@@ -39,6 +39,16 @@ bash demo/run_tilexr_ep_dispatch_demo.sh 2
 `libtilexr_ep_combine_kernel.so` under the repository `install` directory, then builds the EP demo. The memory
 dispatch/combine CCE binaries are embedded in `libtilexr-ep.so` rather than installed as separate shared libraries.
 
+The EP demo is linked without RPATH/RUNPATH. CANN `devlib` is a link-time fallback only; embedding it in the demo's
+runtime search path can make the loader select the stub `libascend_hal.so` before the real driver HAL, causing
+`aclInitImpl: init SoC version failed`. After linking, verify `readelf -d install/bin/tilexr_ep_dispatch_demo` has no
+RPATH/RUNPATH and use `ldd install/bin/tilexr_ep_dispatch_demo` in the target runtime environment to confirm
+`libascend_hal.so` resolves below `${ASCEND_DRIVER_PATH}` rather than CANN `devlib`. These checks prove library
+provenance only; NPU execution is still required to validate the demo.
+
+`tilexr_types.h` is also included by EP device sources. Keep Host-only standard-library includes and objects outside
+`__CCE__`; Host/source checks do not replace a CANN 9.1 CCE compile.
+
 The demo has exactly two execution backends, selected with `TILEXR_EP_DEMO_IMPL=udma|memory`. API version and
 same-node/cross-node topology are handled inside the TileXR library and are not demo branches. Select the operator
 sequence with `TILEXR_EP_DEMO_RUN_MODE=dispatch|combine|dispatch_combine`.

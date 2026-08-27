@@ -193,6 +193,18 @@ void TestRootCMakeRespectsAscendDriverOverride()
     CheckContains(path, text, "set(ASCEND_DRIVER_PATH \"${_tilexr_default_ascend_driver_path}\" CACHE PATH");
 }
 
+void TestPublicTypesKeepHostNamesOutOfCce()
+{
+    const std::string path = "src/include/tilexr_types.h";
+    const auto text = ReadFile(path);
+
+    CheckContains(path, text, "#include <cstdint>");
+    CheckContains(path, text,
+        "#ifndef __CCE__\n#include <map>\n#include <string>\n#endif");
+    CheckContains(path, text,
+        "#ifndef __CCE__\nconst std::map<TileXRType, std::string> TILEXR_TYPE2NAME");
+}
+
 void TestCommBuildIncludesProfilingHeaders()
 {
     const std::string rootPath = "CMakeLists.txt";
@@ -277,6 +289,7 @@ int main()
     TestSocketExchangeUsesDirectConnectionsOnly();
     TestRuntimeEnvDoesNotPrependCannDevlib();
     TestRootCMakeRespectsAscendDriverOverride();
+    TestPublicTypesKeepHostNamesOutOfCce();
     TestCommBuildIncludesProfilingHeaders();
     TestCommInitHonorsUDMAOptOut();
     TestSharedQpDomainIsExplicit();

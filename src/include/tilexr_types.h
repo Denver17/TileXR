@@ -10,8 +10,12 @@
 #ifndef TILEXR_TYPES_H
 #define TILEXR_TYPES_H
 
+#include <cstdint>
+
+#ifndef __CCE__
 #include <map>
 #include <string>
+#endif
 
 namespace TileXR {
 constexpr int TILEXR_SUCCESS = 0;
@@ -126,6 +130,7 @@ enum class TileXRType {
     LCAL_TYPE_MAX = 311
 };
 
+#ifndef __CCE__
 const std::map<TileXRType, std::string> TILEXR_TYPE2NAME = {
     { TileXRType::ALL_REDUCE, "TileXRAllReduce" },
     { TileXRType::REDUCE_SCATTER, "TileXRReduceScatter" },
@@ -154,7 +159,7 @@ const std::map<TileXRType, std::string> TILEXR_TYPE2NAME = {
     { TileXRType::ALLTOALLVC_ALLGATHER_MATMUL, "TileXRAllToAllVAllGatherMatmul" },
     { TileXRType::MATMUL_REDUCESCATTER_ALLTOALLVC, "TileXRMatmulReduceScatterAllToAllV" }
 };
-
+#endif
 
 } // namespace TileXR
 #endif // TILEXR_TYPES_H

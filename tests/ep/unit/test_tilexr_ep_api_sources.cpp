@@ -229,6 +229,17 @@ void TestDemoRunnerUsesLibAndLib64Paths()
     CheckContains("tests/ep/demo/run_tilexr_ep_dispatch_demo.sh", runner, "${INSTALL_DIR}/lib");
 }
 
+void TestDispatchDemoDoesNotEmbedRuntimeSearchPaths()
+{
+    std::string epCmake;
+    if (ReadFile("tests/ep/CMakeLists.txt", &epCmake)) {
+        CheckContains("tests/ep/CMakeLists.txt", epCmake,
+            "set_target_properties(tilexr_ep_dispatch_demo PROPERTIES");
+        CheckContains("tests/ep/CMakeLists.txt", epCmake, "SKIP_BUILD_RPATH TRUE");
+        CheckContains("tests/ep/CMakeLists.txt", epCmake, "INSTALL_RPATH \"\"");
+    }
+}
+
 void TestDemoRunnerSelectsBackendForSoc()
 {
     std::string runner;
@@ -314,6 +325,7 @@ int main()
     TestRemoteDeployScriptDoesNotInitializeSubmodules();
     TestRemoteDeployScriptDoesNotExposePrivateRemoteDefaults();
     TestDemoRunnerUsesLibAndLib64Paths();
+    TestDispatchDemoDoesNotEmbedRuntimeSearchPaths();
     TestDemoRunnerSelectsBackendForSoc();
     TestDispatchDemoRegistersAlignedUdmaWorkspace();
     TestDispatchDemoUsesHostBarrierBeforeValidation();

@@ -46,7 +46,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 
 - Before debugging TileXR, read [docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md](docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md) and use its evidence-driven workflow, test ladder, and state, queue, and ownership checklists to guide the investigation.
 - Treat the historical root causes in that document as hypotheses rather than conclusions. Reproduce the current failure, identify the first failing boundary, and verify the actual source and binary provenance before changing code.
-- When PowerShell drives a Linux host, never embed remote shell logic containing `$VAR`, `$()`, redirections, pipelines, or nested quoting in an inline SSH command. Put non-trivial remote logic in a task-scoped `.sh` file, synchronize it from Windows with Mutagen, and have PowerShell invoke only the fixed remote script path with fixed positional arguments. This prevents PowerShell from expanding or rewriting Linux syntax before it reaches the target host.
+- When PowerShell drives a Linux host, never put non-trivial remote shell logic in an inline SSH command. Use a task-scoped `.sh` file, transfer it with an existing Mutagen session when available or another verified method, and invoke it with fixed positional arguments.
 
 ## Architecture
 

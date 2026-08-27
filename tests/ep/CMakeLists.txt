@@ -290,6 +290,13 @@ if(BUILD_TILEXR_EP_DEMO)
         ascend_hal
     )
 
+    # devlib is a link-time fallback only. An RPATH here can outrank the
+    # runner's LD_LIBRARY_PATH and load the stub HAL instead of the driver HAL.
+    set_target_properties(tilexr_ep_dispatch_demo PROPERTIES
+        SKIP_BUILD_RPATH TRUE
+        INSTALL_RPATH ""
+    )
+
     install(TARGETS tilexr_ep_dispatch_demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
