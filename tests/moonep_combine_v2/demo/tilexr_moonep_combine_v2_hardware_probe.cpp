@@ -49,6 +49,14 @@ const char *const kProfileMetricNames[
     "remote_submit_us",
     "credit_wait_us",
     "credit_publish_us",
+    "weight_destination_gather_us",
+    "weight_value_gather_us",
+    "weight_record_build_us",
+    "weight_mte3_submit_us",
+    "weight_payload_drain_us",
+    "weight_done_publish_us",
+    "weight_inbound_wait_us",
+    "weight_output_us",
 };
 
 struct HostPort {
@@ -79,6 +87,10 @@ struct ProfileSample {
         TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount> timePoint {};
     std::array<uint64_t,
         TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount> metric {};
+    std::array<std::array<uint32_t,
+        TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount>,
+        TileXRMoonEp::kMoonEpCombineV2ProfileStepCount> weightStepCounter {};
+    uint32_t weightOutputTiles = 0U;
     bool fullmesh = false;
     uint32_t fullmeshStep = 0U;
     uint32_t fullmeshPeer = 0U;
@@ -759,6 +771,16 @@ void CaptureProfileSamples(int rank, int world, int iteration,
             ++metric) {
             sample.metric[metric] = record.metric[metric];
         }
+        for (uint32_t step = 0U;
+            step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount; ++step) {
+            for (uint32_t counter = 0U;
+                counter < TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount;
+                ++counter) {
+                sample.weightStepCounter[step][counter] =
+                    record.weightStepCounter[step][counter];
+            }
+        }
+        sample.weightOutputTiles = record.weightOutputTiles;
         sample.fullmeshWqeBuildEnd = record.timePoint[TileXRMoonEp::
             MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END];
         sample.fullmeshSubmitEnd = record.timePoint[TileXRMoonEp::
@@ -1192,6 +1214,25 @@ int main(int argc, char **argv)
                           << static_cast<double>(sample.metric[metric]) /
                               TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs;
             }
+            for (uint32_t step = 0U;
+                step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount; ++step) {
+                std::cout << " weight_step" << step << "_records="
+                          << sample.weightStepCounter[step][TileXRMoonEp::
+                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_RECORDS]
+                          << " weight_step" << step << "_batches="
+                          << sample.weightStepCounter[step][TileXRMoonEp::
+                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_BATCHES]
+                          << " weight_step" << step << "_merged_runs="
+                          << sample.weightStepCounter[step][TileXRMoonEp::
+                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_MERGED_RUNS]
+                          << " weight_step" << step << "_mte3_commands="
+                          << sample.weightStepCounter[step][TileXRMoonEp::
+                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_MTE3_COMMANDS]
+                          << " weight_step" << step << "_stage_waits="
+                          << sample.weightStepCounter[step][TileXRMoonEp::
+                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS];
+            }
+            std::cout << " weight_output_tiles=" << sample.weightOutputTiles;
             std::cout << std::endl;
         }
         std::cout << std::fixed << std::setprecision(6)

@@ -72,6 +72,7 @@ enum MoonEpCombineV2ScheduleMode : uint32_t {
     MOONEP_COMBINE_V2_BIDIRECTIONAL_RING = 1U,
     MOONEP_COMBINE_V2_SERVER_PAIR_SAME_CROSS = 2U,
     MOONEP_COMBINE_V2_SERVER_PAIR_PARITY = 3U,
+    MOONEP_COMBINE_V2_GROUP = 4U,
 };
 
 constexpr uint32_t kMoonEpCombineV2InvalidPeer = UINT32_MAX;
@@ -146,6 +147,19 @@ struct MoonEpCombineV2ScheduleCoordinate {
     uint32_t core;
 };
 
+struct MoonEpCombineV2StepRoute {
+    uint32_t sendDstRank;
+    uint32_t recvSrcRank;
+    uint32_t sendSuccessorRank;
+    uint32_t creditWaitSrcRank;
+    uint32_t creditWaitSrcCore;
+    uint32_t creditPublishDstRank;
+    uint32_t creditPublishDstCore;
+    bool waitCredit;
+    bool publishCredit;
+    bool valid;
+};
+
 static_assert(sizeof(MoonEpCombineV2FailureRecord) == 64U,
     "MoonEP Combine V2 failure record ABI changed");
 static_assert(sizeof(MoonEpCombineV2CollectiveStatus) ==
@@ -168,6 +182,30 @@ MoonEpCombineV2RankSizeSupported(uint32_t rankSize)
     return (rankSize >= 2U && rankSize <= kMoonEpCombineV2GroupSize) ||
         rankSize == 16U || rankSize == 32U || rankSize == 64U ||
         rankSize == kMoonEpCombineV2RankCount;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2ScheduleModeValid(MoonEpCombineV2ScheduleMode mode)
+{
+    return mode >= MOONEP_COMBINE_V2_SINGLE_RING &&
+        mode <= MOONEP_COMBINE_V2_GROUP;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE bool
+MoonEpCombineV2ScheduleRankSizeSupported(
+    MoonEpCombineV2ScheduleMode mode, uint32_t rankSize)
+{
+    return MoonEpCombineV2ScheduleModeValid(mode) &&
+        MoonEpCombineV2RankSizeSupported(rankSize) &&
+        (mode != MOONEP_COMBINE_V2_GROUP ||
+            rankSize == kMoonEpCombineV2RankCount);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE MoonEpCombineV2ScheduleMode
+MoonEpCombineV2ScheduleModeForRankSize(uint32_t rankSize)
+{
+    return rankSize == kMoonEpCombineV2RankCount ?
+        MOONEP_COMBINE_V2_GROUP : MOONEP_COMBINE_V2_SINGLE_RING;
 }
 
 TILEXR_MOONEP_COMBINE_V2_INLINE bool
@@ -1001,6 +1039,225 @@ MoonEpCombineV2TransferCore(uint32_t sourceRank, uint32_t destinationRank,
     }
     return matchedCore;
 }
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2MapSendDst(MoonEpCombineV2ScheduleMode mode,
+    uint32_t sourceRank, uint32_t senderCore, uint32_t step,
+    uint32_t rankSize)
+{
+    if (!MoonEpCombineV2ScheduleRankSizeSupported(mode, rankSize) ||
+        !MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2CoreValid(senderCore, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    if (mode == MOONEP_COMBINE_V2_GROUP) {
+        return MoonEpCombineV2GroupSendDstRank(
+            sourceRank, step, senderCore);
+    }
+    return MoonEpCombineV2EffectivePeer(
+        MoonEpCombineV2Peer(
+            sourceRank, step, senderCore, rankSize, mode),
+        sourceRank);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2MapRecvSrc(MoonEpCombineV2ScheduleMode mode,
+    uint32_t destinationRank, uint32_t receiverCore, uint32_t step,
+    uint32_t rankSize)
+{
+    if (!MoonEpCombineV2ScheduleRankSizeSupported(mode, rankSize) ||
+        !MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        !MoonEpCombineV2CoreValid(receiverCore, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    if (mode == MOONEP_COMBINE_V2_GROUP) {
+        return MoonEpCombineV2GroupRecvSrcRank(
+            destinationRank, step, receiverCore);
+    }
+    return MoonEpCombineV2ReceiveSource(
+        destinationRank, step, receiverCore, rankSize, mode);
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2FindRecvCore(MoonEpCombineV2ScheduleMode mode,
+    uint32_t destinationRank, uint32_t sourceRank, uint32_t step,
+    uint32_t rankSize)
+{
+    if (!MoonEpCombineV2ScheduleRankSizeSupported(mode, rankSize) ||
+        !MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        !MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    if (mode == MOONEP_COMBINE_V2_GROUP) {
+        return MoonEpCombineV2GroupInnerIndex(sourceRank);
+    }
+    // Current modes retain their cheaper inverse; later modes use the
+    // mapping-only fallback below until they provide an equivalent fast path.
+    if (mode <= MOONEP_COMBINE_V2_SERVER_PAIR_PARITY) {
+        return MoonEpCombineV2ReceiveCore(
+            destinationRank, sourceRank, step, rankSize, mode);
+    }
+    const uint32_t activeCoreCount = MoonEpCombineV2ActiveCoreCount(rankSize);
+    uint32_t matchedCore = kMoonEpCombineV2InvalidPeer;
+    for (uint32_t core = 0U; core < activeCoreCount; ++core) {
+        if (MoonEpCombineV2MapRecvSrc(
+                mode, destinationRank, core, step, rankSize) != sourceRank) {
+            continue;
+        }
+        if (matchedCore != kMoonEpCombineV2InvalidPeer) {
+            return kMoonEpCombineV2InvalidPeer;
+        }
+        matchedCore = core;
+    }
+    return matchedCore;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2FindSendCore(MoonEpCombineV2ScheduleMode mode,
+    uint32_t sourceRank, uint32_t destinationRank, uint32_t step,
+    uint32_t rankSize)
+{
+    if (!MoonEpCombineV2ScheduleRankSizeSupported(mode, rankSize) ||
+        !MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2RankValid(destinationRank, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    if (mode == MOONEP_COMBINE_V2_GROUP) {
+        return MoonEpCombineV2GroupInnerIndex(destinationRank);
+    }
+    if (mode <= MOONEP_COMBINE_V2_SERVER_PAIR_PARITY) {
+        return MoonEpCombineV2TransferCore(
+            sourceRank, destinationRank, step, rankSize, mode);
+    }
+    const uint32_t activeCoreCount = MoonEpCombineV2ActiveCoreCount(rankSize);
+    uint32_t matchedCore = kMoonEpCombineV2InvalidPeer;
+    for (uint32_t core = 0U; core < activeCoreCount; ++core) {
+        if (MoonEpCombineV2MapSendDst(
+                mode, sourceRank, core, step, rankSize) != destinationRank) {
+            continue;
+        }
+        if (matchedCore != kMoonEpCombineV2InvalidPeer) {
+            return kMoonEpCombineV2InvalidPeer;
+        }
+        matchedCore = core;
+    }
+    return matchedCore;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE uint32_t
+MoonEpCombineV2FindSendSuccessor(MoonEpCombineV2ScheduleMode mode,
+    uint32_t sourceRank, uint32_t senderCore, uint32_t step,
+    uint32_t rankSize)
+{
+    if (!MoonEpCombineV2ScheduleRankSizeSupported(mode, rankSize) ||
+        !MoonEpCombineV2RankValid(sourceRank, rankSize) ||
+        !MoonEpCombineV2CoreValid(senderCore, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return kMoonEpCombineV2InvalidPeer;
+    }
+    if (mode == MOONEP_COMBINE_V2_GROUP) {
+        const uint32_t destinationRank = MoonEpCombineV2GroupSendDstRank(
+            sourceRank, step, senderCore);
+        const uint32_t nextStep = MoonEpCombineV2NextStep(
+            step, MoonEpCombineV2StepCount(rankSize));
+        return MoonEpCombineV2GroupRecvSrcRank(destinationRank, nextStep,
+            MoonEpCombineV2GroupInnerIndex(sourceRank));
+    }
+    if (mode <= MOONEP_COMBINE_V2_SERVER_PAIR_PARITY) {
+        return MoonEpCombineV2Successor(
+            sourceRank, step, senderCore, rankSize, mode);
+    }
+
+    const uint32_t destinationRank = MoonEpCombineV2MapSendDst(
+        mode, sourceRank, senderCore, step, rankSize);
+    const uint32_t nextStep = MoonEpCombineV2NextStep(
+        step, MoonEpCombineV2StepCount(rankSize));
+    uint32_t matchedSource = kMoonEpCombineV2InvalidPeer;
+    for (uint32_t candidate = 0U; candidate < rankSize; ++candidate) {
+        if (MoonEpCombineV2MapSendDst(
+                mode, candidate, senderCore, nextStep, rankSize) !=
+            destinationRank) {
+            continue;
+        }
+        if (matchedSource != kMoonEpCombineV2InvalidPeer) {
+            return kMoonEpCombineV2InvalidPeer;
+        }
+        matchedSource = candidate;
+    }
+    return matchedSource;
+}
+
+TILEXR_MOONEP_COMBINE_V2_INLINE MoonEpCombineV2StepRoute
+MoonEpCombineV2BuildStepRoute(MoonEpCombineV2ScheduleMode mode,
+    uint32_t rank, uint32_t core, uint32_t step, uint32_t rankSize)
+{
+    MoonEpCombineV2StepRoute route = {
+        kMoonEpCombineV2InvalidPeer,
+        kMoonEpCombineV2InvalidPeer,
+        kMoonEpCombineV2InvalidPeer,
+        kMoonEpCombineV2InvalidPeer,
+        kMoonEpCombineV2InvalidPeer,
+        kMoonEpCombineV2InvalidPeer,
+        kMoonEpCombineV2InvalidPeer,
+        false,
+        false,
+        false};
+    if (!MoonEpCombineV2ScheduleRankSizeSupported(mode, rankSize) ||
+        !MoonEpCombineV2RankValid(rank, rankSize) ||
+        !MoonEpCombineV2CoreValid(core, rankSize) ||
+        !MoonEpCombineV2StepValid(step, rankSize)) {
+        return route;
+    }
+
+    route.sendDstRank = MoonEpCombineV2MapSendDst(
+        mode, rank, core, step, rankSize);
+    route.recvSrcRank = MoonEpCombineV2MapRecvSrc(
+        mode, rank, core, step, rankSize);
+    route.sendSuccessorRank = MoonEpCombineV2FindSendSuccessor(
+        mode, rank, core, step, rankSize);
+    if (!MoonEpCombineV2RankValid(route.sendDstRank, rankSize) ||
+        !MoonEpCombineV2RankValid(route.recvSrcRank, rankSize) ||
+        !MoonEpCombineV2RankValid(route.sendSuccessorRank, rankSize)) {
+        return route;
+    }
+
+    route.waitCredit = MoonEpCombineV2CreditRequiredBeforeStep(
+        step, rankSize);
+    if (route.waitCredit) {
+        route.creditWaitSrcRank = route.sendDstRank;
+        route.creditWaitSrcCore = MoonEpCombineV2FindRecvCore(
+            mode, route.sendDstRank, rank, step, rankSize);
+        if (!MoonEpCombineV2CoreValid(
+                route.creditWaitSrcCore, rankSize)) {
+            return route;
+        }
+    }
+
+    route.publishCredit = MoonEpCombineV2CreditPublishedAfterStep(
+        step, rankSize);
+    if (route.publishCredit) {
+        const uint32_t transitionStep = step + 1U;
+        route.creditPublishDstRank = MoonEpCombineV2MapRecvSrc(
+            mode, rank, core, transitionStep, rankSize);
+        route.creditPublishDstCore = MoonEpCombineV2FindSendCore(
+            mode, route.creditPublishDstRank, rank, transitionStep,
+            rankSize);
+        if (!MoonEpCombineV2RankValid(
+                route.creditPublishDstRank, rankSize) ||
+            !MoonEpCombineV2CoreValid(
+                route.creditPublishDstCore, rankSize)) {
+            return route;
+        }
+    }
+
+    route.valid = true;
+    return route;
+}
+
 TILEXR_MOONEP_COMBINE_V2_INLINE uint64_t
 MoonEpCombineV2CollectiveStatusGuard(uint64_t magic, uint32_t stageId)
 {

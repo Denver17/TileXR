@@ -13,7 +13,7 @@ namespace TileXRMoonEp {
 #endif
 
 constexpr uint32_t kMoonEpCombineV2ProfileMarker = 0x54584750U; // TXGP
-constexpr uint16_t kMoonEpCombineV2ProfileVersion = 6U;
+constexpr uint16_t kMoonEpCombineV2ProfileVersion = 7U;
 constexpr uint32_t kMoonEpCombineV2ProfileCyclesPerUs = 1000U;
 constexpr uint32_t kMoonEpCombineV2ProfileTimePointCapacity = 40U;
 constexpr uint32_t kMoonEpCombineV2ProfileStepCount = 8U;
@@ -49,9 +49,27 @@ enum MoonEpCombineV2ProfileMetricIndex : uint32_t {
     MOONEP_COMBINE_V2_METRIC_REMOTE_SUBMIT,
     MOONEP_COMBINE_V2_METRIC_CREDIT_WAIT,
     MOONEP_COMBINE_V2_METRIC_CREDIT_PUBLISH,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_DESTINATION_GATHER,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_VALUE_GATHER,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_RECORD_BUILD,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_MTE3_SUBMIT,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_PAYLOAD_DRAIN,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_DONE_PUBLISH,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_INBOUND_WAIT,
+    MOONEP_COMBINE_V2_METRIC_WEIGHT_OUTPUT,
 };
 
-constexpr uint32_t kMoonEpCombineV2ProfileMetricCount = 10U;
+constexpr uint32_t kMoonEpCombineV2ProfileMetricCount = 18U;
+
+enum MoonEpCombineV2WeightStepCounterIndex : uint32_t {
+    MOONEP_COMBINE_V2_WEIGHT_COUNTER_RECORDS = 0U,
+    MOONEP_COMBINE_V2_WEIGHT_COUNTER_BATCHES,
+    MOONEP_COMBINE_V2_WEIGHT_COUNTER_MERGED_RUNS,
+    MOONEP_COMBINE_V2_WEIGHT_COUNTER_MTE3_COMMANDS,
+    MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS,
+};
+
+constexpr uint32_t kMoonEpCombineV2WeightStepCounterCount = 5U;
 
 enum MoonEpCombineV2ProfileDiagnosticIndex : uint32_t {
     MOONEP_COMBINE_V2_DIAG_FAILURE_STATUS =
@@ -122,6 +140,9 @@ struct alignas(64) MoonEpCombineV2ProfileRecord {
     uint32_t reserved;
     int64_t timePoint[kMoonEpCombineV2ProfileTimePointCapacity];
     uint64_t metric[kMoonEpCombineV2ProfileMetricCount];
+    uint32_t weightStepCounter[kMoonEpCombineV2ProfileStepCount]
+        [kMoonEpCombineV2WeightStepCounterCount];
+    uint32_t weightOutputTiles;
 };
 
 static_assert(kMoonEpCombineV2ProfileTimePointCount == 22U,
@@ -132,10 +153,13 @@ static_assert(MOONEP_COMBINE_V2_DIAG_OBSERVED <
 static_assert(MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS <
         kMoonEpCombineV2ProfileTimePointCapacity,
     "Combine V2 Fullmesh diagnostics exceed the profile record");
-static_assert(MOONEP_COMBINE_V2_METRIC_CREDIT_PUBLISH + 1U ==
+static_assert(MOONEP_COMBINE_V2_METRIC_WEIGHT_OUTPUT + 1U ==
         kMoonEpCombineV2ProfileMetricCount,
     "Combine V2 profile metric count mismatch");
-static_assert(sizeof(MoonEpCombineV2ProfileRecord) == 448U,
+static_assert(MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS + 1U ==
+        kMoonEpCombineV2WeightStepCounterCount,
+    "Combine V2 weight profile counter count mismatch");
+static_assert(sizeof(MoonEpCombineV2ProfileRecord) == 704U,
     "Combine V2 profile record ABI changed");
 
 } // namespace TileXRMoonEp

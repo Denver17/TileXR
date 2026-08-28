@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "combine_v2_schedule.h"
+#include "combine_v2_weight.h"
 #include "combine_v2_wqe_batch.h"
 #include "tilexr_udma_fullmesh.h"
 
@@ -175,8 +176,27 @@ void TestQpAndBatchContract()
 void TestGroupAllToAllSchedule()
 {
     using namespace TileXRMoonEp;
+    const MoonEpCombineV2ScheduleMode mode = MOONEP_COMBINE_V2_GROUP;
     Check(sizeof(MoonEpCombineV2CreditSignal) == 64U,
         "Credit signal is not one cache line");
+    Check(MoonEpCombineV2ScheduleModeValid(mode) &&
+            MoonEpCombineV2ScheduleRankSizeSupported(
+                mode, kMoonEpCombineV2RankCount),
+        "128P Group schedule mode is not supported");
+    Check(!MoonEpCombineV2ScheduleRankSizeSupported(mode, 64U) &&
+            !MoonEpCombineV2BuildStepRoute(
+                mode, 0U, 0U, 0U, 64U).valid,
+        "Group schedule accepted a non-128P rank size");
+    const uint32_t nonGroupRankSizes[] = {
+        2U, 3U, 4U, 5U, 6U, 7U, 8U, 16U, 32U, 64U};
+    for (uint32_t rankSize : nonGroupRankSizes) {
+        Check(MoonEpCombineV2ScheduleModeForRankSize(rankSize) ==
+                MOONEP_COMBINE_V2_SINGLE_RING,
+            "non-128P rank size did not select Ring mapping");
+    }
+    Check(MoonEpCombineV2ScheduleModeForRankSize(
+            kMoonEpCombineV2RankCount) == MOONEP_COMBINE_V2_GROUP,
+        "128P rank size did not select Group mapping");
 
     std::array<uint32_t,
         kMoonEpCombineV2RankCount *
@@ -199,10 +219,21 @@ void TestGroupAllToAllSchedule()
                     MoonEpCombineV2GroupSendDstRank(rank, step, core);
                 const uint32_t source =
                     MoonEpCombineV2GroupRecvSrcRank(rank, step, core);
+                const MoonEpCombineV2StepRoute route =
+                    MoonEpCombineV2BuildStepRoute(mode, rank, core, step,
+                        kMoonEpCombineV2RankCount);
                 Check(destination < kMoonEpCombineV2RankCount,
                     "Group send destination out of range");
                 Check(source < kMoonEpCombineV2RankCount,
                     "Group receive source out of range");
+                Check(route.valid && route.sendDstRank == destination &&
+                        route.recvSrcRank == source,
+                    "Group StepRoute endpoints changed");
+                Check(MoonEpCombineV2MapSendDst(mode, rank, core, step,
+                            kMoonEpCombineV2RankCount) == destination &&
+                        MoonEpCombineV2MapRecvSrc(mode, rank, core, step,
+                            kMoonEpCombineV2RankCount) == source,
+                    "Group mapping is not routed through the common framework");
                 Check(MoonEpCombineV2GroupInnerIndex(destination) == core,
                     "Group send did not preserve destination inner index");
                 Check(MoonEpCombineV2GroupInnerIndex(source) == core,
@@ -213,6 +244,32 @@ void TestGroupAllToAllSchedule()
                 Check(MoonEpCombineV2GroupSendDstRank(
                         source, step, rankInner) == rank,
                     "Group send mapping did not invert receive mapping");
+                Check(MoonEpCombineV2FindSendCore(mode, rank, destination,
+                            step, kMoonEpCombineV2RankCount) == core &&
+                        MoonEpCombineV2FindRecvCore(mode, destination, rank,
+                            step, kMoonEpCombineV2RankCount) == rankInner,
+                    "Group route core inverse changed");
+                const uint32_t nextStep = MoonEpCombineV2NextStep(
+                    step, kMoonEpCombineV2StepCount);
+                const uint32_t expectedSuccessor =
+                    MoonEpCombineV2GroupRecvSrcRank(destination, nextStep,
+                        rankInner);
+                Check(route.sendSuccessorRank == expectedSuccessor &&
+                        MoonEpCombineV2GroupSendDstRank(
+                            expectedSuccessor, nextStep, core) == destination,
+                    "Group route successor changed");
+                if (route.waitCredit) {
+                    Check(route.creditWaitSrcRank == destination &&
+                            route.creditWaitSrcCore == rankInner,
+                        "Group Credit wait route changed");
+                }
+                if (route.publishCredit) {
+                    Check(route.creditPublishDstRank ==
+                                MoonEpCombineV2GroupRecvSrcRank(
+                                    rank, nextStep, core) &&
+                            route.creditPublishDstCore == rankInner,
+                        "Group Credit publish route changed");
+                }
                 Check(!sendSeen[destination],
                     "Group send mapping repeated a destination");
                 Check(!receiveSeen[source],
@@ -754,6 +811,168 @@ void TestCreditSchedule()
         "Combine Credit final slot exceeds IPC allocation");
 }
 
+void TestStepRouteMapping()
+{
+    using namespace TileXRMoonEp;
+    const uint32_t rankSizes[] = {2U, 3U, 4U, 5U, 6U, 7U, 8U,
+        16U, 32U, 64U, 128U};
+    const MoonEpCombineV2ScheduleMode modes[] = {
+        MOONEP_COMBINE_V2_SINGLE_RING,
+        MOONEP_COMBINE_V2_BIDIRECTIONAL_RING,
+        MOONEP_COMBINE_V2_SERVER_PAIR_SAME_CROSS,
+        MOONEP_COMBINE_V2_SERVER_PAIR_PARITY};
+
+    for (MoonEpCombineV2ScheduleMode mode : modes) {
+        Check(MoonEpCombineV2ScheduleModeValid(mode),
+            "valid schedule mode rejected");
+        for (uint32_t rankSize : rankSizes) {
+            const uint32_t activeCores =
+                MoonEpCombineV2ActiveCoreCount(rankSize);
+            const uint32_t stepCount = MoonEpCombineV2StepCount(rankSize);
+            const uint32_t transitionCount =
+                MoonEpCombineV2CreditTransitionCount(rankSize);
+            std::vector<uint32_t> creditWriters(
+                static_cast<size_t>(rankSize) * transitionCount *
+                    activeCores,
+                0U);
+
+            for (uint32_t rank = 0U; rank < rankSize; ++rank) {
+                for (uint32_t step = 0U; step < stepCount; ++step) {
+                    for (uint32_t core = 0U; core < activeCores; ++core) {
+                        const uint32_t oldSendDst =
+                            MoonEpCombineV2EffectivePeer(
+                                MoonEpCombineV2Peer(rank, step, core,
+                                    rankSize, mode),
+                                rank);
+                        const uint32_t oldRecvSrc =
+                            MoonEpCombineV2ReceiveSource(
+                                rank, step, core, rankSize, mode);
+                        Check(MoonEpCombineV2MapSendDst(
+                                mode, rank, core, step, rankSize) ==
+                                oldSendDst,
+                            "step route send mapping changed");
+                        Check(MoonEpCombineV2MapRecvSrc(
+                                mode, rank, core, step, rankSize) ==
+                                oldRecvSrc,
+                            "step route receive mapping changed");
+                        Check(MoonEpCombineV2FindSendCore(
+                                mode, rank, oldSendDst, step, rankSize) ==
+                                core,
+                            "step route send core is not invertible");
+
+                        const uint32_t oldRecvCore =
+                            MoonEpCombineV2ReceiveCore(
+                                oldSendDst, rank, step, rankSize, mode);
+                        Check(MoonEpCombineV2FindRecvCore(
+                                mode, oldSendDst, rank, step, rankSize) ==
+                                oldRecvCore,
+                            "step route receive core changed");
+
+                        const MoonEpCombineV2StepRoute route =
+                            MoonEpCombineV2BuildStepRoute(
+                                mode, rank, core, step, rankSize);
+                        Check(route.valid,
+                            "valid step route was rejected");
+                        Check(route.sendDstRank == oldSendDst &&
+                                route.recvSrcRank == oldRecvSrc,
+                            "step route endpoints changed");
+                        const uint32_t oldSuccessor =
+                            MoonEpCombineV2Successor(
+                                rank, step, core, rankSize, mode);
+                        Check(route.sendSuccessorRank == oldSuccessor,
+                            "step route send successor changed");
+
+                        const bool waitCredit =
+                            MoonEpCombineV2CreditRequiredBeforeStep(
+                                step, rankSize);
+                        Check(route.waitCredit == waitCredit,
+                            "step route Credit wait boundary changed");
+                        if (waitCredit) {
+                            Check(route.creditWaitSrcRank == oldSendDst &&
+                                    route.creditWaitSrcCore == oldRecvCore,
+                                "step route Credit wait source changed");
+                        } else {
+                            Check(route.creditWaitSrcRank ==
+                                    kMoonEpCombineV2InvalidPeer &&
+                                    route.creditWaitSrcCore ==
+                                        kMoonEpCombineV2InvalidPeer,
+                                "step0 route contains a Credit wait source");
+                        }
+
+                        const bool publishCredit =
+                            MoonEpCombineV2CreditPublishedAfterStep(
+                                step, rankSize);
+                        Check(route.publishCredit == publishCredit,
+                            "step route Credit publish boundary changed");
+                        if (publishCredit) {
+                            const uint32_t transitionStep = step + 1U;
+                            const uint32_t oldTargetRank =
+                                MoonEpCombineV2ReceiveSource(rank,
+                                    transitionStep, core, rankSize, mode);
+                            const uint32_t oldTargetCore =
+                                MoonEpCombineV2TransferCore(oldTargetRank,
+                                    rank, transitionStep, rankSize, mode);
+                            Check(route.creditPublishDstRank ==
+                                    oldTargetRank &&
+                                    route.creditPublishDstCore ==
+                                        oldTargetCore,
+                                "step route Credit publish target changed");
+                            const size_t index =
+                                (static_cast<size_t>(oldTargetRank) *
+                                    transitionCount + step) *
+                                    activeCores + oldTargetCore;
+                            ++creditWriters[index];
+                        } else {
+                            Check(route.creditPublishDstRank ==
+                                    kMoonEpCombineV2InvalidPeer &&
+                                    route.creditPublishDstCore ==
+                                        kMoonEpCombineV2InvalidPeer,
+                                "final route contains a Credit publish target");
+                        }
+                    }
+                }
+            }
+
+            for (uint32_t count : creditWriters) {
+                Check(count == 1U,
+                    "step route Credit slot does not have one writer");
+            }
+        }
+    }
+
+    const MoonEpCombineV2ScheduleMode invalidMode =
+        static_cast<MoonEpCombineV2ScheduleMode>(UINT32_MAX);
+    Check(!MoonEpCombineV2ScheduleModeValid(invalidMode),
+        "invalid schedule mode accepted");
+    Check(MoonEpCombineV2MapSendDst(
+            invalidMode, 0U, 0U, 0U, 32U) ==
+            kMoonEpCombineV2InvalidPeer,
+        "invalid mode produced a send destination");
+    Check(MoonEpCombineV2MapRecvSrc(
+            invalidMode, 0U, 0U, 0U, 32U) ==
+            kMoonEpCombineV2InvalidPeer,
+        "invalid mode produced a receive source");
+    Check(!MoonEpCombineV2BuildStepRoute(
+            invalidMode, 0U, 0U, 0U, 32U).valid,
+        "invalid mode produced a valid step route");
+    Check(!MoonEpCombineV2BuildStepRoute(
+            MOONEP_COMBINE_V2_SERVER_PAIR_PARITY,
+            0U, 16U, 0U, 32U).valid,
+        "invalid core produced a valid step route");
+    Check(!MoonEpCombineV2BuildStepRoute(
+            MOONEP_COMBINE_V2_SERVER_PAIR_PARITY,
+            0U, 0U, 2U, 32U).valid,
+        "invalid step produced a valid step route");
+    Check(!MoonEpCombineV2BuildStepRoute(
+            MOONEP_COMBINE_V2_SERVER_PAIR_PARITY,
+            32U, 0U, 0U, 32U).valid,
+        "invalid rank produced a valid step route");
+    Check(!MoonEpCombineV2BuildStepRoute(
+            MOONEP_COMBINE_V2_SERVER_PAIR_PARITY,
+            0U, 0U, 0U, 12U).valid,
+        "unsupported rank size produced a valid step route");
+}
+
 void TestServerPairParitySchedule()
 {
     using namespace TileXRMoonEp;
@@ -1096,6 +1315,138 @@ void TestVectorSelectionReferenceModel()
         }
     }
 }
+
+struct WeightPlanStats {
+    uint32_t records = 0U;
+    uint32_t batches = 0U;
+    uint32_t commands = 0U;
+    uint32_t mergedRuns = 0U;
+    uint32_t stageReuseWaits = 0U;
+};
+
+WeightPlanStats BuildWeightPlanReference(
+    const std::vector<uint32_t> &destinations)
+{
+    using namespace TileXRMoonEp;
+    WeightPlanStats stats;
+    stats.records = static_cast<uint32_t>(destinations.size());
+    uint32_t batchSequence = 0U;
+    for (uint32_t batchStart = 0U; batchStart < destinations.size();
+        batchStart += kMoonEpCombineV2PayloadBatchRows) {
+        const uint32_t batchRows = MoonEpCombineV2WeightBatchRows(
+            stats.records, batchStart);
+        Check(batchRows > 0U &&
+                batchRows <= kMoonEpCombineV2PayloadBatchRows,
+            "weight batch row count out of range");
+        Check(MoonEpCombineV2WeightStageIndex(batchSequence) ==
+                (batchSequence & 1U),
+            "weight stage selection does not alternate");
+        if (MoonEpCombineV2WeightStageReuseWaitRequired(batchSequence)) {
+            ++stats.stageReuseWaits;
+        }
+        ++stats.batches;
+
+        uint32_t commandStart = 0U;
+        while (commandStart < batchRows) {
+            const uint32_t firstTarget = destinations[batchStart + commandStart];
+            uint32_t runLength = 1U;
+            while (commandStart + runLength < batchRows &&
+                MoonEpCombineV2WeightRunContinues(firstTarget, runLength,
+                    destinations[batchStart + commandStart + runLength])) {
+                ++runLength;
+            }
+            ++stats.commands;
+            if (runLength > 1U) {
+                ++stats.mergedRuns;
+            }
+            commandStart += runLength;
+        }
+        ++batchSequence;
+    }
+    return stats;
+}
+
+void TestWeightBatchAndRunPlan()
+{
+    using namespace TileXRMoonEp;
+    const uint32_t boundaries[] = {0U, 1U, 127U, 128U, 129U, 8191U, 8192U};
+    for (uint32_t count : boundaries) {
+        std::vector<uint32_t> contiguous(count);
+        std::vector<uint32_t> discrete(count);
+        for (uint32_t index = 0U; index < count; ++index) {
+            contiguous[index] = index;
+            discrete[index] = index * 2U;
+        }
+
+        const WeightPlanStats contiguousStats =
+            BuildWeightPlanReference(contiguous);
+        const WeightPlanStats discreteStats = BuildWeightPlanReference(discrete);
+        const uint32_t expectedBatches = MoonEpCombineV2WeightBatchCount(count);
+        Check(contiguousStats.records == count &&
+                contiguousStats.batches == expectedBatches,
+            "contiguous weight boundary split mismatch");
+        Check(discreteStats.records == count &&
+                discreteStats.batches == expectedBatches,
+            "discrete weight boundary split mismatch");
+        Check(contiguousStats.commands == expectedBatches,
+            "contiguous weight plan did not merge each batch");
+        Check(discreteStats.commands == count,
+            "discrete weight plan merged unrelated destinations");
+        const uint32_t expectedReuseWaits =
+            expectedBatches > 2U ? expectedBatches - 2U : 0U;
+        Check(contiguousStats.stageReuseWaits == expectedReuseWaits &&
+                discreteStats.stageReuseWaits == expectedReuseWaits,
+            "weight ping-pong stage reuse count mismatch");
+        if (count != 0U) {
+            const uint32_t lastStart =
+                (expectedBatches - 1U) * kMoonEpCombineV2PayloadBatchRows;
+            const uint32_t expectedTail = count - lastStart;
+            Check(MoonEpCombineV2WeightBatchRows(count, lastStart) ==
+                    expectedTail,
+                "weight final batch tail mismatch");
+        }
+    }
+
+    const std::vector<uint32_t> mixed {0U, 1U, 4U, 5U, 6U, 9U};
+    const WeightPlanStats mixedStats = BuildWeightPlanReference(mixed);
+    Check(mixedStats.commands == 3U && mixedStats.mergedRuns == 2U,
+        "mixed weight run plan mismatch");
+    Check(!MoonEpCombineV2WeightRunContinues(UINT32_MAX, 1U, 0U),
+        "weight run continuation accepted uint32 wraparound");
+}
+
+void TestWeightCompactionReferenceModel()
+{
+    const uint32_t slots = 8192U;
+    const uint32_t peer = 3U;
+    std::vector<int32_t> destinations(slots, -1);
+    std::vector<float> weights(slots, 0.0F);
+    std::vector<int32_t> packedDestinations;
+    std::vector<float> packedWeights;
+    for (uint32_t index = 0U; index < slots; ++index) {
+        weights[index] = static_cast<float>(index) + 0.25F;
+        if ((index % 3U) != 1U) {
+            destinations[index] = static_cast<int32_t>(peer * slots + index);
+            packedDestinations.push_back(static_cast<int32_t>(index));
+            packedWeights.push_back(weights[index]);
+        }
+    }
+
+    const std::vector<uint32_t> selected = SelectPeerIndicesReference(
+        destinations, peer, slots);
+    Check(selected.size() == packedDestinations.size() &&
+            selected.size() == packedWeights.size(),
+        "weight destination/value compaction counts differ");
+    for (uint32_t packed = 0U; packed < selected.size(); ++packed) {
+        const uint32_t source = selected[packed];
+        Check(packedDestinations[packed] ==
+                destinations[source] - static_cast<int32_t>(peer * slots),
+            "packed weight destination lost source order");
+        Check(packedWeights[packed] == weights[source],
+            "packed weight value lost source order");
+    }
+}
+
 void TestFullmeshRouting()
 {
     using namespace TileXRMoonEp;
@@ -1161,10 +1512,13 @@ int main()
     TestServerPairSchedule();
     TestServerPairParitySchedule();
     TestCreditSchedule();
+    TestStepRouteMapping();
     TestQpAndBatchContract();
     TestTokensAndShapes();
     TestWqeBatchHelpers();
     TestVectorSelectionReferenceModel();
+    TestWeightBatchAndRunPlan();
+    TestWeightCompactionReferenceModel();
     TestFullmeshRouting();
     return failures == 0 ? 0 : 1;
 }

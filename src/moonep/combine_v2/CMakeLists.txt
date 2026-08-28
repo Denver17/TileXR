@@ -73,7 +73,6 @@ tilexr_add_moonep_kernel(tilexr_moonep_combine_v2_kernel
     INCLUDES ${TILEXR_MOONEP_COMBINE_V2_KERNEL_INCLUDES}
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_moonep_combine_v2_kernel.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_moonep_combine_v2_group_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_profile.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_schedule.h"
         "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_combine_schedule.h"

@@ -45,7 +45,27 @@ constexpr uint32_t kSelectionMaskBytes =
         kUbAlignBytes - 1U) / kUbAlignBytes * kUbAlignBytes;
 constexpr uint32_t kSelectionMaskElements =
     kSelectionMaskBytes / sizeof(uint16_t);
+constexpr uint32_t kSelectionMaskUint32Elements =
+    kSelectionMaskBytes / sizeof(uint32_t);
 constexpr uint32_t kWqeContextBytes = 256U;
+constexpr uint32_t kWeightChunkBytes =
+    TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows * sizeof(float);
+constexpr uint32_t kWeightPackedOffset = kWeightChunkBytes;
+constexpr uint32_t kWeightPackedDstBytes =
+    TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows * sizeof(uint32_t);
+constexpr uint32_t kWeightRecordLocalStrideBytes = 32U;
+constexpr uint32_t kWeightRecordStageBytes =
+    TileXRMoonEp::kMoonEpCombineV2PayloadBatchRows *
+        kWeightRecordLocalStrideBytes;
+constexpr uint32_t kWeightRecordStage0Offset = kWeightPackedDstBytes;
+constexpr uint32_t kWeightRecordStage1Offset =
+    kWeightRecordStage0Offset + kWeightRecordStageBytes;
+constexpr uint32_t kWeightDoneScratchOffset =
+    kWeightRecordStage1Offset + kWeightRecordStageBytes;
+constexpr uint32_t kWeightOutputTileRows =
+    kSelectionMaskBytes * 8U / 4U;
+constexpr uint32_t kWeightOutputTensorBytes =
+    kWeightOutputTileRows * sizeof(uint32_t);
 constexpr uint32_t kSendBufferBytes = kDstSlotBytes + kTotalIssueBytes +
     2U * kSelectionIndexBytes + 2U * kSelectionMaskBytes + kWqeContextBytes +
     2U * TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes;
@@ -64,10 +84,6 @@ constexpr uint32_t kCollectiveInitStage = 15U;
 constexpr uint32_t kCollectiveValidationStage = 14U;
 constexpr uint32_t kCollectiveDoneStage = 13U;
 constexpr uint32_t kCollectiveReduceStage = 12U;
-constexpr TileXRMoonEp::MoonEpCombineV2ScheduleMode
-    kCombineV2ScheduleMode =
-        TileXRMoonEp::MOONEP_COMBINE_V2_SERVER_PAIR_PARITY;
-
 static_assert(sizeof(TileXR::UDMASqeCtx) + sizeof(TileXR::UDMASgeCtx) ==
     kWqeBytes, "Combine V2 WRITE WQE must occupy one basic block");
 static_assert(sizeof(TileXR::UDMACqeCtx) == 64U,
@@ -95,6 +111,15 @@ static_assert(kFullmeshIssueCapacity <= kTotalIssueCapacity,
     "Combine V2 issue buffer cannot hold Fullmesh payload plus done");
 static_assert(kSelectionMaskBytes == 1024U,
     "Combine V2 selection mask size changed unexpectedly");
+static_assert(kWeightPackedOffset + kWeightChunkBytes ==
+        TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes,
+    "Combine V2 raw and packed weight tensors must fill one relay buffer");
+static_assert(kWeightDoneScratchOffset +
+        TileXRMoonEp::kMoonEpCombineV2WeightDoneStrideBytes <=
+        TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes,
+    "Combine V2 weight stages exceed one relay buffer");
+static_assert(4U * kWeightOutputTensorBytes <= kWeightPackedDstBytes,
+    "Combine V2 weight output tensors exceed the packed destination region");
 static_assert(kSendBufferBytes == 207360U,
     "Combine V2 send buffer layout must occupy 207360 bytes");
 static_assert(kFullUbBytes - kSendBufferBytes == 13824U,
@@ -158,6 +183,17 @@ struct alignas(32) MoonEpCombineV2BuildContext {
     uint32_t sequencePhase;
     uint32_t head[TileXRMoonEp::kMoonEpCombineV2LaneCount];
 };
+
+struct alignas(32) MoonEpCombineV2WeightStageRecord {
+    float value;
+    uint32_t reserved;
+    uint64_t magic;
+    uint64_t padding[2];
+};
+
+static_assert(sizeof(MoonEpCombineV2WeightStageRecord) ==
+        kWeightRecordLocalStrideBytes,
+    "Combine V2 staged weight record must use a 32-byte UB stride");
 
 static_assert(sizeof(MoonEpCombineV2OperatorFields) <= kWqeContextBytes,
     "Combine V2 operator fields exceed their UB allocation");
@@ -396,6 +432,25 @@ inline void MoonEpCombineV2BuildFullmeshPayloadWqesVf(
     sge->va = localAddr;
 }
 
+__simt_vf__ __aicore__ LAUNCH_BOUND(
+    TileXRMoonEp::kMoonEpCombineV2BuilderThreads)
+inline void MoonEpCombineV2BuildWeightRecordsVf(
+    __ubuf__ MoonEpCombineV2WeightStageRecord *records,
+    __ubuf__ const float *weights,
+    uint64_t magic, uint32_t batchStart, uint32_t batchCount)
+{
+    const uint32_t task = static_cast<uint32_t>(threadIdx.x);
+    if (task < batchCount) {
+        __ubuf__ MoonEpCombineV2WeightStageRecord *record =
+            records + task;
+        record->value = weights[batchStart + task];
+        record->reserved = 0U;
+        record->magic = magic;
+        record->padding[0] = 0U;
+        record->padding[1] = 0U;
+    }
+}
+
 #endif
 
 class MoonEpCombineV2 {
@@ -432,6 +487,8 @@ private:
         uint32_t chunkElements);
     __aicore__ inline uint32_t SelectPeerIndices(uint32_t peer,
         uint32_t chunkElements);
+    __aicore__ inline uint32_t SelectPeerDestinations(uint32_t peer,
+        uint32_t chunkElements, LocalTensor<int32_t> packedDestinations);
     __aicore__ inline bool InitLaneStates();
     __aicore__ inline bool InitFullmeshState(uint32_t peer);
     __aicore__ inline bool ResolveRemoteFields(uint32_t targetRank,
@@ -444,8 +501,10 @@ private:
         MoonEpCombineV2LaneState &state);
     __aicore__ inline bool WaitStepCqs(uint32_t step);
     __aicore__ inline bool WaitFullmeshCq(uint32_t step, uint32_t peer);
-    __aicore__ inline bool WaitStepCredit(uint32_t step);
-    __aicore__ inline bool PublishNextCredit(uint32_t step);
+    __aicore__ inline bool WaitStepCredit(uint32_t step,
+        const TileXRMoonEp::MoonEpCombineV2StepRoute &route);
+    __aicore__ inline bool PublishNextCredit(uint32_t step,
+        const TileXRMoonEp::MoonEpCombineV2StepRoute &route);
     __aicore__ inline bool BuildPayloadWqes(uint32_t chunkStart,
         uint32_t batchOffset, uint32_t batchCount, uint32_t sequenceBase,
         uint64_t peerBase);
@@ -488,7 +547,8 @@ private:
     __aicore__ inline bool SendSelfStep(uint32_t peer, uint32_t step);
     __aicore__ inline bool SendWeightMemoryStep(
         uint32_t peer, uint32_t step);
-    __aicore__ inline bool WaitInboundDone(uint32_t step);
+    __aicore__ inline bool WaitInboundDone(
+        uint32_t step, uint32_t source);
     __aicore__ inline bool WaitInboundWeightDone(
         uint32_t step, uint32_t source);
     __aicore__ inline bool CopyReceivedWeights();
@@ -506,6 +566,9 @@ private:
     __aicore__ inline uint64_t BeginProfileMetric();
     __aicore__ inline void EndProfileMetric(uint32_t index,
         uint64_t startCycles);
+    __aicore__ inline void AddWeightStepCounter(
+        uint32_t step, uint32_t index, uint32_t value);
+    __aicore__ inline void AddWeightOutputTiles(uint32_t value);
     __aicore__ inline void WriteProfile();
 
     bool valid_{false};
@@ -566,6 +629,8 @@ private:
     bool selectionBuffersUsed_{false};
     bool reduceHidden_{false};
     bool hasRouteWeight_{false};
+    TileXRMoonEp::MoonEpCombineV2ScheduleMode scheduleMode_{
+        TileXRMoonEp::MOONEP_COMBINE_V2_SINGLE_RING};
     MoonEpCombineV2LaneState lane_[
         TileXRMoonEp::kMoonEpCombineV2LaneCount] {};
     MoonEpCombineV2LaneState fullmeshLane_ {};
@@ -579,7 +644,8 @@ private:
     TBuf<QuePosition::VECCALC> upperMaskBuf_;
     TBuf<QuePosition::VECCALC> wqeIssueBuf_;
     TBuf<QuePosition::VECCALC> wqeContextBuf_;
-    TQue<QuePosition::VECIN, 1> selfCopyQueue_;
+    TBuf<QuePosition::VECCALC> selfRelayPingBuf_;
+    TBuf<QuePosition::VECCALC> selfRelayPongBuf_;
     TQue<QuePosition::VECIN, kReduceMaxInputBuffers> reduceInputQueue_;
     TQue<QuePosition::VECOUT, 1> reduceOutputQueue_;
     TBuf<QuePosition::VECCALC> reduceRowBuf_;
@@ -589,6 +655,9 @@ private:
         TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCapacity];
     uint64_t profileMetric_[
         TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount];
+    uint32_t weightStepCounter_[TileXRMoonEp::kMoonEpCombineV2ProfileStepCount]
+        [TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount];
+    uint32_t weightOutputTiles_{0U};
 #endif
 };
 
@@ -620,6 +689,15 @@ __aicore__ inline void MoonEpCombineV2::Init(
         ++index) {
         profileMetric_[index] = 0U;
     }
+    for (uint32_t step = 0U;
+        step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount; ++step) {
+        for (uint32_t index = 0U;
+            index < TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount;
+            ++index) {
+            weightStepCounter_[step][index] = 0U;
+        }
+    }
+    weightOutputTiles_ = 0U;
     profileTimePoint_[TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INIT_BEGIN] =
         static_cast<int64_t>(profileStartCycles);
 #endif
@@ -656,6 +734,8 @@ __aicore__ inline void MoonEpCombineV2::Init(
     rank_ = args_->rank >= 0 ? static_cast<uint32_t>(args_->rank) : 0U;
     rankSize_ = args_->rankSize > 0 ?
         static_cast<uint32_t>(args_->rankSize) : 0U;
+    scheduleMode_ = TileXRMoonEp::MoonEpCombineV2ScheduleModeForRankSize(
+        rankSize_);
     activeCoreCount_ = TileXRMoonEp::MoonEpCombineV2RankSizeSupported(
             rankSize_) ?
         TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(rankSize_) : 0U;
@@ -809,7 +889,9 @@ __aicore__ inline void MoonEpCombineV2::InitBuffers()
     pipe_->InitBuffer(upperMaskBuf_, kSelectionMaskBytes);
     pipe_->InitBuffer(wqeIssueBuf_, kTotalIssueBytes);
     pipe_->InitBuffer(wqeContextBuf_, kWqeContextBytes);
-    pipe_->InitBuffer(selfCopyQueue_, 2U,
+    pipe_->InitBuffer(selfRelayPingBuf_,
+        TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes);
+    pipe_->InitBuffer(selfRelayPongBuf_,
         TileXRMoonEp::kMoonEpCombineV2SelfRelayHalfBytes);
     CreateVecIndex(slotIndexBuf_.Get<int16_t>(), static_cast<int16_t>(0),
         TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows);
@@ -966,11 +1048,8 @@ __aicore__ inline bool MoonEpCombineV2::InitLaneStates()
         info->memPtr == 0U) {
         return false;
     }
-    const uint32_t scheduledFirstPeer = TileXRMoonEp::MoonEpCombineV2Peer(
-        rank_, 0U, core_, rankSize_, kCombineV2ScheduleMode);
-    const uint32_t firstPeer = scheduledFirstPeer ==
-            TileXRMoonEp::kMoonEpCombineV2InvalidPeer ?
-        rank_ : scheduledFirstPeer;
+    const uint32_t firstPeer = TileXRMoonEp::MoonEpCombineV2MapSendDst(
+        scheduleMode_, rank_, core_, 0U, rankSize_);
     for (uint32_t lane = 0U;
         lane < TileXRMoonEp::kMoonEpCombineV2LaneCount; ++lane) {
         MoonEpCombineV2LaneState &state = lane_[lane];
@@ -1248,6 +1327,38 @@ __aicore__ inline uint32_t MoonEpCombineV2::SelectPeerIndices(
     return static_cast<uint32_t>(selectedCount);
 }
 
+__aicore__ inline uint32_t MoonEpCombineV2::SelectPeerDestinations(
+    uint32_t peer, uint32_t chunkElements,
+    LocalTensor<int32_t> packedDestinations)
+{
+    const uint64_t peerBase = static_cast<uint64_t>(peer) * slots_;
+    const uint64_t peerEnd = peerBase + slots_;
+    if (peerBase > static_cast<uint64_t>(INT32_MAX)) {
+        return 0U;
+    }
+    LocalTensor<int32_t> dstSlots = dstSlotBuf_.Get<int32_t>();
+    LocalTensor<uint8_t> lowerMask = lowerMaskBuf_.Get<uint8_t>();
+    Compares(lowerMask, dstSlots, static_cast<int32_t>(peerBase),
+        CMPMODE::GE, chunkElements);
+    if (peerEnd <= static_cast<uint64_t>(INT32_MAX)) {
+        LocalTensor<uint8_t> upperMask = upperMaskBuf_.Get<uint8_t>();
+        Compares(upperMask, dstSlots, static_cast<int32_t>(peerEnd),
+            CMPMODE::LT, chunkElements);
+        PipeBarrier<PIPE_V>();
+        And(lowerMask.ReinterpretCast<uint16_t>(),
+            lowerMask.ReinterpretCast<uint16_t>(),
+            upperMask.ReinterpretCast<uint16_t>(),
+            static_cast<int32_t>(kSelectionMaskElements));
+    }
+    PipeBarrier<PIPE_V>();
+    uint64_t selectedCount = 0U;
+    GatherMask(packedDestinations, dstSlots,
+        lowerMask.ReinterpretCast<uint32_t>(), true, chunkElements,
+        {1U, 1U, 0U, 0U}, selectedCount);
+    SyncFunc<HardEvent::V_S>();
+    return static_cast<uint32_t>(selectedCount);
+}
+
 __aicore__ inline uint64_t MoonEpCombineV2::LoadToken(
     __gm__ uint64_t *token)
 {
@@ -1383,19 +1494,15 @@ __aicore__ inline bool MoonEpCombineV2::WaitFullmeshCq(
     return true;
 }
 
-__aicore__ inline bool MoonEpCombineV2::WaitStepCredit(uint32_t step)
+__aicore__ inline bool MoonEpCombineV2::WaitStepCredit(uint32_t step,
+    const TileXRMoonEp::MoonEpCombineV2StepRoute &route)
 {
-    if (!TileXRMoonEp::MoonEpCombineV2CreditRequiredBeforeStep(
-            step, rankSize_)) {
+    if (!route.waitCredit) {
         return true;
     }
     const uint64_t creditWaitStart = BeginProfileMetric();
-    const uint32_t sourceRank = TileXRMoonEp::MoonEpCombineV2EffectivePeer(
-        TileXRMoonEp::MoonEpCombineV2Peer(
-            rank_, step, core_, rankSize_, kCombineV2ScheduleMode),
-        rank_);
-    const uint32_t sourceCore = TileXRMoonEp::MoonEpCombineV2ReceiveCore(
-        sourceRank, rank_, step, rankSize_, kCombineV2ScheduleMode);
+    const uint32_t sourceRank = route.creditWaitSrcRank;
+    const uint32_t sourceCore = route.creditWaitSrcCore;
     const uint64_t receiveOffset =
         TileXRMoonEp::MoonEpCombineV2CreditReceiveOffset(
             epoch_, step, core_);
@@ -1454,18 +1561,16 @@ __aicore__ inline bool MoonEpCombineV2::WaitStepCredit(uint32_t step)
     }
 }
 
-__aicore__ inline bool MoonEpCombineV2::PublishNextCredit(uint32_t step)
+__aicore__ inline bool MoonEpCombineV2::PublishNextCredit(uint32_t step,
+    const TileXRMoonEp::MoonEpCombineV2StepRoute &route)
 {
-    if (!TileXRMoonEp::MoonEpCombineV2CreditPublishedAfterStep(
-            step, rankSize_)) {
+    if (!route.publishCredit) {
         return true;
     }
     const uint64_t creditPublishStart = BeginProfileMetric();
     const uint32_t transitionStep = step + 1U;
-    const uint32_t targetRank = TileXRMoonEp::MoonEpCombineV2ReceiveSource(
-        rank_, transitionStep, core_, rankSize_, kCombineV2ScheduleMode);
-    const uint32_t targetCore = TileXRMoonEp::MoonEpCombineV2TransferCore(
-        targetRank, rank_, transitionStep, rankSize_, kCombineV2ScheduleMode);
+    const uint32_t targetRank = route.creditPublishDstRank;
+    const uint32_t targetCore = route.creditPublishDstCore;
     const uint64_t receiveOffset =
         TileXRMoonEp::MoonEpCombineV2CreditReceiveOffset(
             epoch_, transitionStep, targetCore);
@@ -2102,41 +2207,43 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfSelectedIndices(
         uint32_t pendingStart = 0U;
         uint32_t pendingRows = selectedCount < rowsPerBatch ?
             selectedCount : rowsPerBatch;
-        LocalTensor<uint8_t> first = selfCopyQueue_.AllocTensor<uint8_t>();
+        LocalTensor<uint8_t> first = selfRelayPingBuf_.Get<uint8_t>();
         CopySelfRowsIn(pendingStart, pendingRows, chunkStart,
             rowStride, first);
-        selfCopyQueue_.EnQue(first);
 
         uint32_t nextStart = pendingRows;
+        bool pendingPing = true;
         while (nextStart < selectedCount) {
-            LocalTensor<uint8_t> pending =
-                selfCopyQueue_.DeQue<uint8_t>();
+            LocalTensor<uint8_t> pending = pendingPing ?
+                selfRelayPingBuf_.Get<uint8_t>() :
+                selfRelayPongBuf_.Get<uint8_t>();
             SyncFunc<HardEvent::MTE2_MTE3>();
 
             const uint32_t remaining = selectedCount - nextStart;
             const uint32_t currentRows = remaining < rowsPerBatch ?
                 remaining : rowsPerBatch;
-            LocalTensor<uint8_t> current =
-                selfCopyQueue_.AllocTensor<uint8_t>();
+            LocalTensor<uint8_t> current = pendingPing ?
+                selfRelayPongBuf_.Get<uint8_t>() :
+                selfRelayPingBuf_.Get<uint8_t>();
             CopySelfRowsIn(nextStart, currentRows, chunkStart,
                 rowStride, current);
             CopySelfRowsOut(pendingStart, pendingRows, peerBase,
                 rowStride, pending);
             SyncFunc<HardEvent::MTE3_S>();
-            selfCopyQueue_.FreeTensor(pending);
-            selfCopyQueue_.EnQue(current);
 
             pendingStart = nextStart;
             pendingRows = currentRows;
             nextStart += currentRows;
+            pendingPing = !pendingPing;
         }
 
-        LocalTensor<uint8_t> pending = selfCopyQueue_.DeQue<uint8_t>();
+        LocalTensor<uint8_t> pending = pendingPing ?
+            selfRelayPingBuf_.Get<uint8_t>() :
+            selfRelayPongBuf_.Get<uint8_t>();
         SyncFunc<HardEvent::MTE2_MTE3>();
         CopySelfRowsOut(pendingStart, pendingRows, peerBase,
             rowStride, pending);
         SyncFunc<HardEvent::MTE3_S>();
-        selfCopyQueue_.FreeTensor(pending);
         return true;
     }
 
@@ -2150,13 +2257,15 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfSelectedIndices(
     uint64_t pendingOffset = 0U;
     uint32_t pendingBytes =
         TileXRMoonEp::MoonEpCombineV2SelfTileBytes(rowBytes_, 0U);
-    LocalTensor<uint8_t> first = selfCopyQueue_.AllocTensor<uint8_t>();
+    LocalTensor<uint8_t> first = selfRelayPingBuf_.Get<uint8_t>();
     CopySelfTileIn(pendingRoute, chunkStart, pendingOffset,
         pendingBytes, first);
-    selfCopyQueue_.EnQue(first);
 
+    bool pendingPing = true;
     for (uint64_t task = 1U; task < totalTiles; ++task) {
-        LocalTensor<uint8_t> pending = selfCopyQueue_.DeQue<uint8_t>();
+        LocalTensor<uint8_t> pending = pendingPing ?
+            selfRelayPingBuf_.Get<uint8_t>() :
+            selfRelayPongBuf_.Get<uint8_t>();
         SyncFunc<HardEvent::MTE2_MTE3>();
 
         const uint32_t currentRoute = static_cast<uint32_t>(task / tilesPerRow);
@@ -2166,26 +2275,28 @@ __aicore__ inline bool MoonEpCombineV2::CopySelfSelectedIndices(
         const uint32_t currentBytes =
             TileXRMoonEp::MoonEpCombineV2SelfTileBytes(
                 rowBytes_, tileInRow);
-        LocalTensor<uint8_t> current = selfCopyQueue_.AllocTensor<uint8_t>();
+        LocalTensor<uint8_t> current = pendingPing ?
+            selfRelayPongBuf_.Get<uint8_t>() :
+            selfRelayPingBuf_.Get<uint8_t>();
         CopySelfTileIn(currentRoute, chunkStart, currentOffset,
             currentBytes, current);
         CopySelfTileOut(pendingRoute, peerBase, pendingOffset,
             pendingBytes, pending);
         SyncFunc<HardEvent::MTE3_S>();
-        selfCopyQueue_.FreeTensor(pending);
-        selfCopyQueue_.EnQue(current);
 
         pendingRoute = currentRoute;
         pendingOffset = currentOffset;
         pendingBytes = currentBytes;
+        pendingPing = !pendingPing;
     }
 
-    LocalTensor<uint8_t> pending = selfCopyQueue_.DeQue<uint8_t>();
+    LocalTensor<uint8_t> pending = pendingPing ?
+        selfRelayPingBuf_.Get<uint8_t>() :
+        selfRelayPongBuf_.Get<uint8_t>();
     SyncFunc<HardEvent::MTE2_MTE3>();
     CopySelfTileOut(pendingRoute, peerBase, pendingOffset,
         pendingBytes, pending);
     SyncFunc<HardEvent::MTE3_S>();
-    selfCopyQueue_.FreeTensor(pending);
     return true;
 }
 __aicore__ inline bool MoonEpCombineV2::SendSelfStep(
@@ -2243,13 +2354,26 @@ __aicore__ inline bool MoonEpCombineV2::SendWeightMemoryStep(
 
     __gm__ uint8_t *remoteWindow = reinterpret_cast<__gm__ uint8_t *>(
         weightMemoryArgs_->peerMems[peer]) + TileXR::IPC_DATA_OFFSET;
-    LocalTensor<uint8_t> relay = wqeContextBuf_.Get<uint8_t>();
-    const DataCopyExtParams valueIn {1U, sizeof(float), 0U, 0U, 0U};
-    const DataCopyPadExtParams<uint8_t> valuePad {false, 0U, 0U, 0U};
-    const DataCopyExtParams recordOut {1U,
-        static_cast<uint32_t>(
-            TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes),
-        0U, 0U, 0U};
+    const uint64_t peerBase = static_cast<uint64_t>(peer) * slots_;
+    LocalTensor<uint8_t> ping = selfRelayPingBuf_.Get<uint8_t>();
+    LocalTensor<uint8_t> pong = selfRelayPongBuf_.Get<uint8_t>();
+    LocalTensor<float> rawWeights = ping.ReinterpretCast<float>();
+    LocalTensor<float> packedWeights =
+        ping[kWeightPackedOffset].ReinterpretCast<float>();
+    LocalTensor<int32_t> packedDestinations =
+        pong.ReinterpretCast<int32_t>();
+    LocalTensor<uint8_t> doneScratch = pong[kWeightDoneScratchOffset];
+    const TEventID stage0Event =
+        pipe_->AllocEventID<HardEvent::MTE3_S>();
+    const TEventID stage1Event =
+        pipe_->AllocEventID<HardEvent::MTE3_S>();
+    bool stage0InFlight = false;
+    bool stage1InFlight = false;
+    uint32_t batchSequence = 0U;
+    GlobalTensor<float> sourceWeights;
+    sourceWeights.SetGlobalBuffer(
+        reinterpret_cast<__gm__ float *>(routeWeightsNvsAddr_), slots_);
+    const DataCopyPadExtParams<float> valuePad {false, 0U, 0U, 0U};
     for (uint64_t chunkStart = 0U; chunkStart < slots_;
         chunkStart += TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows) {
         const uint32_t chunkElements = static_cast<uint32_t>(
@@ -2257,40 +2381,192 @@ __aicore__ inline bool MoonEpCombineV2::SendWeightMemoryStep(
                     TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows ?
                 slots_ - chunkStart :
                 TileXRMoonEp::kMoonEpCombineV2SelectionChunkRows);
+        const uint64_t destinationGatherStart = BeginProfileMetric();
         LoadSelectionChunk(chunkStart, chunkElements);
-        const uint32_t selectedCount = SelectPeerIndices(peer, chunkElements);
-        LocalTensor<int16_t> selected = selectedIndexBuf_.Get<int16_t>();
-        LocalTensor<int32_t> destinations = dstSlotBuf_.Get<int32_t>();
-        for (uint32_t row = 0U; row < selectedCount; ++row) {
-            const uint32_t relativeIndex = static_cast<uint16_t>(
-                selected.GetValue(row));
-            const uint64_t sourceIndex = chunkStart + relativeIndex;
-            const uint64_t targetIndex = static_cast<uint64_t>(
-                destinations.GetValue(relativeIndex)) -
-                static_cast<uint64_t>(peer) * slots_;
-            GlobalTensor<uint8_t> source;
-            source.SetGlobalBuffer(routeWeightsNvsAddr_ +
-                sourceIndex * sizeof(float));
-            SyncFunc<HardEvent::S_MTE2>();
-            DataCopyPad(relay, source, valueIn, valuePad);
-            SyncFunc<HardEvent::MTE2_S>();
-            LocalTensor<uint32_t> words = relay.ReinterpretCast<uint32_t>();
-            words.SetValue(1U, 0U);
-            LocalTensor<uint64_t> words64 = relay.ReinterpretCast<uint64_t>();
-            words64.SetValue(1U, magic_);
-            GlobalTensor<uint8_t> destination;
-            destination.SetGlobalBuffer(remoteWindow + weightRecordOffset_ +
-                static_cast<uint64_t>(epoch_) *
-                    weightRecordEpochStride_ +
-                targetIndex *
-                    TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes);
-            SyncFunc<HardEvent::S_MTE3>();
-            DataCopyPad(destination, relay, recordOut);
-            SyncFunc<HardEvent::MTE3_S>();
+        const uint32_t selectedCount = SelectPeerDestinations(
+            peer, chunkElements, packedDestinations);
+        if (selectedCount == 0U) {
+            EndProfileMetric(TileXRMoonEp::
+                MOONEP_COMBINE_V2_METRIC_WEIGHT_DESTINATION_GATHER,
+                destinationGatherStart);
+            continue;
+        }
+
+        Adds(packedDestinations, packedDestinations,
+            -static_cast<int32_t>(peerBase), selectedCount);
+        EndProfileMetric(TileXRMoonEp::
+            MOONEP_COMBINE_V2_METRIC_WEIGHT_DESTINATION_GATHER,
+            destinationGatherStart);
+        AddWeightStepCounter(step, TileXRMoonEp::
+            MOONEP_COMBINE_V2_WEIGHT_COUNTER_RECORDS, selectedCount);
+        const uint64_t valueGatherStart = BeginProfileMetric();
+        const DataCopyExtParams valueIn {1U,
+            chunkElements * static_cast<uint32_t>(sizeof(float)),
+            0U, 0U, 0U};
+        SyncFunc<HardEvent::S_MTE2>();
+        DataCopyPad(rawWeights, sourceWeights[chunkStart], valueIn, valuePad);
+        SyncFunc<HardEvent::MTE2_V>();
+        uint64_t weightCount = 0U;
+        GatherMask(packedWeights, rawWeights,
+            lowerMaskBuf_.Get<uint32_t>(), true, chunkElements,
+            {1U, 1U, 0U, 0U}, weightCount);
+        SyncFunc<HardEvent::V_S>();
+        EndProfileMetric(TileXRMoonEp::
+            MOONEP_COMBINE_V2_METRIC_WEIGHT_VALUE_GATHER,
+            valueGatherStart);
+        if (kEnableSafetyChecks && weightCount != selectedCount) {
+            if (stage0InFlight) {
+                WaitFlag<HardEvent::MTE3_S>(stage0Event);
+            }
+            if (stage1InFlight) {
+                WaitFlag<HardEvent::MTE3_S>(stage1Event);
+            }
+            pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage0Event);
+            pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage1Event);
+            SetFailure(TileXRMoonEp::
+                MOONEP_COMBINE_V2_WEIGHT_MEMORY_INVALID_CONFIG,
+                step, peer, UINT32_MAX, selectedCount,
+                selectedCount, weightCount);
+            return false;
+        }
+        if (kEnableSafetyChecks) {
+            for (uint32_t index = 0U; index < selectedCount; ++index) {
+                const int32_t target = packedDestinations.GetValue(index);
+                if (target < 0 || static_cast<uint64_t>(target) >= slots_) {
+                    if (stage0InFlight) {
+                        WaitFlag<HardEvent::MTE3_S>(stage0Event);
+                    }
+                    if (stage1InFlight) {
+                        WaitFlag<HardEvent::MTE3_S>(stage1Event);
+                    }
+                    pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage0Event);
+                    pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage1Event);
+                    SetFailure(TileXRMoonEp::
+                        MOONEP_COMBINE_V2_BAD_DESTINATION,
+                        step, peer, UINT32_MAX, index, slots_,
+                        static_cast<uint32_t>(target));
+                    return false;
+                }
+            }
+        }
+
+        for (uint32_t batchStart = 0U; batchStart < selectedCount;
+            batchStart += TileXRMoonEp::kMoonEpCombineV2PayloadBatchRows) {
+            const uint32_t batchCount =
+                TileXRMoonEp::MoonEpCombineV2WeightBatchRows(
+                    selectedCount, batchStart);
+            const bool useStage0 =
+                TileXRMoonEp::MoonEpCombineV2WeightStageIndex(
+                    batchSequence) == 0U;
+            const TEventID stageEvent = useStage0 ?
+                stage0Event : stage1Event;
+            if ((useStage0 && stage0InFlight) ||
+                (!useStage0 && stage1InFlight)) {
+                const uint64_t drainStart = BeginProfileMetric();
+                WaitFlag<HardEvent::MTE3_S>(stageEvent);
+                EndProfileMetric(TileXRMoonEp::
+                    MOONEP_COMBINE_V2_METRIC_WEIGHT_PAYLOAD_DRAIN,
+                    drainStart);
+                AddWeightStepCounter(step, TileXRMoonEp::
+                    MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS, 1U);
+            }
+            LocalTensor<uint8_t> recordStage = pong[useStage0 ?
+                kWeightRecordStage0Offset : kWeightRecordStage1Offset];
+            const uint64_t recordBuildStart = BeginProfileMetric();
+#if defined(CATLASS_ARCH) && CATLASS_ARCH == 3510
+            Simt::VF_CALL<MoonEpCombineV2BuildWeightRecordsVf>(
+                Simt::Dim3{
+                    TileXRMoonEp::kMoonEpCombineV2BuilderThreads, 1U, 1U},
+                reinterpret_cast<__ubuf__ MoonEpCombineV2WeightStageRecord *>(
+                    recordStage.GetPhyAddr()),
+                reinterpret_cast<__ubuf__ const float *>(
+                    packedWeights.GetPhyAddr()),
+                magic_, batchStart, batchCount);
+#else
+            pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage0Event);
+            pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage1Event);
+            return false;
+#endif
+            SyncFunc<HardEvent::V_MTE3>();
+            EndProfileMetric(TileXRMoonEp::
+                MOONEP_COMBINE_V2_METRIC_WEIGHT_RECORD_BUILD,
+                recordBuildStart);
+            const uint64_t submitStart = BeginProfileMetric();
+            uint32_t commandCount = 0U;
+            uint32_t mergedRunCount = 0U;
+            uint32_t commandStart = 0U;
+            while (commandStart < batchCount) {
+                const uint32_t target = static_cast<uint32_t>(
+                    packedDestinations.GetValue(batchStart + commandStart));
+                uint32_t runLength = 1U;
+                while (commandStart + runLength < batchCount &&
+                    TileXRMoonEp::MoonEpCombineV2WeightRunContinues(
+                        target, runLength, static_cast<uint32_t>(
+                            packedDestinations.GetValue(
+                                batchStart + commandStart + runLength)))) {
+                    ++runLength;
+                }
+                GlobalTensor<uint8_t> destination;
+                destination.SetGlobalBuffer(
+                    remoteWindow + weightRecordOffset_ +
+                    static_cast<uint64_t>(epoch_) *
+                        weightRecordEpochStride_ +
+                    static_cast<uint64_t>(target) *
+                        TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes);
+                const DataCopyExtParams recordOut {
+                    static_cast<uint16_t>(runLength),
+                    static_cast<uint32_t>(
+                        TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes),
+                    0U, 0U, 0U};
+                DataCopyPad(destination,
+                    recordStage[commandStart *
+                        kWeightRecordLocalStrideBytes], recordOut);
+                ++commandCount;
+                if (runLength > 1U) {
+                    ++mergedRunCount;
+                }
+                commandStart += runLength;
+            }
+            SetFlag<HardEvent::MTE3_S>(stageEvent);
+            EndProfileMetric(TileXRMoonEp::
+                MOONEP_COMBINE_V2_METRIC_WEIGHT_MTE3_SUBMIT, submitStart);
+            AddWeightStepCounter(step, TileXRMoonEp::
+                MOONEP_COMBINE_V2_WEIGHT_COUNTER_BATCHES, 1U);
+            AddWeightStepCounter(step, TileXRMoonEp::
+                MOONEP_COMBINE_V2_WEIGHT_COUNTER_MERGED_RUNS,
+                mergedRunCount);
+            AddWeightStepCounter(step, TileXRMoonEp::
+                MOONEP_COMBINE_V2_WEIGHT_COUNTER_MTE3_COMMANDS,
+                commandCount);
+            if (useStage0) {
+                stage0InFlight = true;
+            } else {
+                stage1InFlight = true;
+            }
+            ++batchSequence;
         }
     }
 
-    LocalTensor<uint64_t> token = relay.ReinterpretCast<uint64_t>();
+    if (stage0InFlight) {
+        const uint64_t drainStart = BeginProfileMetric();
+        WaitFlag<HardEvent::MTE3_S>(stage0Event);
+        EndProfileMetric(TileXRMoonEp::
+            MOONEP_COMBINE_V2_METRIC_WEIGHT_PAYLOAD_DRAIN, drainStart);
+        AddWeightStepCounter(step, TileXRMoonEp::
+            MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS, 1U);
+    }
+    if (stage1InFlight) {
+        const uint64_t drainStart = BeginProfileMetric();
+        WaitFlag<HardEvent::MTE3_S>(stage1Event);
+        EndProfileMetric(TileXRMoonEp::
+            MOONEP_COMBINE_V2_METRIC_WEIGHT_PAYLOAD_DRAIN, drainStart);
+        AddWeightStepCounter(step, TileXRMoonEp::
+            MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS, 1U);
+    }
+    pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage0Event);
+    pipe_->ReleaseEventID<HardEvent::MTE3_S>(stage1Event);
+    const uint64_t donePublishStart = BeginProfileMetric();
+    LocalTensor<uint64_t> token = doneScratch.ReinterpretCast<uint64_t>();
     token.SetValue(0U, TileXRMoonEp::MoonEpCombineV2Token(magic_, step));
     for (uint32_t word = 1U;
         word < TileXRMoonEp::kMoonEpCombineV2WeightDoneStrideBytes /
@@ -2308,8 +2584,10 @@ __aicore__ inline bool MoonEpCombineV2::SendWeightMemoryStep(
             TileXRMoonEp::kMoonEpCombineV2WeightDoneStrideBytes),
         0U, 0U, 0U};
     SyncFunc<HardEvent::S_MTE3>();
-    DataCopyPad(done, relay, doneOut);
+    DataCopyPad(done, doneScratch, doneOut);
     SyncFunc<HardEvent::MTE3_S>();
+    EndProfileMetric(TileXRMoonEp::
+        MOONEP_COMBINE_V2_METRIC_WEIGHT_DONE_PUBLISH, donePublishStart);
     return true;
 }
 
@@ -2319,6 +2597,7 @@ __aicore__ inline bool MoonEpCombineV2::WaitInboundWeightDone(
     if (!hasRouteWeight_) {
         return true;
     }
+    const uint64_t waitStart = BeginProfileMetric();
     const uint64_t expected =
         TileXRMoonEp::MoonEpCombineV2Token(magic_, step);
     __gm__ uint64_t *done = reinterpret_cast<__gm__ uint64_t *>(
@@ -2331,10 +2610,14 @@ __aicore__ inline bool MoonEpCombineV2::WaitInboundWeightDone(
         if (TimedOut(operationStartCycles_)) {
             SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_WEIGHT_DONE_TIMEOUT,
                 step, source, UINT32_MAX, 0U, expected, observed);
+            EndProfileMetric(TileXRMoonEp::
+                MOONEP_COMBINE_V2_METRIC_WEIGHT_INBOUND_WAIT, waitStart);
             return false;
         }
         observed = LoadToken(done);
     }
+    EndProfileMetric(TileXRMoonEp::
+        MOONEP_COMBINE_V2_METRIC_WEIGHT_INBOUND_WAIT, waitStart);
     return true;
 }
 
@@ -2343,42 +2626,117 @@ __aicore__ inline bool MoonEpCombineV2::CopyReceivedWeights()
     if (!hasRouteWeight_) {
         return true;
     }
+    const uint64_t outputStart = BeginProfileMetric();
     const uint64_t begin = weightOutputElements_ * core_ / activeCoreCount_;
     const uint64_t end = weightOutputElements_ * (core_ + 1U) /
         activeCoreCount_;
-    LocalTensor<uint8_t> relay = wqeContextBuf_.Get<uint8_t>();
-    const DataCopyExtParams recordIn {1U,
-        static_cast<uint32_t>(
-            TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes),
-        0U, 0U, 0U};
+    LocalTensor<uint8_t> recordBytes =
+        selfRelayPingBuf_.Get<uint8_t>();
+    LocalTensor<uint8_t> outputStorage =
+        selfRelayPongBuf_.Get<uint8_t>();
+    LocalTensor<uint32_t> valueWords =
+        outputStorage.ReinterpretCast<uint32_t>();
+    LocalTensor<uint32_t> magicLowWords =
+        outputStorage[kWeightOutputTensorBytes].ReinterpretCast<uint32_t>();
+    LocalTensor<uint32_t> magicHighWords =
+        outputStorage[2U * kWeightOutputTensorBytes].
+            ReinterpretCast<uint32_t>();
+    LocalTensor<float> filteredValues =
+        outputStorage[3U * kWeightOutputTensorBytes].
+            ReinterpretCast<float>();
+    LocalTensor<uint32_t> gatherPattern =
+        lowerMaskBuf_.Get<uint32_t>();
+    LocalTensor<uint8_t> validMask = lowerMaskBuf_.Get<uint8_t>();
+    LocalTensor<uint8_t> highValidMask = upperMaskBuf_.Get<uint8_t>();
     const DataCopyPadExtParams<uint8_t> recordPad {false, 0U, 0U, 0U};
-    const DataCopyExtParams valueOut {1U, sizeof(float), 0U, 0U, 0U};
-    for (uint64_t index = begin; index < end; ++index) {
-        GlobalTensor<uint8_t> source;
-        source.SetGlobalBuffer(localWeightWindow_ + weightRecordOffset_ +
+    GlobalTensor<float> outputWeights;
+    outputWeights.SetGlobalBuffer(
+        reinterpret_cast<__gm__ float *>(routeWeightsSkAddr_),
+        weightOutputElements_);
+    for (uint64_t tileStart = begin; tileStart < end;
+        tileStart += kWeightOutputTileRows) {
+        AddWeightOutputTiles(1U);
+        const uint32_t tileElements = static_cast<uint32_t>(
+            end - tileStart < kWeightOutputTileRows ?
+                end - tileStart : kWeightOutputTileRows);
+        const uint32_t tileWords = tileElements * 4U;
+        GlobalTensor<uint8_t> sourceRecords;
+        sourceRecords.SetGlobalBuffer(
+            localWeightWindow_ + weightRecordOffset_ +
             static_cast<uint64_t>(epoch_) * weightRecordEpochStride_ +
-            index * TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes);
+            tileStart * TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes);
+        const DataCopyExtParams recordIn {1U,
+            tileElements * static_cast<uint32_t>(
+                TileXRMoonEp::kMoonEpCombineV2WeightRecordBytes),
+            0U, 0U, 0U};
         SyncFunc<HardEvent::S_MTE2>();
-        DataCopyPad(relay, source, recordIn, recordPad);
-        SyncFunc<HardEvent::MTE2_S>();
-        LocalTensor<uint64_t> words64 = relay.ReinterpretCast<uint64_t>();
-        if (words64.GetValue(1U) != magic_) {
-            relay.ReinterpretCast<uint32_t>().SetValue(0U, 0U);
+        DataCopyPad(recordBytes, sourceRecords, recordIn, recordPad);
+        SyncFunc<HardEvent::MTE2_V>();
+
+        uint64_t valueCount = 0U;
+        uint64_t magicLowCount = 0U;
+        uint64_t magicHighCount = 0U;
+        Duplicate(gatherPattern, 0x11111111U,
+            kSelectionMaskUint32Elements);
+        PipeBarrier<PIPE_V>();
+        GatherMask(valueWords, recordBytes.ReinterpretCast<uint32_t>(),
+            gatherPattern, true, tileWords, {1U, 1U, 0U, 0U}, valueCount);
+        PipeBarrier<PIPE_V>();
+        Duplicate(gatherPattern, 0x44444444U,
+            kSelectionMaskUint32Elements);
+        PipeBarrier<PIPE_V>();
+        GatherMask(magicLowWords, recordBytes.ReinterpretCast<uint32_t>(),
+            gatherPattern, true, tileWords, {1U, 1U, 0U, 0U},
+            magicLowCount);
+        PipeBarrier<PIPE_V>();
+        Duplicate(gatherPattern, 0x88888888U,
+            kSelectionMaskUint32Elements);
+        PipeBarrier<PIPE_V>();
+        GatherMask(magicHighWords, recordBytes.ReinterpretCast<uint32_t>(),
+            gatherPattern, true, tileWords, {1U, 1U, 0U, 0U},
+            magicHighCount);
+        PipeBarrier<PIPE_V>();
+        Compares(validMask, magicLowWords,
+            static_cast<uint32_t>(magic_), CMPMODE::EQ, tileElements);
+        Compares(highValidMask, magicHighWords,
+            static_cast<uint32_t>(magic_ >> 32U),
+            CMPMODE::EQ, tileElements);
+        PipeBarrier<PIPE_V>();
+        And(validMask.ReinterpretCast<uint32_t>(),
+            validMask.ReinterpretCast<uint32_t>(),
+            highValidMask.ReinterpretCast<uint32_t>(),
+            static_cast<int32_t>((tileElements + 31U) / 32U));
+        PipeBarrier<PIPE_V>();
+        Select(filteredValues, validMask,
+            valueWords.ReinterpretCast<float>(), 0.0F,
+            SELMODE::VSEL_TENSOR_SCALAR_MODE, tileElements);
+        SyncFunc<HardEvent::V_S>();
+        if (kEnableSafetyChecks &&
+            (valueCount != tileElements || magicLowCount != tileElements ||
+                magicHighCount != tileElements)) {
+            SetFailure(TileXRMoonEp::
+                MOONEP_COMBINE_V2_WEIGHT_MEMORY_INVALID_CONFIG,
+                UINT32_MAX, rank_, UINT32_MAX, tileElements,
+                tileElements, valueCount);
+            EndProfileMetric(TileXRMoonEp::
+                MOONEP_COMBINE_V2_METRIC_WEIGHT_OUTPUT, outputStart);
+            return false;
         }
-        GlobalTensor<uint8_t> destination;
-        destination.SetGlobalBuffer(
-            routeWeightsSkAddr_ + index * sizeof(float));
-        SyncFunc<HardEvent::S_MTE3>();
-        DataCopyPad(destination, relay, valueOut);
+        const DataCopyExtParams valueOut {1U,
+            tileElements * static_cast<uint32_t>(sizeof(float)),
+            0U, 0U, 0U};
+        SyncFunc<HardEvent::V_MTE3>();
+        DataCopyPad(outputWeights[tileStart], filteredValues, valueOut);
         SyncFunc<HardEvent::MTE3_S>();
     }
+    EndProfileMetric(TileXRMoonEp::
+        MOONEP_COMBINE_V2_METRIC_WEIGHT_OUTPUT, outputStart);
     return true;
 }
 
-__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(uint32_t step)
+__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(
+    uint32_t step, uint32_t source)
 {
-    const uint32_t source = TileXRMoonEp::MoonEpCombineV2ReceiveSource(
-        rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
     if (source >= rankSize_) {
         SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
             step, source, UINT32_MAX);
@@ -2698,6 +3056,30 @@ __aicore__ inline void MoonEpCombineV2::EndProfileMetric(
 #endif
 }
 
+__aicore__ inline void MoonEpCombineV2::AddWeightStepCounter(
+    uint32_t step, uint32_t index, uint32_t value)
+{
+#if defined(TILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING)
+    if (step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount &&
+        index < TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount) {
+        weightStepCounter_[step][index] += value;
+    }
+#else
+    (void)step;
+    (void)index;
+    (void)value;
+#endif
+}
+
+__aicore__ inline void MoonEpCombineV2::AddWeightOutputTiles(uint32_t value)
+{
+#if defined(TILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING)
+    weightOutputTiles_ += value;
+#else
+    (void)value;
+#endif
+}
+
 __aicore__ inline void MoonEpCombineV2::WriteProfile()
 {
 #if defined(TILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING)
@@ -2745,6 +3127,16 @@ __aicore__ inline void MoonEpCombineV2::WriteProfile()
         ++index) {
         record->metric[index] = profileMetric_[index];
     }
+    for (uint32_t step = 0U;
+        step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount; ++step) {
+        for (uint32_t index = 0U;
+            index < TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount;
+            ++index) {
+            record->weightStepCounter[step][index] =
+                weightStepCounter_[step][index];
+        }
+    }
+    record->weightOutputTiles = weightOutputTiles_;
     record->timePoint[
         TileXRMoonEp::MOONEP_COMBINE_V2_DIAG_FAILURE_STATUS] =
         static_cast<int64_t>(failureStatus_);
@@ -2829,14 +3221,19 @@ __aicore__ inline void MoonEpCombineV2::Process()
     for (uint32_t step = 0U; step < stepCount_; ++step) {
         localSucceeded = succeeded;
         bool fullmeshStep = false;
-        if (activeWorker_ && localSucceeded) {
-            localSucceeded = WaitStepCredit(step);
+        const TileXRMoonEp::MoonEpCombineV2StepRoute route =
+            TileXRMoonEp::MoonEpCombineV2BuildStepRoute(
+                scheduleMode_, rank_, core_, step, rankSize_);
+        if (activeWorker_ && localSucceeded && !route.valid) {
+            SetFailure(TileXRMoonEp::MOONEP_COMBINE_V2_INVALID_CONFIG,
+                step, route.sendDstRank, UINT32_MAX);
+            localSucceeded = false;
         }
         if (activeWorker_ && localSucceeded) {
-            const uint32_t peer = TileXRMoonEp::MoonEpCombineV2EffectivePeer(
-                TileXRMoonEp::MoonEpCombineV2Peer(
-                    rank_, step, core_, rankSize_, kCombineV2ScheduleMode),
-                rank_);
+            localSucceeded = WaitStepCredit(step, route);
+        }
+        if (activeWorker_ && localSucceeded) {
+            const uint32_t peer = route.sendDstRank;
             const bool selfStep = peer == rank_;
             fullmeshStep = !selfStep &&
                 TileXRMoonEp::MoonEpCombineV2SameServer(rank_, peer,
@@ -2847,12 +3244,9 @@ __aicore__ inline void MoonEpCombineV2::Process()
                     localSucceeded = SendWeightMemoryStep(rank_, step);
                 }
             } else if (fullmeshStep) {
-                const uint32_t successor =
-                    TileXRMoonEp::MoonEpCombineV2Successor(
-                        rank_, step, core_, rankSize_, kCombineV2ScheduleMode);
                 fullmeshProfileRoute_ =
                     TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
-                        step, peer, successor,
+                        step, peer, route.sendSuccessorRank,
                         TileXRMoonEp::MoonEpCombineV2FullmeshLogicalQp(
                             peer, static_cast<uint32_t>(
                                 args_->localRankSize)));
@@ -2881,10 +3275,10 @@ __aicore__ inline void MoonEpCombineV2::Process()
             localSucceeded = WaitStepCqs(step);
         }
         if (activeWorker_ && localSucceeded) {
-            localSucceeded = WaitInboundDone(step);
+            localSucceeded = WaitInboundDone(step, route.recvSrcRank);
         }
         if (activeWorker_ && localSucceeded) {
-            localSucceeded = PublishNextCredit(step);
+            localSucceeded = PublishNextCredit(step, route);
         }
         succeeded = localSucceeded;
         RecordProfilePoint(

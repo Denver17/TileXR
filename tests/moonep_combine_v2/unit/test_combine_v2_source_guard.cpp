@@ -89,9 +89,6 @@ int main()
     const std::string legacyKernel = Read(root +
         "/src/moonep/combine_v2/kernels/"
         "tilexr_moonep_combine_v2_kernel.h");
-    const std::string groupKernel = Read(root +
-        "/src/moonep/combine_v2/kernels/"
-        "tilexr_moonep_combine_v2_group_kernel.h");
     const std::string host = Read(root +
         "/src/moonep/combine_v2/host/combine_v2_host.cpp");
     const std::string hostHeader = Read(root +
@@ -104,6 +101,8 @@ int main()
         "/src/moonep/common/moonep_kernel_registration.h");
     const std::string schedule = Read(root +
         "/src/moonep/common/moonep_combine_schedule.h");
+    const std::string profile = Read(root +
+        "/src/moonep/combine_v2/common/combine_v2_profile.h");
 
     const std::string legacyProcess = Section(legacyKernel,
         "__aicore__ inline void MoonEpCombineV2::Process()",
@@ -117,37 +116,6 @@ int main()
     const std::string legacyFullmeshBuilder = Section(legacyKernel,
         "inline void MoonEpCombineV2BuildFullmeshPayloadWqesVf(",
         "#endif");
-    const std::string process = Section(groupKernel,
-        "__aicore__ inline void MoonEpCombineV2Group::Process()",
-        "} // namespace");
-    const std::string collectiveBegin = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(",
-        "__aicore__ inline bool MoonEpCombineV2Group::EndCollectiveStage(");
-    const std::string collectiveEnd = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::EndCollectiveStage(",
-        "__aicore__ inline void MoonEpCombineV2Group::InitReduceBuffers(");
-    const std::string fullmeshSubmit = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::SubmitFullmeshBatch(",
-        "__aicore__ inline bool MoonEpCombineV2Group::SendFullmeshStep(");
-    const std::string closStep = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::SendClosStep(",
-        "__aicore__ inline bool MoonEpCombineV2Group::SubmitFullmeshBatch(");
-    const std::string singleDone = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::SubmitRemoteDone(",
-        "__aicore__ inline bool MoonEpCombineV2Group::SendClosStep(");
-    const std::string inboundDone = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::WaitSingleInboundDone(",
-        "__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(");
-    const std::string publishCredit = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::PublishNextCredit(",
-        "__aicore__ inline bool MoonEpCombineV2Group::WaitStepCredit(");
-    const std::string waitCredit = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::WaitStepCredit(",
-        "__aicore__ inline bool MoonEpCombineV2Group::BeginCollectiveStage(");
-    const std::string stepLoop = Section(process,
-        "for (uint32_t step", "stageReady = BeginCollectiveStage(");
-    const std::string fullmeshStep = Section(stepLoop,
-        "} else if (fullmeshStep) {", "} else {");
     const std::string legacyPublishCredit = Section(legacyKernel,
         "__aicore__ inline bool MoonEpCombineV2::PublishNextCredit(",
         "__aicore__ inline bool MoonEpCombineV2::BuildPayloadWqes(");
@@ -163,14 +131,7 @@ int main()
     const std::string legacyWeightOutput = Section(legacyKernel,
         "__aicore__ inline bool MoonEpCombineV2::CopyReceivedWeights()",
         "__aicore__ inline bool MoonEpCombineV2::WaitInboundDone(");
-    const std::string groupWeightSend = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::SendWeightMemoryStep(",
-        "__aicore__ inline bool MoonEpCombineV2Group::WaitInboundWeightDone(");
-    const std::string groupWeightOutput = Section(groupKernel,
-        "__aicore__ inline bool MoonEpCombineV2Group::CopyReceivedWeights()",
-        "__aicore__ inline bool MoonEpCombineV2Group::WaitSingleInboundDone(");
-    const std::string activeProtocolSource = legacyKernel + groupKernel +
-        schedule;
+    const std::string activeProtocolSource = legacyKernel + schedule;
 
     bool ok = true;
     ok &= Require(rootCmake, "add_subdirectory(tests/moonep_combine_v2)",
@@ -183,8 +144,8 @@ int main()
         "Combine V2 standalone library is missing");
     ok &= Require(v2Cmake, "tilexr_moonep_combine_v2_kernel.h\"",
         "Combine V2 build does not depend on the legacy kernel header");
-    ok &= Require(v2Cmake, "tilexr_moonep_combine_v2_group_kernel.h\"",
-        "Combine V2 build does not depend on the Group kernel header");
+    ok &= Reject(v2Cmake, "tilexr_moonep_combine_v2_group_kernel.h",
+        "Combine V2 build still depends on the retired Group kernel header");
     ok &= Require(v2Cmake, "-DCATLASS_ARCH=3510",
         "Combine V2 CATLASS target is missing");
     ok &= Reject(v2Cmake, "/devlib",
@@ -193,19 +154,10 @@ int main()
     ok &= Require(kernelEntry,
         "#include \"tilexr_moonep_combine_v2_kernel.h\"",
         "Combine V2 entry does not include the legacy implementation");
-    ok &= Require(kernelEntry,
-        "#include \"tilexr_moonep_combine_v2_group_kernel.h\"",
-        "Combine V2 entry does not include the Group implementation");
-    ok &= Require(kernelEntry, "args != nullptr && args->rankSize == 128",
-        "Combine V2 entry does not isolate the 128P Group path");
-    ok &= Require(kernelEntry,
-        "TileXRGroup128::MoonEpCombineV2Group op;",
-        "Combine V2 entry does not select the namespaced Group kernel");
     ok &= Require(kernelEntry, "MoonEpCombineV2 op;",
-        "Combine V2 entry does not retain the non-128P implementation");
-    ok &= RequireBefore(kernelEntry,
-        "TileXRGroup128::MoonEpCombineV2Group op;", "MoonEpCombineV2 op;",
-        "Combine V2 fallback is placed before the 128P branch");
+        "Combine V2 entry does not use the unified implementation");
+    ok &= Reject(kernelEntry, "MoonEpCombineV2Group",
+        "Combine V2 entry still references the retired Group implementation");
     ok &= Reject(kernelEntry, "<<<",
         "Combine V2 entry contains Host launch syntax");
 
@@ -224,56 +176,6 @@ int main()
         "Legacy fullmesh completion token bypasses the MTE3 publication helper");
     ok &= Reject(legacySubmitFullmesh, "\n        *doneSource =",
         "Legacy fullmesh completion token uses a scalar GM store");
-    ok &= Require(groupKernel, "namespace TileXRGroup128 {",
-        "Group implementation is not isolated in its own namespace");
-    ok &= Require(groupKernel, "class MoonEpCombineV2Group",
-        "Group implementation class is missing");
-    ok &= Require(groupKernel, "args_->rankSize != 128",
-        "Group implementation does not reject non-128P direct use");
-    ok &= Require(groupKernel, "(void)reservedSyncReceiveOffset;",
-        "Group Init does not explicitly ignore the retired receive offset");
-    ok &= Require(groupKernel, "(void)reservedSyncSourceOffset;",
-        "Group Init does not explicitly ignore the retired source offset");
-    ok &= Require(groupKernel, "collectiveStatusBase_",
-        "Group kernel dropped the card-local collective status workspace");
-
-    ok &= Require(groupKernel,
-        "Simt::VF_CALL<MoonEpCombineV2PrefillOperatorWqesVf>",
-        "Group kernel dropped operator WQE prefill");
-    ok &= Require(groupKernel,
-        "Simt::VF_CALL<MoonEpCombineV2PrefillPeerWqesVf>",
-        "Group kernel dropped peer WQE prefill");
-    ok &= Require(groupKernel,
-        "Simt::VF_CALL<MoonEpCombineV2BuildPayloadWqesVf>",
-        "Group kernel dropped the CLOS payload builder");
-    ok &= Require(groupKernel,
-        "Simt::VF_CALL<MoonEpCombineV2BuildFullmeshPayloadWqesVf>",
-        "Group kernel dropped the Fullmesh payload builder");
-    ok &= Require(groupKernel, "AppendControlWqe(",
-        "Group kernel dropped the reusable control WQE builder");
-    ok &= Require(groupKernel, "CopyIssueToSq(",
-        "Group kernel dropped the reusable SQ publisher");
-    ok &= Require(groupKernel, "PollCqOnce(",
-        "Group kernel dropped CQ bookkeeping");
-    ok &= Require(groupKernel, "CopySelfSelectedIndices(",
-        "Group kernel dropped Self copy support");
-    ok &= Require(groupKernel, "ReduceHidden()",
-        "Group kernel dropped final reduction support");
-    ok &= Require(groupKernel, "__gm__ uint8_t *doneBase_",
-        "Group kernel dropped future Done workspace state");
-    ok &= Reject(groupKernel, "__gm__ uint8_t *grantBase_",
-        "Group kernel retained the retired Grant workspace state");
-    ok &= Require(groupKernel, "__gm__ uint8_t *controlSourceBase_",
-        "Group kernel dropped future control source state");
-    ok &= Require(groupKernel, "SyncFunc<HardEvent::S_MTE3>();",
-        "Group kernel dropped UB-to-MTE3 ordering");
-    ok &= Require(groupKernel, "SyncFunc<HardEvent::MTE3_S>();",
-        "Group kernel dropped MTE3-to-doorbell ordering");
-    ok &= Require(groupKernel, "st_dev(",
-        "Group kernel dropped device doorbells");
-    ok &= RequireBefore(fullmeshSubmit, "SyncFunc<HardEvent::MTE3_S>();",
-        "st_dev(fullmeshLane_.head",
-        "Fullmesh path rings its doorbell before MTE3 completion");
     ok &= Require(schedule, "MoonEpCombineV2GroupSendDstRank(",
         "Group send mapping helper is missing");
     ok &= Require(schedule, "MoonEpCombineV2GroupRecvSrcRank(",
@@ -286,51 +188,31 @@ int main()
         "Combine V2 Credit IPC offset helper is missing");
     ok &= Require(schedule, "MoonEpCombineV2ReceiveCore(",
         "Combine V2 Credit receiver-core inverse is missing");
-
-    ok &= RequireBefore(closStep, "WaitLaneCq(", "SubmitRemoteDone(peer, step)",
-        "CLOS Done can be published before payload CQ completion");
-    ok &= Require(singleDone, "SubmitClosControl(peer,",
-        "CLOS path does not publish a standalone Done");
-    ok &= Require(singleDone, "MOONEP_COMBINE_V2_SIX_PORT",
-        "CLOS Done is not fixed to the six-port lane");
-    ok &= Count(singleDone, "SubmitClosControl(") == 1U;
-    if (Count(singleDone, "SubmitClosControl(") != 1U) {
-        std::cerr << "CLOS path does not publish exactly one Done\n";
-    }
-    ok &= Count(inboundDone, "MoonEpCombineV2DoneIndex(") == 1U;
-    if (Count(inboundDone, "MoonEpCombineV2DoneIndex(") != 1U) {
-        std::cerr << "Group receiver does not read exactly one Done slot\n";
-    }
-    ok &= Require(inboundDone, "if (source == rank_)",
-        "Group Self path does not treat local copy as Done");
-    ok &= Require(publishCredit, "MoonEpCombineV2GroupRecvSrcRank(",
-        "Group Credit does not target the next step sender");
-    ok &= Require(publishCredit, "MoonEpCombineV2GroupInnerIndex(rank_)",
-        "Group Credit does not target the destination inner core");
-    ok &= Require(publishCredit, "args_->creditMems[targetRank]",
-        "Group Credit publish does not use the target Credit IPC mapping");
-    ok &= Require(publishCredit,
-        "DataCopy(remoteCreditGlobal, creditLocal",
-        "Group Credit publish is not an MTE3 GM write");
-    ok &= Require(publishCredit, "SyncFunc<HardEvent::S_MTE3>();",
-        "Group Credit publish lacks scalar-to-MTE3 ordering");
-    ok &= Require(publishCredit, "SyncFunc<HardEvent::MTE3_S>();",
-        "Group Credit publish does not wait for MTE3 completion");
-    ok &= Require(waitCredit, "args_->creditMems[rank_]",
-        "Group Credit wait does not use the local Credit IPC mapping");
-    ok &= Require(waitCredit, "DataCopy(creditLocal, creditGlobal",
-        "Group Credit wait is not an MTE2 GM read");
-    ok &= Require(waitCredit, "SyncFunc<HardEvent::S_MTE2>();",
-        "Group Credit wait lacks scalar-to-MTE2 ordering");
-    ok &= Require(waitCredit, "SyncFunc<HardEvent::MTE2_S>();",
-        "Group Credit wait does not wait for MTE2 completion");
-    ok &= Require(waitCredit, "creditLocal.GetValue(4U)",
-        "Group sender does not validate its Credit target route");
-    ok &= Require(waitCredit,
-        "(static_cast<uint64_t>(core_) << 32U | rank_)",
-        "Group sender does not validate its rank/core Credit target");
-    ok &= Require(waitCredit, "MOONEP_COMBINE_V2_CREDIT_TIMEOUT",
-        "Group Credit wait is not bounded");
+    ok &= Require(schedule, "struct MoonEpCombineV2StepRoute",
+        "Combine V2 step route contract is missing");
+    ok &= Require(schedule, "MoonEpCombineV2MapSendDst(",
+        "Combine V2 pluggable send mapping is missing");
+    ok &= Require(schedule, "MoonEpCombineV2MapRecvSrc(",
+        "Combine V2 pluggable receive mapping is missing");
+    ok &= Require(schedule, "MoonEpCombineV2FindRecvCore(",
+        "Combine V2 receive-core inverse is missing");
+    ok &= Require(schedule, "MoonEpCombineV2FindSendCore(",
+        "Combine V2 send-core inverse is missing");
+    ok &= Require(schedule, "MoonEpCombineV2FindSendSuccessor(",
+        "Combine V2 send-successor inverse is missing");
+    ok &= Require(schedule, "MoonEpCombineV2BuildStepRoute(",
+        "Combine V2 step route builder is missing");
+    ok &= Require(schedule, "MOONEP_COMBINE_V2_GROUP = 4U",
+        "Combine V2 Group schedule mode is missing");
+    ok &= Require(schedule, "MoonEpCombineV2ScheduleModeForRankSize(",
+        "Combine V2 rank-size schedule selection is missing");
+    ok &= Require(legacyKernel,
+        "scheduleMode_ = TileXRMoonEp::MoonEpCombineV2ScheduleModeForRankSize(",
+        "Unified kernel does not select Group only by rank size");
+    ok &= Require(legacyProcess, "scheduleMode_, rank_, core_, step, rankSize_",
+        "Unified kernel does not build routes with the selected mode");
+    ok &= Reject(legacyKernel, "kCombineV2ScheduleMode",
+        "Unified kernel retains a fixed schedule mode");
 
     ok &= Require(legacyPublishCredit, "args_->creditMems[targetRank]",
         "Legacy Credit publish does not use the target Credit IPC mapping");
@@ -352,7 +234,7 @@ int main()
     ok &= Require(legacyWaitCredit, "MOONEP_COMBINE_V2_CREDIT_TIMEOUT",
         "Legacy Credit wait is not bounded");
 
-    const std::string creditSections = publishCredit + waitCredit +
+    const std::string creditSections =
         legacyPublishCredit + legacyWaitCredit;
     const char *forbiddenCreditTransport[] = {
         "AppendControlWqe(",
@@ -397,101 +279,123 @@ int main()
             ok = false;
         }
     }
-    const char *retiredGroupSymbols[] = {
-        "WaitInboundDone(",
-        "sourcesPerCore_",
-        "SubmitPair(",
-        "SendRemoteStep(",
-        "MOONEP_COMBINE_V2_SERVER_PAIR_PARITY",
-        "kCombineV2ScheduleMode"
-    };
-    for (const char *symbol : retiredGroupSymbols) {
-        if (!Reject(groupKernel, symbol,
-                "Group kernel retained an obsolete implementation symbol")) {
-            std::cerr << "retired Group symbol: " << symbol << '\n';
-            ok = false;
-        }
+    ok &= Require(legacyProcess, "MoonEpCombineV2BuildStepRoute(",
+        "Legacy process does not build one step route");
+    ok &= Count(legacyProcess, "MoonEpCombineV2BuildStepRoute(") == 1U;
+    if (Count(legacyProcess, "MoonEpCombineV2BuildStepRoute(") != 1U) {
+        std::cerr << "Legacy process does not build exactly one route per step\n";
     }
-
-    ok &= Require(process, "BeginCollectiveStage(kCollectiveInitStage)",
-        "Group scaffold dropped card-local initialization convergence");
-    ok &= Require(process,
-        "BeginCollectiveStage(kCollectiveValidationStage)",
-        "Group scaffold dropped card-local validation convergence");
-    ok &= Require(process, "BeginCollectiveStage(kCollectiveDoneStage)",
-        "Group implementation dropped final card-local convergence");
-    ok &= Require(process, "for (uint32_t step",
-        "Group implementation does not execute the 8-step schedule");
-    ok &= Require(process, "MoonEpCombineV2GroupSendDstRank(",
-        "Group process does not use the send mapping");
-    ok &= Require(process, "MoonEpCombineV2GroupRecvSrcRank(",
-        "Group process does not use the receive mapping");
-    ok &= Require(process, "WaitStepCredit(step)",
-        "Group process does not wait for one pre-step Credit");
-    ok &= Require(process, "PublishNextCredit(step)",
-        "Group process does not publish one next-step Credit");
-    ok &= RequireBefore(stepLoop, "WaitStepCredit(step)",
-        "WaitSingleInboundDone(step, source)",
-        "Group process waits for inbound Done before pre-step Credit");
-    ok &= RequireBefore(stepLoop, "WaitSingleInboundDone(step, source)",
-        "PublishNextCredit(step)",
-        "Group process publishes Credit before inbound Done");
-    ok &= RequireBefore(legacyProcess, "WaitStepCredit(step)",
-        "WaitInboundDone(step)",
-        "Legacy process waits for inbound Done before pre-step Credit");
-    ok &= RequireBefore(legacyProcess, "WaitInboundDone(step)",
-        "PublishNextCredit(step)",
+    ok &= Require(legacyProcess, "const uint32_t peer = route.sendDstRank;",
+        "Legacy process does not send to the route destination");
+    ok &= RequireBefore(legacyProcess, "WaitStepCredit(step, route)",
+        "const uint32_t peer = route.sendDstRank;",
+        "Legacy process sends before pre-step Credit");
+    ok &= RequireBefore(legacyProcess,
+        "const uint32_t peer = route.sendDstRank;", "WaitStepCqs(step)",
+        "Legacy process waits for CQ before entering the send block");
+    ok &= RequireBefore(legacyProcess, "WaitStepCqs(step)",
+        "WaitInboundDone(step, route.recvSrcRank)",
+        "Legacy process waits for inbound Done before outbound CQ");
+    ok &= RequireBefore(legacyProcess,
+        "WaitInboundDone(step, route.recvSrcRank)",
+        "PublishNextCredit(step, route)",
         "Legacy process publishes Credit before inbound Done");
+    ok &= Reject(legacyWaitCredit, "MoonEpCombineV2Peer(",
+        "Legacy Credit wait recalculates the send mapping");
+    ok &= Reject(legacyWaitCredit, "MoonEpCombineV2ReceiveCore(",
+        "Legacy Credit wait recalculates the receiver core");
+    ok &= Require(legacyWaitCredit, "route.creditWaitSrcRank",
+        "Legacy Credit wait does not use the step route rank");
+    ok &= Require(legacyWaitCredit, "route.creditWaitSrcCore",
+        "Legacy Credit wait does not use the step route core");
+    ok &= Reject(legacyPublishCredit, "MoonEpCombineV2ReceiveSource(",
+        "Legacy Credit publish recalculates the next sender rank");
+    ok &= Reject(legacyPublishCredit, "MoonEpCombineV2TransferCore(",
+        "Legacy Credit publish recalculates the next sender core");
+    ok &= Require(legacyPublishCredit, "route.creditPublishDstRank",
+        "Legacy Credit publish does not use the step route rank");
+    ok &= Require(legacyPublishCredit, "route.creditPublishDstCore",
+        "Legacy Credit publish does not use the step route core");
+    ok &= Reject(legacyInboundDone, "MoonEpCombineV2ReceiveSource(",
+        "Legacy inbound Done wait recalculates its source");
+    ok &= Reject(legacyProcess, "MoonEpCombineV2Successor(",
+        "Legacy process bypasses the route for the profile successor");
+    ok &= Require(legacyProcess, "route.sendSuccessorRank",
+        "Legacy process does not use the route profile successor");
     ok &= RequireBefore(legacyProcess, "SendWeightMemoryStep(peer, step)",
         "WaitStepCqs(step)",
         "Legacy process does not send weight before CQ waiting");
     ok &= Require(legacyInboundDone,
         "return WaitInboundWeightDone(step, source);",
         "Legacy inbound completion does not include weight Done");
-    ok &= RequireBefore(stepLoop, "SendWeightMemoryStep(peer, step)",
-        "WaitSingleInboundDone(step, source)",
-        "Group process does not send weight before inbound waiting");
-    ok &= Require(inboundDone, "return WaitInboundWeightDone(step, source);",
-        "Group inbound completion does not include weight Done");
-    ok &= RequireBefore(legacyWeightSend, "DataCopyPad(destination, relay",
-        "DataCopyPad(done, relay",
+    ok &= Require(legacyKernel, "selfRelayPingBuf_",
+        "Legacy kernel does not expose a fixed Self relay ping buffer");
+    ok &= Require(legacyKernel, "selfRelayPongBuf_",
+        "Legacy kernel does not expose a fixed Self relay pong buffer");
+    ok &= Reject(legacyKernel, "selfCopyQueue_",
+        "Legacy kernel still models Self relay ownership as a queue");
+    ok &= Require(legacyWeightSend, "SelectPeerDestinations(",
+        "Legacy weight send does not gather dense destinations");
+    ok &= Require(legacyWeightSend, "GatherMask(packedWeights, rawWeights",
+        "Legacy weight send does not gather FP32 weights");
+    ok &= Require(legacyWeightSend,
+        "AllocEventID<HardEvent::MTE3_S>()",
+        "Legacy weight send does not allocate independent stage events");
+    ok &= Require(legacyWeightSend,
+        "ReleaseEventID<HardEvent::MTE3_S>(stage0Event)",
+        "Legacy weight send leaks its stage events");
+    ok &= Require(legacyWeightSend,
+        "Simt::VF_CALL<MoonEpCombineV2BuildWeightRecordsVf>",
+        "Legacy weight send does not batch-build records with SIMT");
+    ok &= Require(legacyWeightSend, "SyncFunc<HardEvent::V_MTE3>()",
+        "Legacy record builder does not establish a V-to-MTE3 dependency");
+    ok &= Reject(legacyWeightSend, "MoonEpCombineV2WeightBuildContext",
+        "Legacy record builder still consumes shared UB context asynchronously");
+    ok &= Require(profile, "kMoonEpCombineV2ProfileVersion = 7U",
+        "Combine V2 profile version does not cover batched weight metrics");
+    ok &= Require(profile,
+        "MOONEP_COMBINE_V2_METRIC_WEIGHT_DESTINATION_GATHER",
+        "Combine V2 profile dropped weight destination timing");
+    ok &= Require(profile,
+        "MOONEP_COMBINE_V2_WEIGHT_COUNTER_MTE3_COMMANDS",
+        "Combine V2 profile dropped per-step weight command counts");
+    ok &= Require(legacyWeightSend, "AddWeightStepCounter(step",
+        "Legacy weight send does not publish per-step counters");
+    ok &= Reject(legacyWeightSend, "PipeBarrier<PIPE_ALL>()",
+        "Legacy weight send serializes the alternate MTE3 stage");
+    ok &= RequireBefore(legacyWeightSend,
+        "DataCopyPad(destination,", "DataCopyPad(done, doneScratch",
         "Legacy weight Done can be published before weight records");
-    ok &= RequireBefore(groupWeightSend, "DataCopyPad(destination, relay",
-        "DataCopyPad(done, relay",
-        "Group weight Done can be published before weight records");
-    ok &= Require(legacyWeightOutput, "words64.GetValue(1U) != magic_",
-        "Legacy weight output does not filter stale generations");
-    ok &= Require(legacyWeightOutput,
-        "relay.ReinterpretCast<uint32_t>().SetValue(0U, 0U)",
-        "Legacy stale weight output is not zeroed");
-    ok &= Require(groupWeightOutput, "words64.GetValue(1U) != magic_",
-        "Group weight output does not filter stale generations");
+    ok &= Reject(legacyWeightSend, "SelectPeerIndices(peer, chunkElements)",
+        "Legacy weight send still gathers source indices");
+    ok &= Reject(legacyWeightSend, "words.SetValue(",
+        "Legacy weight send still constructs each record with Scalar stores");
+    ok &= Count(legacyWeightSend,
+        "SyncFunc<HardEvent::MTE3_S>()") == 1U;
+    if (Count(legacyWeightSend, "SyncFunc<HardEvent::MTE3_S>()") != 1U) {
+        std::cerr << "Legacy weight send hard-waits MTE3 outside final Done\n";
+    }
+    ok &= Require(legacyWeightOutput, "0x11111111U",
+        "Legacy weight output does not gather record values");
+    ok &= Require(legacyWeightOutput, "0x44444444U",
+        "Legacy weight output does not gather magic low words");
+    ok &= Require(legacyWeightOutput, "0x88888888U",
+        "Legacy weight output does not gather magic high words");
+    ok &= Require(legacyWeightOutput, "magic_ >> 32U",
+        "Legacy weight output does not validate full magic");
+    ok &= Require(legacyWeightOutput, "Select(filteredValues, validMask",
+        "Legacy stale weight output is not zeroed in bulk");
+    ok &= Reject(legacyWeightOutput, ".GetValue(",
+        "Legacy weight output still reads records element by element");
+    ok &= Reject(legacyWeightOutput, ".SetValue(",
+        "Legacy weight output still writes records element by element");
     if (Count(legacyKernel, "weightRecordEpochStride_ +") < 2U ||
         Count(legacyKernel, "weightDoneEpochStride_ +") < 2U) {
         std::cerr << "Legacy weight record/Done accesses are not epoch isolated\n";
         ok = false;
     }
-    if (Count(groupKernel, "weightRecordEpochStride_ +") < 2U ||
-        Count(groupKernel, "weightDoneEpochStride_ +") < 2U) {
-        std::cerr << "Group weight record/Done accesses are not epoch isolated\n";
-        ok = false;
-    }
     ok &= Reject(legacyWeightSend, "st_dev(",
         "Legacy weight Memory path uses a device doorbell");
-    ok &= Reject(groupWeightSend, "st_dev(",
-        "Group weight Memory path uses a device doorbell");
-    ok &= RequireBefore(fullmeshStep,
-        "localSucceeded = WaitFullmeshCq(step, peer);",
-        "MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS",
-        "Group Fullmesh profile can report CQ success before final CQ wait");
-    ok &= Require(process, "ReduceHidden()",
-        "Group implementation dropped final reduction");
-    ok &= Reject(stepLoop, "SyncAll<true>()",
-        "Group hot loop contains a cross-core barrier");
-    ok &= Require(collectiveBegin, "AscendC::SyncAll<true>();",
-        "Group card-local stage does not align all launch blocks");
-    ok &= Require(collectiveEnd, "AscendC::AtomicCas(&status->status",
-        "Group card-local stage does not aggregate local failures");
 
     ok &= Require(host, "UDMA_SHARED_QP",
         "Combine V2 Host does not validate shared-QP capability");
@@ -521,9 +425,5 @@ int main()
     ok &= Require(publicHeader, "TileXRMoonEpCombineStageV2Fused",
         "Combine V2 fused Stage API is missing");
 
-    ok &= Reject(groupKernel, "extern \"C\" __global__",
-        "Group implementation header contains the operator entry");
-    ok &= Reject(groupKernel, "<<<",
-        "Group implementation contains Host launch syntax");
     return ok ? 0 : 1;
 }
