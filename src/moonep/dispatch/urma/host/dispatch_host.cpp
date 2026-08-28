@@ -28,19 +28,18 @@ constexpr char kDispatchGroupWidthEnv[] =
     "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH";
 
 struct DispatchPeerConfig {
-    DispatchPeerMode mode = DispatchPeerMode::Legacy;
+    DispatchPeerMode mode = DispatchPeerMode::GroupCredit;
     uint32_t groupWidth = kDispatchDefaultGroupWidth;
 };
 
 bool ResolveDispatchPeerConfig(DispatchPeerConfig &config)
 {
     const char *mode = std::getenv(kDispatchPeerModeEnv);
-    if (mode == nullptr || mode[0] == '\0' || std::strcmp(mode, "legacy") == 0) {
-        config.mode = DispatchPeerMode::Legacy;
+    if (mode == nullptr || mode[0] == '\0' ||
+        std::strcmp(mode, "group_credit") == 0) {
+        config.mode = DispatchPeerMode::GroupCredit;
     } else if (std::strcmp(mode, "group") == 0) {
         config.mode = DispatchPeerMode::Group;
-    } else if (std::strcmp(mode, "group_credit") == 0) {
-        config.mode = DispatchPeerMode::GroupCredit;
     } else {
         return false;
     }

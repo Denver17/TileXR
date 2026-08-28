@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <iostream>
 
+#include "comm_args.h"
 #include "planner_common.h"
 #include "planner_layout.h"
 #include "tilexr_types.h"
@@ -47,9 +48,11 @@ int main()
         "Planner V3 dstLocal exceeds workspace");
     Check(layout.peerDstOffset >= 128U * sizeof(int32_t),
         "Planner V3 peer dst overlaps tokens-per-expert publication");
-    Check(layout.peerPublicationBytes ==
-            layout.peerDstOffset + static_cast<uint64_t>(layout.routeCount) * sizeof(int32_t),
-        "Planner V3 peer publication size excludes dst routes");
+    const uint64_t peerRowBytes = TileXRMoonEpV3::TileXRMoonEpAlignUp(
+        layout.peerDstOffset + static_cast<uint64_t>(layout.routeCount) * sizeof(int32_t),
+        TileXRMoonEpV3::kPlannerPeerTransferBytes);
+    Check(layout.peerPublicationBytes == 128U * peerRowBytes,
+        "Planner V3 peer publication does not reserve one row per source rank");
 
     Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(
         8, 256, 4, 32, 2, 128, &layout) == TileXR::TILEXR_SUCCESS,
@@ -58,6 +61,15 @@ int main()
     Check(layout.workspaceBytes >=
             layout.dstLocalOffset + 2040U * sizeof(int32_t),
         "PR113 Planner V3 dstLocal allocation is incomplete");
+
+    Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(
+        128, 1048448, 1, 128, 1, 1, &layout) == TileXR::TILEXR_SUCCESS,
+        "Planner V3 rejected a peer publication that exactly fits the IPC data window");
+    Check(layout.peerPublicationBytes == static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE),
+        "Planner V3 exact-fit peer publication size mismatch");
+    Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(
+        128, 1048449, 1, 128, 1, 1, &layout) != TileXR::TILEXR_SUCCESS,
+        "Planner V3 accepted peer publication beyond the IPC data window");
 
     SetBlockDimOverride("65");
     Check(TileXRMoonEpV3::TileXRMoonEpBuildPlannerLayout(

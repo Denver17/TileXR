@@ -15,7 +15,7 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
+from typing import Callable, Iterable, Mapping
 
 from .report import write_json, write_jsonl
 
@@ -556,7 +556,8 @@ def run_packed_expert_compute(
 
 
 def execute_model_iteration(
-    buffer, inputs, *, torch_module, expert_compute=None
+    buffer, inputs, *, torch_module, expert_compute=None,
+    stage_barrier: Callable[[str], None] | None = None,
 ):
     calls = []
     forward_plans = []
@@ -565,6 +566,8 @@ def execute_model_iteration(
         calls.append({"phase": phase, "layer": layer, "stage": stage, "plan": plan})
 
     def forward(call: int, phase: str, layer: int):
+        if stage_barrier is not None:
+            stage_barrier(f"{phase}_{layer}_dispatch_forward")
         hidden, route_weights, cu_seqlens, plan = buffer.dispatch(
             inputs["hidden"],
             inputs["route_weights"],
@@ -581,6 +584,8 @@ def execute_model_iteration(
             expert_output = expert_compute(
                 plan, hidden, cu_seqlens, inputs["projections"], route_weights
             )
+        if stage_barrier is not None:
+            stage_barrier(f"{phase}_{layer}_combine_forward")
         combined, _, _ = buffer.combine(plan, expert_output)
         record(phase, layer, "combine_forward", plan)
         return plan, hidden, route_weights, cu_seqlens, combined
@@ -593,6 +598,8 @@ def execute_model_iteration(
         plan, _, dispatched_route_weights, cu_seqlens, final = forward(
             call, "recompute_backward", layer
         )
+        if stage_barrier is not None:
+            stage_barrier(f"recompute_backward_{layer}_dispatch_backward")
         dispatched_grad, _, _, returned_plan = buffer.dispatch(
             inputs["grad_output"], plan=plan
         )
@@ -608,11 +615,15 @@ def execute_model_iteration(
                 inputs["projections"],
                 dispatched_route_weights,
             )
+        if stage_barrier is not None:
+            stage_barrier(f"recompute_backward_{layer}_combine_backward")
         final, _, _ = buffer.combine(
             plan, backward_input, dispatched_route_weights
         )
         record("recompute_backward", layer, "combine_backward", plan)
         gradients = inputs["gradients"]
+        if stage_barrier is not None:
+            stage_barrier(f"recompute_backward_{layer}_reduce_grad")
         buffer.reduce_grad(
             plan,
             full_gate_grad=gradients.gate,
@@ -722,6 +733,7 @@ def run_model_case(torch_module, case, args, root: Path) -> None:
 
     from .benchmark import (
         _hold_unsafe_teardown,
+        _multi_node_stage_barrier,
         environment_metadata,
         stage_execution_metadata,
         topology_metadata,
@@ -823,27 +835,31 @@ def run_model_case(torch_module, case, args, root: Path) -> None:
                 torch_npu_module=torch_npu_module,
             )
 
+        stage_barrier_epoch = 0
+
+        def coordinated_model_iteration():
+            nonlocal stage_barrier_epoch
+            epoch = stage_barrier_epoch
+            stage_barrier_epoch += 1
+            return execute_model_iteration(
+                buffer,
+                inputs,
+                torch_module=torch_module,
+                expert_compute=expert_compute,
+                stage_barrier=lambda stage: _multi_node_stage_barrier(
+                    buffer, case.case_id, epoch, stage
+                ),
+            )
+
         warmup_checksums = []
         for _ in range(int(case.warmup)):
-            warmup_checksums.append(
-                execute_model_iteration(
-                    buffer,
-                    inputs,
-                    torch_module=torch_module,
-                    expert_compute=expert_compute,
-                )["checksum"]
-            )
+            warmup_checksums.append(coordinated_model_iteration()["checksum"])
 
         samples = []
         if int(case.iterations) > 0:
             with capture_npu_profile(torch_npu_module, rank_dir / "profiler") as profiler:
                 for iteration in range(int(case.iterations)):
-                    sample = execute_model_iteration(
-                        buffer,
-                        inputs,
-                        torch_module=torch_module,
-                        expert_compute=expert_compute,
-                    )
+                    sample = coordinated_model_iteration()
                     samples.append({"iteration": iteration, **sample})
                     step = getattr(profiler, "step", None)
                     if callable(step):

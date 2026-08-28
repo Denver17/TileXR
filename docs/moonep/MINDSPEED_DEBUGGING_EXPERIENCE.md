@@ -561,6 +561,49 @@ iterations 20 连续两次通过；相同规模 `group_credit` 5+20 和 `legacy`
 设为 `/bin/false`，因此这些结果证明 replay 数据面和 meta-only 路径，不代表 grouped
 模型采集本身已完成验证。该结论不能外推到 64/128 rank 或其他 CANN、SoC 和拓扑。
 
+## 多节点 model-flow stage barrier 与 grouped fullmesh 队列域
+
+2026-08-27 在 B131、Ascend950PR、双机 16 rank 的 4K/K8/H7168 和
+8K/K16/H3584 model replay 中，短轮次可以通过，但 5 轮 warmup + 20 轮统计会在不同
+rank 形成稳定长尾或停滞。首先确认 replay 的 55-stage 实际走
+`tools/moonep/model_flow.py`；该路径原先没有执行多节点 stage barrier，两个节点可能以约
+13 秒错位进入首次 Planning，并在 device sync 返回 `507035`。修复必须在 model-flow 的
+Planning、Dispatch、Combine 和 ReduceGrad 边界调用与 benchmark 相同的真实 rendezvous，
+不能通过放宽 Planner、修改 Dispatch 输入或增加 timeout 掩盖 stage skew。
+
+补齐 barrier 后，host stage trace 把剩余首失败固定到
+`recompute_backward_1` 的 Dispatch backward 设备完成：所有 rank 都完成 Host launch，
+只有部分 rank 走出 `buffer.synchronize()`，其余 rank 停在其中。Planning、后续 Host
+rendezvous、Combine 和 ReduceGrad 因而都不是该次复现的首个失败边界。保持 compatible
+meta、16 rank、5+20、profiler、barrier、二进制和跨节点 registered QP 不变，只禁止
+grouped Dispatch 为同节点 peer 选择 fullmesh QP 后，`group` 与 `group_credit` 均通过。
+这组单变量 A/B 说明 grouped plan 的跨 stage 复用不能混用生命周期不同的 SQ/CQ 队列域：
+fullmesh QP 保留的历史状态不受当前 operator-generation registry 契约约束，会让重复
+Dispatch 在历史 CQ/SQ frontier 上失去一致性。
+
+最小修复只把 grouped Dispatch 固定到 registry-owned QP；不删除通用 fullmesh runtime，
+也不改变 MoonEP API、route、credit 协议或 stage barrier。交付前应移除 Planner phase-stop、
+stage trace 转发等任务期诊断，使用 Dispatch DFX、Dispatch profiling 和 Combine V2
+profiling 均关闭的 Release 构建，同时继续保留 framework NPU profiler 和真实 stage
+barrier。最终验证覆盖 B131 的单机 8 rank 和双机 16 rank、`group`/`group_credit`、
+4K/8K 两组 shape；16 rank 的 model、空-cache meta 和 runtime cache 路径均有实机证据，
+但本结论不能外推到 64/128 rank、其他 CANN/SoC/拓扑，也不能证明 fullmesh runtime 在
+获得等价 generation/reset 契约后仍不可用于其他算子。
+
+最终交付证据必须晚于最后一次产品代码修改。调试期已经通过的 shape 或 replay source
+只能作为回归参考；清理 DFX、修改默认 mode、launcher、Host 或 Kernel 后，必须冻结完整
+源码 diff/hash，重新构建和部署，并让全部交付矩阵从该同一冻结版本重新运行。每条结果应
+同时保存源码 diff hash、构建选项、实际加载 DSO hash 和运行时间；任一后续产品代码修改
+都会使这组闭环证据失效。MoonEP Dispatch 的未设置或空 peer mode 必须解析为
+`group_credit`，显式 `group` 仅用于要求覆盖该模式的测试，显式 `legacy` 必须在 Kernel
+launch 前拒绝；不能只在外层脚本禁止 legacy 而让 Host 保留隐藏默认或 fallback。
+
+Python 上下文必须在任何 NPU workspace 或 registered mailbox 分配前镜像原生 Planner 的
+参数上限。原生 Planner 当前只接受 `expert_count <= 4096`；如果 Python 只校验正数和 rank
+整除，非法但可整除的超大值会先放大 mailbox 分配，产生 OOM，而不是稳定返回参数错误。
+边界回归应同时覆盖 `4096` 可接受和大于 `4096` 且仍可整除的输入被提前拒绝；该 Host
+校验只证明失败顺序和 API 契约，不替代合法 shape 的实机数据面闭环。
+
 ## 当前实现状态说明
 
 本文记录的是已验证经验，不代表所有修复都已经进入 `main`。截至 2026-08-12：

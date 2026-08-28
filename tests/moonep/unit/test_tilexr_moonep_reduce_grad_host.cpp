@@ -378,6 +378,49 @@ void TestRanksBelowFourAreUnsupported()
         "four ranks must reach UDMA capability validation");
 }
 
+void TestCrossNodeBarrierProfileBinding()
+{
+    Reset(16);
+    g_commArgs.localRankSize = 8;
+    g_qpCount = 48;
+    g_commArgs.extraFlag |= TileXR::ExtraFlag::UDMA_SHARED_QP;
+    TileXRMoonEpPlanV1 plan = Plan(16);
+    TileXRMoonEpTensorV1 gate = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x400000)), 34, 1024);
+    TileXRMoonEpTensorV1 up = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x500000)), 34, 1024);
+    TileXRMoonEpTensorV1 down = Gradient(
+        reinterpret_cast<void *>(UINTPTR_C(0x600000)), 34, 1024);
+    const auto info = Query(&plan, &gate, &up, &down, TileXR::TILEXR_SUCCESS);
+    Check(info.qpCount == 3,
+        "48-QP cross-node query must retain one lane per projection");
+    auto prepare = PrepareArgs(&plan, &gate, &up, &down, info);
+    TileXRMoonEpReduceGradPreparedV2 prepared = nullptr;
+    CheckStatus("cross-node prepare",
+        TileXRMoonEpReduceGradPrepareV2(&prepare, &prepared),
+        TileXR::TILEXR_SUCCESS);
+    Check(prepared != nullptr && g_profileDesc.qpBindingCount == 48 &&
+        g_profileDesc.qpBindings[47].localRegion == 0 &&
+        g_profileDesc.qpBindings[47].remoteRegion == 0,
+        "cross-node barrier QP must bind staging to staging");
+    Check(g_profileDesc.qpBindings[0].remoteRegion == 1 &&
+        g_profileDesc.qpBindings[1].remoteRegion == 2 &&
+        g_profileDesc.qpBindings[16].remoteRegion == 3,
+        "cross-node projection QPs must retain the 0/1/16 mapping");
+    CheckStatus("cross-node destroy",
+        TileXRMoonEpReduceGradDestroyPreparedV2(prepared),
+        TileXR::TILEXR_SUCCESS);
+
+    Reset(16);
+    g_commArgs.localRankSize = 8;
+    g_qpCount = 3;
+    plan = Plan(16);
+    gate = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x400000)), 34, 1024);
+    up = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x500000)), 34, 1024);
+    down = Gradient(reinterpret_cast<void *>(UINTPTR_C(0x600000)), 34, 1024);
+    (void)Query(&plan, &gate, &up, &down, TileXR::TILEXR_ERROR_NOT_SUPPORT);
+}
+
 void TestSlotsMayExceedExpertsPerRank()
 {
     Reset();
@@ -501,6 +544,7 @@ int main()
     TestPreparedLifecycleAndHotLaunch();
     TestPreparationValidationAndCapability();
     TestRanksBelowFourAreUnsupported();
+    TestCrossNodeBarrierProfileBinding();
     TestSlotsMayExceedExpertsPerRank();
     return g_failures == 0 ? 0 : 1;
 }

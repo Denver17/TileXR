@@ -391,12 +391,11 @@ if [[ "${backend}" == tilexr ]]; then
     export TILEXR_UDMA_QP_ROUTE_SPEC=port_count:6,port_count:2
     export TILEXR_ENABLE_CREDIT_IPC=${TILEXR_ENABLE_CREDIT_IPC:-1}
     export TILEXR_UDMA_ATTACH_EXISTING_RA=1
-    dispatch_route_count=$((sequence_length * router_topk))
     if [[ -n "${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}" ]]; then
         case "${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}" in
             legacy)
-                export TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy
-                unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+                echo "TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy is prohibited" >&2
+                exit 2
                 ;;
             group|group_credit)
                 export TILEXR_MOONEP_DISPATCH_PEER_MODE=${pass_TILEXR_MOONEP_DISPATCH_PEER_MODE}
@@ -407,12 +406,9 @@ if [[ "${backend}" == tilexr ]]; then
                 exit 2
                 ;;
         esac
-    elif (( dispatch_route_count <= 32768 )); then
-        export TILEXR_MOONEP_DISPATCH_PEER_MODE=group
-        export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
     else
-        export TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy
-        unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE=group_credit
+        export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
     fi
     export TILEXR_MOONEP_COMBINE_VERSION=2
     export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES=${TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES:-$((768 * 1024 * 1024))}

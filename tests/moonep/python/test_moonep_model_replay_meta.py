@@ -431,6 +431,39 @@ def test_dispatch_peer_mode_does_not_block_route_materialization(
     }
 
 
+def test_code_build_provenance_does_not_block_route_materialization(
+    tmp_path: Path,
+) -> None:
+    captured = _identity()
+    write_meta_bundle(
+        tmp_path,
+        _shape(),
+        _route_replay(),
+        _performance(),
+        captured,
+        replace=False,
+    )
+    current = copy.deepcopy(captured)
+    current["provenance"]["adapter_sha256"] = "different-adapter"
+    current["provenance"]["runner_sha256"] = "different-runner"
+    current["provenance"]["install_artifacts"] = {
+        "libtile-comm.so": "different-comm",
+        "libtilexr-moonep.so": "different-moonep",
+    }
+    current["provenance"]["model_stack"] = {
+        "mindspeed": "different-mindspeed",
+        "mindspeed_llm": "different-mindspeed-llm",
+    }
+
+    bundle = load_meta_bundle(tmp_path, _shape(), current)
+    assert bundle is not None
+    replay, performance = materialize_meta_bundle(bundle, current)
+
+    assert len(replay["ranks"]) == _shape().world_size
+    assert performance["comparison"]["compatible"] is False
+    assert performance["comparison"]["classification"] == "checked-in reference"
+
+
 def test_route_materialization_still_rejects_combine_version_changes(
     tmp_path: Path,
 ) -> None:
@@ -533,6 +566,7 @@ def test_failed_directory_swap_restores_previous_bundle(
     ).hexdigest()
     real_replace = model_replay_meta.os.replace
     destination = first.path
+    monkeypatch.setattr(model_replay_meta, "_exchange_directories", lambda *_: False)
 
     def fail_staging_publish(source, target) -> None:
         if Path(source).name.startswith(f".{destination.name}.staging-"):

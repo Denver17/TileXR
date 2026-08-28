@@ -128,7 +128,12 @@ int main()
     Excludes("planner host", plannerHost,
         "commArgs.localRankSize != commArgs.rankSize");
     Contains("planner kernel", plannerKernel, "TileXR::IPC_DATA_OFFSET");
-    Excludes("planner kernel", Lower(plannerKernel), "udma");
+    Contains("planner Host registered mailbox", plannerHost,
+        "RegisteredMailboxReady");
+    Contains("planner kernel registered mailbox", plannerKernel,
+        "TileXR::UDMAPutNbiOnQp");
+    Contains("planner kernel registered mailbox", plannerKernel,
+        "TileXR::UDMAQuietStatusOnQp");
     Contains("dispatch common", dispatchCommon, "moonep_peer_window.h");
     Excludes("common stage Host", stageHost,
         "context->hostArgs->localRankSize != context->hostArgs->rankSize");
@@ -197,6 +202,10 @@ int main()
         "state.finalHead = state.head");
     Contains("URMA Dispatch SQ drain frontier", dispatchUrmaKernel,
         "DispatchDrainSqToExpected(state, state.finalHead");
+    Contains("URMA Dispatch grouped QP isolation", dispatchUrmaKernel,
+        "constexpr bool kDispatchGroupedAllowFullmesh = false;");
+    Contains("URMA Dispatch grouped QP isolation", dispatchUrmaKernel,
+        "hasWeight, kDispatchGroupedAllowFullmesh, initContext");
     Excludes("URMA Dispatch completion accounting", dispatchUrmaKernel,
         "state.wqeCount += batchCount");
     Excludes("URMA Dispatch SQ drain frontier", dispatchUrmaKernel,
@@ -392,12 +401,13 @@ int main()
     Contains("registration", registration, "kReduceGradKernelSignature");
     Excludes("registration", registration, "kReduceGradStatusKernelSignature");
 
-    const std::string ipcStages = Lower(plannerHost + plannerKernel + dispatchCommon +
-        dispatchHost + dispatchLaunch + dispatchKernel + combineCommon + combineHost +
+    const std::string ipcStages = Lower(dispatchCommon + dispatchHost +
+        dispatchLaunch + dispatchKernel + combineCommon + combineHost +
         stageHost + kernelLaunch);
     Excludes("IPC-only MoonEP stages", ipcStages, "udma");
-    const std::string active = Lower(ipcStages + prefetchHost + prefetchLaunch +
-        prefetchKernel + reduceHost + reduceLaunch + reduceKernel);
+    const std::string active = Lower(plannerHost + plannerKernel + ipcStages +
+        prefetchHost + prefetchLaunch + prefetchKernel + reduceHost +
+        reduceLaunch + reduceKernel);
     Excludes("active MoonEP sources", active, "3rdparty/moonep");
     Excludes("active MoonEP sources", active, "reference/");
     Excludes("active MoonEP sources", active, "src/ep");

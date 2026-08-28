@@ -215,6 +215,9 @@ bool PreparedRegistryMatches(const ReduceGradPreparedContext &context)
         qpRegions[context.layout.lanePhysicalQps[lane]] =
             context.layout.qpProjection[lane] + 1U;
     }
+    if (context.layout.barrierPhysicalQp != kReduceGradInvalidPhysicalQp) {
+        qpRegions[context.layout.barrierPhysicalQp] = kReduceGradStagingRegion;
+    }
     for (uint32_t qp = 0; qp < context.layout.transportQpCount; ++qp) {
         if (registry->qpBindings[qp].localRegion != kReduceGradStagingRegion ||
             registry->qpBindings[qp].remoteRegion != qpRegions[qp]) {
@@ -304,7 +307,8 @@ int TileXRMoonEpPrepareReduceGradLayout(TileXRCommPtr comm,
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
     return TileXRMoonEpBuildReduceGradLayout(commArgs->rank, commArgs->rankSize,
-        plan->e, plan->b, rowElements, transportQpCount, requestedChunkBytes, layout);
+        commArgs->localRankSize, plan->e, plan->b, rowElements,
+        transportQpCount, requestedChunkBytes, layout);
 }
 
 int TileXRMoonEpCreateReduceGradPreparedContext(
@@ -402,6 +406,10 @@ int TileXRMoonEpCreateReduceGradPreparedContext(
     for (uint32_t lane = 0; lane < layout.laneCount; ++lane) {
         desc.qpBindings[layout.lanePhysicalQps[lane]].remoteRegion =
             layout.qpProjection[lane] + 1U;
+    }
+    if (layout.barrierPhysicalQp != kReduceGradInvalidPhysicalQp) {
+        desc.qpBindings[layout.barrierPhysicalQp].remoteRegion =
+            kReduceGradStagingRegion;
     }
     ret = TileXRUDMAProfileRegister(params.comm, &desc, &next->profileHandle);
     if (ret == TileXR::TILEXR_SUCCESS) {

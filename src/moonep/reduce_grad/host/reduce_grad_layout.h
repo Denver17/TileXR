@@ -8,6 +8,12 @@
 namespace TileXRMoonEp {
 
 int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
+    int64_t localRankSize, int64_t expertCount, int64_t prefetchSlots,
+    const uint64_t rowElements[kReduceGradProjectionCount],
+    uint32_t transportQpCount, uint64_t requestedChunkBytes,
+    ReduceGradLayout *out);
+
+int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     int64_t expertCount, int64_t prefetchSlots,
     const uint64_t rowElements[kReduceGradProjectionCount],
     uint32_t transportQpCount, uint64_t requestedChunkBytes,

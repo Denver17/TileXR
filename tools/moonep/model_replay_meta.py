@@ -335,6 +335,15 @@ def _route_compatibility_view(
     contract: Mapping[str, object],
 ) -> dict[str, object]:
     compatible = copy.deepcopy(dict(contract))
+    # Route materialization is governed by the versioned data contract. Exact
+    # code and binary identities remain part of performance compatibility.
+    for name in (
+        "adapter_sha256",
+        "runner_sha256",
+        "install_artifacts",
+        "model_stack",
+    ):
+        compatible.pop(name, None)
     kernel_version = compatible.get("kernel_version")
     if isinstance(kernel_version, Mapping):
         compatible["kernel_version"] = {

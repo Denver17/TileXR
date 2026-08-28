@@ -26,6 +26,9 @@ constexpr uint32_t kDiagnosticUbBytes = 4U * 1024U;
 constexpr uint32_t kRouteTileElements = 1024U;
 constexpr uint32_t kRouteTileBytes = kRouteTileElements * sizeof(int32_t);
 constexpr uint32_t kRouteSelectChunkElements = 8192U;
+// Grouped launches reuse plans across stages, so keep their SQ/CQ state in the
+// registry-owned QP domain that is initialized for each operator generation.
+constexpr bool kDispatchGroupedAllowFullmesh = false;
 constexpr uint32_t kVectorCompareMinElements = 256U / sizeof(int32_t);
 constexpr uint32_t kOutputCopyBufferNum = 2U;
 constexpr uint64_t kDeferredReclaimWqes =
@@ -785,7 +788,7 @@ __aicore__ inline bool InitDispatchCreditQpState(
     state.physicalQpIdx = physicalQpIdx;
     state.head = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->headAddr), 0);
-    state.wqeCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
+    state.completionCount = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->wqeCntAddr), 0);
     state.tail = ld_dev(reinterpret_cast<__gm__ uint32_t *>(
         qpCtxEntry->tailAddr), 0);
@@ -797,7 +800,7 @@ __aicore__ inline bool InitDispatchCreditQpState(
         UINT64_MAX, state.head, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
     state.stagedDoorbellHead = state.head;
     state.stagedWqeCount = 0U;
-    state.finalWqeCount = state.wqeCount;
+    state.finalHead = state.head;
     state.doorbellPending = 0U;
     state.finalStaged = 0U;
     state.doorbellRung = 0U;
@@ -811,9 +814,9 @@ __aicore__ inline void RecordDispatchCreditQpPost(
 {
     state.targetRank = targetRank;
     ++state.head;
-    ++state.wqeCount;
+    ++state.completionCount;
     ++state.outstanding;
-    state.finalWqeCount = state.wqeCount;
+    state.finalHead = state.head;
     state.batchLimit = TileXRMoonEp::DispatchWqeBatchCount(
         UINT64_MAX, state.head, TileXR::TILEXR_UDMA_SQ_BB_COUNT);
 }
@@ -2694,7 +2697,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     remoteHiddenScratchOffset, hiddenScratchSlotBytes,
                     remoteWeightScratchOffset, weightScratchSlotBytes,
                     remoteFlagBase, static_cast<uint32_t>(blockIdx),
-                    hasWeight, true, initContext));
+                    hasWeight, kDispatchGroupedAllowFullmesh, initContext));
             DispatchPreparedPeer previousPeer {};
             bool previousPeerValid = false;
 

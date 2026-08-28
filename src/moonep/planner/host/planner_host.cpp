@@ -3,6 +3,7 @@
 #include "comm_args.h"
 #include "planner_common.h"
 #include "tilexr_types.h"
+#include "tilexr_udma_reg.h"
 
 namespace TileXRMoonEpV3 {
 namespace {
@@ -26,6 +27,30 @@ bool PeerWindowsReady(const TileXR::CommArgs &commArgs)
 {
     for (int32_t rank = 0; rank < commArgs.rankSize; ++rank) {
         if (commArgs.peerMems[rank] == nullptr) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool RegisteredMailboxReady(TileXRCommPtr comm, const TileXR::CommArgs &commArgs,
+    const PlannerLayout &layout)
+{
+    if (commArgs.rankSize == 1) {
+        return true;
+    }
+    if ((commArgs.extraFlag & TileXR::ExtraFlag::UDMA) == 0U ||
+        commArgs.udmaInfoPtr == nullptr || commArgs.udmaRegistryPtr == nullptr) {
+        return false;
+    }
+    const TileXR::TileXRUDMARegistry *registry = nullptr;
+    if (TileXRGetUDMARegistryHost(comm, &registry) != TileXR::TILEXR_SUCCESS ||
+        !TileXR::UDMARegistryValid(registry, commArgs.rankSize)) {
+        return false;
+    }
+    for (int32_t rank = 0; rank < commArgs.rankSize; ++rank) {
+        if (registry->regions[rank].base == nullptr ||
+            registry->regions[rank].bytes < layout.peerWorkspaceBytes) {
             return false;
         }
     }
@@ -79,6 +104,9 @@ int TileXRMoonEpValidateParams(const PlannerParams &params, const TileXR::CommAr
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (!PeerWindowsReady(commArgs)) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    if (!RegisteredMailboxReady(params.comm, commArgs, layout)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
     if ((reinterpret_cast<uintptr_t>(params.workspace) % kPlannerWorkspaceAlignment) != 0 ||

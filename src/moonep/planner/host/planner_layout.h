@@ -29,6 +29,8 @@ struct PlannerLayout {
     uint64_t peerDstOffset = 0;
     uint64_t workspaceBytes = 0;
     uint64_t peerPublicationBytes = 0;
+    uint64_t peerReadyOffset = 0;
+    uint64_t peerWorkspaceBytes = 0;
 };
 
 uint64_t TileXRMoonEpAlignUp(uint64_t value, uint64_t alignment);

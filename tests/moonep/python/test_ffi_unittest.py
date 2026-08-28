@@ -101,7 +101,7 @@ class FakeCDLLLoader:
             if not address.value:
                 raise AssertionError("invalid UDMA registration")
             size = int(byte_count.value if hasattr(byte_count, "value") else byte_count)
-            if size != 2 * 1024 * 1024:
+            if size not in (2 * 1024 * 1024, 4 * 1024 * 1024):
                 raise AssertionError(f"unexpected UDMA registration size {size}")
             handle = self.next_udma_handle
             self.next_udma_handle += 1
@@ -609,6 +609,30 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(records[0]["shapes"]["routeWeightsSk"], (4, 2))
         runtime.close()
 
+    def test_context_enforces_native_planner_expert_count_limit(self):
+        common = dict(
+            runtime=SimpleNamespace(rank=0, world_size=2),
+            global_rank=0,
+            global_world_size=2,
+            node_rank=0,
+            node_count=1,
+            local_rank=0,
+            local_world_size=2,
+            planner_group_rank=0,
+            planner_group_size=2,
+            lane_group_rank=0,
+            lane_group_size=1,
+            device_index=0,
+            tokens_per_rank=4,
+            hidden_size=8,
+            topk=2,
+            dtype=FakeTorch().bfloat16,
+        )
+        context = TileXRMoonEPContext(expert_count=4096, **common)
+        self.assertEqual(context.expert_count, 4096)
+        with self.assertRaisesRegex(ValueError, r"expert_count must be in \[1, 4096\]"):
+            TileXRMoonEPContext(expert_count=4098, **common)
+
     def test_fake_cdll_receives_v1_descriptors_and_combine_v2_pointers(self):
         loader = FakeCDLLLoader()
         runtime = TileXRMoonEPRuntime(
@@ -714,11 +738,11 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(
             loader.lifecycle_calls,
             [
-                ("register", 2 * 1024 * 1024, 7),
+                ("register", 4 * 1024 * 1024, 7),
                 ("register", 2 * 1024 * 1024, 8),
-                ("register", 2 * 1024 * 1024, 9),
+                ("register", 4 * 1024 * 1024, 9),
                 ("register", 2 * 1024 * 1024, 10),
-                ("register", 2 * 1024 * 1024, 11),
+                ("register", 4 * 1024 * 1024, 11),
                 ("unregister", 11),
                 ("destroy", 0x2345),
                 ("destroy", 0x1234),
@@ -802,7 +826,13 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(loader.reduce_grad_destroy_records, [0x5678])
         self.assertEqual(
             [byte_count for _, byte_count in loader.register_calls],
-            [2 * 1024 * 1024] * 5,
+            [
+                4 * 1024 * 1024,
+                2 * 1024 * 1024,
+                4 * 1024 * 1024,
+                2 * 1024 * 1024,
+                4 * 1024 * 1024,
+            ],
         )
         self.assertEqual(loader.register_calls[0], loader.register_calls[2])
         self.assertEqual(loader.register_calls[1], loader.register_calls[3])

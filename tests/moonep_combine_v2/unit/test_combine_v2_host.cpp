@@ -93,6 +93,10 @@ void ConfigureRankSize(int rankSize, int rank = 0)
     commArgs.rankSize = rankSize;
     commArgs.localRankSize = rankSize <= 8 ? rankSize : 8;
     commArgs.localRank = rank % commArgs.localRankSize;
+    weightCommArgs.rank = commArgs.rank;
+    weightCommArgs.rankSize = commArgs.rankSize;
+    weightCommArgs.localRankSize = commArgs.localRankSize;
+    weightCommArgs.localRank = commArgs.localRank;
     fullmeshView = TileXR::TileXRUDMAFullmeshHostView {};
     fullmeshView.slotCount = TileXR::TILEXR_UDMA_FULLMESH_SLOT_COUNT;
     fullmeshView.connectedCount =
@@ -546,6 +550,7 @@ void TestStageUsesDedicatedHiddenOutput()
 void TestFusedStageUsesOneLaunch()
 {
     Reset();
+    ConfigureRankSize(8);
     const TileXRMoonEp::CombineV2Params params = ValidParams();
     TileXRMoonEp::CombineV2Layout hiddenLayout {};
     CheckStatus(TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
@@ -577,6 +582,40 @@ void TestFusedStageUsesOneLaunch()
         launchedContext.weightOutputElements ==
             static_cast<uint64_t>(params.bs * params.topK),
         "fused V2 stage weight launch context mismatch");
+}
+
+void TestFusedStageFallsBackAcrossNodes()
+{
+    Reset();
+    ConfigureRankSize(16);
+    const TileXRMoonEp::CombineV2Params params = ValidParams();
+    TileXRMoonEp::CombineV2Layout hiddenLayout {};
+    CheckStatus(TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+        params.bs, params.h, params.topK, params.nvS, params.dtype,
+        &hiddenLayout), TILEXR_MOONEP_SUCCESS,
+        "multi-node fallback hidden layout");
+    const void *hiddenNvsh = reinterpret_cast<const void *>(
+        uintptr_t {0x700000000ULL});
+    void *hiddenSh = reinterpret_cast<void *>(uintptr_t {0x710000000ULL});
+    const float *weightsNvs = reinterpret_cast<const float *>(
+        uintptr_t {0x720000000ULL});
+    float *weightsSk = reinterpret_cast<float *>(uintptr_t {0x730000000ULL});
+
+    CheckStatus(TileXRMoonEpCombineStageV2Fused(
+        params.registeredWorkspace, hiddenLayout.totalBytes,
+        params.dstLocal, params.comm, nullptr, params.bs, params.h,
+        params.topK, params.nvS, params.aivCoreNum, hiddenNvsh, hiddenSh,
+        weightsNvs, weightsSk, params.dtype, params.stream),
+        TILEXR_MOONEP_SUCCESS, "multi-node fused API fallback");
+    Check(memcpyCount == 4U,
+        "multi-node fused API must use the two-pass copy sequence");
+    Check(launchCount == 2U && launchedReduceHidden[0] &&
+        !launchedReduceHidden[1],
+        "multi-node fused API must use hidden and weight launches");
+    Check(launchedParams.weightMemoryComm == nullptr &&
+        launchedParams.routeWeightsNvs == nullptr &&
+        launchedParams.routeWeightsSk == nullptr,
+        "multi-node fallback leaked fused weight arguments");
 }
 
 extern "C" aclError aclrtMemcpyAsync(
@@ -615,6 +654,7 @@ int main()
     TestValidation();
     TestStageUsesDedicatedHiddenOutput();
     TestFusedStageUsesOneLaunch();
+    TestFusedStageFallsBackAcrossNodes();
     TestWeightMemoryValidation();
     TestRankAndCoreGeneralization();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

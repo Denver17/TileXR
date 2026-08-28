@@ -124,11 +124,14 @@ void TestLaunch()
     }
     layout.qpCount = 8;
     layout.laneCount = 8;
+    layout.barrierPhysicalQp = 47;
     layout.laneStateBytes = 32;
     layout.stagingOffset = 32;
     layout.bankStrideBytes = 64;
     layout.laneStrideBytes = 128;
     layout.chunkBytes = 16;
+    layout.barrierOffset = 700;
+    layout.barrierBytes = 200;
     layout.workspaceBytes = 900;
 
     g_binaryRegisterReturn = -10;
@@ -192,11 +195,12 @@ void TestLaunch()
     Check(g_args.projectionQpBase[1] == 3 &&
         g_args.projectionQpCounts[2] == 2 && g_args.qpCount == 8 &&
         g_args.laneCount == 8 && g_args.transportQpCount == 48 &&
-        g_args.lanePhysicalQps[7] == 16,
+        g_args.lanePhysicalQps[7] == 16 && g_args.barrierPhysicalQp == 47,
         "QP allocation args mismatch");
     Check(g_args.laneStateBytes == 32 && g_args.stagingOffset == 32 &&
         g_args.bankStrideBytes == 64 && g_args.laneStrideBytes == 128 &&
-        g_args.chunkBytes == 16 && g_args.workspaceBytes == 900 &&
+        g_args.chunkBytes == 16 && g_args.barrierOffset == 700 &&
+        g_args.barrierBytes == 200 && g_args.workspaceBytes == 900 &&
         g_args.waitIterations == 123 && g_args.magic == g_magic,
         "workspace/timing args mismatch");
 

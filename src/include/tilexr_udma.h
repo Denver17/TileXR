@@ -848,6 +848,48 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAProfileGetNbiOnQpD
         nullptr, TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
 }
 
+__attribute__((always_inline)) inline __aicore__ bool UDMAProfilePutOperationValid(
+    const __gm__ CommArgs* args, const __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    int targetRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount)
+{
+    if (!TILEXR_UDMA_ARCH_SUPPORTED ||
+        !UDMAProfileRegistryValid(args, udmaInfo, registry) ||
+        targetRank < 0 || targetRank >= args->rankSize || targetRank == args->rank ||
+        qpIdx >= registry->qpCount || byteCount == 0U || byteCount > 0xFFFFFFFFULL) {
+        return false;
+    }
+    const __gm__ TileXRUDMAProfileQpBinding* binding = &registry->qpBindings[qpIdx];
+    if (binding->localRegion != localRegion || binding->remoteRegion != remoteRegion) {
+        return false;
+    }
+    return UDMAProfileRegisteredRangeValid(registry, args->rank, localRegion,
+               localByteOffset, byteCount) &&
+        UDMAProfileRegisteredRangeValid(registry, targetRank, remoteRegion,
+            remoteByteOffset, byteCount);
+}
+
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAProfilePutNbiOnQpDeferred(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount)
+{
+    if (!UDMAProfilePutOperationValid(args, udmaInfo, registry, targetRank, qpIdx,
+            localRegion, localByteOffset, remoteRegion, remoteByteOffset, byteCount)) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ uint8_t* localAddr = UDMAProfileRegisteredAddr(
+        registry, args->rank, localRegion, localByteOffset);
+    __gm__ uint8_t* remoteAddr = UDMAProfileRegisteredAddr(
+        registry, targetRank, remoteRegion, remoteByteOffset);
+    return UDMAPostSend<UDMAOpcode::WRITE, false>(udmaInfo, wqeScratch,
+        remoteAddr, localAddr, static_cast<uint32_t>(targetRank), qpIdx, byteCount,
+        nullptr, TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
+}
+
 __aicore__ inline uint32_t UDMAProfileCompletionFrontier(
     const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
     const __gm__ TileXRUDMAProfileRegistry* registry, int sourceRank, uint32_t qpIdx)

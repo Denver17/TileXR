@@ -453,6 +453,51 @@ void TestDeferredProfileGetAndCompletionFrontier()
         "second QP selects its bound remote region");
 }
 
+void TestDeferredProfilePutUsesBoundRegions()
+{
+    Fixture fixture;
+    auto scratch = fixture.Scratch();
+    const size_t remoteBase = TILEXR_UDMA_PROFILE_MAX_REGIONS;
+    fixture.profileRegistry.qpBindings[0] = {0U, 0U};
+    fixture.profileRegistry.regions[remoteBase].base =
+        fixture.remoteRegionThree.data();
+    fixture.profileRegistry.regions[remoteBase].bytes =
+        fixture.remoteRegionThree.size();
+    fixture.sqDoorbell[0] = 91U;
+
+    Check(UDMAProfilePutNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 1U, 8U, 0U, 64U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile PUT rejects wrong local region binding");
+    Check(UDMAProfilePutNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 1U, 64U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile PUT rejects wrong remote region binding");
+    Check(UDMAProfilePutNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 240U, 0U, 64U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile PUT rejects local source overflow");
+    Check(UDMAProfilePutNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 0U, 240U, 32U) ==
+        TILEXR_UDMA_STATUS_INVALID, "profile PUT rejects remote destination overflow");
+
+    Check(UDMAProfilePutNbiOnQpDeferred(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, scratch, 1, 0U, 0U, 8U, 0U, 64U, 32U) ==
+        TILEXR_UDMA_STATUS_SUCCESS, "deferred profile PUT succeeds");
+    Check(fixture.sqHead[0] == 1U && fixture.wqeCount[0] == 1U &&
+        fixture.sqDoorbell[0] == 91U,
+        "deferred profile PUT advances the queue without ringing the doorbell");
+    const UDMASqeCtx* sqe = fixture.Sqe(0U, 0U);
+    Check(sqe->opcode == static_cast<uint32_t>(UDMAOpcode::WRITE),
+        "deferred profile PUT emits WRITE");
+    const uint64_t remoteAddr = static_cast<uint64_t>(sqe->rmtAddrLOrTokenId) |
+        (static_cast<uint64_t>(sqe->rmtAddrHOrTokenValue) << 32U);
+    Check(remoteAddr == AddressOf(fixture.remoteRegionThree.data() + 64U),
+        "profile PUT uses the bound remote destination offset");
+    const UDMASgeCtx* sge = reinterpret_cast<const UDMASgeCtx*>(
+        fixture.sqBuffers[0].data() + sizeof(UDMASqeCtx));
+    Check(sge->va == AddressOf(fixture.localRegion.data() + 8U) &&
+        sge->len == 32U,
+        "profile PUT uses the registered local source offset");
+}
+
 void TestProfileQuietUsesSqFrontierAcrossNonCompletionGap()
 {
     Fixture fixture;
@@ -717,6 +762,7 @@ int main()
     TestImmediatePutReclaimsCompletedFullSq();
     TestGetAndLegacyQp0Wrappers();
     TestDeferredProfileGetAndCompletionFrontier();
+    TestDeferredProfilePutUsesBoundRegions();
     TestProfileQuietUsesSqFrontierAcrossNonCompletionGap();
     TestExplicitCompletionTargetDoesNotRereadPublishedCount();
     TestWriteNotifyWrapsWithinSqRing();

@@ -10,7 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -82,12 +82,20 @@ class ModelRunnerSettings:
     profiler_enabled: bool
     stage_barrier: bool = True
     bash_executable: str = "bash"
+    master_port: int | None = None
+    rank_table_file: Path | None = None
 
     def __post_init__(self) -> None:
         if self.node_count <= 0 or self.timeout_seconds <= 0:
             raise ValueError("node count and model timeout must be positive")
         if self.shape.world_size % self.node_count != 0:
             raise ValueError("world size must be divisible by node count")
+        if self.master_port is not None and not 1 <= self.master_port <= 55534:
+            raise ValueError("model master port must be in [1, 55534]")
+        if self.rank_table_file is not None and not self.rank_table_file.is_file():
+            raise ValueError(
+                f"model rank table file not found: {self.rank_table_file}"
+            )
 
     @property
     def mode(self) -> str:
@@ -98,6 +106,10 @@ class ModelRunnerSettings:
         return self.source_root / "tools" / "moonep" / "mindspeed" / "run_model.sh"
 
     def base_command(self, *, run_tag: str) -> list[str]:
+        master_port = self.master_port
+        if master_port is None:
+            digest = hashlib.sha256(run_tag.encode("utf-8")).digest()
+            master_port = 15000 + int.from_bytes(digest[:4], "big") % 10000
         command = [
             self.bash_executable,
             str(self.runner_path),
@@ -115,9 +127,13 @@ class ModelRunnerSettings:
             str(self.config_path),
             "--run-tag",
             run_tag,
+            "--master-port",
+            str(master_port),
             "--timeout",
             str(self.timeout_seconds),
         ]
+        if self.rank_table_file is not None:
+            command.extend(("--rank-table-file", str(self.rank_table_file)))
         if self.stage_barrier:
             command.append("--stage-barrier")
         if self.node_count > 1:
@@ -156,30 +172,16 @@ def prepare_replay_cache(
         raise ValueError("cache identity shape does not match replay shape")
     if source not in ("cache", "meta", "model"):
         raise ValueError(f"invalid model replay source: {source}")
-    previous = find_cache(cache_root, identity)
-    if previous is not None and source == "cache":
-        return PreparedReplayCache(previous, "hit")
-
-    rejected_meta = False
-    if meta_root is not None and source in ("cache", "meta"):
-        try:
-            bundle = load_meta_bundle(meta_root, shape, identity)
-        except (MetaValidationError, CacheValidationError):
-            bundle = None
-            rejected_meta = True
-        if bundle is not None:
-            entry = materialize_meta_cache(
-                bundle,
-                cache_root,
-                identity,
-                capture_id=f"{capture_id}-meta",
-            )
-            return PreparedReplayCache(
-                entry,
-                "meta-hit",
-                meta_path=bundle.path,
-                meta_status="hit",
-            )
+    prepared, previous, rejected_meta = _lookup_existing_replay_cache(
+        cache_root,
+        identity,
+        shape,
+        capture_id=capture_id,
+        source=source,
+        meta_root=meta_root,
+    )
+    if prepared is not None:
+        return prepared
 
     staging = begin_cache_capture(cache_root, identity, capture_id=capture_id)
     raw_capture = staging / "capture" / "routes"
@@ -231,6 +233,46 @@ def prepare_replay_cache(
         meta_path=meta_path,
         meta_status=meta_status,
     )
+
+
+def _lookup_existing_replay_cache(
+    cache_root: str | Path,
+    identity: Mapping[str, object],
+    shape: ReplayShape,
+    *,
+    capture_id: str,
+    source: str,
+    meta_root: str | Path | None,
+) -> tuple[PreparedReplayCache | None, CacheEntry | None, bool]:
+    previous = find_cache(cache_root, identity)
+    if previous is not None and source == "cache":
+        return PreparedReplayCache(previous, "hit"), previous, False
+
+    rejected_meta = False
+    if meta_root is not None and source in ("cache", "meta"):
+        try:
+            bundle = load_meta_bundle(meta_root, shape, identity)
+        except (MetaValidationError, CacheValidationError):
+            bundle = None
+            rejected_meta = True
+        if bundle is not None:
+            entry = materialize_meta_cache(
+                bundle,
+                cache_root,
+                identity,
+                capture_id=f"{capture_id}-meta",
+            )
+            return (
+                PreparedReplayCache(
+                    entry,
+                    "meta-hit",
+                    meta_path=bundle.path,
+                    meta_status="hit",
+                ),
+                previous,
+                False,
+            )
+    return None, previous, rejected_meta
 
 
 def _sha256_file(path: Path) -> str:
@@ -396,17 +438,37 @@ def ensure_model_runner_config(
         ),
         require_file=True,
     )
-    conda_sh = _required_existing_path(
-        "Conda shell script",
-        (
-            env.get("MODEL_RUNNER_CONDA_SH", ""),
-            env.get("TILEXR_MODEL_RUNNER_CONDA_SH", ""),
-            *_DEFAULT_CONDA_SH_CANDIDATES,
-            Path.home() / "miniconda3" / "etc" / "profile.d" / "conda.sh",
-            Path.home() / "anaconda3" / "etc" / "profile.d" / "conda.sh",
-        ),
-        require_file=True,
+    conda_environment = (
+        env.get("MODEL_RUNNER_CONDA_ENV")
+        or env.get("TILEXR_MOONEP_CONDA_ENV")
+        or "ai_moe_test"
     )
+    conda_prefix = Path(conda_environment).expanduser()
+    if conda_prefix.is_absolute():
+        if not (conda_prefix / "bin" / "python").is_file():
+            raise FileNotFoundError(
+                "cannot auto-generate model runner config: Conda environment "
+                f"Python was not found: {conda_prefix / 'bin' / 'python'}"
+            )
+        conda_sh: Path | None = _existing_path(
+            (
+                env.get("MODEL_RUNNER_CONDA_SH", ""),
+                env.get("TILEXR_MODEL_RUNNER_CONDA_SH", ""),
+            ),
+            require_file=True,
+        )
+    else:
+        conda_sh = _required_existing_path(
+            "Conda shell script",
+            (
+                env.get("MODEL_RUNNER_CONDA_SH", ""),
+                env.get("TILEXR_MODEL_RUNNER_CONDA_SH", ""),
+                *_DEFAULT_CONDA_SH_CANDIDATES,
+                Path.home() / "miniconda3" / "etc" / "profile.d" / "conda.sh",
+                Path.home() / "anaconda3" / "etc" / "profile.d" / "conda.sh",
+            ),
+            require_file=True,
+        )
     native_env = _required_existing_path(
         "native MoonEP environment script",
         _native_env_candidates(model_root, env),
@@ -427,12 +489,8 @@ def ensure_model_runner_config(
     )
     values = {
         "MODEL_RUNNER_CANN_ENV": str(cann_env),
-        "MODEL_RUNNER_CONDA_ENV": (
-            env.get("MODEL_RUNNER_CONDA_ENV")
-            or env.get("TILEXR_MOONEP_CONDA_ENV")
-            or "ai_moe_test"
-        ),
-        "MODEL_RUNNER_CONDA_SH": str(conda_sh),
+        "MODEL_RUNNER_CONDA_ENV": conda_environment,
+        "MODEL_RUNNER_CONDA_SH": "" if conda_sh is None else str(conda_sh),
         "MODEL_RUNNER_DATA_PATH": data_path,
         "MODEL_RUNNER_DEVICES_PER_NODE": str(shape.world_size),
         "MODEL_RUNNER_INSTALL_PREFIX": str(install_prefix),
@@ -542,9 +600,24 @@ def build_runtime_provenance(
     environment: Mapping[str, str] | None = None,
 ) -> dict[str, object]:
     env = os.environ if environment is None else environment
-    config = _read_runner_config(settings.config_path)
-    model_root = Path(config.get("MODEL_RUNNER_MODEL_ROOT", ""))
-    hosts = config.get("MODEL_RUNNER_NODES", "").replace(",", " ").split()
+    config = (
+        _read_runner_config(settings.config_path)
+        if settings.config_path.is_file()
+        else {}
+    )
+    model_root_value = (
+        config.get("MODEL_RUNNER_MODEL_ROOT")
+        or env.get("MODEL_RUNNER_MODEL_ROOT")
+        or env.get("TILEXR_MODEL_RUNNER_MODEL_ROOT")
+    )
+    model_root = Path(model_root_value).expanduser() if model_root_value else None
+    node_spec = (
+        config.get("MODEL_RUNNER_NODES")
+        or env.get("MODEL_RUNNER_NODES")
+        or env.get("TILEXR_MODEL_RUNNER_NODES")
+        or ""
+    )
+    hosts = node_spec.replace(",", " ").split()
     if len(hosts) < settings.node_count:
         hosts = [f"node-{index}" for index in range(settings.node_count)]
     else:
@@ -563,8 +636,22 @@ def build_runtime_provenance(
         source / "tools" / "moonep" / "mindspeed" / "build_route_replay.py",
         source / "tools" / "moonep" / "mindspeed" / "collect_model_performance.py",
     )
-    cann_env = Path(config.get("MODEL_RUNNER_CANN_ENV", ""))
-    install_prefix = Path(config.get("MODEL_RUNNER_INSTALL_PREFIX", ""))
+    cann_env_value = (
+        config.get("MODEL_RUNNER_CANN_ENV")
+        or env.get("MODEL_RUNNER_CANN_ENV")
+        or env.get("TILEXR_MODEL_RUNNER_CANN_ENV")
+    )
+    if not cann_env_value and env.get("TILEXR_CANN_HOME"):
+        cann_env_value = str(Path(env["TILEXR_CANN_HOME"]) / "set_env.sh")
+    cann_env = Path(cann_env_value).expanduser() if cann_env_value else None
+    install_prefix_value = (
+        config.get("MODEL_RUNNER_INSTALL_PREFIX")
+        or env.get("MODEL_RUNNER_INSTALL_PREFIX")
+        or env.get("TILEXR_INSTALL_PREFIX")
+    )
+    install_prefix = (
+        Path(install_prefix_value).expanduser() if install_prefix_value else None
+    )
     driver_version = Path("/usr/local/Ascend/driver/version.info")
     firmware = env.get("TILEXR_MODEL_REPLAY_FIRMWARE_ID", "").strip()
     soc = (
@@ -574,14 +661,33 @@ def build_runtime_provenance(
     board_identity = _npu_smi_board_identity() if not firmware or not soc else {}
     firmware = firmware or board_identity.get("firmware", "") or "unavailable"
     soc = soc or board_identity.get("soc", "") or "unavailable"
+    topology: dict[str, object] = {
+        "nodes": hosts,
+        "node_count": settings.node_count,
+        "devices_per_node": devices_per_node,
+    }
+    if settings.rank_table_file is not None:
+        topology["rank_table_sha256"] = _sha256_file(settings.rank_table_file)
     return {
         "tilexr_git_sha": _tilexr_revision(source, env),
         "adapter_sha256": _sha256_file(adapter),
         "runner_sha256": _sha256_files(runner_files),
-        "install_artifacts": _install_artifacts_identity(install_prefix),
+        "install_artifacts": (
+            _install_artifacts_identity(install_prefix)
+            if install_prefix is not None
+            else _install_artifacts_identity(source / ".missing-install")
+        ),
         "model_stack": {
-            "mindspeed": _git_revision(model_root / "MindSpeed"),
-            "mindspeed_llm": _git_revision(model_root / "MindSpeed-LLM"),
+            "mindspeed": (
+                _git_revision(model_root / "MindSpeed")
+                if model_root is not None
+                else "unavailable"
+            ),
+            "mindspeed_llm": (
+                _git_revision(model_root / "MindSpeed-LLM")
+                if model_root is not None
+                else "unavailable"
+            ),
         },
         "backend": "tilexr",
         "execution_controls": {
@@ -592,11 +698,7 @@ def build_runtime_provenance(
             "combine": env.get("TILEXR_MOONEP_COMBINE_VERSION", "2"),
             "dispatch_peer_mode": (
                 env.get("TILEXR_MOONEP_DISPATCH_PEER_MODE")
-                or (
-                    "group"
-                    if settings.shape.tokens_per_rank * settings.shape.topk <= 32768
-                    else "legacy"
-                )
+                or "group_credit"
             ),
             "performance_mode": (
                 "framework_profiler"
@@ -604,17 +706,16 @@ def build_runtime_provenance(
                 else "lightweight_npu_event"
             ),
         },
-        "cann": env.get("TILEXR_MODEL_REPLAY_CANN_ID", _file_identity(cann_env)),
+        "cann": env.get(
+            "TILEXR_MODEL_REPLAY_CANN_ID",
+            _file_identity(cann_env) if cann_env is not None else "unavailable",
+        ),
         "driver": env.get(
             "TILEXR_MODEL_REPLAY_DRIVER_ID", _file_identity(driver_version)
         ),
         "firmware": firmware,
         "soc": soc,
-        "topology": {
-            "nodes": hosts,
-            "node_count": settings.node_count,
-            "devices_per_node": devices_per_node,
-        },
+        "topology": topology,
         "rank_mapping": [
             {
                 "rank": rank,
@@ -966,12 +1067,6 @@ def _run_main(args: argparse.Namespace) -> dict[str, object]:
     )
     if args.node_rank < 0 or args.node_rank >= args.node_count:
         raise ValueError("node rank must be in [0, node count)")
-    config_path = ensure_model_runner_config(
-        config_path,
-        source_root=source_root,
-        shape=shape,
-        node_count=args.node_count,
-    )
     settings = ModelRunnerSettings(
         source_root=source_root,
         config_path=config_path,
@@ -980,6 +1075,11 @@ def _run_main(args: argparse.Namespace) -> dict[str, object]:
         timeout_seconds=args.model_timeout,
         profiler_enabled=args.profile,
         bash_executable=os.environ.get("TILEXR_MODEL_REPLAY_BASH", "bash"),
+        rank_table_file=(
+            Path(os.environ["TILEXR_MODEL_REPLAY_RANK_TABLE_FILE"]).resolve()
+            if os.environ.get("TILEXR_MODEL_REPLAY_RANK_TABLE_FILE", "").strip()
+            else None
+        ),
     )
     provenance = build_runtime_provenance(settings)
     identity = build_cache_identity(
@@ -991,16 +1091,54 @@ def _run_main(args: argparse.Namespace) -> dict[str, object]:
         f"model-replay-{time.time_ns()}-{os.getpid()}"
     )
     if args.node_rank == 0:
-        prepared = prepare_with_model_runner(
-            args.cache_root,
-            identity,
-            settings,
-            capture_id=capture_id,
-            source=args.source,
-            meta_root=meta_root,
-        )
+        prepared = None
+        if args.source != "model":
+            prepared, _previous, _rejected_meta = _lookup_existing_replay_cache(
+                args.cache_root,
+                identity,
+                shape,
+                capture_id=capture_id,
+                source=args.source,
+                meta_root=meta_root,
+            )
+        if prepared is None:
+            config_path = ensure_model_runner_config(
+                config_path,
+                source_root=source_root,
+                shape=shape,
+                node_count=args.node_count,
+            )
+            settings = replace(settings, config_path=config_path)
+            provenance = build_runtime_provenance(settings)
+            identity = build_cache_identity(
+                shape,
+                provenance=provenance,
+                operator_order=model_operator_order(),
+            )
+            prepared = prepare_with_model_runner(
+                args.cache_root,
+                identity,
+                settings,
+                capture_id=capture_id,
+                source=args.source,
+                meta_root=meta_root,
+            )
         distribute_cache_entry(prepared.entry, settings)
     else:
+        if args.source == "model" or config_path.is_file():
+            config_path = ensure_model_runner_config(
+                config_path,
+                source_root=source_root,
+                shape=shape,
+                node_count=args.node_count,
+            )
+            settings = replace(settings, config_path=config_path)
+            provenance = build_runtime_provenance(settings)
+            identity = build_cache_identity(
+                shape,
+                provenance=provenance,
+                operator_order=model_operator_order(),
+            )
         if args.cache_generation:
             entry = load_published_cache_entry(
                 args.cache_generation,

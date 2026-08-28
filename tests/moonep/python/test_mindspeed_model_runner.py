@@ -118,13 +118,13 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
     assert "expert_count=$((((base_expert_count + ep_size - 1) / ep_size) * ep_size))" in node
     assert '--num-experts "${expert_count}"' in node
     assert "ep_size=${devices_per_node}" not in node
-    assert "dispatch_route_count=$((sequence_length * router_topk))" in node
-    assert "dispatch_route_count <= 32768" in node
+    assert "dispatch_route_count" not in node
     assert '"${node_count}" -gt 1' in node
     assert "ip -o -4 addr show dev data0.3001" in node
     assert "interface=data0.3001" in node
-    assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=group" in node
-    assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy" in node
+    assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=group_credit" in node
+    assert "export TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy" not in node
+    assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy is prohibited" in node
     assert "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16" in node
     assert "TILEXR_MOONEP_COMBINE_VERSION=2" in node
     assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in node

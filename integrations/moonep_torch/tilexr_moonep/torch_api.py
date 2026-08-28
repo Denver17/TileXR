@@ -29,6 +29,33 @@ _DISPATCH_COMMON_TAIL_BYTES = (
     + 2 * _DISPATCH_DFX_BYTES
     + _DISPATCH_KERNEL_STATUS_BYTES
 )
+_PLANNER_PEER_TRANSFER_BYTES = 512
+_PLANNER_MAX_EXPERT_COUNT = 4096
+
+
+def _align_up(value: int, alignment: int) -> int:
+    if value < 0 or alignment <= 0:
+        raise ValueError("alignment inputs must be non-negative and positive")
+    return (value + alignment - 1) // alignment * alignment
+
+
+def _planner_mailbox_bytes(context) -> int:
+    rank_size = int(context.planner_group_size)
+    expert_count = int(context.expert_count)
+    route_count = int(context.route_count)
+    if rank_size <= 0 or expert_count <= 0 or route_count <= 0:
+        raise ValueError("Planner mailbox dimensions must be positive")
+    peer_dst_offset = _align_up(expert_count * 4, 32)
+    peer_row_bytes = _align_up(
+        peer_dst_offset + route_count * 4, _PLANNER_PEER_TRANSFER_BYTES
+    )
+    publication_bytes = rank_size * peer_row_bytes
+    ready_bytes = rank_size * _PLANNER_PEER_TRANSFER_BYTES
+    return _align_up(
+        publication_bytes + ready_bytes, _UDMA_REGISTRATION_ALIGNMENT
+    )
+
+
 _PERF_KERNEL_VERSIONS = {
     "planning": "tilexr_ep_plan_kernel",
     "dispatch_forward": "tilexr_moonep_dispatch_urma_kernel",
@@ -328,6 +355,7 @@ class TileXRMoonEPContext:
     _dispatch_workspace_bytes: int = field(init=False, default=0, repr=False)
     _dispatch_workspace_alignment: int = field(init=False, default=0, repr=False)
     _dispatch_registration_bytes: int = field(init=False, default=0, repr=False)
+    _planner_mailbox_bytes: int = field(init=False, default=0, repr=False)
     _dispatch_workspace_handle: int | None = field(init=False, default=None, repr=False)
     _buffer_owner: Any = field(init=False, default=None, repr=False)
     _bound_stream_ptr: int | None = field(init=False, default=None, repr=False)
@@ -346,9 +374,11 @@ class TileXRMoonEPContext:
             raise ValueError(
                 "tokens_per_rank and hidden_size must be positive; topk must be in [1, 32]"
             )
-        if self.expert_count <= 0 or self.expert_count % self.planner_group_size != 0:
+        if (self.expert_count <= 0 or
+                self.expert_count > _PLANNER_MAX_EXPERT_COUNT or
+                self.expert_count % self.planner_group_size != 0):
             raise ValueError(
-                "expert_count must be positive and divisible by planner_group_size"
+                "expert_count must be in [1, 4096] and divisible by planner_group_size"
             )
         if self.token_padding <= 0:
             raise ValueError("token_padding must be positive")
@@ -451,6 +481,7 @@ class TileXRMoonEPContext:
         self._dispatch_workspace_ptr = 0
         self._dispatch_workspace_bytes = 0
         self._dispatch_registration_bytes = 0
+        self._planner_mailbox_bytes = 0
         self._dispatch_workspace_owner = None
         self.runtime.close()
         self._closed = True
@@ -495,7 +526,8 @@ class TileXRMoonEPContext:
                 "native Dispatch returned invalid workspace contract "
                 f"bytes={workspace_bytes} alignment={alignment}"
             )
-        registration_bytes = workspace_bytes
+        planner_mailbox_bytes = _planner_mailbox_bytes(self)
+        registration_bytes = workspace_bytes + planner_mailbox_bytes
         raw = torch_module.empty(
             (registration_bytes + alignment - 1,),
             dtype=torch_module.uint8,
@@ -504,14 +536,15 @@ class TileXRMoonEPContext:
         raw.zero_()
         raw_ptr = int(raw.data_ptr())
         aligned_ptr = ((raw_ptr + alignment - 1) // alignment) * alignment
-        if aligned_ptr + workspace_bytes > raw_ptr + int(raw.numel()):
-            raise RuntimeError("aligned Dispatch workspace exceeds its raw allocation")
+        if aligned_ptr + registration_bytes > raw_ptr + int(raw.numel()):
+            raise RuntimeError("aligned registered workspace exceeds its raw allocation")
         handle = self.runtime.register_dispatch_workspace(aligned_ptr, registration_bytes)
         self._dispatch_workspace_owner = raw
         self._dispatch_workspace_ptr = aligned_ptr
         self._dispatch_workspace_bytes = workspace_bytes
         self._dispatch_workspace_alignment = alignment
         self._dispatch_registration_bytes = registration_bytes
+        self._planner_mailbox_bytes = planner_mailbox_bytes
         self._dispatch_workspace_handle = handle
 
     def activate_dispatch_workspace(self) -> None:
@@ -540,8 +573,11 @@ class TileXRMoonEPContext:
                 "projection backing exceeds the configured UDMA arena reserve: "
                 f"required={required_bytes} reserve={reserve_bytes}"
             )
-        if self._dispatch_registration_bytes == self._dispatch_workspace_bytes:
-            registration_bytes = self._dispatch_workspace_bytes + required_bytes
+        base_registration_bytes = (
+            self._dispatch_workspace_bytes + self._planner_mailbox_bytes
+        )
+        if self._dispatch_registration_bytes == base_registration_bytes:
+            registration_bytes = base_registration_bytes + required_bytes
             alignment = self._dispatch_workspace_alignment
             raw = torch_module.empty(
                 (registration_bytes + alignment - 1,),
@@ -567,7 +603,11 @@ class TileXRMoonEPContext:
             self._dispatch_workspace_ptr = aligned_ptr
             self._dispatch_registration_bytes = registration_bytes
             self._dispatch_workspace_handle = handle
-        available = self._dispatch_registration_bytes - self._dispatch_workspace_bytes
+        available = (
+            self._dispatch_registration_bytes
+            - self._dispatch_workspace_bytes
+            - self._planner_mailbox_bytes
+        )
         if required_bytes > available:
             raise RuntimeError("projection arena was already promoted with a smaller layout")
         raw_offset = self._dispatch_workspace_ptr - int(

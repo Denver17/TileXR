@@ -742,6 +742,7 @@ void TestUDMAPersistentProfilesStayIndependent()
     const auto device = ReadFile(devicePath);
     CheckContains(devicePath, device, "UDMAProfileRegisteredRangeValid(");
     CheckContains(devicePath, device, "UDMAProfileGetNbiOnQpDeferred(");
+    CheckContains(devicePath, device, "UDMAProfilePutNbiOnQpDeferred(");
     CheckContains(devicePath, device,
                   "UDMAPostSend<UDMAOpcode::READ, false>(udmaInfo, wqeScratch");
     CheckContains(devicePath, device, "UDMAProfileCompletionFrontier(");

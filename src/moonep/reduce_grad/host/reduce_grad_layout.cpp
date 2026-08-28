@@ -138,14 +138,16 @@ bool ResolveBlockDim(uint32_t laneCount, int64_t *blockDim)
 } // namespace
 
 int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
-    int64_t expertCount, int64_t prefetchSlots,
+    int64_t localRankSize, int64_t expertCount, int64_t prefetchSlots,
     const uint64_t rowElements[kReduceGradProjectionCount],
     uint32_t transportQpCount, uint64_t requestedChunkBytes,
     ReduceGradLayout *out)
 {
     if (out == nullptr || rowElements == nullptr || rankSize < kReduceGradMinRankCount ||
         rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
-        expertCount <= 0 || expertCount % rankSize != 0 || prefetchSlots <= 0 ||
+        localRankSize <= 0 || localRankSize > rankSize ||
+        rankSize % localRankSize != 0 || expertCount <= 0 ||
+        expertCount % rankSize != 0 || prefetchSlots <= 0 ||
         expertCount > std::numeric_limits<int32_t>::max() ||
         prefetchSlots > std::numeric_limits<int32_t>::max() ||
         prefetchSlots > std::numeric_limits<int32_t>::max() / rankSize ||
@@ -154,6 +156,10 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
         (transportQpCount > kReduceGradMaxUdmaQpCount &&
             transportQpCount != kReduceGradMaxTransportQpCount)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const bool crossNode = localRankSize < rankSize;
+    if (crossNode && transportQpCount == kReduceGradMinMultiRankQpCount) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
 
     ReduceGradLayout next {};
@@ -164,8 +170,10 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     next.prefetchSlots = prefetchSlots;
     next.transportQpCount = transportQpCount;
     next.qpCount = transportQpCount == kReduceGradMaxTransportQpCount ?
-        kReduceGradProjectionCount : transportQpCount;
+        kReduceGradProjectionCount : transportQpCount - (crossNode ? 1U : 0U);
     next.laneCount = next.qpCount;
+    next.barrierPhysicalQp = crossNode ? transportQpCount - 1U :
+        kReduceGradInvalidPhysicalQp;
 
     for (uint32_t projection = 0; projection < kReduceGradProjectionCount; ++projection) {
         uint64_t bytes = 0;
@@ -215,13 +223,41 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
     }
     next.stagingOffset = next.laneStateBytes;
     cursor = next.stagingOffset;
-    if (!CheckedAdd(cursor, payloadBytes, &cursor) ||
-        !AlignUp(cursor, kReduceGradWorkspaceAlignment, &next.workspaceBytes)) {
+    if (!CheckedAdd(cursor, payloadBytes, &cursor)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (crossNode) {
+        if (!AlignUp(cursor, TileXR::TILEXR_UDMA_CACHE_LINE_SIZE,
+                &next.barrierOffset) ||
+            !CheckedMul(static_cast<uint64_t>(rankSize),
+                TileXR::TILEXR_UDMA_CACHE_LINE_SIZE, &next.barrierBytes) ||
+            !CheckedAdd(next.barrierOffset, next.barrierBytes, &cursor)) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    }
+    if (!AlignUp(cursor, kReduceGradWorkspaceAlignment, &next.workspaceBytes)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (crossNode && (next.barrierPhysicalQp >= next.transportQpCount ||
+            next.barrierPhysicalQp == next.lanePhysicalQps[0] ||
+            next.barrierPhysicalQp == next.lanePhysicalQps[1] ||
+            next.barrierPhysicalQp == next.lanePhysicalQps[2])) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     *out = next;
     return TileXR::TILEXR_SUCCESS;
+}
+
+int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
+    int64_t expertCount, int64_t prefetchSlots,
+    const uint64_t rowElements[kReduceGradProjectionCount],
+    uint32_t transportQpCount, uint64_t requestedChunkBytes,
+    ReduceGradLayout *out)
+{
+    return TileXRMoonEpBuildReduceGradLayout(rank, rankSize, rankSize,
+        expertCount, prefetchSlots, rowElements, transportQpCount,
+        requestedChunkBytes, out);
 }
 
 int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
@@ -231,8 +267,9 @@ int TileXRMoonEpBuildReduceGradLayout(int64_t rank, int64_t rankSize,
 {
     const int64_t prefetchSlots = rankSize > 0 && expertCount > 0 ?
         expertCount / rankSize : 0;
-    return TileXRMoonEpBuildReduceGradLayout(rank, rankSize, expertCount,
-        prefetchSlots, rowElements, transportQpCount, requestedChunkBytes, out);
+    return TileXRMoonEpBuildReduceGradLayout(rank, rankSize, rankSize,
+        expertCount, prefetchSlots, rowElements, transportQpCount,
+        requestedChunkBytes, out);
 }
 
 } // namespace TileXRMoonEp

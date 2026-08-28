@@ -4,6 +4,7 @@
 #include <limits>
 
 #include "acl/acl_rt.h"
+#include "tilexr_types.h"
 
 extern "C" int TileXRMoonEpCombineGetWorkspaceSizeV2(
     int64_t bs, int64_t h, int64_t topK, int64_t nvS, uint32_t dtype,
@@ -168,13 +169,28 @@ extern "C" int TileXRMoonEpCombineStageV2Fused(void *registeredWorkspace,
         dstLocal == nullptr || comm == nullptr || hiddenNvsh == nullptr ||
         hiddenSh == nullptr || stream == nullptr ||
         dtype != TILEXR_MOONEP_DTYPE_BFLOAT16 ||
-        ((routeWeightsNvs == nullptr) != (routeWeightsSk == nullptr)) ||
-        (routeWeightsNvs != nullptr && weightMemoryComm == nullptr)) {
+        ((routeWeightsNvs == nullptr) != (routeWeightsSk == nullptr))) {
+        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
+    }
+
+    TileXR::CommArgs *hostArgs = nullptr;
+    int ret = TileXRGetCommArgsHost(comm, hostArgs);
+    if (ret != TileXR::TILEXR_SUCCESS || hostArgs == nullptr) {
+        return ret == TileXR::TILEXR_SUCCESS ?
+            TILEXR_MOONEP_ERROR_INTERNAL : ret;
+    }
+    if (hostArgs->localRankSize < hostArgs->rankSize) {
+        return TileXRMoonEpCombineStageV2(registeredWorkspace,
+            registeredWorkspaceBytes, dstLocal, comm, bs, h, topK, nvS,
+            aivCoreNum, hiddenNvsh, hiddenSh, routeWeightsNvs,
+            routeWeightsSk, dtype, stream);
+    }
+    if (routeWeightsNvs != nullptr && weightMemoryComm == nullptr) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
     TileXRMoonEp::CombineV2Layout hiddenLayout {};
-    int ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
+    ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
         bs, h, topK, nvS, dtype, &hiddenLayout);
     if (ret != TILEXR_MOONEP_SUCCESS ||
         registeredWorkspaceBytes < hiddenLayout.totalBytes) {

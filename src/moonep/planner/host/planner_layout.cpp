@@ -150,14 +150,36 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     }
 
     const uint64_t workspaceBytes = TileXRMoonEpAlignUp(cursor, kPlannerWorkspaceAlignment);
-    const uint64_t peerDstOffset = TileXRMoonEpAlignUp(
-        expertCountU * sizeof(int32_t), kPlannerWorkspaceAlignment);
+    uint64_t peerTpeBytes = 0;
+    uint64_t peerDstBytes = 0;
+    uint64_t peerRowBytes = 0;
     uint64_t peerPublicationBytes = 0;
+    uint64_t peerReadyBytes = 0;
+    uint64_t peerWorkspaceBytes = 0;
+    if (!CheckedMul(expertCountU, sizeof(int32_t), &peerTpeBytes) ||
+        !CheckedMul(routeCount, sizeof(int32_t), &peerDstBytes)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const uint64_t peerDstOffset = TileXRMoonEpAlignUp(
+        peerTpeBytes, kPlannerWorkspaceAlignment);
+    if (peerDstOffset != std::numeric_limits<uint64_t>::max() &&
+        CheckedAdd(peerDstOffset, peerDstBytes, &peerRowBytes)) {
+        peerRowBytes = TileXRMoonEpAlignUp(peerRowBytes, kPlannerPeerTransferBytes);
+    } else {
+        peerRowBytes = std::numeric_limits<uint64_t>::max();
+    }
     if (workspaceBytes == std::numeric_limits<uint64_t>::max() ||
         peerDstOffset == std::numeric_limits<uint64_t>::max() ||
-        !CheckedMul(routeCount, sizeof(int32_t), &peerPublicationBytes) ||
-        !CheckedAdd(peerDstOffset, peerPublicationBytes, &peerPublicationBytes) ||
+        peerRowBytes == std::numeric_limits<uint64_t>::max() ||
+        !CheckedMul(rankSizeU, peerRowBytes, &peerPublicationBytes) ||
+        !CheckedMul(rankSizeU, kPlannerPeerTransferBytes, &peerReadyBytes) ||
+        !CheckedAdd(peerPublicationBytes, peerReadyBytes, &peerWorkspaceBytes) ||
         peerPublicationBytes > static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    peerWorkspaceBytes = TileXRMoonEpAlignUp(
+        peerWorkspaceBytes, kPlannerRegisteredWorkspaceAlignment);
+    if (peerWorkspaceBytes == std::numeric_limits<uint64_t>::max()) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -174,6 +196,8 @@ int TileXRMoonEpBuildPlannerLayout(int64_t rankSize, int64_t s, int64_t k,
     next.peerDstOffset = peerDstOffset;
     next.workspaceBytes = workspaceBytes;
     next.peerPublicationBytes = peerPublicationBytes;
+    next.peerReadyOffset = peerPublicationBytes;
+    next.peerWorkspaceBytes = peerWorkspaceBytes;
     *out = next;
     return TileXR::TILEXR_SUCCESS;
 }

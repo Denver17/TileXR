@@ -84,7 +84,9 @@ Environment:
                                Set to 1/true/yes/on to enable --auto-build-install
   TILEXR_MOONEP_BUILD_DIR      CMake build directory used by --auto-build-install
   TILEXR_MOONEP_BUILD_JOBS     CMake build parallelism (default: nproc)
-  TILEXR_MOONEP_CONDA_ENV      Conda environment (default: ai_moe_test)
+  TILEXR_CANN_HOME             Explicit CANN installation root; sources set_env.sh
+  TILEXR_MOONEP_CONDA_SH       Explicit Conda shell setup script
+  TILEXR_MOONEP_CONDA_ENV      Conda environment name or absolute prefix (default: ai_moe_test)
   TILEXR_MOONEP_OUTPUT_DIR     Result directory (default: timestamped run/moonep directory)
   TILEXR_MOONEP_TIMEOUT_SEC    Launcher timeout in seconds (default: 600)
   TILEXR_MOONEP_LAUNCH_ID      Shared non-secret launch ID (required for multi-node)
@@ -559,22 +561,53 @@ if [[ "${rank_size}" == "1" ]]; then
 fi
 export TILEXR_ENABLE_CREDIT_IPC="${TILEXR_ENABLE_CREDIT_IPC:-1}"
 
-for conda_setup in \
-    /home/miniconda3/etc/profile.d/conda.sh \
-    /home/anaconda3/etc/profile.d/conda.sh \
-    "${HOME}/miniconda3/etc/profile.d/conda.sh" \
-    "${HOME}/anaconda3/etc/profile.d/conda.sh"; do
-    if [[ -f "${conda_setup}" ]]; then
-        # Conda's shell function is required for `conda activate`.
-        source "${conda_setup}"
-        break
+if [[ -n "${TILEXR_CANN_HOME:-}" ]]; then
+    cann_setup="${TILEXR_CANN_HOME%/}/set_env.sh"
+    if [[ ! -f "${cann_setup}" ]]; then
+        echo "TILEXR_CANN_HOME set_env.sh not found: ${cann_setup}" >&2
+        exit 1
     fi
-done
-if ! command -v conda >/dev/null 2>&1; then
-    echo "Conda was not found; expected /home/miniconda3 or a conda command on PATH" >&2
-    exit 1
+    # CANN environment scripts may inspect variables that are unset.
+    set +u
+    source "${cann_setup}"
+    set -u
 fi
-conda activate "${TILEXR_MOONEP_CONDA_ENV:-ai_moe_test}"
+
+conda_environment=${TILEXR_MOONEP_CONDA_ENV:-ai_moe_test}
+if [[ "${conda_environment}" == /* ]]; then
+    if [[ ! -x "${conda_environment}/bin/python" ]]; then
+        echo "Conda environment Python not found: ${conda_environment}/bin/python" >&2
+        exit 1
+    fi
+    export CONDA_PREFIX=${conda_environment}
+    export CONDA_DEFAULT_ENV=${conda_environment}
+    export PATH="${conda_environment}/bin:${PATH}"
+else
+    if [[ -n "${TILEXR_MOONEP_CONDA_SH:-}" ]]; then
+        if [[ ! -f "${TILEXR_MOONEP_CONDA_SH}" ]]; then
+            echo "TILEXR_MOONEP_CONDA_SH not found: ${TILEXR_MOONEP_CONDA_SH}" >&2
+            exit 1
+        fi
+        # Conda's shell function is required for `conda activate`.
+        source "${TILEXR_MOONEP_CONDA_SH}"
+    else
+        for conda_setup in \
+            /home/miniconda3/etc/profile.d/conda.sh \
+            /home/anaconda3/etc/profile.d/conda.sh \
+            "${HOME}/miniconda3/etc/profile.d/conda.sh" \
+            "${HOME}/anaconda3/etc/profile.d/conda.sh"; do
+            if [[ -f "${conda_setup}" ]]; then
+                source "${conda_setup}"
+                break
+            fi
+        done
+    fi
+    if ! command -v conda >/dev/null 2>&1; then
+        echo "Conda was not found; expected /home/miniconda3 or a conda command on PATH" >&2
+        exit 1
+    fi
+    conda activate "${conda_environment}"
+fi
 set -u
 
 install_prefix="${TILEXR_INSTALL_PREFIX:-${TILEXR_HOME}/install-moonep-b131-20260805}"
@@ -624,7 +657,7 @@ output_dir="${TILEXR_MOONEP_OUTPUT_DIR:-${TILEXR_HOME}/run/moonep/tilexr-moonep-
 case_file="${TILEXR_HOME}/tools/moonep/cases/correctness.json"
 if [[ "${model_replay}" == "true" ]]; then
     if (( node_count > 1 )); then
-        export TILEXR_MOONEP_DISPATCH_PEER_MODE="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-legacy}"
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-group_credit}"
         export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS="${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-100000000}"
     fi
     model_replay_cache_dir="${model_replay_cache_dir:-${TILEXR_HOME}/run/moonep/model_replay_cache}"
@@ -752,8 +785,8 @@ if [[ "${case_id}" == "${dispatch_repro_case_id}" ||
     if [[ -n "${requested_dispatch_peer_mode}" ]]; then
         case "${requested_dispatch_peer_mode}" in
             legacy)
-                export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"
-                unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+                echo "TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy is prohibited" >&2
+                exit 2
                 ;;
             group|group_credit)
                 export TILEXR_MOONEP_DISPATCH_PEER_MODE="${requested_dispatch_peer_mode}"
@@ -766,16 +799,16 @@ if [[ "${case_id}" == "${dispatch_repro_case_id}" ||
         esac
     elif [[ "${model_replay}" == "true" ]] &&
          { (( node_count > 1 )) || (( model_s * model_k > 32768 )); }; then
-        export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"
-        unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+        export TILEXR_MOONEP_DISPATCH_PEER_MODE="group_credit"
+        export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"
     else
         case "${case_id}" in
             "${model_flow_scaled_8rank_case_id}"|"${model_flow_scaled_16rank_case_id}")
-                export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"
-                unset TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE="group_credit"
+                export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"
                 ;;
             *)
-                export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"
+                export TILEXR_MOONEP_DISPATCH_PEER_MODE="group_credit"
                 export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"
                 ;;
         esac
@@ -790,7 +823,7 @@ elif [[ "${case_id}" == "${plan_reuse_repro_case_id}" ]]; then
 elif [[ "${is_model_flow}" == "true" ]]; then
     benchmark_kind="model_flow"
     export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES="${TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES:-$((768 * 1024 * 1024))}"
-    case "${TILEXR_MOONEP_DISPATCH_PEER_MODE:-legacy}" in
+    case "${TILEXR_MOONEP_DISPATCH_PEER_MODE:-group_credit}" in
         group|group_credit)
             export TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS="${TILEXR_MOONEP_PLANNER_WAIT_ITERATIONS:-100000000}"
             ;;
@@ -1047,10 +1080,12 @@ model_replay_launch_followers() {
         TILEXR_ENABLE_CREDIT_IPC
         TILEXR_INSTALL_PREFIX
         TILEXR_LOG_LEVEL
+        TILEXR_MODEL_REPLAY_RANK_TABLE_FILE
         TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA
         TILEXR_MODEL_RUNNER_CONFIG
         TILEXR_MOONEP_AUTO_BUILD_INSTALL
         TILEXR_MOONEP_BARRIER_ADDR
+        TILEXR_MOONEP_CONDA_SH
         TILEXR_MOONEP_CONDA_ENV
         TILEXR_MOONEP_DISPATCH_GROUP_WIDTH
         TILEXR_MOONEP_DISPATCH_PEER_MODE
@@ -1067,6 +1102,7 @@ model_replay_launch_followers() {
         TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES
         TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS
         TILEXR_UDMA_ATTACH_EXISTING_RA
+        TILEXR_UDMA_ROOTINFO_PATH
         TILEXR_UDMA_QP_ROUTE_SPEC
     )
     local ssh_options=(

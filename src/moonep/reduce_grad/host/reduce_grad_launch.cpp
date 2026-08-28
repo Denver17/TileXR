@@ -94,11 +94,14 @@ int TileXRMoonEpLaunchReduceGradKernel(const ReduceGradLaunchParams &params,
     args.transportQpCount = layout.transportQpCount;
     args.qpCount = layout.qpCount;
     args.laneCount = layout.laneCount;
+    args.barrierPhysicalQp = layout.barrierPhysicalQp;
     args.laneStateBytes = layout.laneStateBytes;
     args.stagingOffset = layout.stagingOffset;
     args.bankStrideBytes = layout.bankStrideBytes;
     args.laneStrideBytes = layout.laneStrideBytes;
     args.chunkBytes = layout.chunkBytes;
+    args.barrierOffset = layout.barrierOffset;
+    args.barrierBytes = layout.barrierBytes;
     args.workspaceBytes = layout.workspaceBytes;
     args.waitIterations = params.waitIterations;
     args.magic = magic;

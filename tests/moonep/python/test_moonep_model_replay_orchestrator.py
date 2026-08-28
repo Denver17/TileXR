@@ -9,6 +9,7 @@ import struct
 import subprocess
 import zlib
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -673,6 +674,89 @@ def test_model_runner_defaults_to_profiler_and_stage_barrier(tmp_path: Path) -> 
     }
 
 
+def test_model_runner_uses_capture_specific_master_port(tmp_path: Path) -> None:
+    settings = ModelRunnerSettings(
+        source_root=ROOT,
+        config_path=tmp_path / "model_runner.env",
+        shape=_shape(),
+        node_count=1,
+        timeout_seconds=60,
+        profiler_enabled=True,
+    )
+
+    first = settings.base_command(run_tag="capture-one")
+    repeated = settings.base_command(run_tag="capture-one")
+    second = settings.base_command(run_tag="capture-two")
+
+    first_port = int(first[first.index("--master-port") + 1])
+    repeated_port = int(repeated[repeated.index("--master-port") + 1])
+    second_port = int(second[second.index("--master-port") + 1])
+    assert 15000 <= first_port <= 24999
+    assert first_port == repeated_port
+    assert first_port != second_port
+
+
+def test_model_runner_accepts_an_explicit_safe_master_port(tmp_path: Path) -> None:
+    settings = ModelRunnerSettings(
+        source_root=ROOT,
+        config_path=tmp_path / "model_runner.env",
+        shape=_shape(),
+        node_count=1,
+        timeout_seconds=60,
+        profiler_enabled=True,
+        master_port=30123,
+    )
+
+    command = settings.base_command(run_tag="capture")
+    assert command[command.index("--master-port") + 1] == "30123"
+
+
+def test_model_runner_forwards_an_explicit_rank_table(tmp_path: Path) -> None:
+    rank_table = tmp_path / "rank_table.json"
+    rank_table.write_text("{}\n", encoding="utf-8")
+    settings = ModelRunnerSettings(
+        source_root=ROOT,
+        config_path=tmp_path / "model_runner.env",
+        shape=_shape(),
+        node_count=1,
+        timeout_seconds=60,
+        profiler_enabled=True,
+        rank_table_file=rank_table,
+    )
+
+    command = settings.base_command(run_tag="capture")
+    assert command[command.index("--rank-table-file") + 1] == str(rank_table)
+
+
+def test_model_runner_rejects_a_missing_rank_table(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="rank table file not found"):
+        ModelRunnerSettings(
+            source_root=ROOT,
+            config_path=tmp_path / "model_runner.env",
+            shape=_shape(),
+            node_count=1,
+            timeout_seconds=60,
+            profiler_enabled=True,
+            rank_table_file=tmp_path / "missing.json",
+        )
+
+
+@pytest.mark.parametrize("master_port", [0, 55535])
+def test_model_runner_rejects_unsafe_master_port(
+    tmp_path: Path, master_port: int
+) -> None:
+    with pytest.raises(ValueError, match="master port"):
+        ModelRunnerSettings(
+            source_root=ROOT,
+            config_path=tmp_path / "model_runner.env",
+            shape=_shape(),
+            node_count=1,
+            timeout_seconds=60,
+            profiler_enabled=True,
+            master_port=master_port,
+        )
+
+
 def test_runtime_provenance_respects_explicit_dispatch_peer_mode(
     tmp_path: Path,
 ) -> None:
@@ -693,6 +777,235 @@ def test_runtime_provenance_respects_explicit_dispatch_peer_mode(
     )
 
     assert provenance["kernel_version"]["dispatch_peer_mode"] == "legacy"
+
+
+def test_runtime_provenance_hashes_only_an_explicit_rank_table(tmp_path: Path) -> None:
+    config = tmp_path / "model_runner.env"
+    config.write_text("MODEL_RUNNER_NODES=node-a\n", encoding="utf-8")
+    rank_table = tmp_path / "rank_table.json"
+    payload = b'{"version":"1.2"}\n'
+    rank_table.write_bytes(payload)
+    common = {
+        "source_root": ROOT,
+        "config_path": config,
+        "shape": _shape(),
+        "node_count": 1,
+        "timeout_seconds": 60,
+        "profiler_enabled": True,
+    }
+    environment = {
+        "TILEXR_MODEL_REPLAY_FIRMWARE_ID": "firmware",
+        "TILEXR_MODEL_REPLAY_SOC_ID": "soc",
+    }
+
+    with_rank_table = build_runtime_provenance(
+        ModelRunnerSettings(**common, rank_table_file=rank_table),
+        environment=environment,
+    )
+    without_rank_table = build_runtime_provenance(
+        ModelRunnerSettings(**common), environment=environment
+    )
+
+    assert with_rank_table["topology"]["rank_table_sha256"] == hashlib.sha256(
+        payload
+    ).hexdigest()
+    assert "rank_table_sha256" not in without_rank_table["topology"]
+
+
+def test_run_main_reads_rank_table_from_environment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rank_table = tmp_path / "rank_table.json"
+    rank_table.write_text("{}\n", encoding="utf-8")
+    captured = {}
+
+    class StopAfterSettings(Exception):
+        pass
+
+    def capture_settings(**kwargs):
+        captured.update(kwargs)
+        raise StopAfterSettings
+
+    monkeypatch.setenv("TILEXR_MODEL_REPLAY_RANK_TABLE_FILE", str(rank_table))
+    monkeypatch.setattr(
+        replay_orchestrator,
+        "ensure_model_runner_config",
+        lambda path, **_kwargs: path,
+    )
+    monkeypatch.setattr(replay_orchestrator, "ModelRunnerSettings", capture_settings)
+    args = SimpleNamespace(
+        source_root=str(tmp_path),
+        meta_root=None,
+        model_runner_config=None,
+        ep=2,
+        rank_size=2,
+        s=2,
+        k=2,
+        hidden_size=128,
+        node_rank=0,
+        node_count=1,
+        model_timeout=60,
+        profile=True,
+    )
+
+    with pytest.raises(StopAfterSettings):
+        replay_orchestrator._run_main(args)
+
+    assert captured["rank_table_file"] == rank_table.resolve()
+
+
+def _run_main_args(
+    tmp_path: Path,
+    *,
+    meta_root: Path,
+    source: str,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        source_root=str(ROOT),
+        cache_root=str(tmp_path / "cache"),
+        case_file=str(tmp_path / "case.json"),
+        result_env_file=str(tmp_path / "result.env"),
+        model_runner_config=str(tmp_path / "missing-model-runner.env"),
+        meta_root=str(meta_root),
+        ep=2,
+        rank_size=2,
+        s=2,
+        k=2,
+        hidden_size=128,
+        node_rank=0,
+        node_count=1,
+        warmup=0,
+        iterations=1,
+        model_timeout=60,
+        wait_timeout=1,
+        capture_id="orchestration-order",
+        cache_generation=None,
+        source=source,
+        profile=True,
+    )
+
+
+def test_run_main_meta_hit_does_not_require_model_runner_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meta_root = tmp_path / "meta"
+    source = prepare_replay_cache(
+        tmp_path / "source-cache",
+        _identity(),
+        _shape(),
+        capture_id="capture-1",
+        source="cache",
+        capture_routes=_capture_routes,
+        capture_performance=_capture_performance,
+    )
+    monkeypatch.setattr(
+        replay_orchestrator,
+        "build_runtime_provenance",
+        lambda _settings: copy.deepcopy(_identity()["provenance"]),
+    )
+    monkeypatch.setattr(
+        replay_orchestrator,
+        "_lookup_existing_replay_cache",
+        lambda *_args, **_kwargs: (
+            PreparedReplayCache(
+                source.entry,
+                "meta-hit",
+                meta_status="hit",
+            ),
+            None,
+            False,
+        ),
+    )
+
+    def unexpected_config(*_args, **_kwargs):
+        raise AssertionError("meta hit must not generate model runner config")
+
+    monkeypatch.setattr(
+        replay_orchestrator, "ensure_model_runner_config", unexpected_config
+    )
+    monkeypatch.setenv("TILEXR_MODEL_REPLAY_BASH", "/bin/false")
+
+    result = replay_orchestrator._run_main(
+        _run_main_args(tmp_path, meta_root=meta_root, source="meta")
+    )
+
+    assert result["cache_status"] == "meta-hit"
+    assert result["meta_status"] == "hit"
+    assert not (tmp_path / "missing-model-runner.env").exists()
+
+
+def test_run_main_meta_miss_generates_config_only_before_single_capture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events: list[str] = []
+    meta_root = tmp_path / "missing-meta"
+    config = tmp_path / "generated-model-runner.env"
+    args = _run_main_args(tmp_path, meta_root=meta_root, source="meta")
+    args.model_runner_config = str(config)
+    monkeypatch.setattr(
+        replay_orchestrator,
+        "build_runtime_provenance",
+        lambda _settings: copy.deepcopy(_identity()["provenance"]),
+    )
+    real_load_meta_bundle = replay_orchestrator.load_meta_bundle
+
+    def record_meta_lookup(*load_args, **load_kwargs):
+        events.append("meta")
+        return real_load_meta_bundle(*load_args, **load_kwargs)
+
+    def generate_config(path, **_kwargs):
+        events.append("config")
+        Path(path).write_text("MODEL_RUNNER_NODES=node-a\n", encoding="utf-8")
+        return Path(path)
+
+    class CaptureStarted(Exception):
+        pass
+
+    def capture_once(*_args, **_kwargs):
+        events.append("capture")
+        raise CaptureStarted
+
+    monkeypatch.setattr(replay_orchestrator, "load_meta_bundle", record_meta_lookup)
+    monkeypatch.setattr(
+        replay_orchestrator, "ensure_model_runner_config", generate_config
+    )
+    monkeypatch.setattr(replay_orchestrator, "prepare_with_model_runner", capture_once)
+
+    with pytest.raises(CaptureStarted):
+        replay_orchestrator._run_main(args)
+
+    assert events[0:2] == ["meta", "config"]
+    assert events.count("config") == 1
+    assert events.count("capture") == 1
+
+
+def test_runtime_provenance_allows_missing_model_runner_config(
+    tmp_path: Path,
+) -> None:
+    settings = ModelRunnerSettings(
+        source_root=ROOT,
+        config_path=tmp_path / "missing-model-runner.env",
+        shape=_shape(),
+        node_count=1,
+        timeout_seconds=60,
+        profiler_enabled=True,
+    )
+
+    provenance = build_runtime_provenance(
+        settings,
+        environment={
+            "TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA": "a" * 40,
+            "TILEXR_MODEL_REPLAY_FIRMWARE_ID": "firmware",
+            "TILEXR_MODEL_REPLAY_SOC_ID": "soc",
+            "TILEXR_MOONEP_DISPATCH_PEER_MODE": "group_credit",
+        },
+    )
+
+    assert provenance["model_stack"] == {
+        "mindspeed": "unavailable",
+        "mindspeed_llm": "unavailable",
+    }
+    assert provenance["kernel_version"]["dispatch_peer_mode"] == "group_credit"
 
 
 def test_runtime_provenance_hashes_real_installed_library_names(tmp_path: Path) -> None:
@@ -779,6 +1092,36 @@ def test_runtime_provenance_discovers_firmware_and_soc_from_npu_smi(
     assert provenance["soc"] == "Ascend950PR-V100"
 
 
+def test_runtime_provenance_board_overrides_skip_npu_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / "model_runner.env"
+    config.write_text("MODEL_RUNNER_NODES=node-a\n", encoding="utf-8")
+    settings = ModelRunnerSettings(
+        source_root=ROOT,
+        config_path=config,
+        shape=_shape(),
+        node_count=1,
+        timeout_seconds=60,
+        profiler_enabled=True,
+    )
+
+    def unexpected_probe():
+        raise AssertionError("npu-smi probe must not run when overrides are complete")
+
+    monkeypatch.setattr(replay_orchestrator, "_npu_smi_board_identity", unexpected_probe)
+    provenance = build_runtime_provenance(
+        settings,
+        environment={
+            "TILEXR_MODEL_REPLAY_FIRMWARE_ID": "firmware-override",
+            "TILEXR_MODEL_REPLAY_SOC_ID": "soc-override",
+        },
+    )
+
+    assert provenance["firmware"] == "firmware-override"
+    assert provenance["soc"] == "soc-override"
+
+
 def test_single_node_missing_model_runner_config_is_generated(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -836,6 +1179,43 @@ def test_single_node_missing_model_runner_config_is_generated(
     assert values["MODEL_RUNNER_INSTALL_PREFIX"] == str(install_prefix.resolve())
     assert values["MODEL_RUNNER_CANN_ENV"] == str(cann_env.resolve())
     assert values["MODEL_RUNNER_CONDA_ENV"] == "ai_moe_test"
+
+
+def test_generated_runner_config_accepts_absolute_conda_prefix_without_base(
+    tmp_path: Path,
+) -> None:
+    source_root = tmp_path / "TileXR"
+    install_prefix = source_root / "install"
+    model_root = tmp_path / "model"
+    cann_env = tmp_path / "cann" / "set_env.sh"
+    native_env = model_root / "native" / "moonep-native.env"
+    tokenizer = tmp_path / "tokenizer"
+    conda_prefix = tmp_path / "envs" / "ai_moe_test"
+    for directory in (install_prefix, model_root, tokenizer, conda_prefix / "bin"):
+        directory.mkdir(parents=True)
+    for file_path in (cann_env, native_env, conda_prefix / "bin" / "python"):
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_text("# test\n", encoding="utf-8")
+
+    config = tmp_path / "generated" / "model_runner.env"
+    ensure_model_runner_config(
+        config,
+        source_root=source_root,
+        shape=_shape(),
+        node_count=1,
+        environment={
+            "TILEXR_INSTALL_PREFIX": str(install_prefix),
+            "TILEXR_MODEL_RUNNER_MODEL_ROOT": str(model_root),
+            "TILEXR_MODEL_RUNNER_CANN_ENV": str(cann_env),
+            "TILEXR_MODEL_RUNNER_NATIVE_ENV": str(native_env),
+            "TILEXR_MODEL_RUNNER_TOKENIZER_PATH": str(tokenizer),
+            "TILEXR_MOONEP_CONDA_ENV": str(conda_prefix),
+        },
+    )
+
+    values = _parse_runner_env(config.read_text(encoding="utf-8"))
+    assert values["MODEL_RUNNER_CONDA_ENV"] == str(conda_prefix)
+    assert values["MODEL_RUNNER_CONDA_SH"] == ""
 
 
 def test_multinode_missing_model_runner_config_requires_explicit_env(

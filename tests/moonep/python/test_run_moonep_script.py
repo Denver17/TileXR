@@ -102,6 +102,22 @@ def test_script_discovers_the_shared_anaconda_installation() -> None:
     assert system_anaconda in SCRIPT
     assert SCRIPT.index(system_miniconda) < SCRIPT.index(system_anaconda)
     assert SCRIPT.index(system_anaconda) < SCRIPT.index(home_miniconda)
+    assert '[[ -n "${TILEXR_MOONEP_CONDA_SH:-}" ]]' in SCRIPT
+    assert 'source "${TILEXR_MOONEP_CONDA_SH}"' in SCRIPT
+    assert "TILEXR_MOONEP_CONDA_SH not found" in SCRIPT
+    assert '[[ "${conda_environment}" == /* ]]' in SCRIPT
+    assert 'export CONDA_PREFIX=${conda_environment}' in SCRIPT
+    assert 'export PATH="${conda_environment}/bin:${PATH}"' in SCRIPT
+    assert "Conda environment Python not found" in SCRIPT
+
+
+def test_script_sources_explicit_cann_home_before_selecting_conda() -> None:
+    cann_source = 'source "${cann_setup}"'
+    conda_selection = "conda_environment=${TILEXR_MOONEP_CONDA_ENV:-ai_moe_test}"
+    assert 'cann_setup="${TILEXR_CANN_HOME%/}/set_env.sh"' in SCRIPT
+    assert "TILEXR_CANN_HOME set_env.sh not found" in SCRIPT
+    assert cann_source in SCRIPT
+    assert SCRIPT.index(cann_source) < SCRIPT.index(conda_selection)
 
 
 def test_default_output_directory_is_under_project_run_moonep() -> None:
@@ -233,18 +249,18 @@ def test_usage_describes_eight_and_sixteen_rank_cases() -> None:
     )
 
 
-def test_case_15_selects_hidden_only_grouped_urma_dispatch_hot_loop() -> None:
+def test_case_15_defaults_to_group_credit_urma_dispatch_hot_loop() -> None:
     assert 'dispatch_repro_case_id="dispatch-8rank-4k-ep8-grouped-urma"' in SCRIPT
     assert 'benchmark_kind="dispatch_hot_loop"' in SCRIPT
     assert 'dispatch_modes=("hidden")' in SCRIPT
     assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in SCRIPT
-    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"' in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group_credit"' in SCRIPT
     assert 'export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"' in SCRIPT
     assert '--benchmark-kind "${benchmark_kind}"' in SCRIPT
     assert 'launcher_args+=("--dispatch-modes" "${dispatch_modes[@]}")' in SCRIPT
 
 
-def test_case_16_selects_grouped_urma_full_flow_with_plan_reuse() -> None:
+def test_case_16_defaults_to_group_credit_full_flow_with_plan_reuse() -> None:
     assert (
         'plan_reuse_repro_case_id="flow-8rank-4k-ep8-grouped-urma-plan-reuse"'
         in SCRIPT
@@ -254,7 +270,7 @@ def test_case_16_selects_grouped_urma_full_flow_with_plan_reuse() -> None:
     assert 'iterations="${iterations:-8}"' in SCRIPT
     assert 'benchmark_kind="flow"' in SCRIPT
     assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in SCRIPT
-    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group"' in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group_credit"' in SCRIPT
     assert 'export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH="16"' in SCRIPT
 
 
@@ -313,7 +329,7 @@ def test_case_18_through_20_select_rank_matched_model_flows() -> None:
         'model_flow_scaled_16rank_case_id="model-flow-16rank-8k-k16-ep16-mindspeed"'
         in SCRIPT
     )
-    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="legacy"' in SCRIPT
+    assert 'export TILEXR_MOONEP_DISPATCH_PEER_MODE="group_credit"' in SCRIPT
     assert 'TILEXR_MOONEP_DIAGNOSTIC_FLOW:-0' in SCRIPT
 
 
@@ -380,6 +396,7 @@ def test_script_exposes_model_replay_shape_and_cache_controls() -> None:
     assert "TileXR model replay sources are incomplete" in SCRIPT
     assert "tools/moonep/model_replay_cli.py" in SCRIPT
     assert "tools/moonep/model_replay_orchestrator.py" in SCRIPT
+    assert "TILEXR_UDMA_ROOTINFO_PATH" in SCRIPT
     assert "tools/moonep/model_replay_meta.py" in SCRIPT
     assert "integrations/moonep_torch/tilexr_moonep/torch_api.py" in SCRIPT
     assert "python -m tools.moonep.model_replay_orchestrator" in SCRIPT
@@ -412,16 +429,19 @@ def test_model_replay_manages_multinode_followers_and_shared_environment() -> No
     assert '"${original_args[@]}" --node-rank "${index}"' in SCRIPT
     assert "model_replay_wait_followers" in SCRIPT
     assert 'model_replay_follower_logs+=("${log_path}")' in SCRIPT
+    assert "TILEXR_CANN_HOME" in SCRIPT
+    assert "TILEXR_MOONEP_CONDA_SH" in SCRIPT
     assert "TILEXR_MINDSPEED_PREWARM_FRAMEWORK_OPS" in SCRIPT
     assert "TILEXR_MODEL_REPLAY_TILEXR_GIT_SHA" in SCRIPT
+    assert "TILEXR_MODEL_REPLAY_RANK_TABLE_FILE" in SCRIPT
     assert "MODEL_REPLAY_CACHE_GENERATION" in SCRIPT
     assert "TILEXR_MOONEP_MODEL_REPLAY_GENERATION" in SCRIPT
 
 
-def test_multinode_model_replay_defaults_model_and_replay_to_legacy_dispatch() -> None:
+def test_multinode_model_replay_defaults_model_and_replay_to_group_credit() -> None:
     preparation = SCRIPT.index("python -m tools.moonep.model_replay_orchestrator")
     default_mode = SCRIPT.index(
-        'export TILEXR_MOONEP_DISPATCH_PEER_MODE="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-legacy}"'
+        'export TILEXR_MOONEP_DISPATCH_PEER_MODE="${TILEXR_MOONEP_DISPATCH_PEER_MODE:-group_credit}"'
     )
     assert default_mode < preparation
     assert (
@@ -429,6 +449,7 @@ def test_multinode_model_replay_defaults_model_and_replay_to_legacy_dispatch() -
         in SCRIPT
     )
     assert '{ (( node_count > 1 )) || (( model_s * model_k > 32768 )); }' in SCRIPT
+    assert 'TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy is prohibited' in SCRIPT
 
 
 def test_single_node_native_launcher_defaults_to_two_udma_qps() -> None:

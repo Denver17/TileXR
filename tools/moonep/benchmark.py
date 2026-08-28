@@ -278,6 +278,8 @@ def execute_iteration(
             f"input_hidden_weighted={_weighted_checksum(torch_module, inputs['hidden'])}",
             flush=True,
         )
+    if stage_barrier is not None:
+        stage_barrier("planning")
     if timer is not None:
         timer.start()
     plan, cu_seqlens = _timed_call(

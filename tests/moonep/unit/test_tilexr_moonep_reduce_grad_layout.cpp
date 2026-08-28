@@ -107,6 +107,50 @@ void TestSharedDomainUsesBoundedActiveLanes()
         "48-QP shared domain must allocate one active lane per projection");
     Check(layout.workspaceBytes == UINT64_C(194) << 20,
         "inactive shared-domain QPs must not increase ReduceGrad workspace");
+    Check(layout.barrierPhysicalQp == TileXRMoonEp::kReduceGradInvalidPhysicalQp &&
+        layout.barrierBytes == 0,
+        "same-node layout must retain the peer-memory barrier");
+}
+
+void TestCrossNodeBarrierReservesPhysicalQp()
+{
+    const uint64_t rows[TileXRMoonEp::kReduceGradProjectionCount] = {
+        UINT64_C(14) << 20, UINT64_C(14) << 20, UINT64_C(14) << 20};
+    TileXRMoonEp::ReduceGradLayout layout {};
+    CheckStatus("48-QP cross-node layout",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 16, 8, 384, 24, rows, 48, UINT64_C(8) << 20, &layout),
+        TileXR::TILEXR_SUCCESS);
+    Check(layout.qpCount == 3 && layout.laneCount == 3 &&
+        layout.lanePhysicalQps[0] == 0 && layout.lanePhysicalQps[1] == 1 &&
+        layout.lanePhysicalQps[2] == 16 && layout.barrierPhysicalQp == 47,
+        "shared cross-node layout must retain 0/1/16 lanes and reserve QP47");
+    Check(layout.barrierBytes ==
+            16 * TileXR::TILEXR_UDMA_CACHE_LINE_SIZE &&
+        layout.barrierOffset >= layout.stagingOffset +
+            layout.laneCount * layout.laneStrideBytes &&
+        layout.workspaceBytes >= layout.barrierOffset + layout.barrierBytes,
+        "cross-node barrier token area must fit after the payload");
+
+    CheckStatus("8-QP cross-node layout",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 16, 8, 384, 24, rows, 8, UINT64_C(8) << 20, &layout),
+        TileXR::TILEXR_SUCCESS);
+    Check(layout.qpCount == 7 && layout.laneCount == 7 &&
+        layout.barrierPhysicalQp == 7,
+        "dedicated cross-node layout must reserve the final physical QP");
+
+    CheckStatus("4-QP cross-node layout",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 16, 8, 384, 24, rows, 4, UINT64_C(8) << 20, &layout),
+        TileXR::TILEXR_SUCCESS);
+    Check(layout.qpCount == 3 && layout.barrierPhysicalQp == 3,
+        "minimum supported cross-node layout must preserve three projections");
+
+    CheckStatus("3-QP cross-node layout",
+        TileXRMoonEp::TileXRMoonEpBuildReduceGradLayout(
+            0, 16, 8, 384, 24, rows, 3, UINT64_C(8) << 20, &layout),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
 }
 
 void TestMinimumRankCount()
@@ -186,6 +230,7 @@ int main()
     TestEqualProjectionAllocationAndWorkspace();
     TestProportionalAllocationIsStable();
     TestSharedDomainUsesBoundedActiveLanes();
+    TestCrossNodeBarrierReservesPhysicalQp();
     TestMinimumRankCount();
     TestSlotsMayExceedExpertsPerRank();
     TestChunkAlignment();

@@ -158,7 +158,8 @@ def test_timed_iteration_executes_torch_npu_expert_forward() -> None:
     assert buffer.planning_calls == 1
     assert buffer.dispatch_plans == [buffer.plan, buffer.plan]
     assert ops.gmm_calls == 2
-    assert events[:2] == ["expert_forward", "combine"]
+    assert events[:3] == ["planning", "expert_forward", "combine"]
+    assert events.count("planning") == 1
     assert events.count("expert_forward") == 1
     assert events.count("combine_forward_published") == 1
     assert events.count("combine_forward_consumed") == 1

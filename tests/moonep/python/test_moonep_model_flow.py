@@ -382,7 +382,11 @@ def test_model_iteration_calls_five_initial_and_five_recompute_backward_flows() 
     }
 
     sample = execute_model_iteration(
-        Buffer(), inputs, torch_module=torch, expert_compute=expert_compute
+        Buffer(),
+        inputs,
+        torch_module=torch,
+        expert_compute=expert_compute,
+        stage_barrier=lambda stage: events.append(("barrier", stage)),
     )
 
     assert Counter(name for name, _ in events) == {
@@ -394,7 +398,10 @@ def test_model_iteration_calls_five_initial_and_five_recompute_backward_flows() 
         "reduce_grad": 5,
         "expert_compute": 15,
         "synchronize": 6,
+        "barrier": 35,
     }
+    assert events[0] == ("barrier", "initial_forward_0_dispatch_forward")
+    assert events[1] == ("dispatch_forward", 0)
     reduce_positions = [
         index for index, event in enumerate(events) if event[0] == "reduce_grad"
     ]

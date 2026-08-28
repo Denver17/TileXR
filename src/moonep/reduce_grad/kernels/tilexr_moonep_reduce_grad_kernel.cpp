@@ -65,10 +65,11 @@ public:
         uint32_t lane3PhysicalQp, uint32_t lane4PhysicalQp,
         uint32_t lane5PhysicalQp, uint32_t lane6PhysicalQp,
         uint32_t lane7PhysicalQp, uint32_t transportQpCount,
-        uint32_t qpCount, uint32_t laneCount,
+        uint32_t qpCount, uint32_t laneCount, uint32_t barrierPhysicalQp,
         uint64_t laneStateBytes, uint64_t stagingOffset,
         uint64_t bankStrideBytes, uint64_t laneStrideBytes,
-        uint64_t chunkBytes, uint64_t workspaceBytes,
+        uint64_t chunkBytes, uint64_t barrierOffset,
+        uint64_t barrierBytes, uint64_t workspaceBytes,
         uint64_t waitIterations, int64_t magic)
     {
         args_ = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgs);
@@ -115,11 +116,14 @@ public:
         transportQpCount_ = transportQpCount;
         qpCount_ = qpCount;
         laneCount_ = laneCount;
+        barrierPhysicalQp_ = barrierPhysicalQp;
         laneStateBytes_ = laneStateBytes;
         stagingOffset_ = stagingOffset;
         bankStrideBytes_ = bankStrideBytes;
         laneStrideBytes_ = laneStrideBytes;
         chunkBytes_ = chunkBytes;
+        barrierOffset_ = barrierOffset;
+        barrierBytes_ = barrierBytes;
         workspaceBytes_ = workspaceBytes;
         waitIterations_ = waitIterations == 0U ? 1U : waitIterations;
         magic_ = magic;
@@ -199,6 +203,8 @@ private:
 
     __aicore__ inline bool ConfigurationValid() const
     {
+        const bool crossNode = args_->localRankSize > 0 &&
+            args_->localRankSize < rankSize_;
         if (!DataPointersValid() || expertCount_ <= 0 ||
             expertsPerRank_ <= 0 || expertCount_ != expertsPerRank_ * rankSize_ ||
             expertCount_ > INT32_MAX || prefetchSlots_ <= 0 ||
@@ -231,8 +237,27 @@ private:
             profileRegistry_->qpCount != transportQpCount_) {
             return false;
         }
+        const uint64_t payloadEnd = stagingOffset_ +
+            static_cast<uint64_t>(laneCount_) * laneStrideBytes_;
+        if (crossNode) {
+            if (barrierPhysicalQp_ >= transportQpCount_ ||
+                barrierBytes_ != static_cast<uint64_t>(rankSize_) *
+                    TileXR::TILEXR_UDMA_CACHE_LINE_SIZE ||
+                barrierOffset_ < payloadEnd ||
+                barrierOffset_ % TileXR::TILEXR_UDMA_CACHE_LINE_SIZE != 0U ||
+                barrierOffset_ > workspaceBytes_ ||
+                barrierBytes_ > workspaceBytes_ - barrierOffset_) {
+                return false;
+            }
+        } else if (barrierPhysicalQp_ != kReduceGradInvalidPhysicalQp ||
+            barrierOffset_ != 0U || barrierBytes_ != 0U) {
+            return false;
+        }
         for (uint32_t lane = 0U; lane < laneCount_; ++lane) {
             if (lanePhysicalQps_[lane] >= transportQpCount_) {
+                return false;
+            }
+            if (crossNode && lanePhysicalQps_[lane] == barrierPhysicalQp_) {
                 return false;
             }
             for (uint32_t prior = 0U; prior < lane; ++prior) {
@@ -1028,6 +1053,10 @@ private:
 
     __aicore__ inline void CrossRankBarrier()
     {
+        if (barrierPhysicalQp_ != kReduceGradInvalidPhysicalQp) {
+            CrossRankRegisteredBarrier();
+            return;
+        }
         GM_ADDR shareAddrs[TileXR::TILEXR_MAX_RANK_SIZE] = {};
         AscendC::GlobalTensor<GM_ADDR> peerMemTable;
         peerMemTable.SetGlobalBuffer(&(args_->peerMems[0]),
@@ -1060,6 +1089,140 @@ private:
                 PublishStatus(kReduceGradDeviceInvalidState);
             }
         }
+    }
+
+    __aicore__ inline uint64_t BarrierValue(int32_t step) const
+    {
+        return (static_cast<uint64_t>(static_cast<uint32_t>(magic_)) <<
+            MAGIC_OFFSET) | static_cast<uint32_t>(step);
+    }
+
+    __aicore__ inline __gm__ uint64_t *BarrierToken(int32_t sourceRank) const
+    {
+        return reinterpret_cast<__gm__ uint64_t *>(workspace_ + barrierOffset_ +
+            static_cast<uint64_t>(sourceRank) *
+                TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+    }
+
+    __aicore__ inline void PublishLocalBarrierToken(uint64_t value)
+    {
+        AscendC::LocalTensor<uint64_t> token = itemBuf_.Get<uint64_t>();
+        token.SetValue(0U, value);
+        for (uint32_t word = 1U;
+            word < TileXR::TILEXR_UDMA_CACHE_LINE_SIZE / sizeof(uint64_t);
+            ++word) {
+            token.SetValue(word, 0U);
+        }
+        AscendC::GlobalTensor<uint8_t> destination;
+        destination.SetGlobalBuffer(
+            reinterpret_cast<__gm__ uint8_t *>(BarrierToken(rank_)));
+        const AscendC::DataCopyExtParams copyOut {1U,
+            static_cast<uint32_t>(TileXR::TILEXR_UDMA_CACHE_LINE_SIZE),
+            0U, 0U, 0U};
+        SyncEvent<AscendC::HardEvent::S_MTE3>(EVENT_ID3);
+        AscendC::DataCopyPad(destination,
+            token.ReinterpretCast<uint8_t>(), copyOut);
+        SyncEvent<AscendC::HardEvent::MTE3_S>(EVENT_ID3);
+    }
+
+    __aicore__ inline bool PublishRegisteredBarrierRound(int32_t step)
+    {
+        PublishLocalBarrierToken(BarrierValue(step));
+        AscendC::LocalTensor<uint8_t> wqeScratch = wqeBuf_.Get<uint8_t>();
+        uint32_t frontiers[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+        bool posted[TileXR::TILEXR_MAX_RANK_SIZE] = {};
+        const uint64_t tokenOffset = barrierOffset_ +
+            static_cast<uint64_t>(rank_) *
+                TileXR::TILEXR_UDMA_CACHE_LINE_SIZE;
+        bool ok = true;
+        for (int32_t targetRank = 0; targetRank < rankSize_; ++targetRank) {
+            if (targetRank == rank_) {
+                continue;
+            }
+            const uint32_t post = TileXR::UDMAProfilePutNbiOnQpDeferred(
+                args_, profileInfo_, profileRegistry_, wqeScratch, targetRank,
+                barrierPhysicalQp_, kReduceGradStagingRegion, tokenOffset,
+                kReduceGradStagingRegion, tokenOffset,
+                TileXR::TILEXR_UDMA_CACHE_LINE_SIZE);
+            if (post != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+                PublishStatus(kReduceGradDeviceInvalidState);
+                ok = false;
+                continue;
+            }
+            posted[targetRank] = true;
+            frontiers[targetRank] = TileXR::UDMAProfileCompletionFrontier(
+                args_, profileInfo_, profileRegistry_, targetRank,
+                barrierPhysicalQp_);
+        }
+        for (int32_t targetRank = 0; targetRank < rankSize_; ++targetRank) {
+            if (!posted[targetRank]) {
+                continue;
+            }
+            const uint32_t flush = TileXR::UDMAProfileFlushQpDoorbell(
+                args_, profileInfo_, profileRegistry_, targetRank,
+                barrierPhysicalQp_);
+            if (flush != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+                PublishStatus(kReduceGradDeviceInvalidState);
+                ok = false;
+            }
+        }
+        for (int32_t targetRank = 0; targetRank < rankSize_; ++targetRank) {
+            if (!posted[targetRank]) {
+                continue;
+            }
+            const uint32_t quiet = TileXR::UDMAProfileQuietStatusOnQpUntil(
+                args_, profileInfo_, profileRegistry_, targetRank,
+                barrierPhysicalQp_, frontiers[targetRank]);
+            if (quiet != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+                PublishStatus(quiet == TileXR::TILEXR_UDMA_STATUS_CQ_TIMEOUT ?
+                    kReduceGradDeviceUdmaTimeout : kReduceGradDeviceUdmaCqError);
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    __aicore__ inline bool WaitRegisteredBarrierRound(
+        int32_t expectedStep, bool acceptFailure)
+    {
+        const uint64_t expected = BarrierValue(expectedStep);
+        const uint64_t failure = BarrierValue(kReduceGradBarrierFailureStep);
+        for (uint64_t iteration = 0U; iteration < waitIterations_; ++iteration) {
+            bool ready = true;
+            for (int32_t sourceRank = 0; sourceRank < rankSize_; ++sourceRank) {
+                const uint64_t observed = LoadLaneToken(BarrierToken(sourceRank));
+                if (observed != expected && (!acceptFailure || observed != failure)) {
+                    ready = false;
+                    break;
+                }
+            }
+            if (ready) {
+                if (acceptFailure) {
+                    for (int32_t sourceRank = 0; sourceRank < rankSize_; ++sourceRank) {
+                        if (LoadLaneToken(BarrierToken(sourceRank)) != expected) {
+                            PublishStatus(kReduceGradDeviceInvalidState);
+                        }
+                    }
+                }
+                return true;
+            }
+        }
+        PublishStatus(kReduceGradDeviceUdmaTimeout);
+        return false;
+    }
+
+    __aicore__ inline void CrossRankRegisteredBarrier()
+    {
+        if (!PublishRegisteredBarrierRound(kReduceGradBarrierArrivalStep) ||
+            !WaitRegisteredBarrierRound(kReduceGradBarrierArrivalStep, false)) {
+            return;
+        }
+        const int32_t finalStep = DeviceStatus() == 0U ?
+            kReduceGradBarrierStep : kReduceGradBarrierFailureStep;
+        if (!PublishRegisteredBarrierRound(finalStep)) {
+            return;
+        }
+        (void)WaitRegisteredBarrierRound(kReduceGradBarrierStep, true);
     }
 
     __aicore__ inline void ClearLocalSources()
@@ -1123,11 +1286,14 @@ private:
     uint32_t transportQpCount_{0};
     uint32_t qpCount_{0};
     uint32_t laneCount_{0};
+    uint32_t barrierPhysicalQp_{kReduceGradInvalidPhysicalQp};
     uint64_t laneStateBytes_{0};
     uint64_t stagingOffset_{0};
     uint64_t bankStrideBytes_{0};
     uint64_t laneStrideBytes_{0};
     uint64_t chunkBytes_{0};
+    uint64_t barrierOffset_{0};
+    uint64_t barrierBytes_{0};
     uint64_t workspaceBytes_{0};
     uint64_t waitIterations_{1};
     int64_t magic_{0};
@@ -1165,10 +1331,11 @@ extern "C" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel(
     uint32_t lane3PhysicalQp, uint32_t lane4PhysicalQp,
     uint32_t lane5PhysicalQp, uint32_t lane6PhysicalQp,
     uint32_t lane7PhysicalQp, uint32_t transportQpCount,
-    uint32_t qpCount, uint32_t laneCount,
+    uint32_t qpCount, uint32_t laneCount, uint32_t barrierPhysicalQp,
     uint64_t laneStateBytes, uint64_t stagingOffset,
     uint64_t bankStrideBytes, uint64_t laneStrideBytes,
-    uint64_t chunkBytes, uint64_t workspaceBytes,
+    uint64_t chunkBytes, uint64_t barrierOffset,
+    uint64_t barrierBytes, uint64_t workspaceBytes,
     uint64_t waitIterations, int64_t magic)
 {
     if constexpr (g_coreType == AscendC::AIV) {
@@ -1183,9 +1350,9 @@ extern "C" __global__ __aicore__ void tilexr_moonep_reduce_grad_kernel(
             lane0PhysicalQp, lane1PhysicalQp, lane2PhysicalQp,
             lane3PhysicalQp, lane4PhysicalQp, lane5PhysicalQp,
             lane6PhysicalQp, lane7PhysicalQp, transportQpCount,
-            qpCount, laneCount, laneStateBytes, stagingOffset,
-            bankStrideBytes, laneStrideBytes, chunkBytes, workspaceBytes,
-            waitIterations, magic);
+            qpCount, laneCount, barrierPhysicalQp, laneStateBytes,
+            stagingOffset, bankStrideBytes, laneStrideBytes, chunkBytes,
+            barrierOffset, barrierBytes, workspaceBytes, waitIterations, magic);
         op.Process();
     }
 }

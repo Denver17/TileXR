@@ -40,12 +40,14 @@ constexpr uint32_t kReduceGradMaxUdmaQpCount = 8;
 constexpr uint32_t kReduceGradMaxTransportQpCount =
     TileXR::TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS;
 constexpr uint32_t kReduceGradMinMultiRankQpCount = kReduceGradProjectionCount;
+constexpr uint32_t kReduceGradInvalidPhysicalQp = UINT32_MAX;
 constexpr int64_t kReduceGradMaxAivBlockCount = 64;
 constexpr int32_t kReduceGradDeviceInvalidState = 1;
 constexpr int32_t kReduceGradDeviceUdmaTimeout = 2;
 constexpr int32_t kReduceGradDeviceUdmaCqError = 3;
 constexpr int32_t kReduceGradDeviceLeaderTimeout = 4;
 constexpr int32_t kReduceGradDeviceHelperTimeout = 5;
+constexpr int32_t kReduceGradBarrierArrivalStep = 0x5246;
 constexpr int32_t kReduceGradBarrierStep = 0x5247;
 constexpr int32_t kReduceGradBarrierFailureStep = kReduceGradBarrierStep + 1;
 
@@ -94,12 +96,15 @@ struct ReduceGradLayout {
     uint32_t transportQpCount = 0;
     uint32_t qpCount = 0;
     uint32_t laneCount = 0;
+    uint32_t barrierPhysicalQp = kReduceGradInvalidPhysicalQp;
 
     uint64_t laneStateBytes = 0;
     uint64_t stagingOffset = 0;
     uint64_t bankStrideBytes = 0;
     uint64_t laneStrideBytes = 0;
     uint64_t chunkBytes = 0;
+    uint64_t barrierOffset = 0;
+    uint64_t barrierBytes = 0;
     uint64_t workspaceBytes = 0;
 };
 
@@ -127,12 +132,15 @@ struct ReduceGradKernelArgs {
     uint32_t transportQpCount = 0;
     uint32_t qpCount = 0;
     uint32_t laneCount = 0;
+    uint32_t barrierPhysicalQp = kReduceGradInvalidPhysicalQp;
 
     uint64_t laneStateBytes = 0;
     uint64_t stagingOffset = 0;
     uint64_t bankStrideBytes = 0;
     uint64_t laneStrideBytes = 0;
     uint64_t chunkBytes = 0;
+    uint64_t barrierOffset = 0;
+    uint64_t barrierBytes = 0;
     uint64_t workspaceBytes = 0;
     uint64_t waitIterations = 0;
     int64_t magic = 0;

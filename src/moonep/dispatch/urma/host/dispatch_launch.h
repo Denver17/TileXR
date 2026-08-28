@@ -20,7 +20,7 @@ struct DispatchUrmaLaunchParams {
     int32_t *planStatus = nullptr;
     TileXRCommPtr comm = nullptr;
     aclrtStream stream = nullptr;
-    DispatchPeerMode peerMode = DispatchPeerMode::Legacy;
+    DispatchPeerMode peerMode = DispatchPeerMode::GroupCredit;
     uint32_t groupWidth = kDispatchDefaultGroupWidth;
     int64_t zeroFillRangeCount = 0;
     void *trace = nullptr;

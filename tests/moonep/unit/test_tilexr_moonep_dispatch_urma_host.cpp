@@ -108,7 +108,6 @@ void ConfigureGroupedTransport(void *workspace, uint64_t workspaceBytes)
         commArgs.udmaRegistrationGeneration;
     fullmeshView.infoDev = reinterpret_cast<GM_ADDR>(uintptr_t {0xD000});
     fullmeshView.viewDev = commArgs.udmaFullmeshPtr;
-    SetPeerMode("group");
 }
 
 TileXRMoonEpPlanV1 ValidPlan()
@@ -116,11 +115,11 @@ TileXRMoonEpPlanV1 ValidPlan()
     TileXRMoonEpPlanV1 plan {};
     plan.structSize = sizeof(plan);
     plan.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
-    plan.n = 4;
+    plan.n = 128;
     plan.r = 1;
     plan.e = 8;
     plan.b = 2;
-    plan.nvS = 4;
+    plan.nvS = 128;
     plan.k = 2;
     plan.dst = reinterpret_cast<void *>(uintptr_t {0x3000});
     plan.expertsToCopy = reinterpret_cast<void *>(uintptr_t {0x3100});
@@ -174,17 +173,17 @@ void TestPairedSingleLaunch()
     Reset();
     TileXRMoonEpPlanV1 plan = ValidPlan();
     TileXRMoonEpTensorV1 hiddenInput = Tensor(
-        reinterpret_cast<void *>(uintptr_t {0x4000}),
-        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 2, 17, 34);
+        reinterpret_cast<void *>(uintptr_t {0x400000}),
+        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 64, 17, 1088);
     TileXRMoonEpTensorV1 hiddenOutput = Tensor(
-        reinterpret_cast<void *>(uintptr_t {0x5000}),
-        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 4, 17, 68);
+        reinterpret_cast<void *>(uintptr_t {0x500000}),
+        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 128, 17, 2176);
     TileXRMoonEpTensorV1 weightInput = Tensor(
-        reinterpret_cast<void *>(uintptr_t {0x6000}),
-        TILEXR_MOONEP_DTYPE_FLOAT32, 2, 2, 2, 4);
+        reinterpret_cast<void *>(uintptr_t {0x600000}),
+        TILEXR_MOONEP_DTYPE_FLOAT32, 2, 64, 2, 128);
     TileXRMoonEpTensorV1 weightOutput = Tensor(
-        reinterpret_cast<void *>(uintptr_t {0x7000}),
-        TILEXR_MOONEP_DTYPE_FLOAT32, 1, 4, 0, 4);
+        reinterpret_cast<void *>(uintptr_t {0x700000}),
+        TILEXR_MOONEP_DTYPE_FLOAT32, 1, 128, 0, 128);
     TileXRMoonEpDispatchArgsV2 args = Args(&plan, &hiddenInput, &weightInput,
         &hiddenOutput, &weightOutput);
     aclrtStream stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
@@ -195,6 +194,8 @@ void TestPairedSingleLaunch()
         "paired Dispatch must make exactly one internal launch");
     Check(memsetCalls == 1 && synchronizeCalls == 0,
         "paired success must enqueue one reset without synchronizing");
+    Check(launchedParams.peerMode == TileXRMoonEp::DispatchPeerMode::GroupCredit,
+        "unset peer mode must default to group_credit");
     Check(launchedParams.hiddenInput == hiddenInput.data &&
         launchedParams.hiddenOutput == hiddenOutput.data &&
         launchedParams.weightInput == weightInput.data &&
@@ -211,11 +212,11 @@ void TestHiddenOnlyAndFailureBoundaries()
     Reset();
     TileXRMoonEpPlanV1 plan = ValidPlan();
     TileXRMoonEpTensorV1 hiddenInput = Tensor(
-        reinterpret_cast<void *>(uintptr_t {0x4000}),
-        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 2, 16, 32);
+        reinterpret_cast<void *>(uintptr_t {0x400000}),
+        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 64, 16, 1024);
     TileXRMoonEpTensorV1 hiddenOutput = Tensor(
-        reinterpret_cast<void *>(uintptr_t {0x5000}),
-        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 4, 16, 64);
+        reinterpret_cast<void *>(uintptr_t {0x500000}),
+        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 128, 16, 2048);
     TileXRMoonEpDispatchArgsV2 args = Args(
         &plan, &hiddenInput, nullptr, &hiddenOutput, nullptr);
     aclrtStream stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
@@ -262,6 +263,37 @@ void TestGroupedFullmeshCapability()
     CheckStatus("grouped fullmesh", TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(
         &args, stream), TILEXR_MOONEP_SUCCESS);
     Check(launchCalls == 1, "valid grouped Fullmesh must launch Dispatch");
+    Check(launchedParams.peerMode == TileXRMoonEp::DispatchPeerMode::GroupCredit,
+        "unset grouped peer mode must default to group_credit");
+
+    Reset();
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+    SetPeerMode("");
+    CheckStatus("empty grouped peer mode",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_SUCCESS);
+    Check(launchedParams.peerMode == TileXRMoonEp::DispatchPeerMode::GroupCredit,
+        "empty grouped peer mode must select group_credit");
+
+    Reset();
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+    SetPeerMode("group");
+    CheckStatus("explicit group",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_SUCCESS);
+    Check(launchedParams.peerMode == TileXRMoonEp::DispatchPeerMode::Group,
+        "explicit group peer mode must select group");
+
+    Reset();
+    ConfigureGroupedTransport(
+        args.registeredWorkspace, args.registeredWorkspaceBytes);
+    SetPeerMode("legacy");
+    CheckStatus("legacy peer mode",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
+    Check(launchCalls == 0, "legacy peer mode must prevent launch");
 
     Reset();
     ConfigureGroupedTransport(
