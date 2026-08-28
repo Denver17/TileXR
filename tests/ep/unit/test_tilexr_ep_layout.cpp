@@ -198,6 +198,20 @@ void TestMemoryCoreAllocation()
     CheckInt("one block rejected", TileXREp::TileXREpMemoryCountCoreNum(8, 8, 1), 0);
 }
 
+void TestMemoryCommunicatorRoundLayout()
+{
+    CheckInt64("memory round stride", TileXREp::kEpMemoryRoundStrideBytes,
+        TileXR::IPC_DATA_OFFSET + TileXR::IPC_BUFF_MAX_SIZE);
+    CheckInt64("memory required peer bytes", TileXREp::kEpMemoryRequiredPeerBytes,
+        2 * (TileXR::IPC_DATA_OFFSET + TileXR::IPC_BUFF_MAX_SIZE));
+    CheckInt64("memory magic one round", TileXREp::TileXREpMemoryRoundIndex(1), 1);
+    CheckInt64("memory magic two round", TileXREp::TileXREpMemoryRoundIndex(2), 0);
+    CheckInt64("memory magic three offset", TileXREp::TileXREpMemoryRoundDataOffset(3),
+        TileXREp::kEpMemoryRoundStrideBytes + TileXR::IPC_DATA_OFFSET);
+    CheckInt64("memory magic four offset", TileXREp::TileXREpMemoryRoundDataOffset(4),
+        TileXR::IPC_DATA_OFFSET);
+}
+
 void TestMemoryWindowConfig()
 {
     TileXREp::EpMemoryDispatchReferenceConfig config {};
@@ -216,8 +230,7 @@ void TestMemoryWindowConfig()
     CheckInt64("memory expert segment", config.expertPerSizeOnWin, 2048);
     CheckInt64("memory combine reserve", config.combineReserveBytes, 4096);
     CheckInt64("memory workspace", config.workspaceBytes, 1536);
-    CheckInt64("memory total window", config.totalWinSize, 535820800);
-    CheckInt64("memory half window", config.dispatchHalfBytes, 267910400);
+    CheckInt64("memory round payload", config.roundPayloadBytes, 535822336);
 
     const int sharedRet = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
         8, 0, 4, 8, 2, 8, 2, 4, 32, TileXR::TILEXR_DATA_TYPE_FP16,
@@ -239,11 +252,10 @@ void TestMemoryWindowConfig()
         8, 4, 4, 8, 2, 8, 2, 4, 32, TileXR::TILEXR_DATA_TYPE_FP16,
         TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &moeRankConfig),
         TileXR::TILEXR_SUCCESS);
-    CheckInt64("communicator workspace reservation", sharedRankConfig.workspaceBytes, 3072);
-    CheckInt64("shared and moe workspace match", sharedRankConfig.workspaceBytes, moeRankConfig.workspaceBytes);
-    CheckInt64("shared and moe total window match", sharedRankConfig.totalWinSize, moeRankConfig.totalWinSize);
-    CheckInt64("shared and moe half window match", sharedRankConfig.dispatchHalfBytes,
-        moeRankConfig.dispatchHalfBytes);
+    CheckInt64("shared rank workspace reservation", sharedRankConfig.workspaceBytes, 1536);
+    CheckInt64("moe rank workspace reservation", moeRankConfig.workspaceBytes, 3072);
+    CheckInt64("shared and moe round payload match", sharedRankConfig.roundPayloadBytes,
+        moeRankConfig.roundPayloadBytes);
 
     const int mxfp8Ret = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
         2, 0, 4, 33, 2, 8, 0, 0, 8, TileXR::TILEXR_DATA_TYPE_FP16,
@@ -261,43 +273,44 @@ void TestMemoryWindowConfig()
     CheckInt("combine mxfp8 memory config ret", combineMxfp8Ret, TileXR::TILEXR_SUCCESS);
     CheckInt64("combine mxfp8 blocks", combineConfig.blockCntPerToken, 3);
     CheckInt64("combine mxfp8 packed row", combineConfig.packedRowBytes, 1536);
-    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 18208);
-    CheckInt64("combine mxfp8 send UB", combineConfig.sendUbBytes, 5248);
+    CheckInt("combine mxfp8 receive buffers", combineConfig.receiveBufferNum, 2);
+    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 20288);
+    CheckInt64("combine mxfp8 send UB", combineConfig.sendUbBytes, 5344);
 
     TileXREp::EpMemoryDispatchReferenceConfig dispatchMxfp8Config {};
     const int dispatchMxfp8Ret = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16,
         TileXR::TILEXR_DATA_TYPE_FP8E4M3, 4, 48, &dispatchMxfp8Config);
     CheckInt("dispatch mxfp8 UB config ret", dispatchMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("dispatch mxfp8 all-to-all UB", dispatchMxfp8Config.allToAllUbBytes, 12288);
+    CheckInt64("dispatch mxfp8 all-to-all UB", dispatchMxfp8Config.allToAllUbBytes, 12416);
 
     TileXREp::EpMemoryDispatchReferenceConfig dispatchNonQuantConfig {};
     const int dispatchNonQuantRet = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16,
         TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &dispatchNonQuantConfig);
     CheckInt("dispatch non-quant UB config ret", dispatchNonQuantRet, TileXR::TILEXR_SUCCESS);
-    CheckInt64("dispatch non-quant all-to-all UB", dispatchNonQuantConfig.allToAllUbBytes, 12576);
+    CheckInt64("dispatch non-quant all-to-all UB", dispatchNonQuantConfig.allToAllUbBytes, 12384);
 
     TileXREp::EpMemoryCombineReferenceConfig combineNonQuantConfig {};
     const int combineNonQuantRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 0, 48,
         &combineNonQuantConfig);
     CheckInt("combine non-quant UB config ret", combineNonQuantRet, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine non-quant send UB", combineNonQuantConfig.sendUbBytes, 4992);
+    CheckInt64("combine non-quant send UB", combineNonQuantConfig.sendUbBytes, 5088);
 
     TileXREp::EpMemoryCombineReferenceConfig combineSharedMxfp8Config {};
     const int combineSharedMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         2, 0, 4, 1024, 2, 1, 1, 1, 8, TileXR::TILEXR_DATA_TYPE_FP16, 4, 48,
         &combineSharedMxfp8Config);
     CheckInt("combine shared mxfp8 UB config ret", combineSharedMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine shared mxfp8 receive UB", combineSharedMxfp8Config.receiveUbBytes, 18464);
+    CheckInt64("combine shared mxfp8 receive UB", combineSharedMxfp8Config.receiveUbBytes, 20544);
 
     TileXREp::EpMemoryCombineReferenceConfig combineLargeMxfp8Config {};
     const int combineLargeMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         16, 0, 256, 7168, 16, 64, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_FP16, 4, 200,
         &combineLargeMxfp8Config);
     CheckInt("combine large mxfp8 UB config ret", combineLargeMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine large mxfp8 receive UB", combineLargeMxfp8Config.receiveUbBytes, 127936);
+    CheckInt64("combine large mxfp8 receive UB", combineLargeMxfp8Config.receiveUbBytes, 142368);
 
     const int combineInvalidQuantRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 2, 48,
@@ -314,12 +327,27 @@ void TestMemoryWindowConfig()
     CheckInt64("large bf16 memory dispatch payload", largeDispatchConfig.combineReserveBytes +
         largeDispatchConfig.rscvStatusNum * largeDispatchConfig.expertPerSizeOnWin, 157286400);
 
+    TileXREp::EpMemoryDispatchReferenceConfig fullRoundDispatchConfig {};
+    const int fullRoundDispatchRet = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
+        16, 0, 256, 3584, 16, 128, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_BFP16,
+        TileXR::TILEXR_DATA_TYPE_BFP16, 0, 200, &fullRoundDispatchConfig);
+    CheckInt("dispatch accepts payload larger than old half", fullRoundDispatchRet, TileXR::TILEXR_SUCCESS);
+    CheckInt64("dispatch full round payload usage", fullRoundDispatchConfig.combineReserveBytes +
+        fullRoundDispatchConfig.rscvStatusNum * fullRoundDispatchConfig.expertPerSizeOnWin, 283115520);
+
     TileXREp::EpMemoryCombineReferenceConfig largeCombineConfig {};
     const int largeCombineRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         16, 0, 256, 3584, 16, 64, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_BFP16, 0, 200,
         &largeCombineConfig);
     CheckInt("large bf16 memory combine config ret", largeCombineRet, TileXR::TILEXR_SUCCESS);
     CheckInt64("large bf16 memory combine reserve", largeCombineConfig.combineReserveBytes, 31457280);
+
+    TileXREp::EpMemoryCombineReferenceConfig fullRoundCombineConfig {};
+    const int fullRoundCombineRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+        16, 0, 4096, 3584, 16, 64, 0, 0, 65536, TileXR::TILEXR_DATA_TYPE_BFP16, 0, 200,
+        &fullRoundCombineConfig);
+    CheckInt("combine accepts reserve larger than old half", fullRoundCombineRet, TileXR::TILEXR_SUCCESS);
+    CheckInt64("combine full round reserve", fullRoundCombineConfig.combineReserveBytes, 503316480);
 }
 
 void TestMemoryWindowRejectsInvalidConfig()
@@ -372,6 +400,7 @@ int main()
     TestWindowConfig();
     TestRejectsInvalidConfig();
     TestMemoryCoreAllocation();
+    TestMemoryCommunicatorRoundLayout();
     TestMemoryWindowConfig();
     TestMemoryWindowRejectsInvalidConfig();
     return g_failures == 0 ? 0 : 1;

@@ -15,6 +15,11 @@ endif()
 set(TILEXR_EP_SOC_TYPE "${TILEXR_EP_DEFAULT_SOC_TYPE}" CACHE STRING "TileXR EP kernel SOC type")
 string(TOLOWER "${TILEXR_EP_SOC_TYPE}" TILEXR_EP_SOC_TYPE_LOWER)
 
+option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
+    "Enable per-AIV profiling in the EP Combine Memory kernel" OFF)
+option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
+    "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
+
 if(TILEXR_EP_SOC_TYPE_LOWER MATCHES "ascend950|ascend910_9|ascend910-9|a5")
     set(TILEXR_EP_NPU_ARCH "dav-3510")
     set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
@@ -112,7 +117,7 @@ add_custom_target(tilexr_ep_dispatch_kernel ALL DEPENDS "${TILEXR_EP_DISPATCH_KE
 
 set_source_files_properties("${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" PROPERTIES LANGUAGE CCE)
 set_source_files_properties("${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_CURRENT_SOURCE_DIR}/common/ep_dispatch_memory_profile.h;${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 add_library(tilexr_ep_dispatch_memory_kernel_tmp OBJECT
     "${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}")
 target_compile_options(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
@@ -130,6 +135,10 @@ target_compile_options(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
     ${TILEXR_EP_KERNEL_INCLUDES})
 target_compile_definitions(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
     CATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH})
+if(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
+    target_compile_definitions(tilexr_ep_dispatch_memory_kernel_tmp PRIVATE
+        TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING=1)
+endif()
 
 set(TILEXR_EP_DISPATCH_MEMORY_TMP_OBJECT
     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/tilexr_ep_dispatch_memory_kernel_tmp.dir/kernels/tilexr_ep_dispatch_memory_kernel.cpp.o")
@@ -194,7 +203,7 @@ add_custom_target(tilexr_ep_combine_kernel ALL DEPENDS "${TILEXR_EP_COMBINE_KERN
 
 set_source_files_properties("${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" PROPERTIES LANGUAGE CCE)
 set_source_files_properties("${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" PROPERTIES
-    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+    OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.h;${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h;${CMAKE_CURRENT_SOURCE_DIR}/common/ep_combine_memory_profile.h;${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h;${CMAKE_SOURCE_DIR}/src/include/comm_args.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h;${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 add_library(tilexr_ep_combine_memory_kernel_tmp OBJECT
     "${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}")
 target_compile_options(tilexr_ep_combine_memory_kernel_tmp PRIVATE
@@ -212,6 +221,10 @@ target_compile_options(tilexr_ep_combine_memory_kernel_tmp PRIVATE
     ${TILEXR_EP_KERNEL_INCLUDES})
 target_compile_definitions(tilexr_ep_combine_memory_kernel_tmp PRIVATE
     CATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH})
+if(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
+    target_compile_definitions(tilexr_ep_combine_memory_kernel_tmp PRIVATE
+        TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING=1)
+endif()
 
 set(TILEXR_EP_COMBINE_MEMORY_TMP_OBJECT
     "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/tilexr_ep_combine_memory_kernel_tmp.dir/kernels/tilexr_ep_combine_memory_kernel.cpp.o")

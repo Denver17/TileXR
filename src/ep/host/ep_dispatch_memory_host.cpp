@@ -36,11 +36,13 @@ bool TileXREpMemoryGlobalBs(const EpDispatchParams &params, const TileXR::CommAr
 
 int TileXREpValidateMemoryMask(const EpDispatchParams &params)
 {
+    if (params.activeMaskType == TILEXR_EP_ACTIVE_MASK_EXPERT) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     if (params.activeMaskType == TILEXR_EP_ACTIVE_MASK_NONE) {
         return params.xActiveMask == nullptr ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (params.activeMaskType == TILEXR_EP_ACTIVE_MASK_TOKEN ||
-        params.activeMaskType == TILEXR_EP_ACTIVE_MASK_EXPERT) {
+    if (params.activeMaskType == TILEXR_EP_ACTIVE_MASK_TOKEN) {
         return params.xActiveMask != nullptr ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -52,7 +54,8 @@ int TileXREpValidateDispatchMemoryConfig(const EpDispatchParams &params, const T
     uint32_t blockDim, EpMemoryDispatchReferenceConfig *config)
 {
     if (config == nullptr || commArgs.rankSize <= 0 || commArgs.rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
-        commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize) {
+        commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize ||
+        commArgs.peerMemBytes < kEpMemoryRequiredPeerBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 

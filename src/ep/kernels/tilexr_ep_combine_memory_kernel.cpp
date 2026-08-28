@@ -15,6 +15,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_memory_kernel(GM_ADDR co
         sendCountsGM == nullptr || yOutGM == nullptr || bs <= 0 || h <= 0 || topK <= 0 ||
         moeExpertNum <= 0 || sharedExpertNum < 0 || sharedExpertRankNum < 0 || globalBs <= 0 || magic <= 0 ||
         (activeMaskType != Mc2Kernel::ACTIVE_MASK_NONE && activeMaskType != Mc2Kernel::ACTIVE_MASK_TOKEN) ||
+        (activeMaskType == Mc2Kernel::ACTIVE_MASK_NONE && xActiveMaskGM != nullptr) ||
+        (activeMaskType == Mc2Kernel::ACTIVE_MASK_TOKEN && xActiveMaskGM == nullptr) ||
         (quantMode != 0 && quantMode != Mc2Kernel::MXFP8_E5M2_COMM_QUANT &&
             quantMode != Mc2Kernel::MXFP8_E4M3_COMM_QUANT) ||
         (quantMode != 0 && expertScalesGM == nullptr)) {

@@ -23,6 +23,13 @@ set(_tilexr_default_ascend_home_path "$ENV{ASCEND_HOME_PATH}")
 if(NOT _tilexr_default_ascend_home_path)
     set(_tilexr_default_ascend_home_path "/usr/local/Ascend/ascend-toolkit/latest")
 endif()
+
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_dispatch_memory_trace
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/test_dispatch_memory_trace.py")
+endif()
 set(ASCEND_HOME_PATH "${_tilexr_default_ascend_home_path}" CACHE PATH "Ascend toolkit path")
 
 set(_tilexr_default_arch "$ENV{ARCH}")
@@ -134,6 +141,8 @@ add_executable(test_tilexr_ep_layout
     ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
 )
 
+add_executable(test_tilexr_ep_expert_ids unit/test_tilexr_ep_expert_ids.cpp)
+
 add_executable(test_tilexr_ep_api_sources
     unit/test_tilexr_ep_api_sources.cpp
 )
@@ -191,6 +200,10 @@ target_include_directories(test_tilexr_ep_layout PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/demo
 )
 
+target_include_directories(test_tilexr_ep_expert_ids PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/demo
+)
+
 target_include_directories(test_tilexr_ep_host_validation PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
@@ -228,6 +241,7 @@ target_compile_definitions(test_tilexr_ep_kernel_sources PRIVATE TILEXR_SOURCE_R
 target_compile_definitions(test_tilexr_ep_plan_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
 
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
+add_test(NAME test_tilexr_ep_expert_ids COMMAND test_tilexr_ep_expert_ids)
 add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
 add_test(NAME test_tilexr_ep_kernel_sources COMMAND test_tilexr_ep_kernel_sources)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
@@ -242,6 +256,7 @@ add_test(NAME test_tilexr_moonep_planner_compat COMMAND test_tilexr_moonep_plann
 
 install(TARGETS
     test_tilexr_ep_layout
+    test_tilexr_ep_expert_ids
     test_tilexr_ep_api_sources
     test_tilexr_ep_kernel_sources
     test_tilexr_ep_host_validation
@@ -270,6 +285,7 @@ if(BUILD_TILEXR_EP_DEMO)
 
     target_include_directories(tilexr_ep_dispatch_demo PRIVATE
         "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}"
+        "${TILEXR_ROOT}/src/ep/common"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime"

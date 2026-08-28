@@ -3,17 +3,10 @@
 
 #include <cstdint>
 
+#include "ep_memory_window.h"
 #include "tilexr_types.h"
 
 namespace TileXREp {
-
-constexpr int64_t kEpMemoryStateWindowBytes = 1024 * 1024;
-constexpr int64_t kEpMemoryWindowAlignmentBytes = 32;
-constexpr int64_t kEpMemorySplitBlockBytes = 512;
-constexpr int64_t kEpMemorySplitPayloadBytes = 480;
-constexpr int64_t kEpMemoryFullUbBytes = 190 * 1024;
-constexpr uint32_t kEpMemoryMaxCountCoreNum = 8;
-constexpr uint32_t kEpMemoryMaxVectorCoreNum = 200;
 
 struct EpMemoryDispatchReferenceConfig {
     int64_t localExpertNum = 0;
@@ -30,8 +23,7 @@ struct EpMemoryDispatchReferenceConfig {
     int64_t expertPerSizeOnWin = 0;
     int64_t combineReserveBytes = 0;
     int64_t workspaceBytes = 0;
-    int64_t totalWinSize = 0;
-    int64_t dispatchHalfBytes = 0;
+    int64_t roundPayloadBytes = 0;
     int64_t maxSizeForUbBuffer = 0;
     int64_t totalUbSize = 0;
     int64_t allToAllUbBytes = 0;
@@ -40,12 +32,12 @@ struct EpMemoryDispatchReferenceConfig {
 struct EpMemoryCombineReferenceConfig {
     int64_t moeExpertNumPerRank = 0;
     uint32_t blockDim = 0;
+    uint32_t receiveBufferNum = 0;
     int64_t blockCntPerToken = 0;
     int64_t packedRowBytes = 0;
     int64_t combineReserveBytes = 0;
     int64_t workspaceBytes = 0;
-    int64_t totalWinSize = 0;
-    int64_t combineHalfBytes = 0;
+    int64_t roundPayloadBytes = 0;
     int64_t receiveUbBytes = 0;
     int64_t sendUbBytes = 0;
 };

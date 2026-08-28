@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TILEXR_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MODE="${1:-source-only}"
+COMBINE_PROFILE_OPTION="${TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING:-OFF}"
+DISPATCH_PROFILE_OPTION="${TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING:-OFF}"
 
 : "${ASCEND_HOME_PATH:=}"
 : "${LD_LIBRARY_PATH:=}"
@@ -15,7 +17,9 @@ case "${MODE}" in
         ROOT_BUILD_DIR="${TILEXR_ROOT}/build_ep"
         cmake -S "${TILEXR_ROOT}" -B "${ROOT_BUILD_DIR}" \
             -DCMAKE_INSTALL_PREFIX="${TILEXR_ROOT}/install" \
-            -DTILEXR_BUILD_EP=ON
+            -DTILEXR_BUILD_EP=ON \
+            -DTILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING="${COMBINE_PROFILE_OPTION}" \
+            -DTILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING="${DISPATCH_PROFILE_OPTION}"
         cmake --build "${ROOT_BUILD_DIR}" --target install -j"$(nproc)"
         DEMO_OPTION="-DBUILD_TILEXR_EP_DEMO=ON"
         ;;
@@ -40,4 +44,6 @@ cmake -S "${SCRIPT_DIR}" -B "${BUILD_DIR}" \
 cmake --build "${BUILD_DIR}" --target install -j"$(nproc)"
 
 echo "TileXR EP test build complete (${MODE})."
+echo "EP Combine Memory profiling: ${COMBINE_PROFILE_OPTION}"
+echo "EP Dispatch Memory profiling: ${DISPATCH_PROFILE_OPTION}"
 echo "Installed test binaries: ${INSTALL_DIR}/bin"

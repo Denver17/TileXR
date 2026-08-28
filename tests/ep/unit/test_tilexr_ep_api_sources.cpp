@@ -283,6 +283,27 @@ void TestDispatchDemoUsesHostBarrierBeforeValidation()
     CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo, "dispatch synchronized");
 }
 
+void TestDispatchDemoPairsMemoryRounds()
+{
+    std::string demo;
+    if (ReadFile("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", &demo)) {
+        CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+            "runMode == DemoRunMode::DISPATCH_COMBINE && !perfMode");
+        CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+            "for (int loop = 0; loop < loopCount; ++loop) {");
+        CheckContains("tests/ep/demo/tilexr_ep_dispatch_demo.cpp", demo,
+            "aclrtSynchronizeStream dispatch/combine");
+    }
+
+    std::string validation;
+    if (ReadFile("tests/ep/run_memory_round_validation_remote.sh", &validation)) {
+        CheckContains("tests/ep/run_memory_round_validation_remote.sh", validation,
+            "TILEXR_EP_DEMO_PERF=\"${perf_mode}\"");
+        CheckContains("tests/ep/run_memory_round_validation_remote.sh", validation,
+            "TILEXR_EP_DEMO_WARMUP=0");
+    }
+}
+
 void TestNoForbiddenDependencies()
 {
     const std::vector<std::string> paths = {
@@ -329,6 +350,7 @@ int main()
     TestDemoRunnerSelectsBackendForSoc();
     TestDispatchDemoRegistersAlignedUdmaWorkspace();
     TestDispatchDemoUsesHostBarrierBeforeValidation();
+    TestDispatchDemoPairsMemoryRounds();
     TestNoForbiddenDependencies();
     return g_failures == 0 ? 0 : 1;
 }

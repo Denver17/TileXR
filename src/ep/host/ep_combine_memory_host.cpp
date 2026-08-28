@@ -44,7 +44,8 @@ int TileXREpValidateCombineMemoryConfig(const EpCombineParams &params, const Til
     uint32_t blockDim, EpMemoryCombineReferenceConfig *config)
 {
     if (config == nullptr || commArgs.rankSize <= 0 || commArgs.rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
-        commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize) {
+        commArgs.rank < 0 || commArgs.rank >= commArgs.rankSize ||
+        commArgs.peerMemBytes < kEpMemoryRequiredPeerBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {

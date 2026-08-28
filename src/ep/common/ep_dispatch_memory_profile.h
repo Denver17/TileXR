@@ -1,0 +1,114 @@
+#ifndef TILEXR_EP_COMMON_EP_DISPATCH_MEMORY_PROFILE_H
+#define TILEXR_EP_COMMON_EP_DISPATCH_MEMORY_PROFILE_H
+
+#include <cstdint>
+
+namespace TileXREp {
+
+constexpr uint32_t kEpDispatchMemoryProfileMarker = 0x45504450U; // EPDP
+constexpr uint16_t kEpDispatchMemoryProfileVersion = 1U;
+constexpr uint32_t kEpDispatchMemoryProfileCyclesPerUs = 1000U;
+constexpr uint32_t kEpDispatchMemoryProfileTimePointCapacity = 40U;
+constexpr uint32_t kEpDispatchMemoryProfileMetricCapacity = 16U;
+
+enum EpDispatchMemoryProfileCoreRole : uint32_t {
+    EP_DISPATCH_MEMORY_ROLE_SENDER = 0U,
+    EP_DISPATCH_MEMORY_ROLE_COUNT_CUMSUM = 1U,
+};
+
+enum EpDispatchMemoryProfileTimePointIndex : uint32_t {
+    EP_DISPATCH_MEMORY_TIME_INIT_BEGIN = 0U,
+    EP_DISPATCH_MEMORY_TIME_STATIC_INIT_END,
+    EP_DISPATCH_MEMORY_TIME_ROUTE_PREPARE_END,
+    EP_DISPATCH_MEMORY_TIME_COUNT_PUBLISH_END,
+    EP_DISPATCH_MEMORY_TIME_SEND_BUFFER_INIT_END,
+    EP_DISPATCH_MEMORY_TIME_SEND_ISSUE_END,
+    EP_DISPATCH_MEMORY_TIME_COUNT_STATUS_WAIT_END,
+    EP_DISPATCH_MEMORY_TIME_CUMSUM_PUBLISH_END,
+    EP_DISPATCH_MEMORY_TIME_PRE_LOCAL_BARRIER_END,
+    EP_DISPATCH_MEMORY_TIME_LOCAL_COPY_INIT_END,
+    EP_DISPATCH_MEMORY_TIME_CUMSUM_GATE_END,
+    EP_DISPATCH_MEMORY_TIME_RECEIVE_METADATA_END,
+    EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY,
+    EP_DISPATCH_MEMORY_TIME_ALL_PAYLOADS_READY,
+    EP_DISPATCH_MEMORY_TIME_OUTPUT_DRAIN_END,
+    EP_DISPATCH_MEMORY_TIME_FLAG_CLEAR_ISSUE_END,
+    EP_DISPATCH_MEMORY_TIME_LOCAL_COPY_END,
+    EP_DISPATCH_MEMORY_TIME_FINAL_BARRIER_END,
+    EP_DISPATCH_MEMORY_TIME_FINAL_END,
+};
+
+constexpr uint32_t kEpDispatchMemoryProfileTimePointCount =
+    EP_DISPATCH_MEMORY_TIME_FINAL_END + 1U;
+
+enum EpDispatchMemoryProfileDiagnosticIndex : uint32_t {
+    EP_DISPATCH_MEMORY_DIAG_ASSIGNED_ROUTES = kEpDispatchMemoryProfileTimePointCount,
+    EP_DISPATCH_MEMORY_DIAG_ISSUED_ROUTES,
+    EP_DISPATCH_MEMORY_DIAG_COUNT_RECORDS,
+    EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT,
+    EP_DISPATCH_MEMORY_DIAG_SEND_BUFFER_NUM,
+    EP_DISPATCH_MEMORY_DIAG_STATUS_POLL_ATTEMPTS,
+    EP_DISPATCH_MEMORY_DIAG_STATUS_POLL_MISSES,
+    EP_DISPATCH_MEMORY_DIAG_CUMSUM_POLL_ATTEMPTS,
+    EP_DISPATCH_MEMORY_DIAG_CUMSUM_GATE_ATTEMPTS,
+    EP_DISPATCH_MEMORY_DIAG_VALID_EXPERTS,
+    EP_DISPATCH_MEMORY_DIAG_RECEIVE_BATCHES,
+    EP_DISPATCH_MEMORY_DIAG_RECEIVE_TOKENS,
+    EP_DISPATCH_MEMORY_DIAG_PAYLOAD_POLL_ATTEMPTS,
+    EP_DISPATCH_MEMORY_DIAG_PAYLOAD_POLL_MISSES,
+    EP_DISPATCH_MEMORY_DIAG_MAX_COPY_TOKEN_COUNT,
+    EP_DISPATCH_MEMORY_DIAG_BLOCKS_PER_TOKEN,
+};
+
+enum EpDispatchMemoryProfileMetricIndex : uint32_t {
+    EP_DISPATCH_MEMORY_METRIC_ROUTE_PREPARE = 0U,
+    EP_DISPATCH_MEMORY_METRIC_COUNT_COMPUTE,
+    EP_DISPATCH_MEMORY_METRIC_COUNT_STORE_ISSUE,
+    EP_DISPATCH_MEMORY_METRIC_DISPATCH_INPUT_LOAD,
+    EP_DISPATCH_MEMORY_METRIC_DISPATCH_QUANT,
+    EP_DISPATCH_MEMORY_METRIC_DISPATCH_PACK,
+    EP_DISPATCH_MEMORY_METRIC_DISPATCH_STORE_ISSUE,
+    EP_DISPATCH_MEMORY_METRIC_STATUS_FLAG_LOAD,
+    EP_DISPATCH_MEMORY_METRIC_STATUS_FLAG_REDUCE,
+    EP_DISPATCH_MEMORY_METRIC_CUMSUM_PEER_WAIT,
+    EP_DISPATCH_MEMORY_METRIC_CUMSUM_GATE_WAIT,
+    EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_LOAD,
+    EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_REDUCE,
+    EP_DISPATCH_MEMORY_METRIC_PAYLOAD_LOAD,
+    EP_DISPATCH_MEMORY_METRIC_OUTPUT_STORE_ISSUE,
+    EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_CLEAR_ISSUE,
+};
+
+constexpr uint32_t kEpDispatchMemoryProfileMetricCount =
+    EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_CLEAR_ISSUE + 1U;
+
+struct alignas(64) EpDispatchMemoryProfileRecord {
+    uint32_t marker;
+    uint16_t version;
+    uint16_t recordBytes;
+    uint32_t rank;
+    uint32_t core;
+    uint32_t blockDim;
+    uint32_t coreRole;
+    uint32_t timePointCount;
+    uint32_t metricCount;
+    uint64_t generation;
+    uint64_t timePoint[kEpDispatchMemoryProfileTimePointCapacity];
+    uint64_t metric[kEpDispatchMemoryProfileMetricCapacity];
+};
+
+static_assert(kEpDispatchMemoryProfileTimePointCount <
+        kEpDispatchMemoryProfileTimePointCapacity,
+    "EP Dispatch Memory diagnostics require reserved timestamp slots");
+static_assert(EP_DISPATCH_MEMORY_DIAG_BLOCKS_PER_TOKEN <
+        kEpDispatchMemoryProfileTimePointCapacity,
+    "EP Dispatch Memory diagnostics exceed the profile record");
+static_assert(kEpDispatchMemoryProfileMetricCount <=
+        kEpDispatchMemoryProfileMetricCapacity,
+    "EP Dispatch Memory metrics exceed the profile record");
+static_assert(sizeof(EpDispatchMemoryProfileRecord) == 512U,
+    "EP Dispatch Memory profile record ABI changed");
+
+} // namespace TileXREp
+
+#endif // TILEXR_EP_COMMON_EP_DISPATCH_MEMORY_PROFILE_H

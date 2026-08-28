@@ -151,6 +151,7 @@ TileXR::CommArgs ValidCommArgs()
     args.localRankSize = args.rankSize;
     args.peerMems[0] = reinterpret_cast<GM_ADDR>(0x10000000);
     args.peerMems[1] = reinterpret_cast<GM_ADDR>(0x20000000);
+    args.peerMemBytes = TileXREp::kEpMemoryRequiredPeerBytes;
     return args;
 }
 
@@ -164,6 +165,7 @@ TileXR::CommArgs CrossNodeCommArgs()
     for (int rank = 0; rank < args.rankSize; ++rank) {
         args.peerMems[rank] = reinterpret_cast<GM_ADDR>(0x10000000 + rank * 0x10000000);
     }
+    args.peerMemBytes = TileXREp::kEpMemoryRequiredPeerBytes;
     return args;
 }
 
@@ -236,6 +238,10 @@ void TestCommValidation()
     CheckInt("cross-node memory dispatch config", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
+    commArgs.peerMemBytes = TileXREp::kEpMemoryRequiredPeerBytes - 1;
+    CheckInt("memory dispatch rejects undersized peer memory", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+
     commArgs = CrossNodeCommArgs();
     commArgs.peerMems[1] = nullptr;
     CheckInt("cross-node memory dispatch missing peer mem", ValidateMemoryDispatch(params, commArgs),
@@ -307,8 +313,8 @@ void TestCommValidation()
     params.xActiveMask = expertMask;
     params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_EXPERT;
     commArgs = ValidCommArgs();
-    CheckInt("memory expert mask supported", ValidateMemoryDispatch(params, commArgs),
-        TileXR::TILEXR_SUCCESS);
+    CheckInt("memory expert mask rejected", ValidateMemoryDispatch(params, commArgs),
+        TileXR::TILEXR_ERROR_NOT_SUPPORT);
 
     params = ValidV2Params();
     params.epWorldSize = 8;
@@ -399,6 +405,12 @@ void TestCombineValidation()
     CheckInt("memory combine supports mxfp8 e5m2",
         TileXREp::TileXREpValidateCombineMemoryConfig(params, commArgs, 48, &memoryConfig),
         TileXR::TILEXR_SUCCESS);
+
+    commArgs.peerMemBytes = TileXREp::kEpMemoryRequiredPeerBytes - 1;
+    CheckInt("memory combine rejects undersized peer memory",
+        TileXREp::TileXREpValidateCombineMemoryConfig(params, commArgs, 48, &memoryConfig),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    commArgs = ValidCommArgs();
 
     params = ValidMemoryCombineMxfp8Params(4);
     CheckInt("memory combine supports mxfp8 e4m3",

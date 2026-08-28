@@ -5,6 +5,9 @@ and `ops-transformer`. The memory backend uses TileXR peer-memory windows for bo
 dispatch/combine, while the UDMA backend uses TileXR-registered workspaces. Memory generally performs better for
 small transfers, while UDMA generally performs better for large transfers.
 
+Internal Memory classes, profiling artifacts, trace tools, and test helpers use unversioned names. Version suffixes
+are reserved for public ABI compatibility and MoonEP-owned identifiers.
+
 ## Source-Only Tests
 
 From `tests/ep`:
@@ -79,10 +82,13 @@ The run modes behave as follows:
 - `dispatch_combine`: host constructs dispatch inputs and expected final output, runs dispatch `loop_count` times,
   then passes the final `expandXOut`, assist tuples, and counts directly to one combine call.
 
-The expert modes are `uniform`, `random`, and `explicit`. `uniform` assigns the flattened token/topK routes to
-experts in deterministic round-robin order. `random` uses a reproducible per-token random permutation and selects
-the first `topk` expert IDs; set `expert_seed` to change it. `explicit` uses `expert_ids` and requires exactly
-`bs * topk` IDs. Expert IDs are in `[0, moeExpertNum - 1]`, and `topk` must not exceed `moeExpertNum`.
+The expert modes are `uniform`, `random`, and `explicit`. `uniform` follows the commercial balanced-routing input:
+experts are ordered by local expert index across destination MoE ranks, and EP rank `r` takes `bs * topk` entries
+from the cyclic order starting at `r * bs * topk`. `random` samples `topk` distinct IDs from the full MoE expert
+range for every global token; `expert_seed` makes the generated tables reproducible while different EP ranks use
+different tables. `explicit` uses `expert_ids` and requires exactly `bs * topk` IDs. Expert IDs are in
+`[0, moeExpertNum - 1]`, and `topk` must not exceed `moeExpertNum`. Shared-expert routes are generated separately
+and are not included in these MoE expert-ID tables.
 
 ### MXFP8 Golden Tensors
 
@@ -130,7 +136,7 @@ The memory dispatch path ports the A5 full-mesh dispatch algorithm and launches 
 same-type FP16/BF16 dispatch and MXFP8 quantized dispatch (`quant_mode=4`) to E4M3 or E5M2. MXFP8 uses one E8M0
 scale per 32 hidden elements, pads the scale count to an even number, and returns the scales through
 `dynamicScalesOut`. The path currently requires TP size one. It supports ordinary MoE experts, shared experts
-deployed on one or more ranks per shared expert, token masks shaped `[bs]`, and expert masks shaped `[bs, topK]`.
+deployed on one or more ranks per shared expert, and token masks shaped `[bs]`.
 The reference state/data windows and receive-count workspace are carved from TileXR IPC
 peer memory internally; callers do not provide a workspace.
 
@@ -146,10 +152,11 @@ TILEXR_EP_DEMO_IMPL=memory \
   bash demo/run_tilexr_ep_dispatch_demo.sh 2
 ```
 
-The fourth argument is the loop count and defaults to `100`. In dispatch and dispatch+combine modes it controls the
-number of dispatch calls; in combine-only mode it controls the number of combine calls. Each repeated call reaches
-a stream/rank completion point before its communication window is reused, and only the final output is copied back.
-For example, this runs 100 memory dispatches followed by one memory combine:
+The fourth argument is the loop count and defaults to `100`. In dispatch-only or combine-only mode it controls the
+number of operator calls. In dispatch+combine mode it controls the number of paired rounds, with each dispatch
+immediately followed by the combine that consumes its outputs. Each repeated call reaches a stream/rank completion
+point before its communication window is reused, and only the final output is copied back. For example, this runs
+100 paired memory dispatch+combine rounds:
 
 ```bash
 bash demo/run_tilexr_ep_dispatch_demo.sh 8 8 0 100 memory
@@ -159,18 +166,25 @@ Set `TILEXR_EP_DEMO_LOOP=<n>` when using the environment instead of the fourth a
 `1` for a single dispatch+combine smoke test.
 
 For device-event timing, set `TILEXR_EP_DEMO_PERF=1`. `TILEXR_EP_DEMO_WARMUP` controls the warmup count and defaults
-to `20`; `loop_count` is then the number of measured iterations. Performance mode supports dispatch-only or
+to `20`; `loop_count` defaults to `100`. After warmup and a rank barrier, one event pair encloses all measured
+iterations and the reported average is `batch_elapsed / loop_count`. This approximates operator latency while also
+reflecting any device idle gaps between direct host submissions. Performance mode supports dispatch-only or
 combine-only execution, not `dispatch_combine`.
 
-The current demo accepts `TILEXR_EP_DEMO_ACTIVE_MASK_TYPE=none|token`. The legacy
-`TILEXR_EP_DEMO_ACTIVE_MASK=1` setting remains an alias for token masking. The memory dispatch API and kernel also
-support expert masks shaped `[bs, topK]`, but the demo correctness path does not currently accept expert-mask mode.
+The current demo and Memory API accept `TILEXR_EP_DEMO_ACTIVE_MASK_TYPE=none|token`. The legacy
+`TILEXR_EP_DEMO_ACTIVE_MASK=1` setting remains an alias for token masking. Expert-mask mode is unsupported by the
+Memory backend.
 Use `TILEXR_EP_DEMO_DTYPE=fp16|bf16` to select the input/output data type. For example:
 
 ```bash
 TILEXR_EP_DEMO_IMPL=memory TILEXR_EP_DEMO_ACTIVE_MASK_TYPE=token TILEXR_EP_DEMO_DTYPE=bf16 \
   bash demo/run_tilexr_ep_dispatch_demo.sh 2
 ```
+
+For sparse token masks, Dispatch compacts expert IDs for counting but preserves each active token's original token
+index in the assist triple. Combine must skip flag polling for inactive tokens and write zero rows for them. When
+Kernel UB buffers change, keep the Host reference estimator synchronized with every `InitBuffer` allocation; source
+contract tests complement, but do not replace, target-toolchain compilation.
 
 ## Remote Verification
 

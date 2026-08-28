@@ -98,7 +98,23 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
     if (!AddInt64(sharedExpertRankNum, moeExpertNum, &totalExpertNum)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    next.aivUsedCumSum = TileXREpMemoryCountCoreNum(totalExpertNum, next.rscvStatusNum, blockDim);
+    const bool useAllCoreCount = bs < static_cast<int64_t>(kEpMemoryAllCoreCountBsThreshold);
+    if (useAllCoreCount) {
+        uint64_t count = static_cast<uint64_t>(next.rscvStatusNum) /
+            kEpMemoryCumsumStatusPerCore;
+        if (static_cast<uint64_t>(next.rscvStatusNum) %
+            kEpMemoryCumsumStatusPerCore != 0U) {
+            ++count;
+        }
+        count = std::max<uint64_t>(count, 1U);
+        count = std::min<uint64_t>(count, blockDim / 2U);
+        count = std::min<uint64_t>(count, kEpMemoryMaxCountCoreNum);
+        count = std::min<uint64_t>(count, static_cast<uint64_t>(next.rscvStatusNum));
+        next.aivUsedCumSum = static_cast<uint32_t>(count);
+    } else {
+        next.aivUsedCumSum = TileXREpMemoryCountCoreNum(
+            totalExpertNum, next.rscvStatusNum, blockDim);
+    }
     if (next.aivUsedCumSum == 0 || next.aivUsedCumSum >= blockDim) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -165,43 +181,38 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    int64_t workspaceStatusNum = 0;
     int64_t workspaceRawBytes = 0;
-    if (!MulInt64(rankSize, moeExpertNumPerRank, &workspaceStatusNum) ||
-        !MulInt64(static_cast<int64_t>(blockDim), workspaceStatusNum, &workspaceRawBytes) ||
+    if (!MulInt64(static_cast<int64_t>(blockDim), next.rscvStatusNum, &workspaceRawBytes) ||
         !MulInt64(workspaceRawBytes, static_cast<int64_t>(sizeof(int32_t)), &workspaceRawBytes) ||
         !AlignUpInt64(workspaceRawBytes, kEpMemoryWindowAlignmentBytes, &next.workspaceBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    next.totalWinSize = TileXR::IPC_BUFF_MAX_SIZE - kEpMemoryStateWindowBytes - next.workspaceBytes;
-    if (next.totalWinSize <= 0) {
+    next.roundPayloadBytes = TileXR::IPC_BUFF_MAX_SIZE - kEpMemoryStateWindowBytes;
+    if (next.roundPayloadBytes <= 0 ||
+        next.workspaceBytes > static_cast<int64_t>(kEpMemoryDispatchDfxOffset)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    next.dispatchHalfBytes = next.totalWinSize / 2;
 
     int64_t dispatchDataBytes = 0;
-    int64_t requiredHalfBytes = 0;
+    int64_t requiredRoundBytes = 0;
+    int64_t statusBytes = 0;
+    const int64_t workspaceStartOffset =
+        static_cast<int64_t>(kEpMemoryDispatchDfxOffset) - next.workspaceBytes;
     if (!MulInt64(next.rscvStatusNum, next.expertPerSizeOnWin, &dispatchDataBytes) ||
-        !AddInt64(next.combineReserveBytes, dispatchDataBytes, &requiredHalfBytes) ||
-        requiredHalfBytes > next.dispatchHalfBytes) {
+        !AddInt64(next.combineReserveBytes, dispatchDataBytes, &requiredRoundBytes) ||
+        !MulInt64(next.rscvStatusNum, kEpMemoryWindowAlignmentBytes, &statusBytes) ||
+        statusBytes > workspaceStartOffset || requiredRoundBytes > next.roundPayloadBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     int64_t expertIdsBytes = 0;
     int64_t expertIdsAligned = 0;
-    int64_t expertMaskRowBytes = 0;
-    int64_t expertMaskBytes = 0;
-    int64_t expertMaskHalfBytes = 0;
     if (!MulInt64(bs, topK, &expertIdsBytes) ||
         !MulInt64(expertIdsBytes, static_cast<int64_t>(sizeof(int32_t)), &expertIdsBytes) ||
-        !AlignUpInt64(expertIdsBytes, kEpMemoryWindowAlignmentBytes, &expertIdsAligned) ||
-        !AlignUpInt64(topK * static_cast<int64_t>(sizeof(bool)), kEpMemoryWindowAlignmentBytes,
-            &expertMaskRowBytes) ||
-        !MulInt64(bs, expertMaskRowBytes, &expertMaskBytes) ||
-        !MulInt64(expertMaskBytes, static_cast<int64_t>(sizeof(uint16_t)), &expertMaskHalfBytes)) {
+        !AlignUpInt64(expertIdsBytes, kEpMemoryWindowAlignmentBytes, &expertIdsAligned)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    next.maxSizeForUbBuffer = std::max(expertIdsAligned, expertMaskHalfBytes);
+    next.maxSizeForUbBuffer = expertIdsAligned;
     if (useMxfp8) {
         int64_t alignedScaleCount = 0;
         int64_t quantWorkBytes = 0;
@@ -223,9 +234,15 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
     int64_t inputBuffersPerSlotBytes = 0;
     int64_t inputPoolBytes = 0;
     int64_t expertIdsVecBytes = 0;
+    int64_t senderStatusCount = 0;
+    int64_t senderStatusBytes = 0;
     int64_t allToAllUbBytes = 2 * kEpMemoryWindowAlignmentBytes;
     int64_t term = 0;
-    if (!AlignUpInt64(inputBytes, useMxfp8 ? 128 : kEpMemoryWindowAlignmentBytes, &hAlignBytes) ||
+    if ((useAllCoreCount &&
+            (!CeilDivInt64(totalExpertNum, blockDim, &senderStatusCount) ||
+                !AlignUpInt64(senderStatusCount, 8, &senderStatusCount) ||
+                !MulInt64(senderStatusCount, kEpMemoryWindowAlignmentBytes, &senderStatusBytes))) ||
+        !AlignUpInt64(inputBytes, useMxfp8 ? 512 : kEpMemoryWindowAlignmentBytes, &hAlignBytes) ||
         !AddInt64(useMxfp8 ? hAlignBytes : packedPayloadBytes, hAlignBytes, &inputBuffersPerSlotBytes) ||
         !MulInt64(2, inputBuffersPerSlotBytes, &inputPoolBytes) ||
         !AlignUpInt64(expertIdsBytes, 256, &expertIdsVecBytes) ||
@@ -234,6 +251,7 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
         !MulInt64(2, next.maxSizeForUbBuffer, &term) || !AddInt64(allToAllUbBytes, term, &allToAllUbBytes) ||
         !AddInt64(allToAllUbBytes, expertIdsAligned, &allToAllUbBytes) ||
         (useMxfp8 && !AddInt64(allToAllUbBytes, packedPayloadBytes, &allToAllUbBytes)) ||
+        !AddInt64(allToAllUbBytes, senderStatusBytes, &allToAllUbBytes) ||
         !AddInt64(allToAllUbBytes, next.hCommuSize, &allToAllUbBytes) ||
         allToAllUbBytes > next.totalUbSize) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -259,7 +277,10 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
         !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &tokenNumBytes) ||
         !MulInt64(rankSize, static_cast<int64_t>(sizeof(float)), &term) ||
         !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &workLocalBytes) ||
-        !AlignUpInt64(totalExpertNum, 8, &statusCountAligned) ||
+        ((useAllCoreCount &&
+            (!CeilDivInt64(totalExpertNum, blockDim, &statusCountAligned) ||
+                !AlignUpInt64(statusCountAligned, 8, &statusCountAligned))) ||
+            (!useAllCoreCount && !AlignUpInt64(totalExpertNum, 8, &statusCountAligned))) ||
         !MulInt64(2, next.maxSizeForUbBuffer, &term) || !AddInt64(countUbBytes, term, &countUbBytes) ||
         !MulInt64(2, expertIdsVecBytes, &term) || !AddInt64(countUbBytes, term, &countUbBytes) ||
         !MulInt64(statusCountAligned, kEpMemoryWindowAlignmentBytes, &term) ||
@@ -282,6 +303,8 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
     int64_t receiveCountBytes = 0;
     int64_t sourceInfoBytes = 0;
     int64_t localCopyFixedBytes = kEpMemoryWindowAlignmentBytes;
+    int64_t receiverTokenBufferBytes = 0;
+    int64_t reduceWorkBytes = 0;
     const int64_t statesPerAiv = next.rscvStatusNum / blockDim +
         (next.rscvStatusNum % blockDim == 0 ? 0 : 1);
     const int64_t blockCountPerToken = next.hCommuSize / kEpMemorySplitBlockBytes;
@@ -293,11 +316,14 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
         !MulInt64(2 * static_cast<int64_t>(next.aivUsedCumSum), kEpMemoryWindowAlignmentBytes, &term) ||
         !AddInt64(localCopyFixedBytes, term, &localCopyFixedBytes) ||
         !MulInt64(3, sourceInfoBytes, &term) || !AddInt64(localCopyFixedBytes, term, &localCopyFixedBytes) ||
-        !AddInt64(localCopyFixedBytes, 2 * kEpMemoryWindowAlignmentBytes, &localCopyFixedBytes) ||
+        !MulInt64(blockCountPerToken, static_cast<int64_t>(sizeof(float)), &term) ||
+        !AlignUpInt64(term, 256, &reduceWorkBytes) ||
+        !MulInt64(2, packedPayloadBytes, &receiverTokenBufferBytes) ||
         !MulInt64(blockCountPerToken, kEpMemoryWindowAlignmentBytes, &term) ||
-        !AddInt64(localCopyFixedBytes, term, &localCopyFixedBytes) ||
+        !AddInt64(receiverTokenBufferBytes, term, &receiverTokenBufferBytes) ||
+        !AddInt64(receiverTokenBufferBytes, reduceWorkBytes, &receiverTokenBufferBytes) ||
         localCopyFixedBytes >= next.totalUbSize ||
-        next.totalUbSize - localCopyFixedBytes < next.hCommuSize) {
+        next.totalUbSize - localCopyFixedBytes < receiverTokenBufferBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -333,6 +359,7 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
     int64_t commDataBytes = 0;
     int64_t inputAlignBytes = 0;
     int64_t scaleCount = 0;
+    int64_t quantComputeScaleCount = 0;
     if (!MulInt64(h, dtypeBytes, &rowBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -342,16 +369,17 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
             !CeilDivInt64(h, 32, &scaleCount) ||
             !AlignUpInt64(scaleCount, 2, &scaleCount) ||
             !AddInt64(fp8PayloadBytes, scaleCount, &commDataBytes) ||
-            !AlignUpInt64(h, 128, &inputAlignBytes) ||
-            !MulInt64(inputAlignBytes, dtypeBytes, &inputAlignBytes)) {
+            !MulInt64(fp8PayloadBytes, dtypeBytes, &inputAlignBytes)) {
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
+        quantComputeScaleCount = fp8PayloadBytes / 32;
     } else if (!AlignUpInt64(rowBytes, kEpMemoryWindowAlignmentBytes, &inputAlignBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     } else {
         commDataBytes = rowBytes;
     }
     if (!CeilDivInt64(commDataBytes, kEpMemorySplitPayloadBytes, &next.blockCntPerToken) ||
+        next.blockCntPerToken > std::numeric_limits<uint8_t>::max() ||
         !MulInt64(next.blockCntPerToken, kEpMemorySplitBlockBytes, &next.packedRowBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -372,9 +400,8 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
         !AlignUpInt64(workspaceBytes, kEpMemoryWindowAlignmentBytes, &next.workspaceBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    next.totalWinSize = TileXR::IPC_BUFF_MAX_SIZE - kEpMemoryStateWindowBytes - next.workspaceBytes;
-    next.combineHalfBytes = next.totalWinSize / 2;
-    if (next.totalWinSize <= 0 || next.combineReserveBytes > next.combineHalfBytes) {
+    next.roundPayloadBytes = TileXR::IPC_BUFF_MAX_SIZE - kEpMemoryStateWindowBytes - next.workspaceBytes;
+    if (next.roundPayloadBytes <= 0 || next.combineReserveBytes > next.roundPayloadBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -387,12 +414,15 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
     int64_t compactPayloadBytes = 0;
     int64_t floatRowBytes = 0;
     int64_t alignedFloatRowBytes = 0;
+    int64_t alignedMulRowBytes = 0;
     int64_t alignedOutputBytes = 0;
     int64_t receiveInputBytes = 0;
     int64_t sendInputBytes = 0;
     int64_t scaleBytes = 0;
     int64_t maskBytes = 0;
     int64_t clearFlagBytes = 0;
+    int64_t tokenStatusBytes = 0;
+    int64_t maxTokensPerCore = 0;
     int64_t receiveBytes = 4 * kEpMemoryWindowAlignmentBytes;
     int64_t term = 0;
     if (!MulInt64(routesPerToken, next.blockCntPerToken, &totalPackedBlocks) ||
@@ -405,24 +435,30 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
         !AddInt64(checkFlagBytes, checkCompareBytes, &checkFlagsBytes) ||
         !MulInt64(next.blockCntPerToken, kEpMemorySplitPayloadBytes, &compactPayloadBytes) ||
         !MulInt64(h, static_cast<int64_t>(sizeof(float)), &floatRowBytes) ||
-        !AlignUpInt64(floatRowBytes, useMxfp8 ? 512 : kEpMemoryWindowAlignmentBytes,
-            &alignedFloatRowBytes) ||
+        !AlignUpInt64(floatRowBytes, kEpMemoryWindowAlignmentBytes, &alignedFloatRowBytes) ||
+        !AlignUpInt64(floatRowBytes, useMxfp8 ? 512 : 256, &alignedMulRowBytes) ||
         !AlignUpInt64(rowBytes, kEpMemoryWindowAlignmentBytes, &alignedOutputBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     receiveInputBytes = std::max(compactPayloadBytes, alignedOutputBytes);
     sendInputBytes = useMxfp8 ? inputAlignBytes : std::max(inputAlignBytes, compactPayloadBytes);
-    if (!MulInt64(topK, static_cast<int64_t>(sizeof(float)), &term) ||
+    if (!CeilDivInt64(bs, blockDim, &maxTokensPerCore) ||
+        !MulInt64(maxTokensPerCore, topK, &term) ||
+        !MulInt64(term, static_cast<int64_t>(sizeof(float)), &term) ||
         !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &scaleBytes) ||
-        !AlignUpInt64(bs * static_cast<int64_t>(sizeof(bool)), kEpMemoryWindowAlignmentBytes, &maskBytes) ||
+        !MulInt64(bs, static_cast<int64_t>(sizeof(bool)), &term) ||
+        !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &maskBytes) ||
+        !MulInt64(maxTokensPerCore, static_cast<int64_t>(sizeof(int32_t)), &term) ||
+        !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &tokenStatusBytes) ||
         !MulInt64(next.blockCntPerToken, kEpMemoryWindowAlignmentBytes, &clearFlagBytes) ||
         !AddInt64(receiveBytes, checkFlagsBytes, &receiveBytes) ||
-        !AddInt64(receiveBytes, receiveInputBytes, &receiveBytes) ||
-        !MulInt64(3, alignedFloatRowBytes, &term) || !AddInt64(receiveBytes, term, &receiveBytes) ||
         !AddInt64(receiveBytes, alignedOutputBytes, &receiveBytes) ||
+        !MulInt64(2, alignedFloatRowBytes, &term) || !AddInt64(receiveBytes, term, &receiveBytes) ||
+        !AddInt64(receiveBytes, alignedMulRowBytes, &receiveBytes) ||
         !AddInt64(receiveBytes, scaleBytes, &receiveBytes) ||
         !AddInt64(receiveBytes, maskBytes, &receiveBytes) ||
-        !AddInt64(receiveBytes, clearFlagBytes, &receiveBytes)) {
+        !AddInt64(receiveBytes, clearFlagBytes, &receiveBytes) ||
+        !AddInt64(receiveBytes, tokenStatusBytes, &receiveBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (useMxfp8) {
@@ -433,8 +469,22 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }
-    next.receiveUbBytes = receiveBytes;
-    int64_t sendUbBytes = kEpMemoryWindowAlignmentBytes;
+    int64_t doubleReceiveInputBytes = 0;
+    int64_t doubleReceiveBytes = 0;
+    if (!MulInt64(2, receiveInputBytes, &doubleReceiveInputBytes) ||
+        !AddInt64(receiveBytes, doubleReceiveInputBytes, &doubleReceiveBytes)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (doubleReceiveBytes <= kEpMemoryFullUbBytes) {
+        next.receiveBufferNum = 2U;
+        next.receiveUbBytes = doubleReceiveBytes;
+    } else {
+        next.receiveBufferNum = 1U;
+        if (!AddInt64(receiveBytes, receiveInputBytes, &next.receiveUbBytes)) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    }
+    int64_t sendUbBytes = 4 * kEpMemoryWindowAlignmentBytes;
     if (!AddInt64(sendUbBytes, sendInputBytes, &sendUbBytes) ||
         !AddInt64(sendUbBytes, next.packedRowBytes, &sendUbBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -442,9 +492,10 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
     if (useMxfp8) {
         int64_t alignedScaleCount = 0;
         int64_t quantWorkBytes = 0;
-        if (!AlignUpInt64(scaleCount, 32, &alignedScaleCount) ||
+        if (!AlignUpInt64(quantComputeScaleCount, 32, &alignedScaleCount) ||
             !MulInt64(alignedScaleCount, static_cast<int64_t>(sizeof(float)), &quantWorkBytes) ||
-            !AddInt64(quantWorkBytes, scaleCount * static_cast<int64_t>(sizeof(uint16_t)), &quantWorkBytes) ||
+            !MulInt64(quantComputeScaleCount, static_cast<int64_t>(sizeof(uint16_t)), &term) ||
+            !AddInt64(quantWorkBytes, term, &quantWorkBytes) ||
             !AlignUpInt64(quantWorkBytes, kEpMemoryWindowAlignmentBytes, &quantWorkBytes) ||
             !AddInt64(sendUbBytes, compactPayloadBytes, &sendUbBytes) ||
             !AddInt64(sendUbBytes, quantWorkBytes, &sendUbBytes)) {

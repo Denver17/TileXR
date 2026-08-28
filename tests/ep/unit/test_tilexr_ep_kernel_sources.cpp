@@ -343,7 +343,7 @@ void TestKernelForwardsTpRecvCountsOut()
     }
 }
 
-void TestDispatchDemoExercisesV2OptionalInputs()
+void TestDispatchDemoExercisesOptionalInputs()
 {
     const std::string path = "tests/ep/demo/tilexr_ep_dispatch_demo.cpp";
     std::string contents;
@@ -433,27 +433,45 @@ void TestClearLocalWindowDoesNotPreclearSlotHeaders()
         "    }");
 }
 
-void TestMemoryDispatchUsesExternalDataState()
+void TestMemoryKernelsUseCommunicatorRounds()
 {
-    const std::string path = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h";
-    std::string contents;
-    if (!ReadFile(path, &contents)) {
-        return;
+    const std::string windowPath = "src/ep/common/ep_memory_window.h";
+    std::string window;
+    if (ReadFile(windowPath, &window)) {
+        CheckContains(windowPath, window, "kEpMemoryRoundStrideBytes");
+        CheckContains(windowPath, window, "kEpMemoryRequiredPeerBytes");
+        CheckContains(windowPath, window, "TileXREpMemoryRoundDataBase");
     }
 
-    CheckContains(path, contents, "dataStateSeed_ = static_cast<uint32_t>(magic) & 1U");
-    CheckContains(path, contents, "uint32_t dataState = dataStateSeed");
-    CheckNotContains(path, contents, "SetValue(ZERONE_STATE_POS");
-    CheckNotContains(path, contents, "dataState == 0 ? 1 : 0");
-    CheckNotContains(path, contents, "GetValue(ZERONE_STATE_POS)");
-    CheckContains(path, contents, "DataCopy(flagRecvTensor_, dataFlagGlobal, expFlagCopyParams)");
-    CheckContains(path, contents,
-        "ReduceSum(flagSumOutTensor, flagRecvTensor_, flagReduceWorkTensor_, 1U, flagNum, 1U)");
-    CheckNotContains(path, contents, "GatherMask(flagGatherOutTensor_");
-    CheckNotContains(path, contents, "CompareScalar(flagCompResultU8_");
-    CheckContains(path, contents, "class MoeDistributeDispatchV2FullMesh");
-    CheckNotContains(path, contents,
-        "extern \"C\" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel");
+    const std::string path = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h";
+    std::string contents;
+    if (ReadFile(path, &contents)) {
+        CheckContains(path, contents, "ctx_.Init(commArgs, magic)");
+        CheckNotContains(path, contents, "EpMemoryRoundSync");
+        CheckNotContains(path, contents, "roundSync_");
+        CheckContains(path, contents,
+            "TileXREp::TileXREpMemoryRoundDataBase(args_->peerMems[rankId], magic_)");
+        CheckContains(path, contents, "DataCopy(flagRecvTensor_, dataFlagGlobal, expFlagCopyParams)");
+        CheckContains(path, contents,
+            "ReduceSum(flagSumOutTensor, flagRecvTensor_, flagReduceWorkTensor_, 1U, flagNum, 1U)");
+        CheckContains(path, contents, "TileXREp::kEpMemoryAssistInfoWidth");
+        CheckNotContains(path, contents, "EXPAND_IDX_INFO");
+        CheckContains(path, contents, "class MoeDispatchMemory");
+        CheckNotContains(path, contents,
+            "extern \"C\" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel");
+    }
+
+    const std::string combinePath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.h";
+    std::string combine;
+    if (ReadFile(combinePath, &combine)) {
+        CheckContains(combinePath, combine, "context_.Init(commArgsGM, magic)");
+        CheckNotContains(combinePath, combine, "EpMemoryRoundSync");
+        CheckNotContains(combinePath, combine, "roundSync_");
+        CheckContains(combinePath, combine,
+            "TileXREp::TileXREpMemoryRoundDataBase(args_->peerMems[rank], magic_)");
+        CheckNotContains(combinePath, combine, "halfWinSize_");
+        CheckNotContains(combinePath, combine, "dataState_ * halfWinSize_");
+    }
 
     const std::string entryPath = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.cpp";
     std::string entry;
@@ -461,7 +479,7 @@ void TestMemoryDispatchUsesExternalDataState()
         CheckContains(entryPath, entry, "#include \"tilexr_ep_dispatch_memory_kernel.h\"");
         CheckContains(entryPath, entry,
             "extern \"C\" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel");
-        CheckNotContains(entryPath, entry, "class MoeDistributeDispatchV2FullMesh");
+        CheckNotContains(entryPath, entry, "class MoeDispatchMemory");
     }
 }
 
@@ -473,23 +491,38 @@ void TestMemoryKernelUbStagingCoversPackedPayloads()
         CheckContains(dispatchPath, dispatch,
             "packedPayloadBytes_ = blockCntPerToken_ * SPLIT_BLOCK_DATA_SIZE");
         CheckContains(dispatchPath, dispatch,
-            "inputTensorBytes_ = useMxfp8_ ? hAlignSize_ : packedPayloadBytes_");
+            "inputTensorBytes_ = IsMxfp8 ? hAlignSize_ : packedPayloadBytes_");
         CheckContains(dispatchPath, dispatch, "quantTensorBytes_ = packedPayloadBytes_");
         CheckContains(dispatchPath, dispatch,
             "tbufPool0.InitBuffer(inQueue, BUFFER_NUM, inputTensorBytes_)");
+        CheckContains(dispatchPath, dispatch,
+            "validBsIndexTensor_.GetValue(activeTokenIndex)");
+        CheckContains(dispatchPath, dispatch,
+            "LocalTensor<int32_t> validBsIndexTensor_");
+        CheckNotContains(dispatchPath, dispatch,
+            "LocalTensor<uint32_t> validBsIndexTensor_");
+        CheckContains(dispatchPath, dispatch,
+            "DataCopyPad(validExpertIdsTensor_[activeTokenIndex * axisK_]");
+        CheckContains(dispatchPath, dispatch,
+            "sendTokenBufNum_ = static_cast<uint8_t>(sendTokenBufNum)");
     }
 
     const std::string combinePath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.h";
     std::string combine;
     if (ReadFile(combinePath, &combine)) {
+        CheckContains(combinePath, combine, "indexCountsBuf_");
+        CheckContains(combinePath, combine, "CalcDispatchBufferNum");
+        CheckContains(combinePath, combine, "MAX_DISPATCH_BUFFER_NUM");
+        CheckContains(combinePath, combine, "expandXInQueue_");
+        CheckContains(combinePath, combine, "xOutPackageQueue_");
+        CheckContains(combinePath, combine, "moeMainSumQueue_, bufferNum_");
+        CheckContains(combinePath, combine, "CheckPackedFlagRangeArrive");
+        CheckContains(combinePath, combine, "ExpertScaleCopy");
+        CheckContains(combinePath, combine, "tpipe_->InitBuffer(indexCountsBuf_, UB_ALIGN)");
         CheckContains(combinePath, combine,
-            "pipe_->InitBuffer(sendInputQueue_, 1, sendInputBytes_)");
+            "const uint32_t inputBufferBytes = IsMxfp8 ? quantInputBytes_ : moeQueueBytes_");
         CheckContains(combinePath, combine,
-            "pipe_->InitBuffer(packedInputQueue_, 1, receiveInputBytes_)");
-        CheckContains(combinePath, combine,
-            "AlignUp(quantScaleCount_, 128U) * sizeof(float) * 2U");
-        CheckContains(combinePath, combine,
-            "sendInputBytes_ / sizeof(uint32_t)");
+            "toRankId < epWorldSize_ && tokenId < axisBS_ && topkId < slotCount_");
     }
 }
 
@@ -501,7 +534,9 @@ void TestMemoryCombineUsesRegisteredBinaryLaunch()
         CheckContains(entryPath, entry, "#include \"tilexr_ep_combine_memory_kernel.h\"");
         CheckContains(entryPath, entry,
             "extern \"C\" __global__ __aicore__ void tilexr_ep_combine_memory_kernel");
-        CheckNotContains(entryPath, entry, "class MoeDistributeCombineV2A5Mte");
+        CheckContains(entryPath, entry,
+            "activeMaskType == Mc2Kernel::ACTIVE_MASK_TOKEN && xActiveMaskGM == nullptr");
+        CheckNotContains(entryPath, entry, "class MoeCombineMemory");
         CheckNotContains(entryPath, entry, "<<<blockDim, nullptr, stream>>>");
         CheckNotContains(entryPath, entry, "launch_tilexr_ep_combine_memory_kernel");
     }
@@ -509,9 +544,17 @@ void TestMemoryCombineUsesRegisteredBinaryLaunch()
     const std::string algorithmPath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.h";
     std::string algorithm;
     if (ReadFile(algorithmPath, &algorithm)) {
-        CheckContains(algorithmPath, algorithm, "class MoeDistributeCombineV2A5Mte");
-        CheckContains(algorithmPath, algorithm, "dataState_ = static_cast<uint32_t>(magic) & 1U");
-        CheckNotContains(algorithmPath, algorithm, "dataState_ = meta.GetValue(0) == 0U ? 1U : 0U");
+        CheckContains(algorithmPath, algorithm, "class MoeCombineMemory");
+        CheckNotContains(algorithmPath, algorithm, "EpMemoryRoundSync");
+        CheckNotContains(algorithmPath, algorithm, "roundSync_");
+        CheckNotContains(algorithmPath, algorithm, "halfWinSize_");
+        CheckNotContains(algorithmPath, algorithm, "dataState_");
+        CheckNotContains(algorithmPath, algorithm, "SendOneRow");
+        CheckContains(algorithmPath, algorithm, "TokenActive");
+        CheckContains(algorithmPath, algorithm,
+            "xActiveMaskGM_.SetGlobalBuffer(reinterpret_cast<__gm__ bool *>(xActiveMaskGM))");
+        CheckContains(algorithmPath, algorithm,
+            "const bool tokenActive = TokenActive(tokenIndex)");
         CheckNotContains(algorithmPath, algorithm,
             "extern \"C\" __global__ __aicore__ void tilexr_ep_combine_memory_kernel");
     }
@@ -533,6 +576,7 @@ void TestMemoryCombineUsesRegisteredBinaryLaunch()
     if (ReadFile(cmakePath, &cmake)) {
         CheckContains(cmakePath, cmake, "tilexr_ep_combine_memory_kernel_tmp OBJECT");
         CheckContains(cmakePath, cmake, "kernels/tilexr_ep_dispatch_memory_kernel.h");
+        CheckNotContains(cmakePath, cmake, "tilexr_ep_memory_round_sync.h");
         CheckContains(cmakePath, cmake, "kernels/tilexr_ep_combine_memory_kernel.h");
         CheckContains(cmakePath, cmake, "TILEXR_EP_COMBINE_MEMORY_EMBED_CPP");
         CheckContains(cmakePath, cmake, "embed_combine_memory_kernel.cmake");
@@ -545,6 +589,57 @@ void TestMemoryCombineUsesRegisteredBinaryLaunch()
     if (ReadFile(embedPath, &embed)) {
         CheckContains(embedPath, embed, "TileXREpCombineMemoryKernelBinaryData");
         CheckContains(embedPath, embed, "TileXREpCombineMemoryKernelBinarySize");
+    }
+}
+
+void TestMemoryDispatchProfilingContract()
+{
+    const std::string profilePath = "src/ep/common/ep_dispatch_memory_profile.h";
+    std::string profile;
+    if (ReadFile(profilePath, &profile)) {
+        CheckContains(profilePath, profile, "struct alignas(64) EpDispatchMemoryProfileRecord");
+        CheckContains(profilePath, profile, "EP_DISPATCH_MEMORY_ROLE_SENDER");
+        CheckContains(profilePath, profile, "EP_DISPATCH_MEMORY_ROLE_COUNT_CUMSUM");
+        CheckContains(profilePath, profile, "sizeof(EpDispatchMemoryProfileRecord) == 512U");
+    }
+
+    const std::string windowPath = "src/ep/common/ep_memory_window.h";
+    std::string window;
+    if (ReadFile(windowPath, &window)) {
+        CheckContains(windowPath, window, "kEpMemoryDispatchProfileBuffer = 0");
+        CheckContains(windowPath, window, "kEpMemoryCombineProfileBuffer = 1");
+        CheckContains(windowPath, window,
+            "kEpMemoryDispatchProfileBuffer != kEpMemoryCombineProfileBuffer");
+    }
+
+    const std::string dispatchPath = "src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h";
+    std::string dispatch;
+    if (ReadFile(dispatchPath, &dispatch)) {
+        CheckContains(dispatchPath, dispatch, "#include \"ep_dispatch_memory_profile.h\"");
+        CheckContains(dispatchPath, dispatch,
+            "TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING");
+        CheckContains(dispatchPath, dispatch, "ctx_.ProfileRecordBase");
+        CheckContains(dispatchPath, dispatch,
+            "TileXREp::kEpMemoryDispatchProfileBuffer");
+        CheckContains(dispatchPath, dispatch,
+            "EP_DISPATCH_MEMORY_TIME_FINAL_END");
+        CheckContains(dispatchPath, dispatch, "WriteProfile()");
+    }
+
+    const std::string combinePath = "src/ep/kernels/tilexr_ep_combine_memory_kernel.h";
+    std::string combine;
+    if (ReadFile(combinePath, &combine)) {
+        CheckContains(combinePath, combine,
+            "TileXREp::kEpMemoryCombineProfileBuffer");
+    }
+
+    const std::string cmakePath = "src/ep/CMakeLists.txt";
+    std::string cmake;
+    if (ReadFile(cmakePath, &cmake)) {
+        CheckContains(cmakePath, cmake,
+            "option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING");
+        CheckContains(cmakePath, cmake,
+            "TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING=1");
     }
 }
 
@@ -594,14 +689,15 @@ int main()
     TestKernelForwardsActiveMask();
     TestKernelForwardsExpertTokenNumsType();
     TestKernelForwardsTpRecvCountsOut();
-    TestDispatchDemoExercisesV2OptionalInputs();
+    TestDispatchDemoExercisesOptionalInputs();
     TestKernelForwardsSharedExpertConfig();
     TestKernelForwardsStaticQuantConfig();
     TestKernelForwardsPerTokenDynamicQuantConfig();
     TestClearLocalWindowDoesNotPreclearSlotHeaders();
-    TestMemoryDispatchUsesExternalDataState();
+    TestMemoryKernelsUseCommunicatorRounds();
     TestMemoryKernelUbStagingCoversPackedPayloads();
     TestMemoryCombineUsesRegisteredBinaryLaunch();
+    TestMemoryDispatchProfilingContract();
     TestNoForbiddenDependencies();
     if (g_failures != 0) {
         std::cerr << g_failures << " TileXR EP kernel source checks failed" << std::endl;
