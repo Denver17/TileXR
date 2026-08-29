@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "clusters": {
+    "c02-a04": {
+      "user": "root",
+      "hosts": [
+        {"name": "cpu1", "address": "141.61.53.150"},
+        {"name": "cpu2", "address": "141.61.53.83"},
+        {"name": "cpu3", "address": "141.61.53.142"},
+        {"name": "cpu4", "address": "141.61.53.138"},
+        {"name": "cpu5", "address": "141.61.53.110"},
+        {"name": "cpu6", "address": "141.61.53.106"},
+        {"name": "cpu7", "address": "141.61.53.146"},
+        {"name": "cpu8", "address": "141.61.53.98"}
+      ]
+    },
+    "c02-a07": {
+      "user": "root",
+      "hosts": [
+        {"name": "cpu1", "address": "141.61.52.35"},
+        {"name": "cpu2", "address": "141.61.52.39"},
+        {"name": "cpu3", "address": "141.61.52.43"},
+        {"name": "cpu4", "address": "141.61.52.47"},
+        {"name": "cpu5", "address": "141.61.52.75"},
+        {"name": "cpu6", "address": "141.61.52.79"},
+        {"name": "cpu7", "address": "141.61.52.83"},
+        {"name": "cpu8", "address": "141.61.52.87"}
+      ]
+    },
+    "c02-a09": {
+      "user": "root",
+      "hosts": [
+        {"name": "cpu1", "address": "141.61.52.116"},
+        {"name": "cpu2", "address": "141.61.52.120"},
+        {"name": "cpu3", "address": "141.61.52.128"},
+        {"name": "cpu4", "address": "141.61.52.124"},
+        {"name": "cpu5", "address": "141.61.52.156"},
+        {"name": "cpu6", "address": "141.61.52.160"},
+        {"name": "cpu7", "address": "141.61.52.164"},
+        {"name": "cpu8", "address": "141.61.52.167"}
+      ]
+    }
+  }
+}

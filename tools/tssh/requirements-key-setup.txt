@@ -1,0 +1,2 @@
+# Optional: only required by `tssh --install-key`.
+paramiko==5.0.0

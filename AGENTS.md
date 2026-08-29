@@ -36,6 +36,31 @@ cmake --install build
 
 Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILEXR_BUILD_TESTS`, and `TILEXR_BUILD_CHECKER`. Run focused tests for the changed module; use [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md) for build and hardware validation details. The complete script catalog is in [scripts/README.md](scripts/README.md).
 
+## Multi-Host Commands
+
+On Windows, use `tools/tssh/tssh.cmd` as the single entry point for temporary,
+one-shot commands on a configured cluster:
+
+```powershell
+tools\tssh\tssh.cmd -C c02-a07 -- hostname
+```
+
+Pipe non-trivial Bash through stdin instead of generating, copying, and
+invoking a task-specific script:
+
+```powershell
+@'
+set -euo pipefail
+# one-shot remote logic
+'@ | tools\tssh\tssh.cmd -C c02-a07 -I -- bash -s -- arg1 arg2
+```
+
+Add or edit hosts in `tools/tssh/clusters.json`; do not duplicate host lists in
+agent-generated orchestration code. The default runs all configured hosts with
+a 64-host cap; use `-j N` only to limit concurrency. Run
+`tools\tssh\tssh.cmd -C NAME --install-key` for one-time public-key
+setup; Paramiko is used only by that setup mode.
+
 ## Continuous Improvement
 
 - Before completing a development change, identify reusable lessons and pitfalls that are likely to matter in future work. Record them in the most relevant maintained Markdown document and include that documentation update in the same commit as the change that produced the lesson.
@@ -46,7 +71,7 @@ Optional CMake switches are `TILEXR_BUILD_COLLECTIVES`, `TILEXR_BUILD_EP`, `TILE
 
 - Before debugging TileXR, read [docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md](docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md) and use its evidence-driven workflow, test ladder, and state, queue, and ownership checklists to guide the investigation.
 - Treat the historical root causes in that document as hypotheses rather than conclusions. Reproduce the current failure, identify the first failing boundary, and verify the actual source and binary provenance before changing code.
-- When PowerShell drives a Linux host, never put non-trivial remote shell logic in an inline SSH command. Use a task-scoped `.sh` file, transfer it with an existing Mutagen session when available or another verified method, and invoke it with fixed positional arguments.
+- When PowerShell drives a Linux host, never put non-trivial remote shell logic in an inline SSH command. For temporary multi-host work, pipe it to `tssh -I -- bash -s -- ARGS`. Use a task-scoped `.sh` file only when the script itself must be retained, reviewed, or reused.
 
 ## Architecture
 
