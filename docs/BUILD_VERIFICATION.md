@@ -85,12 +85,13 @@ cmake --install build-moonep
 
 MoonEP custom-kernel commands must list the implementation header selected by
 the kernel entry in `DEPENDS`. Otherwise an implementation-header edit can
-leave a stale embedded kernel object during an incremental build. Source guards
-verify this wiring; only a target-toolchain kernel build validates Ascend C
-syntax and binary generation.
+leave a stale embedded kernel object during an incremental build. Verify this
+through an incremental target-toolchain rebuild and the resulting embedded
+binary; production-source substring checks are not accepted as a substitute
+for compile, link, or behavior evidence.
 
-For Combine V2 schedule, workspace, Host validation, launch ABI, public ABI,
-and source guards, run:
+For Combine V2 schedule, workspace, Host validation, launch ABI, and public ABI,
+run:
 
 ```bash
 bash scripts/validate_combine_v2_host.sh
@@ -98,9 +99,8 @@ bash scripts/validate_combine_v2_host.sh
 
 Set `TILEXR_CMAKE_BIN` when CMake is not on `PATH`, and
 `TILEXR_COMBINE_V2_HOST_BUILD_DIR` to keep the build outside the source tree.
-These tests verify Credit routing and source-level transport constraints, but
-do not validate Ascend C compilation, MTE ordering on hardware, or multi-rank
-correctness.
+These tests verify Credit routing and Host contracts, but do not validate
+Ascend C compilation, MTE ordering on hardware, or multi-rank correctness.
 
 Before a multi-rank MoonEP hardware run, execute the official HCCL Test on the
 same devices and data path. Check the per-rank correctness output as well as the
@@ -108,7 +108,7 @@ process status: HCCL operation failures can still exit with status 0. Stop the
 TileXR run when the matching HCCL baseline reports an interface or correctness
 failure.
 
-Run the Host/source-only suite separately:
+Run the Host suite separately:
 
 ```bash
 cmake -S tests/moonep -B tests/moonep/build-host
@@ -131,7 +131,7 @@ Expected:
 - all five V1 symbols are exported;
 - planner, dispatch, prefetch-weight, combine, and reduce-grad Host libraries are NEEDED;
 - RPATH is `$ORIGIN` and contains no CANN `devlib` directory;
-- Host/source and Python fake-runtime tests pass without device execution.
+- Host and Python fake-runtime tests pass without device execution.
 
 Do not describe these checks as NPU correctness. When runtime testing is authorized,
 run the installed demo first on one rank, then on the intended physical A5 ranks. For

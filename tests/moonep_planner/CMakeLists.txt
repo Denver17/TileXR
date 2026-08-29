@@ -56,10 +56,6 @@ target_include_directories(test_tilexr_moonep_planner_host PRIVATE
     ${TILEXR_ROOT}/src/moonep/planner_v2/host
 )
 
-add_executable(test_tilexr_moonep_planner_source_guard unit/test_planner_source_guard.cpp)
-target_compile_definitions(test_tilexr_moonep_planner_source_guard PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_planner_public_abi.cpp)
 target_include_directories(test_tilexr_moonep_planner_public_abi PRIVATE
     ${TILEXR_MOONEP_PLANNER_FAKE_INCLUDE_DIR}
@@ -71,7 +67,6 @@ add_test(NAME test_tilexr_moonep_planner_v3_layout COMMAND test_tilexr_moonep_pl
 add_test(NAME test_tilexr_moonep_planner_reference COMMAND test_tilexr_moonep_planner_reference)
 add_test(NAME test_tilexr_moonep_planner_host COMMAND test_tilexr_moonep_planner_host)
 add_test(NAME test_tilexr_moonep_planner_public_abi COMMAND test_tilexr_moonep_planner_public_abi)
-add_test(NAME test_tilexr_moonep_planner_source_guard COMMAND test_tilexr_moonep_planner_source_guard)
 
 install(TARGETS
     test_tilexr_moonep_planner_layout
@@ -79,7 +74,6 @@ install(TARGETS
     test_tilexr_moonep_planner_reference
     test_tilexr_moonep_planner_host
     test_tilexr_moonep_planner_public_abi
-    test_tilexr_moonep_planner_source_guard
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(BUILD_TILEXR_MOONEP_PLANNER_DEMO)

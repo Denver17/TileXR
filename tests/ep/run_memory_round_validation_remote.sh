@@ -11,7 +11,7 @@ readonly retry_seconds=${TILEXR_EP_ROUND_TEST_RETRY_SECONDS:-5}
 cd -- "${tilexr_root}"
 bash tests/ep/build.sh full
 ctest --test-dir tests/ep/build --output-on-failure \
-    -R 'test_tilexr_ep_(layout|host_validation|kernel_sources|api_sources)$'
+    -R 'test_tilexr_ep_(layout|host_validation)$'
 
 deadline=$((SECONDS + wait_seconds))
 while true; do

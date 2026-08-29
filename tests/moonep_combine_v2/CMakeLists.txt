@@ -109,11 +109,6 @@ target_include_directories(test_tilexr_moonep_combine_v2_public_abi PRIVATE
     ${TILEXR_MOONEP_COMBINE_V2_FAKE_INCLUDE_DIR}
     ${TILEXR_ROOT}/src/include)
 
-add_executable(test_tilexr_moonep_combine_v2_source_guard
-    unit/test_combine_v2_source_guard.cpp)
-target_compile_definitions(test_tilexr_moonep_combine_v2_source_guard PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-
 if(TARGET tilexr-moonep-combine-v2 AND TARGET tile-comm)
     add_executable(tilexr_moonep_combine_v2_perf
         demo/tilexr_moonep_combine_v2_hardware_probe.cpp)
@@ -151,8 +146,6 @@ add_test(NAME test_tilexr_moonep_combine_v2_launch
     COMMAND test_tilexr_moonep_combine_v2_launch)
 add_test(NAME test_tilexr_moonep_combine_v2_public_abi
     COMMAND test_tilexr_moonep_combine_v2_public_abi)
-add_test(NAME test_tilexr_moonep_combine_v2_source_guard
-    COMMAND test_tilexr_moonep_combine_v2_source_guard)
 
 install(TARGETS
     test_tilexr_moonep_combine_v2_schedule
@@ -160,7 +153,6 @@ install(TARGETS
     test_tilexr_moonep_combine_v2_host
     test_tilexr_moonep_combine_v2_launch
     test_tilexr_moonep_combine_v2_public_abi
-    test_tilexr_moonep_combine_v2_source_guard
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(TARGET tilexr_moonep_combine_v2_perf)

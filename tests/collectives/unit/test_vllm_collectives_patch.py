@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import subprocess
 import sys
 import types
 from pathlib import Path
@@ -29,6 +30,58 @@ def _import_patch_module(monkeypatch):
     from tilexr_collectives import vllm_patch
 
     return vllm_patch
+
+
+def test_smoke_launcher_accepts_preflight_sentinel_with_plugin_stdout(tmp_path) -> None:
+    fake_python = tmp_path / "fake-python"
+    fake_python.write_text(
+        """#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-c" ]]; then
+  if [[ "${2:-}" == *"tilexr_python_preflight_ok"* ]]; then
+    echo "INFO plugin stdout before sentinel"
+    echo "tilexr_python_preflight_ok"
+    exit 0
+  fi
+  if [[ "${2:-}" == *"sys.executable"* ]]; then
+    printf '%s\n' "$0"
+    exit 0
+  fi
+fi
+if [[ "${1:-}" == *"smoke_collectives.py" ]]; then
+  exit 0
+fi
+exit 0
+""",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    launcher = INTEGRATION_DIR / "run_tilexr_collectives_smoke.sh"
+    result = subprocess.run(
+        [
+            "bash",
+            str(launcher),
+            "2",
+            "16",
+            "0",
+            str(tmp_path / "install"),
+            "allgather",
+            "int32",
+        ],
+        env={
+            "PATH": "/usr/bin:/bin",
+            "TILEXR_VLLM_SMOKE_PYTHON": str(fake_python),
+            "TILEXR_VLLM_SMOKE_TIMEOUT_SEC": "5",
+        },
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=10,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS TileXR vllm collectives smoke" in result.stdout
 
 
 def test_patch_routes_supported_collectives_to_tilexr_adapter(monkeypatch) -> None:

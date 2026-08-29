@@ -9,7 +9,6 @@ from typing import Callable
 from .vllm_adapter import TileXRVllmCollectivesAdapter, enabled
 
 
-FEATURE_FLAG_ENV = "VLLM_ASCEND_TILEXR_COLLECTIVES"
 _PATCH_MARKER = "_tilexr_collectives_patch_applied"
 _ORIGINALS_ATTR = "_tilexr_collectives_originals"
 _ROUTE_METHODS = ("all_reduce", "all_gather", "reduce_scatter", "all_to_all", "broadcast")

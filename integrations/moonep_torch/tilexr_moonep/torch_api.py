@@ -1570,9 +1570,6 @@ class TileXRMoonEPBuffer:
         )
         return sources, reduce_buffers
 
-    def _reduce_grad_sources(self, gradients: ProjectionBuffers) -> tuple[Any, Any, Any]:
-        return self._reduce_grad_source_regions(gradients)[0]
-
     @property
     def reduce_grad_info(self):
         return self._reduce_grad_info

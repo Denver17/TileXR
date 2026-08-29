@@ -105,72 +105,6 @@ bash scripts/test_allreduce.sh
 - Launches multi-rank test via mpirun
 - Tests AllReduce operation across NPU devices
 
-### `watch_cab15_9_4_7_npus.sh`
-**Purpose**: Show the occupancy of all 256 NPUs in cabinets 15, 9, 4, and 7 from
-cabinet 8 CPU1, refreshing every two seconds and reporting `freeNum` per cabinet.
-
-**Usage**:
-```bash
-bash scripts/watch_cab15_9_4_7_npus.sh
-bash scripts/watch_cab15_9_4_7_npus.sh --once
-```
-
-Each cabinet row contains eight CPU groups in CPU1-to-CPU8 order, with NPU0-to-NPU7
-inside each group, followed by that cabinet's `freeNum`. `0` means idle, `1` means
-occupied, and `?` means the probe failed; failed probes are never counted as idle.
-The watcher queries each host's per-device `npu-smi info -t proc-mem` data and probes
-all hosts and local devices concurrently.
-A full `npu-smi info` can exceed the two-second refresh budget under load, while
-`/dev/davinciN` handle scans can miss active runtime processes. This display reports
-process occupancy only and does not establish device health.
-
-### `watch_512p_npus.sh`
-**Purpose**: Monitor every server in the bundled `hosts_512p.txt` environment map,
-refreshing every five seconds and reporting `freeNum` per cabinet. The current map
-contains 10 cabinets, 80 servers, and 640 NPUs despite its historical 512P name.
-
-**Usage**:
-```bash
-bash scripts/watch_512p_npus.sh
-bash scripts/watch_512p_npus.sh --once
-```
-
-The map is ordered by cabinet, CPU1-to-CPU8. Each row must contain the frame label,
-cabinet number, CPU label, and host IP. Set `TILEXR_512P_HOST_FILE` to load an updated
-map without changing the watcher. As with the focused watcher, failed probes are
-shown as `?` and are not counted as idle.
-
-### `watch_cab0_2_npus.sh`
-**Purpose**: Monitor cabinets 0 and 2 from cabinet 0 CPU1 (`141.61.53.150`),
-refreshing every two seconds and reporting `freeNum` for each 64-NPU cabinet.
-
-**Usage**:
-```bash
-bash scripts/watch_cab0_2_npus.sh
-bash scripts/watch_cab0_2_npus.sh --once
-```
-
-The dedicated `hosts_cab0_2.txt` map preserves CPU1-to-CPU8 order for both cabinets.
-This wrapper uses the same process-only probe as the full environment watcher, with a
-shorter 1.8-second probe deadline to preserve the two-second refresh period.
-
-### `watch_a10_64p_npus.sh`
-**Purpose**: Monitor every server in the bundled `hosts_a10_64p.txt` map,
-refreshing every five seconds and reporting `freeNum` per host and for the complete
-environment. The current map contains eight servers and 64 NPUs.
-
-**Usage**:
-```bash
-bash scripts/watch_a10_64p_npus.sh
-bash scripts/watch_a10_64p_npus.sh --once
-```
-
-The map preserves the line order from `A10-64P环境.txt`. Set
-`TILEXR_A10_64P_HOST_FILE` to load an updated one-IP-per-line host file. Failed probes
-are shown as `?` and are excluded from both host and total free counts. Run this
-watcher on `141.61.49.226`, which has the A10 environment's internal SSH access;
-cabinet 8 CPU1 does not have permission to log in to every host in this map.
-
 ### `run_moonep.sh`
 **Purpose**: Run the MoonEP benchmark, reference, or correctness flow with a requested
 logical rank count.
@@ -457,14 +391,6 @@ bash scripts/driver_fix.sh
 
 **Requirements**: Root user
 
-### `watch.sh`
-**Purpose**: Monitor NPU device status in real-time.
-
-**Usage**:
-```bash
-bash scripts/watch.sh
-```
-
 ### `prepare.sh`
 **Purpose**: Complete first-time setup script.
 
@@ -520,9 +446,6 @@ bash scripts/plog_grep.sh ERROR
 ```bash
 # Check device status
 bash scripts/device_connect.sh
-
-# Monitor devices
-bash scripts/watch.sh
 
 # Fix driver issues
 bash scripts/driver_fix.sh

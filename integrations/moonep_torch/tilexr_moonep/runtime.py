@@ -500,18 +500,6 @@ class TileXRMoonEPRuntime:
                 raise RuntimeError("ReduceGrad owner token mismatch")
             self._reduce_grad_owner_token = None
 
-    def _require_reduce_grad_workspace_owner(
-        self, owner_token: object | None, operation: str
-    ) -> None:
-        if (
-            self._reduce_grad_owner_token is not None
-            and self._reduce_grad_owner_token is not owner_token
-        ):
-            raise RuntimeError(
-                f"{operation} cannot modify the ReduceGrad workspace while another "
-                "ReduceGrad is in flight"
-            )
-
     @staticmethod
     def _plan_v1(context, plan) -> TileXRMoonEPPlanV1:
         value = initialize_struct(TileXRMoonEPPlanV1())

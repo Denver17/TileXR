@@ -23,13 +23,12 @@ cd /path/to/TileXR/tests/memory
 bash build.sh
 ```
 
-If `bisheng` is unavailable, the source-level check still builds while the AICore demo is skipped.
+If `bisheng` is unavailable, the AICore demo is skipped.
 
 ## Run
 
 ```bash
 cd /path/to/TileXR/tests/memory
-./install/bin/test_tilexr_memory_demo_sources
 bash demo/run_tilexr_memory_demo.sh 2 16 2 0
 ```
 

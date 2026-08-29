@@ -159,10 +159,9 @@ run_comm_host_tests() {
     cmake --build "${BUILD_ROOT}/comm" --target install -j"$(nproc)"
     "${BUILD_ROOT}/comm-install/bin/test_tilexr_log"
     "${BUILD_ROOT}/comm-install/bin/test_tilexr_log_spdlog_compile"
-    "${BUILD_ROOT}/comm-install/bin/test_tilexr_source_guards"
 }
 
-run_ep_source_tests() {
+run_ep_host_tests() {
     cmake -S "${ROOT_DIR}/tests/ep" -B "${BUILD_ROOT}/ep" \
         -DBUILD_TILEXR_EP_DEMO=OFF
     cmake --build "${BUILD_ROOT}/ep" -j"$(nproc)"
@@ -231,12 +230,10 @@ trap finalize_host_checks EXIT
 run_and_accumulate_case shell-syntax check_tracked_shell_syntax
 run_and_accumulate_case ci-ctest run_ci_ctest
 run_and_accumulate_case comm-host run_comm_host_tests
-run_and_accumulate_case ep-source-only run_ep_source_tests
+run_and_accumulate_case ep-host run_ep_host_tests
 run_and_accumulate_case data-as-flag run_data_as_flag_tests
 run_and_accumulate_case collectives-vllm-patch \
     python3 -m pytest -q "${ROOT_DIR}/tests/collectives/unit/test_vllm_collectives_patch.py"
-run_and_accumulate_case collectives-vllm-integration-sources \
-    python3 -m pytest -q "${ROOT_DIR}/tests/collectives/unit/test_vllm_collectives_integration_sources.py"
 run_and_accumulate_case collectives-profile-report \
     python3 "${ROOT_DIR}/tests/collectives/unit/test_collective_profile_report.py"
 

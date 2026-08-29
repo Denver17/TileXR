@@ -97,11 +97,6 @@ _KERNEL_NAMES = {
     "reduce_grad": ("tilexr_moonep_reduce_grad_kernel",),
 }
 
-MODEL_ROUTE_REPLAY = (
-    Path(__file__).resolve().parent / "cases" / "mindspeed_4k_ep8_route_counts.json"
-)
-
-
 def model_flow_case_spec(
     case_id: str, *, dynamic_world_size: int | None = None
 ) -> ModelFlowCaseSpec:

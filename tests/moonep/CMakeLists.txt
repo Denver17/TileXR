@@ -125,18 +125,6 @@ add_executable(test_tilexr_moonep_host
 target_include_directories(test_tilexr_moonep_host PRIVATE
     ${TILEXR_MOONEP_TEST_INCLUDE_DIRS})
 
-add_executable(test_tilexr_moonep_sources
-    unit/test_tilexr_moonep_sources.cpp
-)
-target_compile_definitions(test_tilexr_moonep_sources PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-
-add_executable(test_tilexr_moonep_kernel_sources
-    unit/test_tilexr_moonep_kernel_sources.cpp
-)
-target_compile_definitions(test_tilexr_moonep_kernel_sources PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-
 add_executable(test_tilexr_moonep_stage_layout
     unit/test_tilexr_moonep_stage_layout.cpp
     ${TILEXR_ROOT}/src/moonep/dispatch/host/dispatch_layout.cpp
@@ -267,8 +255,6 @@ target_include_directories(test_tilexr_moonep_reduce_grad_launch PRIVATE
 add_test(NAME test_tilexr_moonep_c_header COMMAND test_tilexr_moonep_c_header)
 add_test(NAME test_tilexr_moonep_abi_layout COMMAND test_tilexr_moonep_abi_layout)
 add_test(NAME test_tilexr_moonep_host COMMAND test_tilexr_moonep_host)
-add_test(NAME test_tilexr_moonep_sources COMMAND test_tilexr_moonep_sources)
-add_test(NAME test_tilexr_moonep_kernel_sources COMMAND test_tilexr_moonep_kernel_sources)
 add_test(NAME test_tilexr_moonep_stage_layout COMMAND test_tilexr_moonep_stage_layout)
 add_test(NAME test_tilexr_moonep_stage_reference COMMAND test_tilexr_moonep_stage_reference)
 add_test(NAME test_tilexr_moonep_dispatch_urma_layout

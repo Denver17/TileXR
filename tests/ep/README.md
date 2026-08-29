@@ -8,7 +8,7 @@ small transfers, while UDMA generally performs better for large transfers.
 Internal Memory classes, profiling artifacts, trace tools, and test helpers use unversioned names. Version suffixes
 are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
-## Source-Only Tests
+## Host Tests
 
 From `tests/ep`:
 
@@ -16,17 +16,12 @@ From `tests/ep`:
 source ../../scripts/common_env.sh
 bash build.sh source-only
 ./install/bin/test_tilexr_ep_layout
-./install/bin/test_tilexr_ep_api_sources
 ./install/bin/test_tilexr_ep_host_validation
-./install/bin/test_tilexr_ep_kernel_sources
 ```
 
-`source-only` mode builds and installs the source-layout, API source, host validation, and kernel source tests without
-building the hardware demo.
-
-`test_tilexr_ep_kernel_sources` is a host-side source-contract test. It reads selected Host, Kernel, demo, and CMake
-files and checks required or forbidden implementation patterns. It does not compile or execute device kernels, so
-CCE compilation and hardware correctness must still be validated separately.
+`source-only` mode builds and installs host layout and validation tests without
+building the hardware demo. CCE compilation and hardware correctness must still
+be validated separately.
 
 ## Full Hardware Demo
 
@@ -50,7 +45,7 @@ RPATH/RUNPATH and use `ldd install/bin/tilexr_ep_dispatch_demo` in the target ru
 provenance only; NPU execution is still required to validate the demo.
 
 `tilexr_types.h` is also included by EP device sources. Keep Host-only standard-library includes and objects outside
-`__CCE__`; Host/source checks do not replace a CANN 9.1 CCE compile.
+`__CCE__`; Host tests do not replace a CANN 9.1 CCE compile.
 
 The demo has exactly two execution backends, selected with `TILEXR_EP_DEMO_IMPL=udma|memory`. API version and
 same-node/cross-node topology are handled inside the TileXR library and are not demo branches. Select the operator

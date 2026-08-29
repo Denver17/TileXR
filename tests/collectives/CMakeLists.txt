@@ -62,32 +62,12 @@ if(TARGET tilexr-collectives)
     set(TILEXR_COLLECTIVES_IN_TREE ON)
 endif()
 
-add_executable(test_tilexr_collectives_api
-    unit/test_tilexr_collectives_api.cpp
-)
-
-target_compile_definitions(test_tilexr_collectives_api PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
-add_executable(test_tilexr_collectives_kernel_ownership
-    unit/test_tilexr_collectives_kernel_ownership.cpp
-)
-
-target_compile_definitions(test_tilexr_collectives_kernel_ownership PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
-add_executable(test_tilexr_collectives_tools_sources
-    unit/test_tilexr_collectives_tools_sources.cpp
-)
-
-target_compile_definitions(test_tilexr_collectives_tools_sources PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
 add_executable(test_tilexr_collectives_header_compile
     unit/test_tilexr_collectives_header_compile.cpp
+)
+
+add_executable(test_tilexr_int32_pattern
+    unit/test_tilexr_int32_pattern.cpp
 )
 
 add_executable(test_tilexr_perf_trace_layout
@@ -308,10 +288,8 @@ foreach(_tilexr_collectives_link_target
     TileXRAddAscendRpathLink(${_tilexr_collectives_link_target})
 endforeach()
 
-add_test(NAME test_tilexr_collectives_api COMMAND test_tilexr_collectives_api)
-add_test(NAME test_tilexr_collectives_kernel_ownership COMMAND test_tilexr_collectives_kernel_ownership)
-add_test(NAME test_tilexr_collectives_tools_sources COMMAND test_tilexr_collectives_tools_sources)
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
+add_test(NAME test_tilexr_int32_pattern COMMAND test_tilexr_int32_pattern)
 add_test(NAME test_tilexr_perf_trace_layout COMMAND test_tilexr_perf_trace_layout)
 add_test(NAME test_collective_perf_report COMMAND test_collective_perf_report)
 add_test(NAME test_collective_perf_session COMMAND test_collective_perf_session)
@@ -327,17 +305,16 @@ if(Python3_Interpreter_FOUND)
                 ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_collective_profile_report.py
     )
     add_test(
-        NAME test_vllm_collectives_integration_sources
+        NAME test_vllm_collectives_patch
         COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_vllm_collectives_integration_sources.py
+                -m pytest -q
+                ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_vllm_collectives_patch.py
     )
 endif()
 
 install(TARGETS
-    test_tilexr_collectives_api
-    test_tilexr_collectives_kernel_ownership
-    test_tilexr_collectives_tools_sources
     test_tilexr_collectives_header_compile
+    test_tilexr_int32_pattern
     test_tilexr_perf_trace_layout
     test_collective_perf_report
     test_collective_perf_session

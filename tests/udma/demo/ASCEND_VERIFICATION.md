@@ -61,16 +61,6 @@ test -x install/bin/tilexr_udma_demo
 test -f install/lib/libtilexr_udma_demo_kernel.so
 ```
 
-Optional source-level check:
-
-```bash
-cd /path/to/TileXR
-rg -n '#include "shmem\.h"|aclshmem|ACLSHMEM|ShmemBarrier' \
-  src/comm src/include/tilexr_udma.h tests/udma/demo/*.cpp
-```
-
-Expected: no matches in `src/comm` or the demo host source.
-
 ## Runtime Setup
 
 Use one process per rank. The helper script launches local ranks and writes logs

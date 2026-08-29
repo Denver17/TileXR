@@ -321,16 +321,6 @@ class FakeRuntime:
                 raise RuntimeError("ReduceGrad owner token mismatch")
             self._reduce_grad_owner_token = None
 
-    def _require_reduce_grad_workspace_owner(self, owner_token, operation):
-        if (
-            self._reduce_grad_owner_token is not None
-            and self._reduce_grad_owner_token is not owner_token
-        ):
-            raise RuntimeError(
-                f"{operation} cannot modify the ReduceGrad workspace while another "
-                "ReduceGrad is in flight"
-            )
-
     def planning_workspace_size(self, context):
         self.calls.append(("planning_workspace_size", None))
         return 64 + int(context.nv_s) * 4

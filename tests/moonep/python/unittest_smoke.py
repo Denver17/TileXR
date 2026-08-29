@@ -608,26 +608,6 @@ class MoonEPSmokeTests(unittest.TestCase):
         self.assertFalse(runtime.closed)
         self.assertFalse(buffer._closed)
 
-    def test_active_python_has_no_distributed_or_hccl_dependency(self):
-        integration_sources = list(
-            (ROOT / "integrations" / "moonep_torch").rglob("*.py")
-        )
-        integration_sources = [
-            path for path in integration_sources if path.name != "compat.py"
-        ]
-        integration_text = "\n".join(
-            path.read_text(encoding="utf-8") for path in integration_sources
-        )
-        self.assertNotIn("torch." + "distributed", integration_text)
-        self.assertNotIn("import " + "hccl", integration_text.lower())
-        self.assertNotIn("from " + "hccl", integration_text.lower())
-        benchmark_source = (ROOT / "tools" / "moonep" / "benchmark.py").read_text(
-            encoding="utf-8"
-        )
-        mode_guard = benchmark_source.index('if args.mode != "benchmark"')
-        hccl_init = benchmark_source.index("torch." + "distributed.init_process_group")
-        self.assertLess(mode_guard, hccl_init)
-
     def test_projection_rank_must_be_in_supported_range(self):
         torch, _, buffer = make_buffer()
         plan, _ = buffer.planning(

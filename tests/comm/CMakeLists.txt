@@ -31,17 +31,8 @@ target_include_directories(test_tilexr_log_spdlog_compile PRIVATE
     ${TILEXR_ROOT}/src/comm
 )
 
-add_executable(test_tilexr_source_guards
-    unit/test_tilexr_source_guards.cpp
-)
-
-target_compile_definitions(test_tilexr_source_guards PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
 install(TARGETS
     test_tilexr_log
     test_tilexr_log_spdlog_compile
-    test_tilexr_source_guards
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
 )

@@ -266,28 +266,21 @@ run_case top-level-ctest run_ctest "${SOURCE_DIR}/build-ci"
 run_logged_step "comm-build" bash "${SOURCE_DIR}/tests/comm/build.sh"
 run_case comm-log "${SOURCE_DIR}/tests/comm/install/bin/test_tilexr_log"
 run_case comm-spdlog-compile "${SOURCE_DIR}/tests/comm/install/bin/test_tilexr_log_spdlog_compile"
-run_case comm-source-guards "${SOURCE_DIR}/tests/comm/install/bin/test_tilexr_source_guards"
 
 run_logged_step "udma-build" env BUILD_TILEXR_UDMA_DEMO=OFF \
     bash "${SOURCE_DIR}/tests/udma/build.sh"
 run_case udma-transport-layout "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udma_transport_layout"
 run_case udma-registry "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udma_registry"
-run_case udma-demo-sources "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udma_demo_sources"
-run_case udma-source-guard "${SOURCE_DIR}/tests/udma/install/bin/test_tilexr_udma_source_guard"
 
 run_logged_step "sdma-build" bash \
     "${SOURCE_DIR}/tests/sdma/build.sh" "${ASCEND_HOME_PATH}"
 run_case sdma-metadata "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_metadata"
 run_case sdma-api-invalid "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_api_invalid"
 run_case sdma-transport-disabled "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_transport_disabled"
-run_case sdma-comm-wiring "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_comm_wiring"
-run_case sdma-source-guard "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_source_guard"
 run_case sdma-header-compile "${SOURCE_DIR}/tests/sdma/install/bin/test_tilexr_sdma_header_compile"
 
 run_logged_step "ep-build" bash "${SOURCE_DIR}/tests/ep/build.sh" full
 run_case ep-layout "${SOURCE_DIR}/tests/ep/install/bin/test_tilexr_ep_layout"
-run_case ep-api-sources "${SOURCE_DIR}/tests/ep/install/bin/test_tilexr_ep_api_sources"
-run_case ep-kernel-sources "${SOURCE_DIR}/tests/ep/install/bin/test_tilexr_ep_kernel_sources"
 run_case ep-host-validation "${SOURCE_DIR}/tests/ep/install/bin/test_tilexr_ep_host_validation"
 
 run_logged_step "memory-configure" cmake \
@@ -297,8 +290,6 @@ run_logged_step "memory-configure" cmake \
     -DTILEXR_MEMORY_DEMO_SOC_TYPE=Ascend910B
 run_logged_step "memory-build" cmake \
     --build "${SOURCE_DIR}/tests/memory/build" --target install -j"${BUILD_JOBS}"
-run_case memory-demo-sources "${SOURCE_DIR}/tests/memory/install/bin/test_tilexr_memory_demo_sources"
-
 # Dedicated suite builds reuse the root install prefix with optional components
 # disabled. Restore the complete top-level install before validating outputs.
 run_logged_step "top-level-reinstall" cmake --install "${SOURCE_DIR}/build-ci"

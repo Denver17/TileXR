@@ -15,10 +15,6 @@ function(tilexr_checker_shim_test name)
   )
 endfunction()
 
-tilexr_checker_test(test_tilexr_checker_sources
-  unit/test_checker_sources.cpp
-)
-
 tilexr_checker_test(test_tilexr_checker_world
   unit/test_checker_world.cpp
 )
@@ -63,10 +59,6 @@ tilexr_checker_test(test_tilexr_checker_trace_schedule
   unit/test_checker_trace_schedule.cpp
 )
 
-tilexr_checker_test(test_tilexr_checker_source_preservation
-  unit/test_checker_source_preservation.cpp
-)
-
 tilexr_checker_test(test_tilexr_checker_ep_dispatch_oracle_probe
   unit/test_checker_ep_dispatch_oracle_probe.cpp
 )
@@ -97,7 +89,6 @@ target_compile_features(test_tilexr_checker_allreduce_big_data_header_probe PRIV
 add_custom_target(tilexr_checker_all
   DEPENDS
     tilexr_checker
-    test_tilexr_checker_sources
     test_tilexr_checker_world
     test_tilexr_checker_oracles
     test_tilexr_checker_shim_events
@@ -109,7 +100,6 @@ add_custom_target(tilexr_checker_all
     test_tilexr_checker_trace_bundle_verifier
     test_tilexr_checker_trace_materializer
     test_tilexr_checker_trace_schedule
-    test_tilexr_checker_source_preservation
     test_tilexr_checker_ep_dispatch_oracle_probe
     test_tilexr_checker_header_probe
     test_tilexr_checker_allgather_hdb_header_probe

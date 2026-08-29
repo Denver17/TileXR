@@ -21,19 +21,9 @@ target_include_directories(test_tilexr_data_as_flag_header_compile PRIVATE
     ${TILEXR_ROOT}/src/include
 )
 
-add_executable(test_tilexr_data_as_flag_source_guard
-    unit/test_tilexr_data_as_flag_source_guard.cpp
-)
-
-target_compile_definitions(test_tilexr_data_as_flag_source_guard PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
 add_test(NAME test_tilexr_data_as_flag_header_compile COMMAND test_tilexr_data_as_flag_header_compile)
-add_test(NAME test_tilexr_data_as_flag_source_guard COMMAND test_tilexr_data_as_flag_source_guard)
 
 install(TARGETS
     test_tilexr_data_as_flag_header_compile
-    test_tilexr_data_as_flag_source_guard
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

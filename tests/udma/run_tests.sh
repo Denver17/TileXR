@@ -46,7 +46,6 @@ fi
 # 检查测试二进制是否存在
 if [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma_transport_layout" ] ||
    [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma_registry" ] ||
-   [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma_source_guard" ] ||
    [ ! -f "${INSTALL_DIR}/bin/test_tilexr_udma" ]; then
     echo "ERROR: Test binaries not found. Please run build.sh first."
     exit 1
@@ -68,27 +67,19 @@ echo "=========================================="
 TEST2_RESULT=$?
 echo ""
 
-# 测试 3: UDMA source guard（host-only）
+# 测试 3: TileXR 集成测试（单进程，单卡）
 echo "=========================================="
-echo "Test 3: TileXR UDMA Source Guard Unit Test"
-echo "=========================================="
-"${INSTALL_DIR}/bin/test_tilexr_udma_source_guard"
-TEST3_RESULT=$?
-echo ""
-
-# 测试 4: TileXR 集成测试（单进程，单卡）
-echo "=========================================="
-echo "Test 4: TileXR Integration Tests (Single Process)"
+echo "Test 3: TileXR Integration Tests (Single Process)"
 echo "=========================================="
 export RANK=0
 export RANK_SIZE=1
 "${INSTALL_DIR}/bin/test_tilexr_udma"
-TEST4_RESULT=$?
+TEST3_RESULT=$?
 echo ""
 
-# 测试 5: TileXR 多进程测试（需要 mpirun）
+# 测试 4: TileXR 多进程测试（需要 mpirun）
 echo "=========================================="
-echo "Test 5: TileXR Multi-Process Tests (MPI)"
+echo "Test 4: TileXR Multi-Process Tests (MPI)"
 echo "=========================================="
 
 # 检查是否有 mpirun
@@ -107,14 +98,14 @@ if command -v mpirun &> /dev/null; then
         unset RANK
         unset RANK_SIZE
         mpirun -n 2 "${INSTALL_DIR}/bin/test_tilexr_udma"
-        TEST5_RESULT=$?
+        TEST4_RESULT=$?
     else
         echo "SKIP: Need at least 2 usable NPUs for multi-rank test"
-        TEST5_RESULT=0
+        TEST4_RESULT=0
     fi
 else
     echo "SKIP: mpirun not found, skipping multi-process tests"
-    TEST5_RESULT=0
+    TEST4_RESULT=0
 fi
 echo ""
 
@@ -124,14 +115,13 @@ echo "  Test Results Summary"
 echo "=========================================="
 echo "Test 1 (UDMA Layout):     $([ $TEST1_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
 echo "Test 2 (UDMA Registry):   $([ $TEST2_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 3 (Source Guard):    $([ $TEST3_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 4 (TileXR Single):   $([ $TEST4_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
-echo "Test 5 (TileXR Multi):    $([ $TEST5_RESULT -eq 0 ] && echo 'PASS' || echo 'SKIP/FAIL')"
+echo "Test 3 (TileXR Single):   $([ $TEST3_RESULT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+echo "Test 4 (TileXR Multi):    $([ $TEST4_RESULT -eq 0 ] && echo 'PASS' || echo 'SKIP/FAIL')"
 echo "=========================================="
 
 # 返回失败状态
-if [ $TEST1_RESULT -ne 0 ] || [ $TEST2_RESULT -ne 0 ] || [ $TEST3_RESULT -ne 0 ] ||
-   [ $TEST4_RESULT -ne 0 ] || [ $TEST5_RESULT -ne 0 ]; then
+if [ $TEST1_RESULT -ne 0 ] || [ $TEST2_RESULT -ne 0 ] ||
+   [ $TEST3_RESULT -ne 0 ] || [ $TEST4_RESULT -ne 0 ]; then
     exit 1
 fi
 

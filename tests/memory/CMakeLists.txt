@@ -59,20 +59,7 @@ link_directories(
     ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 
-add_executable(test_tilexr_memory_demo_sources
-    unit/test_tilexr_memory_demo_sources.cpp
-)
-
-target_include_directories(test_tilexr_memory_demo_sources PRIVATE
-    ${TILEXR_ROOT}/src/include
-)
-target_compile_definitions(test_tilexr_memory_demo_sources PRIVATE
-    TILEXR_SOURCE_ROOT="${TILEXR_ROOT}"
-)
-
-set(INSTALL_TARGETS
-    test_tilexr_memory_demo_sources
-)
+set(INSTALL_TARGETS)
 
 if(BUILD_TILEXR_MEMORY_DEMO)
     find_program(BISHENG_EXECUTABLE bisheng)
@@ -191,7 +178,9 @@ if(BUILD_TILEXR_MEMORY_DEMO)
     endif()
 endif()
 
-install(TARGETS ${INSTALL_TARGETS}
-    RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
-    LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
-)
+if(INSTALL_TARGETS)
+    install(TARGETS ${INSTALL_TARGETS}
+        RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
+        LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
+    )
+endif()

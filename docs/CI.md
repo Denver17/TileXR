@@ -92,15 +92,14 @@ cleanup.
 
 ## Test matrix
 
-[`host_checks.sh`](../scripts/ci/host_checks.sh) runs these eight recorded cases:
+[`host_checks.sh`](../scripts/ci/host_checks.sh) runs these seven recorded cases:
 
 - shell syntax for tracked CI and affected test scripts;
 - the complete standalone `tests/ci` CTest suite;
-- comm logging, spdlog compile, and source-guard binaries;
-- all four EP source-only tests;
-- both data-as-flag tests;
+- comm logging and spdlog compile binaries;
+- EP host tests;
+- the data-as-flag header compile test;
 - collectives vLLM patch tests;
-- collectives vLLM integration-source tests;
 - collectives profile-report tests.
 
 On `blue`, [`build_blue.sh`](../scripts/ci/control/build_blue.sh) performs a
@@ -113,14 +112,11 @@ failure.
 The build phase logs these named cases:
 
 - top level: `top-level-ctest`;
-- comm: `comm-log`, `comm-spdlog-compile`, and `comm-source-guards`;
-- UDMA: `udma-transport-layout`, `udma-registry`, `udma-demo-sources`, and
-  `udma-source-guard`;
+- comm: `comm-log` and `comm-spdlog-compile`;
+- UDMA: `udma-transport-layout` and `udma-registry`;
 - SDMA: `sdma-metadata`, `sdma-api-invalid`, `sdma-transport-disabled`,
-  `sdma-comm-wiring`, `sdma-source-guard`, and `sdma-header-compile`;
-- EP: `ep-layout`, `ep-api-sources`, `ep-kernel-sources`, and
-  `ep-host-validation`;
-- memory: `memory-demo-sources`.
+  and `sdma-header-compile`;
+- EP: `ep-layout` and `ep-host-validation`.
 
 The top-level configure/build, suite builds, top-level reinstall, required-file
 checks, and dependency/RPATH checks are also mandatory. They fail the build

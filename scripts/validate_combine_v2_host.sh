@@ -22,11 +22,10 @@ readonly tests=(
     test_tilexr_moonep_combine_v2_host
     test_tilexr_moonep_combine_v2_launch
     test_tilexr_moonep_combine_v2_public_abi
-    test_tilexr_moonep_combine_v2_source_guard
 )
 
 for test_name in "${tests[@]}"; do
     "${build_dir}/${test_name}"
 done
 
-printf 'Combine V2 Host/source validation passed (%s tests)\n' "${#tests[@]}"
+printf 'Combine V2 Host validation passed (%s tests)\n' "${#tests[@]}"

@@ -74,7 +74,6 @@ The following files must exist and match across hosts:
 ```text
 install/lib64/libtile-comm.so
 tests/udma/install/bin/tilexr_udma_demo
-tests/udma/install/bin/test_tilexr_udma_demo_sources
 tests/udma/install/lib/libtilexr_udma_demo_kernel.so
 ```
 

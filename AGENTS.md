@@ -16,7 +16,7 @@ src/comm/          Core runtime and IPC, UDMA, and SDMA transports
 src/collectives/   Optional collectives library
 src/ep/            Optional expert-parallel dispatch/combine library
 src/include/       Public host and device headers
-tests/             Module, source, integration, and hardware tests
+tests/             Module, Host, integration, and hardware tests
 scripts/           Environment, build, test, and utility scripts
 reference/         Ignored comparison-only upstream checkouts
 docs/              Architecture and validation guides
@@ -85,6 +85,13 @@ setup; Paramiko is used only by that setup mode.
 
 - Preserve C++14 and CANN 9.1 compatibility unless the task explicitly changes them.
 - Treat `reference/` as comparison-only; active targets must not include or link sources from it.
+- Do not commit environment-specific temporary scripts, monitoring helpers, host
+  inventories, or one-off orchestration. Add a script only when it is a
+  maintained, reviewed, reusable project tool without deployment-specific hosts
+  or credentials.
+- Do not add source guards that enforce production implementation by matching
+  source text, tokens, or regular expressions. Validate contracts with compile,
+  link, unit, integration, or hardware behavior tests instead.
 - An NPU reported in `Alarm` state may be treated as a healthy, usable card; do not exclude it solely because of the `Alarm` state.
 - UDMA and SDMA are best-effort capabilities. Communicator initialization must preserve existing paths when either is unavailable.
 - Do not select memory versus UDMA from topology alone: memory supports cross-node transfers. Prefer memory for small transfers and UDMA for large transfers, subject to runtime capability and registration readiness.

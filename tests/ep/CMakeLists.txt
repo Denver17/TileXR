@@ -143,13 +143,6 @@ add_executable(test_tilexr_ep_layout
 
 add_executable(test_tilexr_ep_expert_ids unit/test_tilexr_ep_expert_ids.cpp)
 
-add_executable(test_tilexr_ep_api_sources
-    unit/test_tilexr_ep_api_sources.cpp
-)
-
-add_executable(test_tilexr_ep_kernel_sources unit/test_tilexr_ep_kernel_sources.cpp)
-
-add_executable(test_tilexr_ep_plan_sources unit/test_tilexr_ep_plan_sources.cpp)
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
 
 add_executable(test_tilexr_ep_plan_layout
@@ -236,16 +229,9 @@ target_include_directories(test_tilexr_ep_plan_host PRIVATE
     ${TILEXR_ROOT}/src/moonep/planner_v2/host
 )
 
-target_compile_definitions(test_tilexr_ep_api_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-target_compile_definitions(test_tilexr_ep_kernel_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-target_compile_definitions(test_tilexr_ep_plan_sources PRIVATE TILEXR_SOURCE_ROOT="${TILEXR_ROOT}")
-
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_expert_ids COMMAND test_tilexr_ep_expert_ids)
-add_test(NAME test_tilexr_ep_api_sources COMMAND test_tilexr_ep_api_sources)
-add_test(NAME test_tilexr_ep_kernel_sources COMMAND test_tilexr_ep_kernel_sources)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
-add_test(NAME test_tilexr_ep_plan_sources COMMAND test_tilexr_ep_plan_sources)
 add_test(NAME test_tilexr_moonep_planner_public_abi COMMAND test_tilexr_moonep_planner_public_abi)
 add_test(NAME test_tilexr_ep_plan_layout COMMAND test_tilexr_ep_plan_layout)
 add_test(NAME test_tilexr_ep_plan_reference COMMAND test_tilexr_ep_plan_reference)
@@ -257,10 +243,7 @@ add_test(NAME test_tilexr_moonep_planner_compat COMMAND test_tilexr_moonep_plann
 install(TARGETS
     test_tilexr_ep_layout
     test_tilexr_ep_expert_ids
-    test_tilexr_ep_api_sources
-    test_tilexr_ep_kernel_sources
     test_tilexr_ep_host_validation
-    test_tilexr_ep_plan_sources
     test_tilexr_ep_plan_layout
     test_tilexr_ep_plan_reference
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

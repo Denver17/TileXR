@@ -6,7 +6,7 @@ usage() {
 Usage:
   run_collective_perf_multihost_suite.sh prepare
   run_collective_perf_multihost_suite.sh build
-  run_collective_perf_multihost_suite.sh guards
+  run_collective_perf_multihost_suite.sh host-checks
   run_collective_perf_multihost_suite.sh case <name> <op> <bytes>
   run_collective_perf_multihost_suite.sh suite
   run_collective_perf_multihost_suite.sh profile-probe
@@ -17,7 +17,7 @@ Environment:
   TILEXR_PROFILE_BUILD_DIR     Profile build dir. Defaults to <repo>/build-profile-950.
   TILEXR_PROFILE_DIR           Multi-host profile output root. Defaults to <repo>/run/prof/collectives-2host.
   TILEXR_PROFILE_BUILD_JOBS    Build parallelism. Defaults to nproc or 8.
-  TILEXR_PROFILE_ENV_SCRIPT    Optional environment script sourced before build/guards.
+  TILEXR_PROFILE_ENV_SCRIPT    Optional environment script sourced before build/checks.
   CMAKE                        Optional cmake executable name. Defaults to cmake from PATH.
 
 Multi-host runs also require TILEXR_MULTIHOST_PEERS and usually TILEXR_COMM_ID.
@@ -60,16 +60,18 @@ build_profile() {
     -DTILEXR_COLLECTIVES_ENABLE_PROFILING=ON \
     -DBUILD_TESTING=OFF
   "${cmake_bin}" --build "${build_dir}" --target \
-    test_tilexr_collectives_kernel_ownership \
-    test_tilexr_collectives_tools_sources \
+    test_tilexr_collectives_header_compile \
+    test_tilexr_int32_pattern \
+    test_tilexr_perf_trace_layout \
     tilexr_collective_perf -j"${build_jobs}"
 }
 
-run_guards() {
+run_host_checks() {
   cd "${repo_dir}"
   source_profile_env
-  "${build_dir}/tests/collectives/test_tilexr_collectives_kernel_ownership"
-  "${build_dir}/tests/collectives/test_tilexr_collectives_tools_sources"
+  "${build_dir}/tests/collectives/test_tilexr_collectives_header_compile"
+  "${build_dir}/tests/collectives/test_tilexr_int32_pattern"
+  "${build_dir}/tests/collectives/test_tilexr_perf_trace_layout"
   python3 "${repo_dir}/tests/collectives/unit/test_collective_profile_report.py"
 }
 
@@ -152,12 +154,12 @@ case "${command}" in
   build)
     build_profile
     ;;
-  guards)
-    run_guards
+  host-checks)
+    run_host_checks
     ;;
   prepare)
     build_profile
-    run_guards
+    run_host_checks
     ;;
   case)
     if [[ $# -ne 4 ]]; then

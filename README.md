@@ -155,7 +155,7 @@ TileXR/
 |-- tests/                    # Host, communication, integration, and UDMA tests
 |   |-- collectives/          # Collectives source/unit checks and manual runners
 |   |-- comm/
-|   |-- ep/                   # EP source checks, build helper, and 2-rank demo
+|   |-- ep/                   # EP Host checks, build helper, and 2-rank demo
 |   |-- udma/
 |   `-- sdma/                 # SDMA unit tests, integration test, and data-plane demo
 |-- scripts/                  # Build, setup, test, and utility scripts
@@ -411,7 +411,6 @@ Expected demo logs include `rank 0 validation PASS` and `rank 1 validation PASS`
 ```bash
 source scripts/common_env.sh
 bash scripts/device_connect.sh
-bash scripts/watch.sh
 bash scripts/plog_grep.sh "search_term"
 bash scripts/driver_fix.sh
 ```

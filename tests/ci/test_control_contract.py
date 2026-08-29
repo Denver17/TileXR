@@ -74,21 +74,13 @@ class ControlSourceContractTests(unittest.TestCase):
             '(cd "$1" && ctest --output-on-failure)',
             "test_tilexr_log",
             "test_tilexr_log_spdlog_compile",
-            "test_tilexr_source_guards",
             "test_tilexr_udma_transport_layout",
             "test_tilexr_udma_registry",
-            "test_tilexr_udma_demo_sources",
-            "test_tilexr_udma_source_guard",
             "test_tilexr_sdma_metadata",
             "test_tilexr_sdma_api_invalid",
             "test_tilexr_sdma_transport_disabled",
-            "test_tilexr_sdma_comm_wiring",
-            "test_tilexr_sdma_source_guard",
             "test_tilexr_sdma_header_compile",
-            "test_tilexr_memory_demo_sources",
             "test_tilexr_ep_layout",
-            "test_tilexr_ep_api_sources",
-            "test_tilexr_ep_kernel_sources",
             "test_tilexr_ep_host_validation",
             "libascend_hal.so",
             "readelf",
@@ -488,7 +480,7 @@ class ControlSourceContractTests(unittest.TestCase):
         text = self.read("scripts/ci/control/build_blue.sh")
         self.assertIn(': > "${CASES_FILE}"', text)
         self.assertIn("run_case()", text)
-        self.assertGreaterEqual(text.count("run_case "), 19)
+        self.assertGreaterEqual(text.count("run_case "), 11)
         self.assertIn("printf '%s\\t%s\\t%s\\t%s\\n'", text)
 
     def test_build_manifest_captures_configuration_and_build_logs(self):
@@ -537,12 +529,10 @@ class ControlSourceContractTests(unittest.TestCase):
             'cmake -S "${ROOT_DIR}/tests/comm"',
             "test_tilexr_log",
             "test_tilexr_log_spdlog_compile",
-            "test_tilexr_source_guards",
             'cmake -S "${ROOT_DIR}/tests/ep"',
             "-DBUILD_TILEXR_EP_DEMO=OFF",
             'cmake -S "${ROOT_DIR}/tests/data_as_flag"',
             "test_vllm_collectives_patch.py",
-            "test_vllm_collectives_integration_sources.py",
             "test_collective_profile_report.py",
             "CASE_NAMES=()",
             "run_case()",
@@ -559,10 +549,9 @@ class ControlSourceContractTests(unittest.TestCase):
             "shell-syntax",
             "ci-ctest",
             "comm-host",
-            "ep-source-only",
+            "ep-host",
             "data-as-flag",
             "collectives-vllm-patch",
-            "collectives-vllm-integration-sources",
             "collectives-profile-report",
         ]:
             self.assertIn("run_and_accumulate_case {} ".format(suite), text)
@@ -977,8 +966,7 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "  printf '<testsuite/>\\n' > \"$build_dir/Testing/tag/Test.xml\"\n"
                 "fi\n"
                 "mkdir -p \"${TILEXR_TEST_COMM_BIN:?}\"\n"
-                "for name in test_tilexr_log test_tilexr_log_spdlog_compile "
-                "test_tilexr_source_guards; do\n"
+                "for name in test_tilexr_log test_tilexr_log_spdlog_compile; do\n"
                 "  printf '#!/bin/bash\\nexit 0\\n' > "
                 "\"${TILEXR_TEST_COMM_BIN}/$name\"\n"
                 "  chmod 755 \"${TILEXR_TEST_COMM_BIN}/$name\"\n"
@@ -1039,29 +1027,28 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 line for line in result.stdout.splitlines()
                 if line.startswith("[host-check] ")
             ]
-            self.assertEqual(8, len(case_lines))
+            self.assertEqual(7, len(case_lines))
             expected = [
                 "shell-syntax",
                 "ci-ctest",
                 "comm-host",
-                "ep-source-only",
+                "ep-host",
                 "data-as-flag",
                 "collectives-vllm-patch",
-                "collectives-vllm-integration-sources",
                 "collectives-profile-report",
             ]
             self.assertEqual(
                 expected,
                 [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
-            self.assertIn("[host-check] ep-source-only: FAIL (exit=23", result.stdout)
+            self.assertIn("[host-check] ep-host: FAIL (exit=23", result.stdout)
             self.assertIn(
                 "[host-check] collectives-profile-report: FAIL (exit=31",
                 result.stdout,
             )
-            self.assertIn("Host cases: 8 total, 6 passed, 2 failed", result.stdout)
+            self.assertIn("Host cases: 7 total, 5 passed, 2 failed", result.stdout)
             self.assertIn(
-                "Failed cases: ep-source-only, collectives-profile-report",
+                "Failed cases: ep-host, collectives-profile-report",
                 result.stdout,
             )
 

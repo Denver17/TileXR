@@ -318,7 +318,7 @@ quiet 每个 fused epoch 只执行一轮。发生上游或设备错误后可以�
   必须使用 checked add/multiply 计算真实容量，并在扩大 workspace 绑定后重新检查全部
   active region 与 common tail 边界。
 
-这些 Host/mock/source guard 只能证明 ABI、布局和源码协议不变量。只有相同 CANN、设备、
+这些 Host/mock 测试只能证明 ABI、布局和主机侧协议不变量。只有相同 CANN、设备、
 拓扑上的 HCCL baseline 和 Ascend950 实机逐元素多轮结果，才能证明 UDMA 数据面；性能结论
 还必须使用同 shape、同 pair 模式、同 warmup/迭代和独立 Kernel profiling-off 构建做 A/B；
 框架 NPU profiler 与 stage barrier 仍按项目规则保留。

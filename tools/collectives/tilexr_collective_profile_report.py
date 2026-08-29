@@ -153,12 +153,6 @@ def group_key(entry):
     )
 
 
-def expected_launch_ids(measured_iters, sample_every):
-    if measured_iters <= 0 or sample_every <= 0:
-        return []
-    return [launch_id for launch_id in range(measured_iters) if launch_id % sample_every == 0]
-
-
 def expected_group_launch_ids(observed_launch_ids, measured_iters, sample_every):
     if not observed_launch_ids or measured_iters <= 0 or sample_every <= 0:
         return observed_launch_ids
