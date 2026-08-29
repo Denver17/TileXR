@@ -357,6 +357,65 @@ directory from Mutagen synchronization. With eight available devices and no expl
 device selection, a four-rank run uses physical devices 0-3.
 Running it without arguments or with `--help` prints usage.
 
+### `run_moonep_meta_gate.py`
+
+Run the single-node MoonEP model-order cascade gate without setting environment
+variables:
+
+```bash
+cd /path/to/TileXR
+python3 scripts/run_moonep_meta_gate.py
+```
+
+The gate incrementally configures, builds, and installs the current source, then runs
+the checked-in replay meta for `S=4096,K=8,H=7168,EP=8` and
+`S=8192,K=16,H=3584,EP=8` in both `group` and `group_credit` mode. Each replay uses
+eight ranks on devices 0-7, one measured model-flow iteration, framework profiler
+provenance, and the model-flow stage barrier. Successful cases print the existing
+`run_moonep.sh` model-versus-replay stage performance table. The final table reports
+all four PASS/FAIL results, and any failed row makes the gate exit non-zero.
+Meta selection is strict: missing or incompatible checked-in meta fails the row instead
+of silently falling through to a full MindSpeed model capture.
+
+Results are retained under `run/moonep/meta-cascade-gate-<timestamp>-<pid>/`, with one
+artifact directory per shape and peer mode. By default, the build and install trees
+are `build-moonep-meta-gate/` and `install-moonep-meta-gate/`. For a repeated run of
+an installation already built by this gate, the only optional argument is:
+
+```bash
+python3 scripts/run_moonep_meta_gate.py --skip-build
+```
+
+Use the default build path after source changes. Reusing an older install can validate
+the wrong binary. By default, the gate clears inherited CANN selection variables and
+requires a toolkit installed under the current checkout's `env/cann`; it never falls
+back to a system CANN. For a fresh checkout, install it first with:
+
+```bash
+bash scripts/cann_download_install.sh
+```
+
+To test one explicitly selected toolkit outside the checkout, pass its root directly:
+
+```bash
+python3 scripts/run_moonep_meta_gate.py --cann /home/pkg/b101/cann-9.1.0
+```
+
+The selected root must contain `set_env.sh`. `--cann` and `--skip-build` are mutually
+exclusive so every explicit toolkit test rebuilds the current source. CANN cannot be
+selected through `ASCEND_HOME_PATH`, `TILEXR_CANN_HOME`, or other inherited environment
+variables; those values are cleared before either the workspace default or `--cann`
+path is applied. The gate uses the selected toolkit for both build and replay and starts
+every replay from the TileXR source root. These checks prevent an inherited environment
+or arbitrary caller working directory from selecting the wrong compiler or failing
+before the model replay orchestrator starts.
+
+This meta gate exercises the 55-stage Planning, Dispatch, Prefetch, Combine, reverse
+Dispatch, and ReduceGrad order and plan reuse that single-operator tests miss; it does
+not launch the full MindSpeed model and therefore is not full-model correctness
+evidence. Hardware conclusions remain limited to the actual host, SoC, device set,
+CANN, driver, and firmware recorded by that run.
+
 ## Utilities
 
 ### `plog_grep.sh`

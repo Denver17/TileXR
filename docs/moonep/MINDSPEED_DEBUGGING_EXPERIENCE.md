@@ -604,6 +604,28 @@ Python 上下文必须在任何 NPU workspace 或 registered mailbox 分配前�
 边界回归应同时覆盖 `4096` 可接受和大于 `4096` 且仍可整除的输入被提前拒绝；该 Host
 校验只证明失败顺序和 API 契约，不替代合法 shape 的实机数据面闭环。
 
+## 同版本 CANN 的编译器构建身份与 clean 门禁
+
+2026-08-28 在 C01-A10 `.192` 的单机 8 rank meta 级联门禁中，`9.1.0` 版本字符串相同的
+两套 CANN 产生了不同结果。`/home/pkg/b061/cann-9.1.T560` 编译的 Planner V2 AICore
+产物为 113704 字节、SHA256 `65c11535...9101`，四个 `group`/`group_credit` case 都在
+首次 Planning data barrier 超时；workspace-local CANN 的 Bisheng 时间戳为
+`20260713_000025320`、SHA256 `4747c1d9...162b`，其 Planner 产物为 109672 字节、
+SHA256 `6d9909e0...ea10`，相同源码和四 case 全部通过。交叉运行进一步确认 b061 编译产物
+在新 runtime 上仍失败，而 workspace-local 编译产物在旧 runtime 上通过，因此故障固化在
+编译产物中，不是 MoonEP runtime 选择或超时长度问题。
+
+clean checkout 不包含未跟踪的 `env/cann/cann`。此时 `common_env.sh` 无法覆盖登录环境继承的
+`ASCEND_HOME_PATH`，仅检查 `set_env.sh` 是否存在会误选同版本但未验证的系统工具链。正确
+流程是在 workspace 内安装 CANN，按 component timestamp 和编译器哈希确认 build 身份，
+再核对 CMake 输出、实际 Planner Kernel 哈希和门禁结果。门禁必须清除继承的 CANN 选择
+变量；默认只接受解析后仍位于当前 checkout `env/cann` 下的 toolkit，内部安装缺失时直接
+失败，不能回退系统 CANN。需要显式 A/B 其他 toolkit 时只允许使用 `--cann <路径>`，且
+必须重新构建；不得通过环境变量选包。不得只记录 `Version=9.1.0`，也不得通过修改 MoonEP
+协议或增加 timeout 适配错误编译器。最终 clean 复现从无 build/install 产物的目录开始，
+CMake 明确使用 workspace-local CANN，四个 8 rank meta case 均保留 framework profiler
+与 stage barrier 并通过；该结论只覆盖本次 Ascend950、驱动、固件和单机拓扑。
+
 ## 当前实现状态说明
 
 本文记录的是已验证经验，不代表所有修复都已经进入 `main`。截至 2026-08-12：
