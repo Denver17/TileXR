@@ -424,7 +424,7 @@ int TileXRCommDestroy(TileXRCommPtr comm)
         return TILEXR_INVALID_VALUE;
     }
     auto *c = static_cast<TileXRComm *>(comm);
-
+    const int profilingRet = c->FinalizeProfiling();
     delete c;
-    return TILEXR_SUCCESS;
+    return profilingRet;
 }

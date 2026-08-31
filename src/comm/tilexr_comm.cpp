@@ -9,6 +9,7 @@
  */
 #include "tilexr_comm.h"
 #include "tilexr_internal.h"
+#include "tilexr_profiling.h"
 #include "sdma/tilexr_sdma_transport.h"
 #include "udma/tilexr_udma_context.h"
 
@@ -23,6 +24,7 @@
 #include <thread>
 #include <sstream>
 #include <iomanip>
+#include <limits>
 
 #include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
@@ -146,6 +148,154 @@ int TileXRComm::InitDumpAddr()
  
     commArgs_.dumpAddr = dumpAddr;
     return TILEXR_SUCCESS;
+}
+
+int TileXRComm::InitProfiling()
+{
+    std::string error;
+    if (!LoadTileXRProfilingRuntimeConfig(
+            rank_, devId_, commDomain_, &profilingConfig_, &error)) {
+        TILEXR_LOG(ERROR) << "Invalid TileXR profiling configuration: " << error;
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (!profilingConfig_.enabled) {
+        return TILEXR_SUCCESS;
+    }
+
+    const uint64_t slotCount =
+        static_cast<uint64_t>(profilingConfig_.coreCapacity) *
+        profilingConfig_.recordsPerCore;
+    if (slotCount > std::numeric_limits<size_t>::max() / sizeof(uint64_t)) {
+        TILEXR_LOG(ERROR) << "TileXR profiling allocation size overflow";
+        return TILEXR_ERROR_INTERNAL;
+    }
+    const size_t timestampBytes = static_cast<size_t>(slotCount) * sizeof(uint64_t);
+    const size_t eventIdBytes = static_cast<size_t>(slotCount) * sizeof(uint32_t);
+    const size_t counterBytes =
+        static_cast<size_t>(profilingConfig_.coreCapacity) *
+        TILEXR_PROFILING_COUNT_STRIDE * sizeof(uint32_t);
+
+    const auto allocateZeroed = [](GM_ADDR *destination, size_t bytes) -> aclError {
+        aclError ret = aclrtMalloc(
+            reinterpret_cast<void **>(destination), bytes, ACL_MEM_MALLOC_HUGE_FIRST);
+        if (ret != ACL_SUCCESS) {
+            return ret;
+        }
+        ret = aclrtMemset(*destination, bytes, 0, bytes);
+        if (ret != ACL_SUCCESS) {
+            (void)aclrtFree(*destination);
+            *destination = nullptr;
+        }
+        return ret;
+    };
+
+    aclError ret = allocateZeroed(&profilingTimestampsDev_, timestampBytes);
+    if (ret == ACL_SUCCESS) {
+        ret = allocateZeroed(&profilingEventIdsDev_, eventIdBytes);
+    }
+    if (ret == ACL_SUCCESS) {
+        ret = allocateZeroed(&profilingRecordCountsDev_, counterBytes);
+    }
+    if (ret == ACL_SUCCESS) {
+        ret = allocateZeroed(&profilingDroppedCountsDev_, counterBytes);
+    }
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR profiling device allocation failed: " << ret;
+        ResetProfilingState();
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    commArgs_.tilexrProfilingTimestampsGM = profilingTimestampsDev_;
+    commArgs_.tilexrProfilingEventIdsGM = profilingEventIdsDev_;
+    commArgs_.tilexrProfilingRecordCountsGM = profilingRecordCountsDev_;
+    commArgs_.tilexrProfilingDroppedCountsGM = profilingDroppedCountsDev_;
+    commArgs_.tilexrProfilingRecordsPerCore = profilingConfig_.recordsPerCore;
+    commArgs_.tilexrProfilingCoreCapacity = profilingConfig_.coreCapacity;
+    commArgs_.extraFlag |= ExtraFlag::PROFILING;
+    TILEXR_LOG(INFO) << "TileXR profiling enabled: records="
+                     << profilingConfig_.recordsPath
+                     << ", recordsPerCore=" << profilingConfig_.recordsPerCore;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::FinalizeProfiling()
+{
+    if (!profilingConfig_.enabled || profilingFinalized_) {
+        return TILEXR_SUCCESS;
+    }
+    profilingFinalized_ = true;
+    aclError ret = aclrtSynchronizeDevice();
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR profiling device synchronization failed: " << ret;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    const uint64_t slotCount =
+        static_cast<uint64_t>(profilingConfig_.coreCapacity) *
+        profilingConfig_.recordsPerCore;
+    std::vector<uint32_t> occupiedCounts(profilingConfig_.coreCapacity, 0U);
+    std::vector<uint32_t> droppedCounts(profilingConfig_.coreCapacity, 0U);
+    std::vector<uint32_t> rawCounters(
+        static_cast<size_t>(profilingConfig_.coreCapacity) *
+        TILEXR_PROFILING_COUNT_STRIDE, 0U);
+    std::vector<uint64_t> timestamps(static_cast<size_t>(slotCount), 0U);
+    std::vector<uint32_t> eventIds(static_cast<size_t>(slotCount), 0U);
+
+    const size_t counterBytes = rawCounters.size() * sizeof(uint32_t);
+    ret = aclrtMemcpy(rawCounters.data(), counterBytes,
+        profilingRecordCountsDev_, counterBytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    if (ret == ACL_SUCCESS) {
+        for (uint32_t core = 0U; core < profilingConfig_.coreCapacity; ++core) {
+            occupiedCounts[core] = rawCounters[
+                static_cast<size_t>(core) * TILEXR_PROFILING_COUNT_STRIDE];
+        }
+        ret = aclrtMemcpy(rawCounters.data(), counterBytes,
+            profilingDroppedCountsDev_, counterBytes, ACL_MEMCPY_DEVICE_TO_HOST);
+    }
+    if (ret == ACL_SUCCESS) {
+        for (uint32_t core = 0U; core < profilingConfig_.coreCapacity; ++core) {
+            droppedCounts[core] = rawCounters[
+                static_cast<size_t>(core) * TILEXR_PROFILING_COUNT_STRIDE];
+        }
+        ret = aclrtMemcpy(timestamps.data(), timestamps.size() * sizeof(uint64_t),
+            profilingTimestampsDev_, timestamps.size() * sizeof(uint64_t),
+            ACL_MEMCPY_DEVICE_TO_HOST);
+    }
+    if (ret == ACL_SUCCESS) {
+        ret = aclrtMemcpy(eventIds.data(), eventIds.size() * sizeof(uint32_t),
+            profilingEventIdsDev_, eventIds.size() * sizeof(uint32_t),
+            ACL_MEMCPY_DEVICE_TO_HOST);
+    }
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR profiling device capture copy failed: " << ret;
+        return TILEXR_ERROR_INTERNAL;
+    }
+
+    std::string error;
+    if (!WriteTileXRProfilingRecords(profilingConfig_, rank_, occupiedCounts,
+            droppedCounts, timestamps, eventIds, &error)) {
+        TILEXR_LOG(ERROR) << "TileXR profiling records export failed: " << error;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    TILEXR_LOG(INFO) << "TileXR profiling records written to "
+                     << profilingConfig_.recordsPath;
+    return TILEXR_SUCCESS;
+}
+
+void TileXRComm::ResetProfilingState()
+{
+    FreePeerMem(profilingTimestampsDev_);
+    FreePeerMem(profilingEventIdsDev_);
+    FreePeerMem(profilingRecordCountsDev_);
+    FreePeerMem(profilingDroppedCountsDev_);
+    commArgs_.tilexrProfilingTimestampsGM = nullptr;
+    commArgs_.tilexrProfilingEventIdsGM = nullptr;
+    commArgs_.tilexrProfilingRecordCountsGM = nullptr;
+    commArgs_.tilexrProfilingDroppedCountsGM = nullptr;
+    commArgs_.tilexrProfilingRecordsPerCore = 0U;
+    commArgs_.tilexrProfilingCoreCapacity = 0U;
+    commArgs_.extraFlag &= ~ExtraFlag::PROFILING;
+    profilingConfig_ = TileXRProfilingRuntimeConfig {};
 }
 
 int TileXRComm::InitUDMA()
@@ -582,6 +732,11 @@ int TileXRComm::Init()
         return TILEXR_ERROR_INTERNAL;
     }
 
+    ret = InitProfiling();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
     const int32_t localIpcEnabled = memoryOnlyDomain_ ? 1 :
         (IsEnvEnabled("TILEXR_ENABLE_IPC", true) ? 1 : 0);
     std::vector<int32_t> allIpcEnabled(rankSize_, -1);
@@ -695,6 +850,10 @@ int TileXRComm::InitThread(const std::string &uid)
         TILEXR_LOG(ERROR) << "init common failed!";
         return TILEXR_ERROR_INTERNAL;
     }
+    int ret = InitProfiling();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
     {
         lock_guard<mutex> lock(g_mtx);
         if (g_localPeerMemMap.find(uid) == g_localPeerMemMap.end()) {
@@ -704,7 +863,7 @@ int TileXRComm::InitThread(const std::string &uid)
         }
         uid_ = uid;
     }
-    int ret = InitMem();
+    ret = InitMem();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "InitMem failed! ret: " << ret;
         return ret;
@@ -1179,6 +1338,7 @@ TileXRComm::~TileXRComm()
         socketExchange_ = nullptr;
     }
     FreePeerMem(commArgs_.dumpAddr);
+    ResetProfilingState();
     FreePeerMem(peerMem_[rank_]);
     FreePeerMem(creditIpcMem_[rank_]);
     FreePeerMem(commArgsPtr_);

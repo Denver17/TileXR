@@ -113,6 +113,7 @@ struct ExtraFlag {
     static constexpr uint32_t SDMA = 1 << 11;
     static constexpr uint32_t UDMA_SHARED_QP = 1 << 12;
     static constexpr uint32_t UDMA_FULLMESH = 1 << 13;
+    static constexpr uint32_t PROFILING = 1 << 14;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
     static constexpr uint32_t PERF_CYCLE_A5 = 1 << 17;
@@ -144,6 +145,12 @@ struct CommArgs {
     uint64_t peerMemBytes = 0U;
     int32_t commDomain = 0;
     uint32_t reserved0 = 0U;
+    GM_ADDR tilexrProfilingTimestampsGM = nullptr;
+    GM_ADDR tilexrProfilingEventIdsGM = nullptr;
+    GM_ADDR tilexrProfilingRecordCountsGM = nullptr;
+    GM_ADDR tilexrProfilingDroppedCountsGM = nullptr;
+    uint32_t tilexrProfilingRecordsPerCore = 0U;
+    uint32_t tilexrProfilingCoreCapacity = 0U;
 };
 
 struct LcclDumpBlockInfo {

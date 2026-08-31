@@ -1,0 +1,21 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "Add4",
+  "cycles_per_us": 1000.0,
+  "stages": [
+    {"name": "kernel_total", "category": "total", "critical": true, "begin": 1, "end": 2},
+    {"name": "copy_input", "category": "copy", "parent": "kernel_total", "begin": 10, "end": 11},
+    {"name": "accumulate_window", "category": "compute", "parent": "kernel_total", "begin": 20, "end": 21},
+    {"name": "copy_out", "category": "copy", "parent": "kernel_total", "begin": 30, "end": 31},
+    {
+      "name": "partial_sum",
+      "category": "compute",
+      "parent": "accumulate_window",
+      "instances": [
+        {"begin": 100, "end": 101},
+        {"begin": 110, "end": 111},
+        {"begin": 120, "end": 121}
+      ]
+    }
+  ]
+}

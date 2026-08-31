@@ -67,6 +67,9 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/3rdparty/spdlog/include
         ${CMAKE_SOURCE_DIR}/3rdparty/
 )
+if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
+    add_subdirectory(tests/profiling)
+endif()
 add_subdirectory(src/comm)
 if(TILEXR_BUILD_EP)
     add_subdirectory(src/ep)

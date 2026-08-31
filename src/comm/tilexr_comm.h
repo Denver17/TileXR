@@ -20,6 +20,7 @@
 #include "../include/tilexr_types.h"
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
+#include "tilexr_profiling_runtime.h"
 
 namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
@@ -59,6 +60,7 @@ public:
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;
     std::string PrintDFX();
+    int FinalizeProfiling();
     friend class Lccl;
     friend class Lcoc;
     friend class LcclTest;
@@ -84,12 +86,14 @@ private:
     int GetName(std::string &name, char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]) const;
     int SyncCommArgs();
     int InitDumpAddr();
+    int InitProfiling();
     int InitUDMA();
     int ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state);
     static int ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData);
     int InitSDMA();
     int UpdateCommArgsDev();
     void ResetSDMAState();
+    void ResetProfilingState();
 
 private:
     int rank_ = 0;  // global rank id
@@ -122,6 +126,12 @@ private:
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     std::unique_ptr<TileXRSDMATransport> sdmaTransport_;
+    TileXRProfilingRuntimeConfig profilingConfig_ {};
+    GM_ADDR profilingTimestampsDev_ = nullptr;
+    GM_ADDR profilingEventIdsDev_ = nullptr;
+    GM_ADDR profilingRecordCountsDev_ = nullptr;
+    GM_ADDR profilingDroppedCountsDev_ = nullptr;
+    bool profilingFinalized_ = false;
 };
 } // TileXR
 
