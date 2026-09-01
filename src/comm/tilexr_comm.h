@@ -88,6 +88,7 @@ private:
     int InitDumpAddr();
     int InitProfiling();
     int InitUDMA();
+    int InitUDMAPeerMemory();
     int ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state);
     static int ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData);
     int InitSDMA();
@@ -112,6 +113,7 @@ private:
     int bufferSize_ = TILEXR_COMM_BUFFER_SIZE;
     bool sharedQpDomain_ = false;
     bool memoryOnlyDomain_ = false;
+    bool udmaPeerMemMode_ = false;
 
     // shared ping pong buff，这个地址就是一开始申请在HBM上的，所以host上可以取到，但不能直接修改。
     GM_ADDR peerMem_[TILEXR_MAX_RANK_SIZE] = {};

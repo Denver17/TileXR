@@ -116,6 +116,13 @@ target_include_directories(test_tilexr_udma_rootinfo_parser PRIVATE
     ${TILEXR_ROOT}/src/comm
 )
 
+add_executable(test_tilexr_udma_peermem_sources
+    unit/test_tilexr_udma_peermem_sources.cpp
+)
+target_compile_definitions(test_tilexr_udma_peermem_sources PRIVATE
+    TILEXR_SOURCE_DIR="${TILEXR_ROOT}"
+)
+
 # 集成测试：TileXR UDMA
 add_executable(test_tilexr_udma
     integration/test_tilexr_udma.cpp
@@ -135,6 +142,7 @@ set(INSTALL_TARGETS
     test_tilexr_udma_transport_layout
     test_tilexr_udma_route_config
     test_tilexr_udma_rootinfo_parser
+    test_tilexr_udma_peermem_sources
 )
 
 add_test(NAME test_tilexr_udma_registry COMMAND test_tilexr_udma_registry)
@@ -142,6 +150,7 @@ add_test(NAME test_tilexr_udma_device_api COMMAND test_tilexr_udma_device_api)
 add_test(NAME test_tilexr_udma_transport_layout COMMAND test_tilexr_udma_transport_layout)
 add_test(NAME test_tilexr_udma_route_config COMMAND test_tilexr_udma_route_config)
 add_test(NAME test_tilexr_udma_rootinfo_parser COMMAND test_tilexr_udma_rootinfo_parser)
+add_test(NAME test_tilexr_udma_peermem_sources COMMAND test_tilexr_udma_peermem_sources)
 
 if(BUILD_TILEXR_UDMA_DEMO)
     find_program(BISHENG_EXECUTABLE bisheng)
@@ -293,6 +302,78 @@ if(BUILD_TILEXR_UDMA_DEMO)
             )
             list(APPEND INSTALL_TARGETS tilexr_udma_profile_probe)
             message(STATUS "TileXR UDMA persistent-profile hardware probe enabled")
+
+            set(TILEXR_UDMA_PEERMEM_PROBE_KERNEL_SOURCE
+                "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_peermem_probe_kernel.cpp")
+            set(TILEXR_UDMA_PEERMEM_PROBE_KERNEL_RELOCATABLE
+                "${CMAKE_CURRENT_BINARY_DIR}/tilexr_udma_peermem_probe_kernel_rel.o")
+            set(TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY
+                "${CMAKE_CURRENT_BINARY_DIR}/tilexr_udma_peermem_probe_kernel.o")
+            set(TILEXR_UDMA_PEERMEM_PROBE_KERNEL_EMBED
+                "${CMAKE_CURRENT_BINARY_DIR}/tilexr_udma_peermem_probe_kernel_embed.cpp")
+            add_custom_command(
+                OUTPUT "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY}"
+                COMMAND ${BISHENG_EXECUTABLE}
+                    -xcce
+                    -mllvm -cce-aicore-stack-size=0x8000
+                    -mllvm -cce-aicore-function-stack-size=0x8000
+                    -mllvm -cce-aicore-record-overflow=true
+                    -mllvm -cce-aicore-addr-transform
+                    -mllvm -cce-aicore-dcci-insert-for-scalar=false
+                    --cce-aicore-arch=dav-c310-vec
+                    --cce-aicore-only
+                    -std=gnu++17
+                    ${TILEXR_UDMA_PROFILE_PROBE_KERNEL_INCLUDES}
+                    -I${CMAKE_CURRENT_SOURCE_DIR}/demo
+                    -c "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_SOURCE}"
+                    -o "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_RELOCATABLE}"
+                COMMAND ${TILEXR_UDMA_CCE_LINKER}
+                    -m aicorelinux -Ttext=0
+                    "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_RELOCATABLE}"
+                    --static --allow-multiple-definition
+                    -o "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY}"
+                DEPENDS
+                    "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_SOURCE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/demo/tilexr_udma_peermem_probe_layout.h"
+                    "${TILEXR_ROOT}/src/include/tilexr_udma.h"
+                VERBATIM
+                COMMENT "Building pure AICore TileXR UDMA peer-memory probe kernel"
+            )
+            add_custom_target(tilexr_udma_peermem_probe_kernel ALL
+                DEPENDS "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY}")
+            add_custom_command(
+                OUTPUT "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_EMBED}"
+                COMMAND ${CMAKE_COMMAND}
+                    -DTILEXR_MOONEP_KERNEL_BINARY=${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY}
+                    -DTILEXR_MOONEP_KERNEL_EMBED_CPP=${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_EMBED}
+                    -DTILEXR_MOONEP_KERNEL_DATA_SYMBOL=TileXRUDMAPeerMemProbeKernelBinaryData
+                    -DTILEXR_MOONEP_KERNEL_SIZE_SYMBOL=TileXRUDMAPeerMemProbeKernelBinarySize
+                    -P "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                DEPENDS
+                    "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY}"
+                    "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                VERBATIM
+                COMMENT "Embedding pure AICore TileXR UDMA peer-memory probe kernel"
+            )
+            add_executable(tilexr_udma_peermem_probe
+                demo/tilexr_udma_peermem_probe.cpp
+                "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_EMBED}"
+            )
+            add_dependencies(tilexr_udma_peermem_probe tilexr_udma_peermem_probe_kernel)
+            target_include_directories(tilexr_udma_peermem_probe PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/demo)
+            target_link_libraries(tilexr_udma_peermem_probe
+                ${TILEXR_LIB}
+                ascendcl
+                runtime
+                ascend_hal
+            )
+            set_target_properties(tilexr_udma_peermem_probe PROPERTIES
+                BUILD_WITH_INSTALL_RPATH TRUE
+                INSTALL_RPATH "$ORIGIN/../lib"
+            )
+            list(APPEND INSTALL_TARGETS tilexr_udma_peermem_probe)
+            message(STATUS "TileXR UDMA peer-memory alias hardware probe enabled")
         endif()
 
         add_custom_command(

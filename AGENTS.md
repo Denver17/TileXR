@@ -95,7 +95,7 @@ setup; Paramiko is used only by that setup mode.
 - An NPU reported in `Alarm` state may be treated as a healthy, usable card; do not exclude it solely because of the `Alarm` state.
 - UDMA and SDMA are best-effort capabilities. Communicator initialization must preserve existing paths when either is unavailable.
 - Do not select memory versus UDMA from topology alone: memory supports cross-node transfers. Prefer memory for small transfers and UDMA for large transfers, subject to runtime capability and registration readiness.
-- `TileXRUDMARegister` is unsupported in `InitThread`; UDMA targets must be registered ordinary device memory, not `peerMems[]`.
+- `TileXRUDMARegister` is unsupported in `InitThread` and accepts caller-owned ordinary device memory. The opt-in `TILEXR_UDMA_USE_PEER_MEM=1` mode is a controlled exception: `TileXRComm` may register only its owner rank's original `peerMem_[rank_]` allocation, never a remote `peerMems[]` IPC mapping.
 - UDMA WQEs must be assembled entirely in UB and published to the SQ through MTE3. Never construct or patch an SQ WQE with scalar or direct-GM stores.
 - Ring a UDMA doorbell only with `st_dev`, after the corresponding MTE3 WQE write has completed. Scalar stores must never be used for doorbells.
 - Never put `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib` in runtime RPATH/RUNPATH; runtime must resolve the real driver HAL.

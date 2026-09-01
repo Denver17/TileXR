@@ -327,6 +327,39 @@ int TileXRComm::InitUDMA()
     return ret;
 }
 
+int TileXRComm::InitUDMAPeerMemory()
+{
+    if (!udmaPeerMemMode_ || udmaContext_ == nullptr ||
+        !udmaContext_->IsAvailable()) {
+        return TILEXR_SUCCESS;
+    }
+    if (peerMem_[rank_] == nullptr) {
+        TILEXR_LOG(WARN) << "TileXR UDMA peer-memory registration skipped: local IPC memory is null";
+        udmaContext_->Shutdown();
+        udmaContext_.reset();
+        return TILEXR_SUCCESS;
+    }
+
+    const size_t peerMemBytes =
+        static_cast<size_t>(bufferSize_) * 1024U * 1024U +
+        static_cast<size_t>(TILEXR_FLAG_BUFF_BYTES);
+    TileXRUDMAMemHandle handle = 0;
+    const int ret = udmaContext_->RegisterMemory(
+        peerMem_[rank_], peerMemBytes, &handle);
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(WARN) << "TileXR UDMA peer-memory registration failed: "
+                         << ret << ", UDMA disabled";
+        udmaContext_->Shutdown();
+        udmaContext_.reset();
+        return TILEXR_SUCCESS;
+    }
+
+    TILEXR_LOG(INFO) << "TileXR UDMA registered local peer memory, base "
+                     << static_cast<void *>(peerMem_[rank_]) << ", bytes "
+                     << peerMemBytes;
+    return TILEXR_SUCCESS;
+}
+
 int TileXRComm::ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state)
 {
     const uint32_t oldExtraFlag = commArgs_.extraFlag;
@@ -537,6 +570,10 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
     if (localPtr == nullptr || bytes == 0 || handle == nullptr) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    if (udmaPeerMemMode_) {
+        TILEXR_LOG(ERROR) << "TileXRUDMARegister cannot replace communicator-owned peer memory";
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
     if (udmaContext_ == nullptr) {
         TILEXR_LOG(ERROR) << "TileXRUDMARegister called while UDMA is unavailable";
         return TILEXR_ERROR_NOT_FOUND;
@@ -546,6 +583,10 @@ int TileXRComm::RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMem
 
 int TileXRComm::UnregisterUDMAMemory(TileXRUDMAMemHandle handle)
 {
+    if (udmaPeerMemMode_) {
+        TILEXR_LOG(ERROR) << "TileXRUDMAUnregister cannot release communicator-owned peer memory";
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
     if (handle != 0) {
         return TILEXR_ERROR_NOT_FOUND;
     }
@@ -764,6 +805,27 @@ int TileXRComm::Init()
         TILEXR_LOG(INFO) << "TileXR IPC memory disabled by TILEXR_ENABLE_IPC";
     }
 
+    const int32_t localUdmaPeerMemRequested = memoryOnlyDomain_ ? 0 :
+        (IsEnvEnabled("TILEXR_UDMA_USE_PEER_MEM", false) ? 1 : 0);
+    std::vector<int32_t> allUdmaPeerMemRequested(rankSize_, -1);
+    ret = socketExchange_->AllGather(&localUdmaPeerMemRequested, 1,
+        allUdmaPeerMemRequested.data());
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "Failed to agree TILEXR_UDMA_USE_PEER_MEM across ranks: " << ret;
+        return ret;
+    }
+    if (std::any_of(allUdmaPeerMemRequested.begin(), allUdmaPeerMemRequested.end(),
+            [localUdmaPeerMemRequested](int32_t enabled) {
+                return enabled != localUdmaPeerMemRequested;
+            })) {
+        TILEXR_LOG(ERROR) << "TILEXR_UDMA_USE_PEER_MEM must match on every rank";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    udmaPeerMemMode_ = localUdmaPeerMemRequested != 0 && localIpcEnabled != 0;
+    if (localUdmaPeerMemRequested != 0 && !udmaPeerMemMode_) {
+        TILEXR_LOG(WARN) << "TILEXR_UDMA_USE_PEER_MEM requires IPC; peer-memory UDMA disabled";
+    }
+
     const int32_t localCreditIpcEnabled = memoryOnlyDomain_ ? 0 :
         IsEnvEnabled("TILEXR_ENABLE_CREDIT_IPC", false) ? 1 : 0;
     std::vector<int32_t> allCreditIpcEnabled(rankSize_, -1);
@@ -804,6 +866,10 @@ int TileXRComm::Init()
     }
     if (localUdmaEnabled != 0) {
         ret = InitUDMA();
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+        ret = InitUDMAPeerMemory();
         if (ret != TILEXR_SUCCESS) {
             return ret;
         }
@@ -1321,6 +1387,10 @@ TileXRComm::~TileXRComm()
             g_localPeerMemMap.erase(uid_);
         }
     }
+    if (udmaContext_ != nullptr) {
+        udmaContext_->Shutdown();
+        udmaContext_.reset();
+    }
     if (ipcMemInited_) {
         CloseIpcMem();
         ipcMemInited_ = false;
@@ -1328,10 +1398,6 @@ TileXRComm::~TileXRComm()
     if (creditIpcMemInited_) {
         CloseCreditIpcMem();
         creditIpcMemInited_ = false;
-    }
-    if (udmaContext_ != nullptr) {
-        udmaContext_->Shutdown();
-        udmaContext_.reset();
     }
     if (socketExchange_) {
         delete socketExchange_;

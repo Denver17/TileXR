@@ -28,6 +28,26 @@ is the four-WQE aggregate. The launcher uses MPI when `mpirun` is available and
 otherwise starts one bounded SSH process on each host; use `--launcher` to
 select either mode explicitly.
 
+## Peer-Memory Alias Hardware Probe
+
+`tilexr_udma_peermem_probe` proves that a UDMA write to an owner rank's original
+IPC allocation is immediately consumable through another local rank's
+`peerMems[ownerRank]` mapping after an explicit ready-token acquire. It requires
+exactly three ranks on one Ascend950/A5 server: producer, owner, and local IPC
+consumer.
+
+```bash
+export MPI_HOME=/path/to/mpich
+bash demo/run_tilexr_udma_peermem_probe_mpi.sh \
+  <host> <host> <host:port> <tests/udma/install> 8
+```
+
+The final argument is the generation count. Success requires all three ranks to
+report the requested count and `TileXR UDMA peer-memory alias probe success`.
+The consumer also verifies every byte of every 4 KiB payload. This probe is a
+same-server visibility test; uneven cross-node rank placement is unsupported by
+the current `localRankSize` calculation.
+
 ## Build
 
 ```bash

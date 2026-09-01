@@ -1,7 +1,7 @@
 # UDMA Test Infrastructure Status
 
-**Updated:** 2026-05-29
-**Status:** TileXR UDMA test infrastructure is present; A5 / Ascend950 hardware is required for data-plane validation
+**Updated:** 2026-09-01
+**Status:** Registered-memory and peer-memory alias data planes validated on Ascend950PR
 
 ## Summary
 
@@ -14,6 +14,29 @@ The test tree verifies:
 - registered-memory metadata and remote address calculations are correct;
 - a TileXR communicator can expose `CommArgs`;
 - AICore demo kernels can issue UDMA put and put-with-signal on A5 / Ascend950 / 950 hardware.
+- an owner rank's original IPC allocation can be UDMA-registered in the opt-in
+  peer-memory mode and consumed through another local rank's IPC alias.
+
+## Peer-Memory Alias Result
+
+On 2026-09-01, the three-rank peer-memory alias probe passed on host
+`C01-A10-CPU2` (`141.61.49.223`) using Ascend950PR devices 0, 1, and 2, CANN
+`9.1.T560`, and driver `25.1.rc1.b188`. Eight generations completed on every
+rank. For each generation, the producer UDMA-wrote a 4 KiB payload and ready
+token into the owner's registered `peerMem_[owner]`; the third rank acquired the
+ready token through a distinct `peerMems[owner]` IPC mapping and verified every
+payload byte.
+
+The debugging boundary was cache visibility, not UDMA registration: CQ
+completion and Host reads through both IPC aliases showed the correct token,
+while repeated MTE2 token polling remained stale. DCCI followed by scalar
+`GlobalTensor::GetValue` provided the required control-token acquire. This
+result covers same-server UDMA-to-IPC visibility only; it does not validate an
+uneven cross-node placement.
+
+The review follow-up added an explicit cache acquire before reusing the payload
+slot. The source contract check covers this guard, but the follow-up cache path
+has not been rerun on Ascend950 hardware.
 
 ## Test Files
 

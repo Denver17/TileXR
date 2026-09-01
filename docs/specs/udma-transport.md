@@ -28,8 +28,12 @@ expose immutable Host or device registry views.
 
 `TileXRUDMARegister` accepts ordinary device memory and exchanges the resulting
 remote descriptors across ranks. Registration is unsupported during
-`TileXRCommInitThread`, and `peerMems[]` are not valid UDMA registration targets.
-Every submitted remote range must be contained by a live registration.
+`TileXRCommInitThread`. By default, `peerMems[]` are not UDMA registration
+targets. When every rank opts in with `TILEXR_UDMA_USE_PEER_MEM=1`, `TileXRComm`
+registers only its owner rank's original `peerMem_[rank_]` allocation after IPC
+setup; remote `peerMems[peer]` IPC mappings are never registered locally. Public
+register/unregister calls cannot replace or release this communicator-owned
+region. Every submitted remote range must be contained by a live registration.
 
 Registration handles are communicator-owned identities. The caller must quiesce
 every stream and device operation that can use a registration before unregister.
@@ -73,6 +77,23 @@ mandatory:
 Nonblocking put/get/signal APIs return or advance a queue frontier. Flush and
 quiet operations wait to a defined frontier, not merely for an arbitrary CQE.
 Operators using multiple QPs maintain independent frontiers.
+
+## Peer-Memory Publication Contract
+
+Registering the owner allocation makes UDMA writes address the same physical
+memory exposed through local IPC aliases, but completion alone does not publish
+a message. A producer must clean its local source cache lines, complete the
+payload UDMA write, and then complete a separate cache-line-aligned ready-token
+write. A consumer polls that token through `peerMems[ownerRank]` using
+`DataCacheCleanAndInvalid<CACHELINE_OUT>` followed by scalar
+`GlobalTensor::GetValue`; repeatedly copying the token through MTE2 can keep
+returning a stale cached value on Ascend950. After acquiring the ready token,
+the consumer may copy payload lines that it has not read before through MTE2.
+
+Control slots must not share cache lines with payload or other flags. Reusing a
+slot requires a new magic generation. If a consumer can have cached payload
+from an earlier generation, it must apply the documented cache acquire for
+those lines before consuming the next generation.
 
 ## Failure and Fallback
 
