@@ -107,6 +107,21 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         tilexr_internal.cpp
         tilexr_internal.h
         tilexr_log.h
+        ccu/tilexr_ccu_abi_constants.h
+        ccu/tilexr_ccu_barrier_program.h
+        ccu/tilexr_ccu_barrier_program.cpp
+        ccu/tilexr_ccu_memory_program.h
+        ccu/tilexr_ccu_memory_program.cpp
+        ccu/tilexr_ccu_microcode.h
+        ccu/tilexr_ccu_microcode.cpp
+        ccu/tilexr_ccu_producer_plan.h
+        ccu/tilexr_ccu_producer_plan.cpp
+        ccu/tilexr_ccu_resource_allocator.h
+        ccu/tilexr_ccu_resource_allocator.cpp
+        ccu/tilexr_ccu_runtime.h
+        ccu/tilexr_ccu_runtime.cpp
+        ccu/tilexr_ccu_specs.h
+        ccu/tilexr_ccu_specs.cpp
         tools/socket/tilexr_sock_exchange.h
         tools/socket/tilexr_sock_exchange.cpp
         udma/tilexr_hccp_defs.h
@@ -127,6 +142,11 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
+set_target_properties(tile-comm PROPERTIES
+        BUILD_WITH_INSTALL_RPATH FALSE
+        SKIP_BUILD_RPATH TRUE
+        INSTALL_RPATH ""
+        SKIP_INSTALL_RPATH TRUE)
 
 if(TILEXR_HAVE_PTO_SDMA)
     target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_PTO_SDMA=1)
@@ -142,6 +162,7 @@ target_include_directories(tile-comm
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/profiling/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/
+        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/runtime/
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
         PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}

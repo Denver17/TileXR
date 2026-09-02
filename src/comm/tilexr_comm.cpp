@@ -29,9 +29,9 @@
 #include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
-#include "runtime/kernel.h"
 #include "runtime/mem.h"
 #include "runtime/dev.h"
+#include "runtime/rts/rts_device.h"
 #include "runtime/rt_ffts.h"
 
 enum TopologyType : int {
