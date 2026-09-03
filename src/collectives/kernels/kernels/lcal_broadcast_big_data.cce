@@ -12,8 +12,6 @@
 
 __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastOrigin(ALLREDUCE_ARGS_FUN(char))
 {
-    const uint32_t perfCore = static_cast<uint32_t>(GetBlockIdx());
-    const uint32_t perfRank = static_cast<uint32_t>(rank);
     uint32_t blockSize = UB_SINGLE_DMA_SIZE_MAX;
     int64_t magicInner = magic << SYNC_FLAG_BIT_NUM;
     __gm__ char* buff[8] = {
@@ -50,19 +48,9 @@ __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastOrigin(ALLR
             remain = len - (blockTotalNum - 1) * blockSize;
         }
         if (rank == root) {
-            auto localToIpc = TileXR::TileXRPerfStageBegin(
-                perfTrace, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
             CopyInput2BuffBroadCast(inputUB, buff[rank], (__gm__ char*)input, remain, blockDataOffset);
             SetFlag(ctrlFlagsUB, (__gm__ int64_t * )buff[rank] + GetBlockIdx() * MEM_DMA_UNIT_INT_NUM, magicInner + currentCount);
-            TileXR::TileXRPerfStageEnd(
-                perfTrace, perfRank, perfCore, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC,
-                localToIpc, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         } else {
-            const bool tracePollWait = TileXR::TileXRPerfTraceEnabled(perfTrace);
-            uint64_t pollStart = 0;
-            if (tracePollWait) {
-                pollStart = static_cast<uint64_t>(AscendC::GetSystemCycle());
-            }
             if (GetBlockIdx() == root) {
                 CheckFlagGE(ctrlFlagsUB, ((__gm__ int64_t * )buff[GetBlockIdx()] + rank * MEM_DMA_UNIT_INT_NUM),
                 magicInner + currentCount);
@@ -70,36 +58,19 @@ __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastOrigin(ALLR
                 CheckFlagGE(ctrlFlagsUB, ((__gm__ int64_t * )buff[GetBlockIdx()] + GetBlockIdx() * MEM_DMA_UNIT_INT_NUM),
                 magicInner + currentCount);
             }
-            if (tracePollWait) {
-                const uint64_t pollEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
-                TileXR::TileXRPerfAccumulateDuration(
-                    perfTrace, perfRank, perfCore, TileXR::PerfStageId::FLAG_POLL_WAIT, pollStart, pollEnd);
-            }
             AscendC::PipeBarrier<PIPE_ALL>();
 
             if (remain > 0) {
-                auto peerToOutput = TileXR::TileXRPerfStageBegin(
-                    perfTrace, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT, TileXR::PerfBarrierPolicy::BARRIERED);
                 CpGM2UBAlignB16(inputUB, (__gm__ char*)((__gm__ int64_t * )buff[GetBlockIdx()] + GetTileXRBlockNum() * 2 * MEM_DMA_UNIT_INT_NUM) +blockDataOffset, remain);
                 AscendC::PipeBarrier<PIPE_ALL>();
                 CpUB2GMAlignB16((__gm__ char*)output + blockDataOffset, inputUB, remain);
-                TileXR::TileXRPerfStageEnd(
-                    perfTrace, perfRank, perfCore, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT,
-                    peerToOutput, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
                 if (GetBlockIdx() == root) {
-                    auto forwardToIpc = TileXR::TileXRPerfStageBegin(
-                        perfTrace, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
                     CpUB2GMAlignB16((__gm__ char*)((__gm__ int64_t * )buff[rank] + GetTileXRBlockNum() * 2 * MEM_DMA_UNIT_INT_NUM) + blockDataOffset, inputUB, remain);
                     SetFlag(ctrlFlagsUB, (__gm__ int64_t * )buff[rank] + rank * MEM_DMA_UNIT_INT_NUM, magicInner + currentCount);
-                    TileXR::TileXRPerfStageEnd(
-                        perfTrace, perfRank, perfCore, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC,
-                        forwardToIpc, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
                 }
             }
         }
     }
-    auto chunkBarrier = TileXR::TileXRPerfStageBegin(
-        perfTrace, TileXR::PerfStageId::CHUNK_BARRIER, TileXR::PerfBarrierPolicy::NO_BARRIER);
     if (rank != root) {
         SetFlag(ctrlFlagsUB, (__gm__ int64_t * )buff[GetBlockIdx()] + (GetTileXRBlockNum() + rank) * MEM_DMA_UNIT_INT_NUM, magic);
     }
@@ -115,15 +86,10 @@ __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastOrigin(ALLR
             CheckFlag(ctrlFlagsUB, ((__gm__ int64_t * )buff[rank] + (GetTileXRBlockNum() + i) * MEM_DMA_UNIT_INT_NUM), magic);
         }
     }
-    TileXR::TileXRPerfStageEnd(
-        perfTrace, perfRank, perfCore, TileXR::PerfStageId::CHUNK_BARRIER,
-        chunkBarrier, TileXR::PerfBarrierPolicy::NO_BARRIER);
 }
 
 __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastBigData(ALLREDUCE_ARGS_FUN(char))
 {
-    const uint32_t perfCore = static_cast<uint32_t>(GetBlockIdx());
-    const uint32_t perfRank = static_cast<uint32_t>(rank);
     magic = magic << SYNC_FLAG_BIT_NUM;
     __gm__ char* buff[8] = {
         buff0, buff1, buff2, buff3,
@@ -136,13 +102,9 @@ __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastBigData(ALL
     const int64_t loopNum = CeilDiv(len, IPC_BUFF_MAX_SIZE);
 
     for (int64_t i = 0; i < loopNum; i++) {
-        auto chunkTotal = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::CHUNK_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER);
         int64_t processedNum = i * IPC_BUFF_MAX_SIZE;
         int64_t remainNum = (len - processedNum < IPC_BUFF_MAX_SIZE) ? len - processedNum : IPC_BUFF_MAX_SIZE;
         if (i > 0) {
-            auto postSync = TileXR::TileXRPerfStageBegin(
-                perfTrace, TileXR::PerfStageId::POST_SYNC, TileXR::PerfBarrierPolicy::BARRIERED);
             SyncWithinNPUNew(ctrlFlagsUB, (__gm__ int64_t *)((__gm__ char *)buff[rank] + IPC_BUFF_MAX_SIZE) + dataOffsetNum + MEM_DMA_UNIT_INT_NUM, magic + i);
 
             __gm__ int64_t* ctrlFlagsGM =  (__gm__ int64_t *)((__gm__ char *)buff[rank] + IPC_BUFF_MAX_SIZE) + dataOffsetNum + postSyncFlagIdx;
@@ -155,21 +117,10 @@ __attribute__((always_inline)) inline __aicore__ void TileXRBroadcastBigData(ALL
                 __gm__ int64_t* ctrlFlagsGMX =  (__gm__ int64_t *)((__gm__ char *)buff[targetNPU] + IPC_BUFF_MAX_SIZE) + dataOffsetNum + postSyncFlagIdx;
                 CheckFlagNew(ctrlFlagsUB, ctrlFlagsGMX, (int64_t)magic + i);
             }
-            TileXR::TileXRPerfStageEnd(
-                perfTrace, perfRank, perfCore, TileXR::PerfStageId::POST_SYNC,
-                postSync, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         }
         TileXRBroadcastOrigin(
             input + processedNum, output + processedNum, rank, rankSize, remainNum, magic + i, 0, root, localRankSize,
-            loopTime, sendCountMatrix, dumpAddr, buff0, buff1, buff2, buff3, buff4, buff5, buff6, buff7, perfTrace);
-        auto chunkBarrier = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::CHUNK_BARRIER, TileXR::PerfBarrierPolicy::NO_BARRIER);
+            loopTime, sendCountMatrix, dumpAddr, buff0, buff1, buff2, buff3, buff4, buff5, buff6, buff7);
         AscendC::PipeBarrier<PIPE_ALL>();
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::CHUNK_BARRIER,
-            chunkBarrier, TileXR::PerfBarrierPolicy::NO_BARRIER);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::CHUNK_TOTAL,
-            chunkTotal, TileXR::PerfBarrierPolicy::NO_BARRIER);
     }
 }

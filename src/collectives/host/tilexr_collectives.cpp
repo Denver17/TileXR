@@ -226,27 +226,3 @@ int TileXRBroadcast(void *buf, int64_t count,
         buf, buf, bytes, dataType, blockDim, stream,
         TileXRCollectives::Host::CollectiveLaunchAttrs { 0, root });
 }
-
-int TileXRProfileProbe(void *sendBuf, void *recvBuf, int64_t count,
-                       TileXR::TileXRDataType dataType, TileXRCommPtr comm,
-                       aclrtStream stream)
-{
-    int ret = ValidateCommon(sendBuf, recvBuf, count, dataType, comm);
-    if (ret != TileXR::TILEXR_SUCCESS) {
-        return ret;
-    }
-
-    TileXRCollectives::Host::HostLaunchContext context;
-    ret = TileXRCollectives::Host::PrepareHostLaunchContext(comm, context);
-    if (ret != TileXR::TILEXR_SUCCESS) {
-        return ret;
-    }
-
-    const int64_t bytes = TileXRCollectives::Host::CountToBytes(count, dataType);
-    const uint32_t blockDim = TileXRCollectives::Host::GetProfileProbeBlockNum(*context.hostArgs, bytes);
-    if (blockDim == 0) {
-        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    return TileXRCollectives::Host::LaunchCollectiveKernel(comm, TileXR::TileXRType::PROFILE_PROBE, context,
-        sendBuf, recvBuf, bytes, TileXR::TILEXR_DATA_TYPE_INT8, blockDim, stream);
-}

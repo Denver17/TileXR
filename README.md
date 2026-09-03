@@ -339,35 +339,29 @@ LD_LIBRARY_PATH="$TILEXR_LIBDIR:${LD_LIBRARY_PATH:-}" \
 
 The perf tool prints latency, algorithm bandwidth, bus bandwidth, and error counts, with optional CSV output.
 
-Operator-internal profiling can be enabled for the collectives perf tool with `TILEXR_COLLECTIVES_ENABLE_PROFILING=ON`:
+Collectives can emit the common PR #143 records without a Collectives-specific
+session or report path. Set the capture environment before communicator
+initialization, run a normal operation, and parse the records after communicator
+destruction:
 
 ```bash
-source scripts/common_env.sh
-cmake -S . -B build-profile \
-  -DTILEXR_BUILD_COLLECTIVES=ON \
-  -DTILEXR_COLLECTIVES_ENABLE_PROFILING=ON
-cmake --build build-profile --target tilexr_collective_perf -j"$(nproc)"
-
-cd tests/collectives
-../../tools/collectives/run_collective_perf.sh 2 0 ../../build-profile/tests/collectives \
+mkdir -p run
+capture_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+export TILEXR_PROFILING_CAPTURE_ID="$capture_id"
+export TILEXR_PROFILING_RECORDS_PATH="$PWD/run/collective-${capture_id}-rank-{rank}.records.bin"
+tools/collectives/run_collective_perf.sh 2 0 build/tests/collectives \
   --op allgather --min-bytes 67108864 --max-bytes 67108864 \
-  --profile 1 --profile-dir run/prof/collectives --profile-ai-prompt 1
+  --iters 1 --warmup-iters 0 --datatype int32 --check 1
+python3 -m tools.profiling \
+  --mapping tools/collectives/tilexr_collectives.mapping.json \
+  --records "run/collective-${capture_id}-rank-0.records.bin" \
+  --records "run/collective-${capture_id}-rank-1.records.bin" \
+  --output-dir "run/collective-${capture_id}-profile"
 ```
 
-Each sampled measured launch writes per-rank/per-launch artifacts under
-`run/prof/collectives/rank<N>/launch<M>/`. After all ranks finish successfully,
-`run_collective_perf.sh` also writes aggregate root-level profiling artifacts:
-
-```text
-run/prof/collectives/report.html
-run/prof/collectives/trace_index.json
-run/prof/collectives/analysis.md
-run/prof/collectives/ai_prompt.md   # only when prompt export is enabled
-```
-
-The aggregate `report.html` keeps the bottleneck-first summary and adds a zoomable chronological timeline across ranks, cores, and sampled measured launches, with links back to each per-launch report. Warmup iterations remain controlled by `--warmup-iters` and are reported as metadata; warmup launches are not profiled by this path. Existing profile directories can be re-analyzed with `tools/collectives/tilexr_collective_profile_report.py`.
-
-See [tests/collectives/README.md](tests/collectives/README.md) for script arguments, skip behavior, timeout handling, topology limitations, and profiling report details.
+The output directory contains `perfetto_trace.json`, `analysis.md`, and
+`report.html`. See [tests/collectives/README.md](tests/collectives/README.md) for
+script arguments, skip behavior, timeout handling, and topology limitations.
 
 ## EP Dispatch Validation
 

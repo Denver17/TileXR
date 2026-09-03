@@ -102,7 +102,7 @@ CheckerStatus RunAllReduceBigDataTrace(RankWorld *world, const CheckerCase &test
             op.Init(world->UserInput(rank).data_ptr(), world->UserOutput(rank).data_ptr(),
                     reinterpret_cast<GM_ADDR>(&args), test_case.count,
                     static_cast<int64_t>(test_case.magic), TileXR::Op::ADD, 0, 0,
-                    nullptr, 0, nullptr, nullptr);
+                    nullptr, 0, nullptr);
             op.Process();
         }
     }

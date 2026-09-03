@@ -58,7 +58,7 @@ cd tests/collectives
   --iters 20 --warmup-iters 5 --datatype int32 --check 1
 ```
 
-Main options are `--op allgather|alltoall|allreduce|reducescatter|broadcast|profile-probe`, `--min-bytes`, `--max-bytes`, `--step-factor`, `--iters`,
+Main options are `--op allgather|alltoall|allreduce|reducescatter|broadcast|noop`, `--min-bytes`, `--max-bytes`, `--step-factor`, `--iters`,
 `--warmup-iters`, `--datatype int8|int16|int32|int64|fp16|fp32|bf16`, `--rank-size`, `--rank`,
 `--first-npu`, `--check 0|1`, and `--csv <path>`. Optional thresholds `--min-algbw` and
 `--max-latency-us` are available but are not set by default.
@@ -80,81 +80,12 @@ allreduce/reducescatter runs require `--datatype int32`; `--check=0` measures an
 
 ### Operator-Internal Profiling
 
-Build collectives with profiling enabled:
-
-```bash
-cmake -S . -B build-profile -DTILEXR_BUILD_COLLECTIVES=ON -DTILEXR_COLLECTIVES_ENABLE_PROFILING=ON
-cmake --build build-profile --target tilexr_collective_perf -j"$(nproc)"
-```
-
-Run the perf tool with profiling:
-
-```bash
-../../tools/collectives/run_collective_perf.sh 2 0 ../../build-profile/tests/collectives \
-  --op allgather --min-bytes 67108864 --max-bytes 67108864 \
-  --profile 1 --profile-dir run/prof/collectives --profile-ai-prompt 1
-```
-
-Each sampled measured launch writes `trace.json`, `summary.csv`, `analysis.md`, `report.html`, and `ai_prompt.md`
-when prompt export is enabled. `--profile-dir` is a root directory; each rank writes sampled launches under
-`run/prof/collectives/rank<N>/launch<M>/` in the example above.
-
-After all rank processes finish successfully, `run_collective_perf.sh` also writes a root-level report:
-
-```text
-run/prof/collectives/report.html
-run/prof/collectives/trace_index.json
-run/prof/collectives/analysis.md
-run/prof/collectives/perfetto_trace.json
-```
-
-When prompt export is enabled, the aggregate prompt is written as `run/prof/collectives/ai_prompt.md`.
-The root-level report.html keeps the bottleneck-first summary, adds a rank-level summary for spotting slow ranks,
-and adds a zoomable chronological timeline across sampled measured iterations. `perfetto_trace.json` uses
-launch/rank/stage event names plus per-rank launch windows so `ui.perfetto.dev` can quickly filter by launch or rank.
-Warmup execution is controlled by the existing `--warmup-iters` option and is reported as metadata; warmup launches are not profiled by this report path.
-The per-launch `rank<N>/launch<M>/report.html` files remain available for drilldown.
-
-To regenerate the aggregate report from an existing profile directory:
-
-```bash
-python3 ../../tools/collectives/tilexr_collective_profile_report.py run/prof/collectives \
-  --warmup-iters 5 --iters 20 --profile-sample-every 1 --emit-ai-prompt
-```
-
-### Multi-Host Profiling
-
-For a command-first runbook that is easier for humans and AI agents to execute, see
-[`COLLECTIVES_MULTIHOST_PROFILING.md`](../../docs/COLLECTIVES_MULTIHOST_PROFILING.md). It includes the peer environment, serial run
-templates for all standalone collective ops, trace verification snippets, Perfetto search hints, and common failure
-checks.
-
-`tilexr_collective_perf` also supports a socket bootstrap mode for one process per host. The helper script below
-starts each rank over SSH with `--comm-mode socket`, collects `rank<N>/` profile directories back to the first host,
-and then writes a single aggregate `report.html` plus `perfetto_trace.json` containing host/rank labels.
-
-Use `--op profile-probe` first as a multi-host profiling/report smoke mode. It initializes ACL and the socket
-communicator on all hosts, launches a real AIV kernel on each rank, and records the same kernel-level stages as the
-single-host collective report. The probe only performs local device-memory copies and does not touch cross-host
-`peerMems[]`, so it is useful for two-host profiling/report validation but should not be reported as allgather
-cross-host bandwidth.
-
-```bash
-cd tests/collectives
-TILEXR_MULTIHOST_PEERS="0,root@192.0.2.10,192.0.2.10,0;1,root@192.0.2.11,192.0.2.11,0" \
-TILEXR_COMM_ID=192.0.2.10:10067 \
-TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=300 \
-bash ../../tools/collectives/run_collective_perf_multihost.sh /path/to/TileXR/run/prof/collectives-2host-profile-probe \
-  /path/to/TileXR/build-profile-950/tests/collectives \
-  --op profile-probe --min-bytes 4096 --max-bytes 4096 \
-  --iters 2 --warmup-iters 1 --datatype int32 --check 0 \
-  --profile 1 --profile-sample-every 1 --profile-ai-prompt 1
-```
-
-The current report normalizes each rank/launch independently because cross-host device cycles are not assumed to be
-synchronized. Use the HTML rank-level summary to spot slow host/rank pairs, then drill into `rank<N>/launch<M>/`.
-The helper labels hosts from the SSH target/IP in `TILEXR_MULTIHOST_PEERS`, so Perfetto event names look like
-`launch0/rank1@192.0.2.11/kernel_total` in the example above.
+Collectives uses the common profiling runtime and report tool. Set
+`TILEXR_PROFILING_RECORDS_PATH` and `TILEXR_PROFILING_CAPTURE_ID` before the
+communicator is initialized, run the normal perf command, and invoke
+`python3 -m tools.profiling` after communicator destruction with
+`tools/collectives/tilexr_collectives.mapping.json`. No Collectives-specific
+session, probe operation, trace schema, or report script is required.
 
 ## Skip Behavior
 

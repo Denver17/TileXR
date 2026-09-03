@@ -384,6 +384,26 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, checker_cmake)
 
+    def test_legacy_profiling_headers_are_declaration_free_install_compatibility(self):
+        collectives_cmake = self.read("src/collectives/CMakeLists.txt")
+        comm_cmake = self.read("src/comm/CMakeLists.txt")
+        for header in ["tilexr_collectives_perf.h", "tilexr_perf_trace.h"]:
+            text = self.read("src/include/{}".format(header))
+            self.assertIn("Compatibility header retained", text)
+            self.assertNotIn("TileXRCollectivePerfSession", text)
+            self.assertNotIn("TileXRPerfTraceHeader", text)
+            self.assertIn(header, collectives_cmake)
+        self.assertIn("tilexr_perf_trace.h", comm_cmake)
+
+    def test_checker_collective_runners_use_current_kernel_init_signature(self):
+        for path in [
+            "tools/checker/src/collective_trace_runner.cpp",
+            "tools/checker/src/collective_trace_runner_hdb.cpp",
+        ]:
+            text = self.read(path)
+            self.assertNotIn("nullptr, 0, nullptr, nullptr", text)
+            self.assertIn("nullptr, 0, nullptr);", text)
+
     def test_hardware_manifest_has_required_8_card_coverage(self):
         text = self.read("scripts/ci/control/run_hardware.sh")
         for token in [
@@ -529,7 +549,6 @@ class ControlSourceContractTests(unittest.TestCase):
             "-DBUILD_TILEXR_EP_DEMO=OFF",
             'cmake -S "${ROOT_DIR}/tests/data_as_flag"',
             "test_vllm_collectives_patch.py",
-            "test_collective_profile_report.py",
             "CASE_NAMES=()",
             "run_case()",
             "trap finalize_host_checks EXIT",
@@ -548,7 +567,6 @@ class ControlSourceContractTests(unittest.TestCase):
             "ep-host",
             "data-as-flag",
             "collectives-vllm-patch",
-            "collectives-profile-report",
         ]:
             self.assertIn("run_and_accumulate_case {} ".format(suite), text)
         self.assertGreaterEqual(text.count(":-local}"), 4)
@@ -985,11 +1003,8 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "#!/bin/bash\n"
                 "set -euo pipefail\n"
                 "if [[ \"${1:-}\" == '-m' && \"${2:-}\" == 'pytest' ]]; then\n"
-                "  exit 0\n"
-                "fi\n"
-                "if [[ \"${1:-}\" == *test_collective_profile_report.py ]]; then\n"
                 "  touch \"${TILEXR_TEST_LATER_CASE:?}\"\n"
-                "  exit 31\n"
+                "  exit 0\n"
                 "fi\n"
                 "exec \"${TILEXR_TEST_REAL_PYTHON:?}\" \"$@\"\n",
                 encoding="utf-8",
@@ -1016,14 +1031,11 @@ class HostChecksBehaviorTests(unittest.TestCase):
 
             self.assertNotEqual(0, result.returncode)
             self.assertTrue(later_case.is_file())
-
-            self.assertNotEqual(0, result.returncode)
-            self.assertTrue(later_case.is_file())
             case_lines = [
                 line for line in result.stdout.splitlines()
                 if line.startswith("[host-check] ")
             ]
-            self.assertEqual(7, len(case_lines))
+            self.assertEqual(6, len(case_lines))
             expected = [
                 "shell-syntax",
                 "ci-ctest",
@@ -1031,22 +1043,14 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "ep-host",
                 "data-as-flag",
                 "collectives-vllm-patch",
-                "collectives-profile-report",
             ]
             self.assertEqual(
                 expected,
                 [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
             self.assertIn("[host-check] ep-host: FAIL (exit=23", result.stdout)
-            self.assertIn(
-                "[host-check] collectives-profile-report: FAIL (exit=31",
-                result.stdout,
-            )
-            self.assertIn("Host cases: 7 total, 5 passed, 2 failed", result.stdout)
-            self.assertIn(
-                "Failed cases: ep-host, collectives-profile-report",
-                result.stdout,
-            )
+            self.assertIn("Host cases: 6 total, 5 passed, 1 failed", result.stdout)
+            self.assertIn("Failed cases: ep-host", result.stdout)
 
 
 class BuildHelperBehaviorTests(unittest.TestCase):

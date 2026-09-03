@@ -44,22 +44,11 @@ public:
     }
     FORCE_INLINE_AICORE void Process()
     {
-        auto chunkTotal = TileXR::TileXRPerfStageBegin(
-            perfTrace_, TileXR::PerfStageId::CHUNK_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER);
         if (coreGroup == PRODUCER_CORE) {
             Producer();
         } else {
             Consumer();
         }
-        auto chunkBarrier = TileXR::TileXRPerfStageBegin(
-            perfTrace_, TileXR::PerfStageId::CHUNK_BARRIER, TileXR::PerfBarrierPolicy::NO_BARRIER);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        TileXR::TileXRPerfStageEnd(
-            perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-            TileXR::PerfStageId::CHUNK_BARRIER, chunkBarrier, TileXR::PerfBarrierPolicy::NO_BARRIER);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-            TileXR::PerfStageId::CHUNK_TOTAL, chunkTotal, TileXR::PerfBarrierPolicy::NO_BARRIER);
     }
 private:
     FORCE_INLINE_AICORE void InitShare()
@@ -109,12 +98,6 @@ private:
 
     FORCE_INLINE_AICORE void Producer()
     {
-        auto postSync = TileXR::TileXRPerfStageBegin(
-            perfTrace_, TileXR::PerfStageId::POST_SYNC, TileXR::PerfBarrierPolicy::NO_BARRIER);
-        AscendC::PipeBarrier<PIPE_ALL>();
-        TileXR::TileXRPerfStageEnd(
-            perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-            TileXR::PerfStageId::POST_SYNC, postSync, TileXR::PerfBarrierPolicy::NO_BARRIER);
         for (auto i = 0; i < loopCount; ++i) {
             srcRank = (rank + i * SIO) % rankSize;
             sioSrcRank = (srcRank % SIO == 0) ? srcRank + 1 : srcRank - 1;
@@ -146,14 +129,8 @@ private:
             srcLocalQue.DeQue(rank, flagIdx + (srcRank / SIO) * coreNumPerStage + flagNumPerStage);
             writeGt = srcLocalQue.EnQue();
             if (copyLen > 0) {
-                auto localToIpc = TileXR::TileXRPerfStageBegin(
-                    perfTrace_, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
                 CpGM2GMPingPong<T>(copyLen * sizeof(T), inputGt[sliceIdx * perQueElemLen], writeGt, Op::COPYONLY);
                 sync.SetSyncFlag(magic, sliceIdx + sliceNum * idx, flagIdx, rank);
-                TileXR::TileXRPerfStageEnd(
-                    perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-                    TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, localToIpc,
-                    TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
             }
         } else {
             flagIdx = flagIdx - singleStage;
@@ -167,14 +144,8 @@ private:
             srcSioQue.DeQue(sioRank, flagIdx + (sioSrcRank / SIO) * coreNumPerStage + flagNumPerStage);
             writeGt = srcSioQue.EnQue();
             if (copyLen > 0) {
-                auto localToIpc = TileXR::TileXRPerfStageBegin(
-                    perfTrace_, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
                 CpGM2GMPingPong<T>(copyLen * sizeof(T), inputGt[sliceIdx * perQueElemLen], writeGt, Op::COPYONLY);
                 sync.SetSyncFlag(magic, sliceIdx + sliceNum * idx, flagIdx, sioRank);
-                TileXR::TileXRPerfStageEnd(
-                    perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-                    TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, localToIpc,
-                    TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
             }
         }
     }
@@ -205,30 +176,13 @@ private:
         } else if (copyLen < 0) {
             copyLen = 0;
         }
-        const bool tracePollWait = TileXR::TileXRPerfTraceEnabled(perfTrace_);
-        uint64_t pollStart = 0;
-        if (tracePollWait) {
-            pollStart = static_cast<uint64_t>(AscendC::GetSystemCycle());
-        }
         sync.WaitSyncFlag(magic, sliceIdx + sliceNum * idx, groupCoreIdx, destRank);
-        if (tracePollWait) {
-            const uint64_t pollEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
-            TileXR::TileXRPerfAccumulateDuration(
-                perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-                TileXR::PerfStageId::FLAG_POLL_WAIT, pollStart, pollEnd);
-        }
         if (groupCoreIdx < singleStage) {
             readGt = detHccsQue.ReadFront();
         } else {
             readGt = detHccsSioQue.ReadFront();
         }
-        auto peerToOutput = TileXR::TileXRPerfStageBegin(
-            perfTrace_, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT, TileXR::PerfBarrierPolicy::BARRIERED);
         CpGM2GMPingPong<T>(copyLen * sizeof(T), readGt, outputGt[sliceIdx * perQueElemLen], Op::COPYONLY);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace_, static_cast<uint32_t>(rank), static_cast<uint32_t>(blockIdx),
-            TileXR::PerfStageId::PEER_IPC_TO_OUTPUT, peerToOutput,
-            TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         sync.SetSyncFlag(magic, sliceIdx + sliceNum * idx, groupCoreIdx + flagNumPerStage +
             (rank / SIO) * coreNumPerStage, destRank);
     }

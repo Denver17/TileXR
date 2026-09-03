@@ -36,8 +36,6 @@ uint32_t GetReduceScatterBlockNum(const TileXR::CommArgs &commArgs, int64_t data
 
 uint32_t GetBroadcastBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
 
-uint32_t GetProfileProbeBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
-
 } // namespace Host
 } // namespace TileXRCollectives
 

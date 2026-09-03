@@ -35,9 +35,6 @@ int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
 int TileXRBroadcast(void *buf, int64_t count,
                     TileXR::TileXRDataType dataType, int root,
                     TileXRCommPtr comm, aclrtStream stream);
-int TileXRProfileProbe(void *sendBuf, void *recvBuf, int64_t count,
-                       TileXR::TileXRDataType dataType, TileXRCommPtr comm,
-                       aclrtStream stream);
 
 }
 

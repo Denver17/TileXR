@@ -4,11 +4,11 @@
 
 The optional collectives component builds `libtilexr-collectives.so` on top of
 the core `libtile-comm.so` communicator. It owns collective algorithm dispatch,
-embedded AICore binaries, launch validation, and optional performance tracing.
+embedded AICore binaries, launch validation, and generic profiling markers.
 The core communicator remains independently usable.
 
 The public operations in `src/include/tilexr_collectives.h` are AllGather,
-AllToAll, AllReduce, ReduceScatter, Broadcast, and the profiling probe. The
+AllToAll, AllReduce, ReduceScatter, and Broadcast. The
 library accepts a TileXR communicator and an ACL stream; it does not own either.
 
 ## Build and Launch
@@ -35,41 +35,37 @@ not reset between operations.
 
 ## Profiling
 
-Profiling is opt-in and must not change collective results or default launch
-behavior. `src/include/tilexr_collectives_perf.h` defines the session lifecycle:
+Collectives uses the common recorder from `src/include/tilexr_profiling.h` at
+the original coarse kernel begin/end locations. It adds no Host launch argument,
+session API, records schema, or report implementation. The existing `commArgs`
+kernel argument supplies the common profiling GM state, and runtime enablement
+is controlled by `TILEXR_PROFILING_RECORDS_PATH` and the other common profiling
+environment variables.
 
-1. create a session with output and selection configuration;
-2. make it active for launches on the calling process;
-3. collect per-core stage records from instrumented kernels;
-4. write a complete or explicitly incomplete report;
-5. clear and destroy the session.
+`tools/collectives/tilexr_collectives.mapping.json` gives the two events their
+operator-owned meaning. After communicator destruction exports records, the
+unchanged `tools/profiling` command validates and renders them.
 
-The generic record schema is defined in `src/include/tilexr_perf_trace.h`.
-Records carry versioned headers, chip and stage metadata, per-core timestamps,
-and accumulated metrics. Host aggregation preserves rank/core identity, labels
-incomplete data, converts cycles with the recorded clock basis, and can emit a
-timeline plus machine-readable report data. Offline report generation lives in
-`tools/collectives/tilexr_collective_profile_report.py`.
+Do not remove `ExtraFlag::PROFILING` or `CommArgs::tilexrProfiling*` while
+cleaning legacy Collectives profiling. Those fields belong to the common
+runtime and are required by every PR #143 producer.
 
-Profiling buffers, report paths, and sessions are Host-owned resources. Kernel
-writers own only their assigned fixed-size record and must not write another
-core's region.
+The installed `tilexr_collectives_perf.h` and `tilexr_perf_trace.h` files are
+declaration-free compatibility headers. Keep the filenames in the install
+manifest for existing consumers and the sealed v4 CI controller, but do not
+restore the removed session API or trace schema in them.
 
 ## Failure and Compatibility
 
 - Missing optional profiling configuration leaves normal execution unchanged.
-- Invalid session state or malformed records must produce an explicit report
-  error; partial data must not be presented as a complete profile.
-- New record fields require a version change or backward-compatible reserved
-  space handling.
+- Malformed or incomplete records are rejected by the common profiling tool.
 - Runtime failure is reported through the public return code and must not be
   replaced by an unverified algorithm fallback.
 
 ## Verification Boundary
 
-Source and Host tests cover argument validation, algorithm selection, session
-lifecycle, report aggregation, and record parsing. A Host or simulator pass does
+Source and Host tests cover argument validation and algorithm selection. A Host or simulator pass does
 not prove AICore execution, multi-rank correctness, topology behavior, or device
 timing. Build and hardware commands are maintained in
-`docs/BUILD_VERIFICATION.md` and profiling procedures in
-`docs/COLLECTIVES_MULTIHOST_PROFILING.md`.
+`docs/BUILD_VERIFICATION.md`. A real hardware profiling check must retain the
+common records file and the generated `perfetto_trace.json`.

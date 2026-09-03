@@ -70,26 +70,6 @@ add_executable(test_tilexr_int32_pattern
     unit/test_tilexr_int32_pattern.cpp
 )
 
-add_executable(test_tilexr_perf_trace_layout
-    unit/test_tilexr_perf_trace_layout.cpp
-)
-
-add_executable(test_collective_perf_report
-    unit/test_collective_perf_report.cpp
-)
-
-target_include_directories(test_collective_perf_report PRIVATE
-    ${TILEXR_ROOT}/src/collectives/host
-)
-
-add_executable(test_collective_perf_session
-    unit/test_collective_perf_session.cpp
-)
-
-target_include_directories(test_collective_perf_session PRIVATE
-    ${TILEXR_ROOT}/src/collectives/host
-)
-
 add_executable(test_tilexr_collectives_correctness
     integration/test_tilexr_collectives_correctness.cpp
 )
@@ -223,18 +203,6 @@ target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
-target_link_libraries(test_tilexr_perf_trace_layout
-    ${TILEXR_COMM_TEST_TARGET}
-)
-
-target_link_libraries(test_collective_perf_report
-    ${TILEXR_COLLECTIVES_TEST_TARGET}
-)
-
-target_link_libraries(test_collective_perf_session
-    ${TILEXR_COLLECTIVES_TEST_TARGET}
-)
-
 target_link_directories(test_tilexr_collectives_correctness PRIVATE
     ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
 )
@@ -275,9 +243,6 @@ target_link_libraries(test_prepare_host_launch_context
 
 foreach(_tilexr_collectives_link_target
         test_tilexr_collectives_header_compile
-        test_tilexr_perf_trace_layout
-        test_collective_perf_report
-        test_collective_perf_session
         test_tilexr_collectives_correctness
         tilexr_collective_perf
         test_tilexr_collectives_stub_behavior
@@ -290,20 +255,12 @@ endforeach()
 
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_int32_pattern COMMAND test_tilexr_int32_pattern)
-add_test(NAME test_tilexr_perf_trace_layout COMMAND test_tilexr_perf_trace_layout)
-add_test(NAME test_collective_perf_report COMMAND test_collective_perf_report)
-add_test(NAME test_collective_perf_session COMMAND test_collective_perf_session)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
 add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
 add_test(NAME test_tilexr_comm_next_magic COMMAND test_tilexr_comm_next_magic)
 add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_context)
 if(Python3_Interpreter_FOUND)
-    add_test(
-        NAME test_collective_profile_report
-        COMMAND ${Python3_EXECUTABLE}
-                ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_collective_profile_report.py
-    )
     add_test(
         NAME test_vllm_collectives_patch
         COMMAND ${Python3_EXECUTABLE}
@@ -315,9 +272,6 @@ endif()
 install(TARGETS
     test_tilexr_collectives_header_compile
     test_tilexr_int32_pattern
-    test_tilexr_perf_trace_layout
-    test_collective_perf_report
-    test_collective_perf_session
     test_tilexr_collectives_correctness
     tilexr_collective_perf
     test_tilexr_collectives_stub_behavior
@@ -331,8 +285,10 @@ install(TARGETS
 install(PROGRAMS
     run_collectives_correctness.sh
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf.sh
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf_multihost.sh
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf_multihost_suite.sh
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/tilexr_collective_profile_report.py
     DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+
+install(FILES
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/tilexr_collectives.mapping.json
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/collectives
 )

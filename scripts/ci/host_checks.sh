@@ -234,7 +234,5 @@ run_and_accumulate_case ep-host run_ep_host_tests
 run_and_accumulate_case data-as-flag run_data_as_flag_tests
 run_and_accumulate_case collectives-vllm-patch \
     python3 -m pytest -q "${ROOT_DIR}/tests/collectives/unit/test_vllm_collectives_patch.py"
-run_and_accumulate_case collectives-profile-report \
-    python3 "${ROOT_DIR}/tests/collectives/unit/test_collective_profile_report.py"
 
 exit "${overall_status}"

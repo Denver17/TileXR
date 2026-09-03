@@ -13,10 +13,6 @@
 template<typename T>
 __attribute__((always_inline)) inline __aicore__ void TileXRAll2AllTranspose(ALLREDUCE_ARGS_FUN_16P(T))
 {
-    const uint32_t perfCore = static_cast<uint32_t>(GetBlockIdx());
-    const uint32_t perfRank = static_cast<uint32_t>(rank);
-    auto chunkTotal = TileXR::TileXRPerfStageBegin(
-        perfTrace, TileXR::PerfStageId::CHUNK_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER);
     int32_t width = root;
     int32_t burstLen = width / rankSize;
     const int64_t dataOffsetNum = GetTileXRBlockNum() * 32 * MEM_DMA_UNIT_INT_NUM;
@@ -45,8 +41,6 @@ __attribute__((always_inline)) inline __aicore__ void TileXRAll2AllTranspose(ALL
 
     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-    auto localToIpc = TileXR::TileXRPerfStageBegin(
-        perfTrace, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
     for(int32_t loopId = 0; loopId < rowNumPerCore; ++loopId) {
         event_t eventId = (loopId & 1)? EVENT_ID1 : EVENT_ID0;
         int32_t rowId = loopId + coreIdxInRank * rowNumPerCore;
@@ -68,52 +62,20 @@ __attribute__((always_inline)) inline __aicore__ void TileXRAll2AllTranspose(ALL
     }
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_MTE2>(EVENT_ID1);
-    TileXR::TileXRPerfStageEnd(
-        perfTrace, perfRank, perfCore, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC,
-        localToIpc, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
     AscendC::PipeBarrier<PIPE_ALL>();
 
-    auto postSync = TileXR::TileXRPerfStageBegin(
-        perfTrace, TileXR::PerfStageId::POST_SYNC, TileXR::PerfBarrierPolicy::BARRIERED);
     __gm__ int64_t* ctrlFlagsGM = (__gm__ int64_t*) buff[rank] + flagOffset1st;
     SetFlag(ctrlFlagsUB, ctrlFlagsGM, magic);
-    TileXR::TileXRPerfStageEnd(
-        perfTrace, perfRank, perfCore, TileXR::PerfStageId::POST_SYNC,
-        postSync, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
-
-    const bool tracePollWait = TileXR::TileXRPerfTraceEnabled(perfTrace);
-    uint64_t pollStart = 0;
-    if (tracePollWait) {
-        pollStart = static_cast<uint64_t>(AscendC::GetSystemCycle());
-    }
     __gm__ int64_t* ctrlFlagsGMWait = (__gm__ int64_t*)buff[coreIdxRankId] + (rank * corePerRank + coreIdxInRank) * MEM_DMA_UNIT_INT_NUM;
     CheckFlag((__ubuf__ int64_t*)ctrlFlagsUB, ctrlFlagsGMWait, (int64_t)magic);
-    if (tracePollWait) {
-        const uint64_t pollEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
-        TileXR::TileXRPerfAccumulateDuration(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::FLAG_POLL_WAIT, pollStart, pollEnd);
-    }
 
-    auto chunkBarrier = TileXR::TileXRPerfStageBegin(
-        perfTrace, TileXR::PerfStageId::CHUNK_BARRIER, TileXR::PerfBarrierPolicy::NO_BARRIER);
     AscendC::SetFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::S_MTE2>(EVENT_ID0);
-    TileXR::TileXRPerfStageEnd(
-        perfTrace, perfRank, perfCore, TileXR::PerfStageId::CHUNK_BARRIER,
-        chunkBarrier, TileXR::PerfBarrierPolicy::NO_BARRIER);
     __gm__ T* gm_src = (__gm__ T*)buff[coreIdxRankId] +
         rank * lenPerRank + coreIdxInRank * rowNumPerCore * burstLen + dataOffsetNum;
     __gm__ T* gm_dst = (__gm__ T*)output + coreIdxRankId * lenPerRank +
         coreIdxInRank * rowNumPerCore * burstLen;
     if (coreIdxRankId != rank) {
-        auto peerToOutput = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT, TileXR::PerfBarrierPolicy::BARRIERED);
         GM2GM(rowNumThisCore * burstLen * sizeof(T), inputUB[0], gm_dst, 0, gm_src, 0);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT,
-            peerToOutput, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
     }
-    TileXR::TileXRPerfStageEnd(
-        perfTrace, perfRank, perfCore, TileXR::PerfStageId::CHUNK_TOTAL,
-        chunkTotal, TileXR::PerfBarrierPolicy::NO_BARRIER);
 }

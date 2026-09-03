@@ -1,6 +1,4 @@
 #include "tilexr_collectives.h"
-#include "tilexr_collectives_perf.h"
-#include "tilexr_perf_trace.h"
 
 namespace {
 
@@ -27,11 +25,6 @@ int main()
         TileXR::TILEXR_REDUCE_MIN != TileXR::TILEXR_REDUCE_RESERVED &&
         TileXR::TILEXR_REDUCE_PROD != TileXR::TILEXR_REDUCE_RESERVED;
 
-    TileXR::TileXRPerfTraceHeader header {};
-    TileXRCollectivePerfConfig config {};
-    config.enabled = 1;
-
     return (allGather != nullptr && allToAll != nullptr && allReduce != nullptr &&
-            reduceScatter != nullptr && broadcast != nullptr && reduceOpsPresent &&
-            header.magic == TileXR::TILEXR_PERF_TRACE_MAGIC && config.enabled == 1) ? 0 : 1;
+            reduceScatter != nullptr && broadcast != nullptr && reduceOpsPresent) ? 0 : 1;
 }

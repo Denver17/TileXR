@@ -48,7 +48,7 @@ CheckerStatus RunAllGatherHierarchyDoubleRingTrace(RankWorld *world,
                     reinterpret_cast<GM_ADDR>(&args),
                     static_cast<int64_t>(test_case.count) * static_cast<int64_t>(sizeof(int32_t)),
                     static_cast<int64_t>(test_case.magic), TileXR::Op::COPYONLY, 0, 0,
-                    nullptr, 0, nullptr, nullptr);
+                    nullptr, 0, nullptr);
             op.Process();
         }
     }

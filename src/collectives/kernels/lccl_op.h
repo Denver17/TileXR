@@ -13,6 +13,7 @@
 #if defined(__DAV_C220_VEC__) || defined(__DAV_C220_CUBE__) || defined(__DAV_C310_VEC__)
 
 #include "op_def.h"
+#include "tilexr_profiling.h"
 #include "allgather.h"
 #include "91093/allgather_hierarchy_double_ring.h"
 #include "allreduce_quant.h"
@@ -49,27 +50,28 @@
 #include "kernels/lcal_broadcast_write.cce"
 #include "kernels/lcal_broadcast_big_data.cce"
 #include "kernels/lcal_all2all_transpose.cce"
-#include "kernels/lcal_profile_probe.cce"
 
 extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR"))) void TileXRDescriptor() {}
 
-struct TileXRCoarsePerfToken {
-    TileXR::TileXRPerfStageToken kernelTotal;
-    uint32_t perfRank = 0;
-    uint32_t perfCore = 0;
-};
+constexpr uint64_t TILEXR_COLLECTIVES_PROFILE_FLUSH_UB_OFFSET = 195616U;
 
 #define TILEXR_COARSE_PERF_BEGIN(tokenName) \
-    TileXRCoarsePerfToken tokenName {}; \
-    tokenName.perfRank = static_cast<uint32_t>(rank); \
-    tokenName.perfCore = static_cast<uint32_t>(GetBlockIdx()); \
-    tokenName.kernelTotal = TileXR::TileXRPerfStageBegin( \
-        perfTrace, TileXR::PerfStageId::KERNEL_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER)
+    TileXR::ProfilingRecorder<2U> tokenName; \
+    const bool tokenName##Enabled = (extraFlag & ExtraFlag::PROFILING) != 0U; \
+    if (tokenName##Enabled) { \
+        tokenName.RecordMarker<0U, 1U>(); \
+    }
 
 #define TILEXR_COARSE_PERF_END(tokenName) \
-    TileXR::TileXRPerfStageEnd( \
-        perfTrace, tokenName.perfRank, tokenName.perfCore, TileXR::PerfStageId::KERNEL_TOTAL, \
-        tokenName.kernelTotal, TileXR::PerfBarrierPolicy::NO_BARRIER)
+    if (tokenName##Enabled) { \
+        tokenName.RecordMarker<1U, 2U>(); \
+        AscendC::LocalTensor<uint64_t> tilexrProfileScratch; \
+        AscendC::TBuffAddr tilexrProfileScratchAddr; \
+        tilexrProfileScratchAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN); \
+        tilexrProfileScratchAddr.bufferAddr = TILEXR_COLLECTIVES_PROFILE_FLUSH_UB_OFFSET; \
+        tilexrProfileScratch.SetAddr(tilexrProfileScratchAddr); \
+        tokenName.Flush(commArgs, tilexrProfileScratch); \
+    }
 
 #define CLASS_OP_QUANT_LAUNCH(name, outputType, inputType) \
 do { \
@@ -92,15 +94,6 @@ extern "C" __global__ __aicore__ void TileXRBroadcast##suffix(KERNELS_ARGS_FUN()
         TileXRBroadcastBigData(ALLREDUCE_ARGS_CALL(char)); \
     } \
     TILEXR_COARSE_PERF_END(coarsePerf); \
-    } \
-}
-
-#define LCCL_PROFILE_PROBE_FUNC_AUTO_DEF() \
-extern "C" __global__ __aicore__ void TileXRProfileProbe(KERNELS_ARGS_FUN()) \
-{ \
-    if ASCEND_IS_AIV { \
-        GET_COMM_ARGS; \
-        TileXRProfileProbeKernel(KERNELS_ARGS_CALL(), rank, rankSize, extraFlag); \
     } \
 }
 

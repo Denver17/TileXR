@@ -116,7 +116,6 @@ struct ExtraFlag {
     static constexpr uint32_t PROFILING = 1 << 14;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
-    static constexpr uint32_t PERF_CYCLE_A5 = 1 << 17;
     static constexpr uint32_t MEMORY_ONLY = 1 << 18;
 };
 

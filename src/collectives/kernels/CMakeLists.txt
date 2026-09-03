@@ -7,7 +7,6 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 enable_language(CCE)
 
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 10485760 CACHE STRING "Padded size for TileXR collectives CCE binary")
-option(TILEXR_COLLECTIVES_ENABLE_PROFILING "Enable TileXR collectives kernel profiling helpers" OFF)
 set(_tilexr_collectives_default_soc_type "$ENV{TILEXR_COLLECTIVES_SOC_TYPE}")
 if(NOT _tilexr_collectives_default_soc_type)
     set(_tilexr_collectives_default_soc_type "$ENV{TILEXR_SOC_NAME}")
@@ -69,10 +68,9 @@ target_compile_options(tilexr_collectives_op_tmp PRIVATE
         ${CCE_COMPILE_OPTION}
         --cce-aicore-arch=${TILEXR_COLLECTIVES_AICORE_ARCH}
 )
-
-if(TILEXR_COLLECTIVES_ENABLE_PROFILING)
-    target_compile_definitions(tilexr_collectives_op_tmp PRIVATE TILEXR_COLLECTIVES_ENABLE_PROFILING=1)
-endif()
+target_compile_definitions(tilexr_collectives_op_tmp PRIVATE
+        TILEXR_ENABLE_PROFILING=1
+)
 
 set(TILEXR_COLLECTIVES_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_collectives_op.o")
 add_custom_command(

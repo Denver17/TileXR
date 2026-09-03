@@ -713,9 +713,6 @@ int TileXRComm::InitCommon()
     if (GetChipName() > ChipName::CHIP_910_9362) {
         commArgs_.extraFlag |= ExtraFlag::TOPO_910A5;
     }
-    if (GetChipName() == ChipName::CHIP_910A5) {
-        commArgs_.extraFlag |= ExtraFlag::PERF_CYCLE_A5;
-    }
     constexpr uint32_t AI_CORE_NUM_20 = 20;
     if (GetCoreNum(GetChipName()) > AI_CORE_NUM_20) {
         commArgs_.extraFlag |= ExtraFlag::IS_GREATER_THAN_40_AIV;

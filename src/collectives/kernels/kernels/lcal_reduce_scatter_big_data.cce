@@ -14,10 +14,8 @@ __attribute__((always_inline)) inline __aicore__ void TileXRReduceScatterBigData
     __gm__ T* buff[16], __gm__ T *input, __gm__ T *output, uint64_t processedNum, int64_t blockNumPerGroup, uint32_t rank,
     uint32_t rankSize, int64_t allLen, int64_t len, int64_t magic, __ubuf__ int64_t* ctrlFlagsUB, __ubuf__ int64_t* ctrlFlagsUB1,
     __ubuf__ int64_t* ctrlFlagsUB2, __ubuf__ T *inputUB[2], int64_t dataOffsetNum, int64_t flagOffset1st, int64_t flagOffset2nd,
-    int64_t x, int64_t corePerRank, int64_t coreSegmentedIdx, int op, GM_ADDR perfTrace)
+    int64_t x, int64_t corePerRank, int64_t coreSegmentedIdx, int op)
 {
-    const uint32_t perfCore = static_cast<uint32_t>(GetBlockIdx());
-    const uint32_t perfRank = static_cast<uint32_t>(rank);
     const int64_t inputNum = len * rankSize;
     const int64_t avgNumDMAPerCore = len / corePerRank;
     int64_t dataNumRemain = avgNumDMAPerCore;
@@ -34,25 +32,15 @@ __attribute__((always_inline)) inline __aicore__ void TileXRReduceScatterBigData
         __gm__ int64_t* ctrlFlagsGM = (__gm__ int64_t*)buff[rank] + flagOffset1st;
         __gm__ T *receiveBuff = (__gm__ T*)((__gm__ int64_t*)buff[rank] + dataOffsetNum);
         int64_t ipcBuffOffsetNum = x * len + inputOffsetNum;
-        auto localToIpc = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
         input2BuffRankMagic(dataNumRemain * sizeof(T), inputUB[0], receiveBuff, ipcBuffOffsetNum,
                             input, inputOffsetNum, ctrlFlagsUB, ctrlFlagsGM, magic);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC,
-            localToIpc, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         return;
     }
 
     if (x == rank) {
         __gm__ int64_t* ctrlFlagsGM = (__gm__ int64_t*)buff[rank] + flagOffset2nd;
-        auto localToOutput = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC, TileXR::PerfBarrierPolicy::BARRIERED);
         input2BuffRankMagic(dataNumRemain * sizeof(T), inputUB[0], output, inputOffsetNum,
                             input, inputOffsetNum, ctrlFlagsUB, ctrlFlagsGM, magic);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::LOCAL_INPUT_TO_IPC,
-            localToOutput, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         return;
     }
 
@@ -68,19 +56,9 @@ __attribute__((always_inline)) inline __aicore__ void TileXRReduceScatterBigData
             break;
         }
 
-        const bool tracePollWait = TileXR::TileXRPerfTraceEnabled(perfTrace);
-        uint64_t pollStart = 0;
-        if (tracePollWait) {
-            pollStart = static_cast<uint64_t>(AscendC::GetSystemCycle());
-        }
         CpGM2UB(ctrlFlagsUB1, ctrlFlagsGM, sizeof(int64_t));
         CpGM2UB(ctrlFlagsUB2, ctrlFlagsGMX, sizeof(int64_t));
         AscendC::PipeBarrier<PIPE_ALL>();
-        if (tracePollWait) {
-            const uint64_t pollEnd = static_cast<uint64_t>(AscendC::GetSystemCycle());
-            TileXR::TileXRPerfAccumulateDuration(
-                perfTrace, perfRank, perfCore, TileXR::PerfStageId::FLAG_POLL_WAIT, pollStart, pollEnd);
-        }
 
         if (((*ctrlFlagsUB1 >> 10) != (magic >> 10)) || ((*ctrlFlagsUB2 >> 10) != (magic >> 10))) {
             continue;
@@ -101,12 +79,7 @@ __attribute__((always_inline)) inline __aicore__ void TileXRReduceScatterBigData
         int64_t ipcBuffOffsetNum = rank * len + inputOffsetNum + (*ctrlFlagsUB) * DMA_SIZE_PER_FLAG / sizeof(T);
         int64_t outputOffsetNum = inputOffsetNum + (*ctrlFlagsUB) * DMA_SIZE_PER_FLAG / sizeof(T);
 
-        auto peerToOutput = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT, TileXR::PerfBarrierPolicy::BARRIERED);
         ProcessDataNew<T>(dataSizeRemain, inputUB, buff[x], dataOffsetNum, ipcBuffOffsetNum, output, outputOffsetNum, op);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, perfRank, perfCore, TileXR::PerfStageId::PEER_IPC_TO_OUTPUT,
-            peerToOutput, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         AscendC::PipeBarrier<PIPE_ALL>();
 
         *ctrlFlagsUB = preparedDataGroupCount;
@@ -149,33 +122,18 @@ __attribute__((always_inline)) inline __aicore__ void TileXRReduceScatterBigData
     DumpLcclLogInfo(dumpAddr, LogId::INIT, static_cast<Op>(op));
     DumpLcclLogInfo(dumpAddr, LogId::PROCESS, static_cast<Op>(op));
     for (int64_t i = 0; i < CeilDiv(dataLen, ipcBuffMaxNumPerRank); i++) {
-        auto chunkTotal = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::CHUNK_TOTAL, TileXR::PerfBarrierPolicy::NO_BARRIER);
         *ctrlFlagsUB = 0;
         AscendC::PipeBarrier<PIPE_ALL>();
 
         int64_t processedNum = i * ipcBuffMaxNumPerRank;
         int64_t remainNum = (dataLen - processedNum < ipcBuffMaxNumPerRank) ? dataLen - processedNum : ipcBuffMaxNumPerRank;
 
-        auto postSync = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::POST_SYNC, TileXR::PerfBarrierPolicy::BARRIERED);
         PostSyncBigData<T>(ctrlFlagsUB, buff, rank, rankSize, dataOffsetNum, ipcBuffMaxNum, magic, i);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, static_cast<uint32_t>(rank), static_cast<uint32_t>(GetBlockIdx()),
-            TileXR::PerfStageId::POST_SYNC, postSync, TileXR::PerfBarrierPolicy::END_BARRIER_ONLY);
         TileXRReduceScatterBigDataOrigin<T>(
             buff, input + len * x + processedNum, output + processedNum, processedNum, blockNumPerGroup, rank, rankSize,
             len, remainNum, (magic + i) * 1024, ctrlFlagsUB, ctrlFlagsUB1, ctrlFlagsUB2, inputUB, dataOffsetNum,
-            flagOffset1st, flagOffset2nd, x, corePerRank, coreSegmentedIdx, op, perfTrace);
-        auto chunkBarrier = TileXR::TileXRPerfStageBegin(
-            perfTrace, TileXR::PerfStageId::CHUNK_BARRIER, TileXR::PerfBarrierPolicy::NO_BARRIER);
+            flagOffset1st, flagOffset2nd, x, corePerRank, coreSegmentedIdx, op);
         AscendC::PipeBarrier<PIPE_ALL>();
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, static_cast<uint32_t>(rank), static_cast<uint32_t>(GetBlockIdx()),
-            TileXR::PerfStageId::CHUNK_BARRIER, chunkBarrier, TileXR::PerfBarrierPolicy::NO_BARRIER);
-        TileXR::TileXRPerfStageEnd(
-            perfTrace, static_cast<uint32_t>(rank), static_cast<uint32_t>(GetBlockIdx()),
-            TileXR::PerfStageId::CHUNK_TOTAL, chunkTotal, TileXR::PerfBarrierPolicy::NO_BARRIER);
     }
     DumpLcclLogInfo(dumpAddr, LogId::PROCESS, static_cast<Op>(op));
 }
