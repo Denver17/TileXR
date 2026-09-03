@@ -110,12 +110,21 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ccu/tilexr_ccu_abi_constants.h
         ccu/tilexr_ccu_barrier_program.h
         ccu/tilexr_ccu_barrier_program.cpp
+        ccu/tilexr_ccu_driver_adapter.h
+        ccu/tilexr_ccu_driver_adapter.cpp
+        ccu/tilexr_ccu_hccp_types.h
+        ccu/tilexr_ccu_hccp_loader.h
+        ccu/tilexr_ccu_hccp_loader.cpp
+        ccu/tilexr_ccu_lower_layer_payloads.h
+        ccu/tilexr_ccu_lower_layer_payloads.cpp
         ccu/tilexr_ccu_memory_program.h
         ccu/tilexr_ccu_memory_program.cpp
         ccu/tilexr_ccu_microcode.h
         ccu/tilexr_ccu_microcode.cpp
         ccu/tilexr_ccu_producer_plan.h
         ccu/tilexr_ccu_producer_plan.cpp
+        ccu/tilexr_ccu_ra_custom_channel_provider.h
+        ccu/tilexr_ccu_ra_custom_channel_provider.cpp
         ccu/tilexr_ccu_resource_allocator.h
         ccu/tilexr_ccu_resource_allocator.cpp
         ccu/tilexr_ccu_runtime.h
