@@ -11,6 +11,7 @@
 #define TILEXR_COMM_H
 
 #include <atomic>
+#include <cstddef>
 #include <memory>
 #include <vector>
 #include <string>
@@ -42,6 +43,7 @@ class TileXRSockExchange;
 class TileXRUDMAContext;
 struct TileXRUDMACommArgsState;
 class TileXRSDMATransport;
+class TileXRCcuBackend;
 class TileXRComm {
 public:
     TileXRComm(int rank, int rankSize);
@@ -69,6 +71,11 @@ public:
     int QueryUDMAFullmesh(TileXRUDMAFullmeshHostView *view) const;
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
+    bool IsUdmaAvailableForCollectives() const;
+    int InitCcuBackend();
+    TileXRCcuBackend *GetCcuBackendForCollectives();
+    const TileXRCcuBackend *GetCcuBackendForCollectives() const;
+    int EnableCcuBackendForTest();
     bool IsSDMAAvailable() const;
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;
@@ -139,6 +146,7 @@ private:
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
     std::unique_ptr<TileXRUDMAContext> udmaContext_;
+    std::unique_ptr<TileXRCcuBackend> ccuBackend_;
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     std::unique_ptr<TileXRSDMATransport> sdmaTransport_;

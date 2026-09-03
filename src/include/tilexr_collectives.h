@@ -20,22 +20,48 @@
 // The collectives public API is currently C++ header-compatible because it reuses TileXR namespace datatypes.
 extern "C" {
 
+enum TileXRCollectiveBackend {
+    TILEXR_COLLECTIVE_BACKEND_AUTO = 0,
+    TILEXR_COLLECTIVE_BACKEND_AIV = 1,
+    TILEXR_COLLECTIVE_BACKEND_UDMA = 2,
+    TILEXR_COLLECTIVE_BACKEND_CCU = 3,
+};
+
+struct TileXRCollectiveOptions {
+    TileXRCollectiveBackend backend;
+};
+
+int TileXRAllGatherEx(void *sendBuf, void *recvBuf, int64_t sendCount,
+                      TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                      aclrtStream stream, const TileXRCollectiveOptions *options);
 int TileXRAllGather(void *sendBuf, void *recvBuf, int64_t sendCount,
                     TileXR::TileXRDataType dataType, TileXRCommPtr comm,
                     aclrtStream stream);
+int TileXRAllToAllEx(void *sendBuf, void *recvBuf, int64_t sendCount,
+                     TileXR::TileXRDataType dataType, TileXRCommPtr comm,
+                     aclrtStream stream, const TileXRCollectiveOptions *options);
 int TileXRAllToAll(void *sendBuf, void *recvBuf, int64_t sendCount,
                    TileXR::TileXRDataType dataType, TileXRCommPtr comm,
                    aclrtStream stream);
+int TileXRAllReduceEx(void *sendBuf, void *recvBuf, int64_t count,
+                      TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                      TileXRCommPtr comm, aclrtStream stream, const TileXRCollectiveOptions *options);
 int TileXRAllReduce(void *sendBuf, void *recvBuf, int64_t count,
                     TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
                     TileXRCommPtr comm, aclrtStream stream);
+int TileXRReduceScatterEx(void *sendBuf, void *recvBuf, int64_t recvCount,
+                          TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
+                          TileXRCommPtr comm, aclrtStream stream,
+                          const TileXRCollectiveOptions *options);
 int TileXRReduceScatter(void *sendBuf, void *recvBuf, int64_t recvCount,
                         TileXR::TileXRDataType dataType, TileXR::TileXRReduceOp op,
                         TileXRCommPtr comm, aclrtStream stream);
+int TileXRBroadcastEx(void *buf, int64_t count,
+                      TileXR::TileXRDataType dataType, int root,
+                      TileXRCommPtr comm, aclrtStream stream, const TileXRCollectiveOptions *options);
 int TileXRBroadcast(void *buf, int64_t count,
                     TileXR::TileXRDataType dataType, int root,
                     TileXRCommPtr comm, aclrtStream stream);
-
 }
 
 #endif // __cplusplus

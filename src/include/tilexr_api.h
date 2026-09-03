@@ -10,11 +10,19 @@
 #ifndef TILEXR_API_H
 #define TILEXR_API_H
 
+#ifdef __cplusplus
 #include <cstddef>
-#include <string>
+#include <cstdint>
 #include "comm_args.h"
 #include "tilexr_udma_fullmesh.h"
 #include "tilexr_udma_reg.h"
+#else
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+typedef uint8_t *GM_ADDR;
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif // __cplusplus
@@ -41,9 +49,11 @@ int TileXRCommInitRankWithSharedQpDomain(int commDomain, int rankSize, int rank,
 // Creates an isolated peer-memory domain without Credit, UDMA, Fullmesh, or SDMA resources.
 int TileXRCommInitRankMemoryDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
 
+#ifdef __cplusplus
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr);
 
 int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);
+#endif
 
 int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 
@@ -64,9 +74,11 @@ int TileXRUDMAGetQpCount(TileXRCommPtr comm, uint32_t *qpCount);
 int TileXRUDMAFullmeshQuery(TileXRCommPtr comm,
     TileXR::TileXRUDMAFullmeshHostView *view);
 
+#ifdef __cplusplus
 int TileXRGetUDMARegistryDev(TileXRCommPtr comm, GM_ADDR &registryPtr);
 
 int TileXRGetUDMARegistryHost(TileXRCommPtr comm, const TileXR::TileXRUDMARegistry **registry);
+#endif
 
 int TileXRSDMAAvailable(TileXRCommPtr comm, bool *available);
 

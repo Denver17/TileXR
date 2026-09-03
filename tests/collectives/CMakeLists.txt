@@ -70,6 +70,14 @@ add_executable(test_tilexr_int32_pattern
     unit/test_tilexr_int32_pattern.cpp
 )
 
+add_executable(test_tilexr_collective_backend_options
+    unit/test_tilexr_collective_backend_options.cpp
+)
+
+target_include_directories(test_tilexr_collective_backend_options PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 add_executable(test_tilexr_collectives_correctness
     integration/test_tilexr_collectives_correctness.cpp
 )
@@ -203,6 +211,9 @@ target_link_libraries(test_tilexr_collectives_header_compile
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
+target_link_libraries(test_tilexr_collective_backend_options
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
 target_link_directories(test_tilexr_collectives_correctness PRIVATE
     ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
 )
@@ -243,6 +254,7 @@ target_link_libraries(test_prepare_host_launch_context
 
 foreach(_tilexr_collectives_link_target
         test_tilexr_collectives_header_compile
+        test_tilexr_collective_backend_options
         test_tilexr_collectives_correctness
         tilexr_collective_perf
         test_tilexr_collectives_stub_behavior
@@ -255,6 +267,7 @@ endforeach()
 
 add_test(NAME test_tilexr_collectives_header_compile COMMAND test_tilexr_collectives_header_compile)
 add_test(NAME test_tilexr_int32_pattern COMMAND test_tilexr_int32_pattern)
+add_test(NAME test_tilexr_collective_backend_options COMMAND test_tilexr_collective_backend_options)
 add_test(NAME test_tilexr_collectives_stub_behavior COMMAND test_tilexr_collectives_stub_behavior)
 add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_collectives_uninitialized_comm)
 add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
@@ -272,6 +285,7 @@ endif()
 install(TARGETS
     test_tilexr_collectives_header_compile
     test_tilexr_int32_pattern
+    test_tilexr_collective_backend_options
     test_tilexr_collectives_correctness
     tilexr_collective_perf
     test_tilexr_collectives_stub_behavior

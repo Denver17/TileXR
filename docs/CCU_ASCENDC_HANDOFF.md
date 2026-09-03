@@ -148,6 +148,10 @@ The direct P2P smoke currently validates remote-to-local transfer on both ranks.
 - CANN 9.1 runtime declares `rtUbDevQueryInfo` in
   `runtime/rts/rts_device.h`; the `tile-comm` target must include
   `${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime/runtime/`.
+- When replaying the CCU stack onto a newer `main`, preserve current public API
+  and test ownership: add the CCU backend to the maintained collective entry
+  points, but do not restore removed profiling probes or legacy source guards.
+  Validate the resolved diff against `main`, not only against the old stack base.
 
 ## Maintained Validation
 

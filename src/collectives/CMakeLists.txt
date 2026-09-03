@@ -23,10 +23,12 @@ add_custom_command(
 )
 
 set(TILEXR_COLLECTIVES_SOURCE_FILE
+        host/collective_backend.cpp
         host/collective_launcher.cpp
         host/collective_utils.cpp
         host/collective_kernel.cpp
         host/tilexr_collectives.cpp
+        host/collective_backend.h
         ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
 )
 
