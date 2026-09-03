@@ -9,6 +9,7 @@
 #include "ccu/tilexr_ccu_install_provider.h"
 #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
 #include "ccu/tilexr_ccu_memory_program.h"
+#include "ccu/tilexr_ccu_signal_wait_program.h"
 #include "ccu/tilexr_ccu_specs.h"
 
 #include <cstdint>
@@ -43,6 +44,7 @@ struct TileXRCcuDirectInstallOptions {
     uint16_t remoteNotifyCkeStartId = 0;
     uint16_t remoteNotifyCkeCount = 0;
     TileXRCcuBarrierMode barrierMode = TileXRCcuBarrierMode::SyncXn;
+    uint16_t taskTimeout = 0;
     uint32_t deviceId = 0;
     uint32_t rank = 0;
     std::string provider;
@@ -65,6 +67,10 @@ struct TileXRCcuDirectMemoryCopySpec {
     uint64_t remoteAddr = 0;
     uint64_t remoteToken = 0;
     uint64_t lengthBytes = 0;
+};
+
+struct TileXRCcuDirectSignalWaitSpec {
+    TileXRCcuSignalWaitProgramRole role = TileXRCcuSignalWaitProgramRole::Signal;
 };
 
 struct TileXRCcuDirectInstallAttempt {
@@ -120,6 +126,12 @@ int TileXRCcuRunDirectInstallAttempt(
 int TileXRCcuRunDirectMemoryCopyInstallAttempt(
     const TileXRCcuDirectInstallOptions& options,
     const TileXRCcuDirectMemoryCopySpec& memoryCopy,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report);
+
+int TileXRCcuRunDirectSignalWaitInstallAttempt(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectSignalWaitSpec& signalWait,
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report);
 

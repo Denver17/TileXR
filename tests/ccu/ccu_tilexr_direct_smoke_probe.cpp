@@ -11,7 +11,9 @@
 #include "acl/acl_rt.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
+#include "ccu/tilexr_ccu_backend.h"
 #include "ccu/tilexr_ccu_collective_planner.h"
+#include "ccu/tilexr_ccu_driver_adapter.h"
 #include "ccu/tilexr_ccu_executor.h"
 #include "ccu/tilexr_ccu_runtime_session.h"
 #include "tools/socket/tilexr_sock_exchange.h"
@@ -39,6 +41,7 @@ struct DirectCcuSmokeContext {
     TileXR::TileXRCcuRuntimeSession session;
     TileXR::TileXRCcuCollectivePlanner planner;
     TileXR::TileXRCcuExecutor executor;
+    TileXR::TileXRCcuBackend backend;
 };
 
 using TileXRDirectCcuPrepareOptions = TileXR::TileXRCcuDirectInstallOptions;
@@ -71,6 +74,12 @@ constexpr const char* kPreSubmitDelayMsEnv = "TILEXR_CCU_DIRECT_SMOKE_PRE_SUBMIT
 constexpr const char* kP2pCcuCopyEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY";
 constexpr const char* kExpectP2pCcuCopyEnv = "TILEXR_CCU_DIRECT_SMOKE_EXPECT_P2P_CCU_COPY";
 constexpr const char* kP2pCcuCopyBytesEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES";
+constexpr const char* kP2pCcuCopyActiveRankEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK";
+constexpr const char* kP2pCcuCopyDirectionEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION";
+constexpr const char* kP2pCcuCopyResourceWindowEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW";
+constexpr const char* kSignalWaitEnv = "TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT";
+constexpr const char* kSignalWaitSignalRankEnv = "TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK";
+constexpr const char* kSignalWaitBarrierEnv = "TILEXR_CCU_DIRECT_SMOKE_BARRIER";
 constexpr const char* kLocalWaitCkeStartEnv = "TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START";
 constexpr const char* kLocalWaitCkeCountEnv = "TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT";
 constexpr const char* kRemoteNotifyCkeStartEnv = "TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START";
@@ -128,6 +137,16 @@ bool EnvFlag(const char* name)
     return text == "1" || text == "true" || text == "TRUE" || text == "yes" || text == "on";
 }
 
+bool SignalWaitSmokeEnabled()
+{
+    return EnvFlag(kSignalWaitEnv);
+}
+
+bool BarrierSmokeEnabled()
+{
+    return EnvFlag(kSignalWaitBarrierEnv);
+}
+
 bool ShouldFastExitAfterPrepareFailure(int ret)
 {
     return ret != 0 && EnvFlag(kFastExitOnPrepareFailureEnv);
@@ -180,6 +199,30 @@ int ParseInt(const char* value, int fallback)
 int EnvInt(const char* name, int fallback)
 {
     return ParseInt(std::getenv(name), fallback);
+}
+
+bool IsP2pCcuCopyActiveRank(int rank)
+{
+    return rank == EnvInt(kP2pCcuCopyActiveRankEnv, 0);
+}
+
+TileXR::TileXRCcuMemoryCopyDirection P2pCcuCopyDirectionFromEnv()
+{
+    const char* value = std::getenv(kP2pCcuCopyDirectionEnv);
+    if (value != nullptr && std::string(value) == "local_to_remote") {
+        return TileXR::TileXRCcuMemoryCopyDirection::LocalToRemote;
+    }
+    return TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal;
+}
+
+bool ShouldCheckInactiveP2pCcuCopyRank()
+{
+    return P2pCcuCopyDirectionFromEnv() == TileXR::TileXRCcuMemoryCopyDirection::LocalToRemote;
+}
+
+bool ShouldCheckActiveP2pCcuCopyRank()
+{
+    return P2pCcuCopyDirectionFromEnv() == TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal;
 }
 
 uint64_t ParseU64(const char* value, uint64_t fallback)
@@ -255,6 +298,32 @@ bool SyncXnLoadPostOnlyBarrierMode()
 {
     const char* value = std::getenv(kBarrierModeEnv);
     return value != nullptr && std::string(value) == "sync_xn_load_post_only";
+}
+
+TileXR::TileXRCcuBarrierMode BarrierModeFromEnv()
+{
+    if (SyncCkeBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::SyncCke;
+    }
+    if (SyncCkeSetWaitBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::SyncCkeSetWait;
+    }
+    if (SyncCkePostOnlyBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::SyncCkePostOnly;
+    }
+    if (LocalCkeBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::LocalCke;
+    }
+    if (LocalCkePostOnlyBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::LocalCkePostOnly;
+    }
+    if (SyncXnPostOnlyBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::SyncXnPostOnly;
+    }
+    if (SyncXnLoadPostOnlyBarrierMode()) {
+        return TileXR::TileXRCcuBarrierMode::SyncXnLoadPostOnly;
+    }
+    return TileXR::TileXRCcuBarrierMode::SyncXn;
 }
 
 TileXR::TileXRCcuRepositoryInstallWindow RepositoryInstallWindowFromEnv()
@@ -476,6 +545,17 @@ void PrintP2pCcuCopy(
               << std::endl;
 }
 
+void PrintP2pCcuCopySkipped(int rank, int peer, const P2pCcuCopyState& state)
+{
+    std::cout << "tilexr_ccu_direct_smoke p2pCcuCopy skipped"
+              << " rank=" << rank
+              << " peer=" << peer
+              << " bytes=" << state.bytes
+              << " activeRank=" << EnvInt(kP2pCcuCopyActiveRankEnv, 0)
+              << " reason=\"inactive p2p CCU-copy rank\""
+              << std::endl;
+}
+
 int RunP2pCcuCopy(
     int rank,
     int peer,
@@ -487,8 +567,14 @@ int RunP2pCcuCopy(
     if (state == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (syncRet == ACL_SUCCESS && submitRet == TileXR::TILEXR_SUCCESS) {
-        (void)CheckP2pCcuCopyState(state);
+    if (ShouldCheckActiveP2pCcuCopyRank() && syncRet == ACL_SUCCESS && submitRet == TileXR::TILEXR_SUCCESS) {
+        if (EnvFlag(kP2pCcuCopyResourceWindowEnv)) {
+            state->passed = true;
+        } else {
+            (void)CheckP2pCcuCopyState(state);
+        }
+    } else if (!ShouldCheckActiveP2pCcuCopyRank() && syncRet == ACL_SUCCESS && submitRet == TileXR::TILEXR_SUCCESS) {
+        state->passed = true;
     }
     PrintP2pCcuCopy(rank, peer, *state, prepareRet, submitRet, syncRet);
     return state->passed ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_INTERNAL;
@@ -553,6 +639,16 @@ int InitCommForDirectCcuSmoke(int commDomain, int rankSize, int rank, int device
                   << " directOnly=" << (EnvFlag(kDirectCcuOnlyInitEnv) ? 1 : 0)
                   << std::endl;
     }
+    if (ret == TileXR::TILEXR_SUCCESS && (SignalWaitSmokeEnabled() || BarrierSmokeEnabled())) {
+        const int backendRet = context->backend.Init(options);
+        std::cout << "tilexr_ccu_signal_wait backendInit"
+                  << " rank=" << rank
+                  << " rankSize=" << rankSize
+                  << " device=" << device
+                  << " ret=" << backendRet
+                  << std::endl;
+        return backendRet;
+    }
     return ret;
 }
 
@@ -591,10 +687,98 @@ TileXRDirectCcuPrepareOptions MakePrepareOptions(int rank, int rankSize, int dev
     options.repositoryInstallOptions.dataLenMode = RepositoryInstallDataLenModeFromEnv();
     options.repositoryMemoryAllocMode = RepositoryMemoryAllocModeFromEnv();
     options.installOrder = InstallOrderFromEnv();
+    options.barrierMode = BarrierModeFromEnv();
+    options.taskTimeout = static_cast<uint16_t>(EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 0));
     options.deviceId = static_cast<uint32_t>(device);
     options.rank = static_cast<uint32_t>(rank);
     options.provider = rankSize > 0 ? "tilexr-direct-smoke-probe" : "";
     return options;
+}
+
+const char* SignalWaitRoleName(TileXR::TileXRCcuSignalWaitRole role)
+{
+    switch (role) {
+        case TileXR::TileXRCcuSignalWaitRole::Signal:
+            return "signal";
+        case TileXR::TileXRCcuSignalWaitRole::Wait:
+            return "wait";
+        case TileXR::TileXRCcuSignalWaitRole::SignalAndWait:
+            return "signal_and_wait";
+        default:
+            return "unknown";
+    }
+}
+
+TileXR::TileXRCcuSignalWaitRole SignalWaitRoleForRank(int rank)
+{
+    if (BarrierSmokeEnabled()) {
+        return TileXR::TileXRCcuSignalWaitRole::SignalAndWait;
+    }
+    const int signalRank = EnvInt(kSignalWaitSignalRankEnv, 0);
+    return rank == signalRank ? TileXR::TileXRCcuSignalWaitRole::Signal : TileXR::TileXRCcuSignalWaitRole::Wait;
+}
+
+uint32_t DefaultSignalWaitInstructionCount(TileXR::TileXRCcuSignalWaitRole role)
+{
+    switch (role) {
+        case TileXR::TileXRCcuSignalWaitRole::Signal:
+            return 5U;
+        case TileXR::TileXRCcuSignalWaitRole::Wait:
+            return 5U;
+        case TileXR::TileXRCcuSignalWaitRole::SignalAndWait:
+            return 6U;
+        default:
+            return 0U;
+    }
+}
+
+TileXR::TileXRCcuSignalWaitRequest MakeSignalWaitRequest(
+    int rank,
+    int rankSize,
+    const TileXRDirectCcuPrepareOptions& options)
+{
+    TileXR::TileXRCcuSignalWaitRequest request {};
+    request.peerRank = rankSize == 2 ? 1 - rank : (rank + 1) % rankSize;
+    request.role = SignalWaitRoleForRank(rank);
+    request.syncInstructionCount = std::getenv("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT") == nullptr ?
+        0U :
+        options.syncInstructionCount;
+    request.missionStartId = options.missionStartId;
+    request.instructionStartId = options.instructionStartId;
+    request.missionInstructionStartId = options.missionInstructionStartId;
+    request.xnStartId = options.xnStartId;
+    request.remoteXnStartId = options.remoteXnStartId;
+    request.remoteXnCount = options.remoteXnCount;
+    request.ckeStartId = options.ckeStartId;
+    request.channelStartId = options.channelStartId;
+    request.localWaitCkeStartId = options.localWaitCkeStartId;
+    request.localWaitCkeCount = options.localWaitCkeCount;
+    request.remoteNotifyCkeStartId = options.remoteNotifyCkeStartId;
+    request.remoteNotifyCkeCount = options.remoteNotifyCkeCount;
+    request.timeout = static_cast<uint16_t>(EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 20));
+    request.provider = "tilexr-direct-smoke-probe-signal-wait";
+    return request;
+}
+
+TileXRDirectCcuPrepareReport SignalWaitInstallReportFromPlan(
+    const TileXR::TileXRCcuSignalWaitPlan& plan)
+{
+    TileXRDirectCcuPrepareReport report {};
+    report.pipelineBuilt = !plan.attempt.plan.taskWindows.empty();
+    report.installAttempted = plan.attempt.installReport.installAttempted;
+    report.installSucceeded = plan.attempt.installReport.installSucceeded;
+    report.submitReady = plan.attempt.providerReport.submitReady;
+    report.requiredInstallSurfaceCount = plan.attempt.installReport.requiredInstallSurfaceCount;
+    report.publicVerifiedInstallSurfaceCount = plan.attempt.installReport.publicVerifiedInstallSurfaceCount;
+    report.missingInstallSurfaceCount = plan.attempt.installReport.missingInstallSurfaceCount;
+    report.taskCount = static_cast<uint32_t>(plan.attempt.plan.taskWindows.size());
+    report.submitTaskCount = static_cast<uint32_t>(plan.submitTasks.size());
+    if (!plan.attempt.providerReport.message.empty()) {
+        report.message = plan.attempt.providerReport.message;
+    } else {
+        report.message = plan.attempt.installReport.message;
+    }
+    return report;
 }
 
 void PrintInstallReport(
@@ -829,6 +1013,79 @@ void PrintPreparedTasks(TileXRDirectCcuPreparedTasksPtr prepared, uint32_t taskC
         }
     }
     std::cout << std::endl;
+}
+
+uint16_t LoadLe16(const uint8_t* data, size_t index)
+{
+    return static_cast<uint16_t>(data[index * 2U]) |
+        static_cast<uint16_t>(static_cast<uint16_t>(data[index * 2U + 1U]) << 8U);
+}
+
+void PrintMissionContext(
+    DirectCcuSmokeContext* context,
+    const TileXRDirectCcuTaskInfo& task,
+    const char* label)
+{
+    if (context == nullptr || label == nullptr) {
+        return;
+    }
+    TileXR::TileXRCcuDriverAdapter adapter;
+    TileXR::TileXRCcuDriverAdapterReport adapterReport;
+    int ret = context->session.CreateDriverAdapter(&adapter, &adapterReport);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        std::cerr << label << " missionCtxRead ret=" << ret
+                  << " message=\"" << adapterReport.message << "\""
+                  << std::endl;
+        return;
+    }
+
+    uint8_t raw[TileXR::TILEXR_CCU_DATA_ARRAY_SLOT_BYTES] = {};
+    ret = adapter.ReadMissionContext(
+        task.dieId,
+        task.missionId,
+        raw,
+        sizeof(raw),
+        &adapterReport);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        std::cerr << label << " missionCtxRead ret=" << ret
+                  << " opcode=" << adapterReport.opcode
+                  << " driverRet=" << adapterReport.driverRet
+                  << " opRet=" << adapterReport.opRet
+                  << " message=\"" << adapterReport.message << "\""
+                  << std::endl;
+        return;
+    }
+
+    const uint16_t part2 = LoadLe16(raw, 2);
+    const uint16_t part3 = LoadLe16(raw, 3);
+    const uint16_t part4 = LoadLe16(raw, 4);
+    const uint16_t part5 = LoadLe16(raw, 5);
+    const uint16_t part6 = LoadLe16(raw, 6);
+    const uint16_t part7 = LoadLe16(raw, 7);
+    const uint16_t status = static_cast<uint16_t>(((part3 & 0x7U) << 13U) | ((part2 >> 3U) & 0x1fffU));
+    const uint16_t currentIns = static_cast<uint16_t>(((part5 & 0x1fU) << 11U) | ((part4 >> 5U) & 0x7ffU));
+    const uint16_t endIns = static_cast<uint16_t>(((part6 & 0x1fU) << 11U) | ((part5 >> 5U) & 0x7ffU));
+    const uint16_t startIns = static_cast<uint16_t>(((part7 & 0x1fU) << 11U) | ((part6 >> 5U) & 0x7ffU));
+    const uint16_t missionVld = static_cast<uint16_t>((part7 >> 6U) & 0x1U);
+
+    std::cerr << label << " missionCtx"
+              << " dieId=" << static_cast<uint32_t>(task.dieId)
+              << " missionId=" << static_cast<uint32_t>(task.missionId)
+              << " status=0x" << std::hex << status
+              << " currentIns=" << std::dec << currentIns
+              << " startIns=" << startIns
+              << " endIns=" << endIns
+              << " missionVld=" << missionVld
+              << " rawWords=";
+    for (size_t i = 0; i < sizeof(raw) / sizeof(uint64_t); ++i) {
+        uint64_t word = 0;
+        std::memcpy(&word, raw + i * sizeof(uint64_t), sizeof(word));
+        if (i != 0) {
+            std::cerr << ",";
+        }
+        std::cerr << "0x" << std::hex << word;
+    }
+    std::cerr << std::dec << std::endl;
 }
 
 void PrintInstructionReadback(DirectCcuSmokeContext* context, TileXRDirectCcuPreparedTasksPtr prepared, uint32_t taskCount)
@@ -1077,11 +1334,170 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult)
     }
 }
 
+bool WaitForInactiveP2pCcuCopyRank(int rank, int rankSize, int localResult)
+{
+    return WaitForCollectiveSubmitDone(rank, rankSize, localResult);
+}
+
+int RunInactiveP2pCcuCopyRank(int rank, int peer, int rankSize, P2pCcuCopyState* state, int localResult)
+{
+    if (state == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    PrintP2pCcuCopySkipped(rank, peer, *state);
+    if (!WaitForInactiveP2pCcuCopyRank(rank, rankSize, localResult) && localResult == 0) {
+        return 13;
+    }
+    if (localResult != 0 || !ShouldCheckInactiveP2pCcuCopyRank()) {
+        return localResult;
+    }
+    const int checkRet = CheckP2pCcuCopyState(state);
+    PrintP2pCcuCopy(rank, peer, *state, TileXR::TILEXR_SUCCESS, TileXR::TILEXR_SUCCESS, ACL_SUCCESS);
+    return checkRet == ACL_SUCCESS ? 0 : 14;
+}
+
+int RunSignalWaitSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
+{
+    if (context == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
+    options.syncResourceCount = 1;
+    options.sqeArgCount = 0;
+    const TileXR::TileXRCcuSignalWaitRole role = SignalWaitRoleForRank(rank);
+    if (std::getenv("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT") == nullptr) {
+        options.syncInstructionCount = DefaultSignalWaitInstructionCount(role);
+    }
+    PrintConfig(options, rankSize);
+
+    const TileXR::TileXRCcuSignalWaitRequest request = MakeSignalWaitRequest(rank, rankSize, options);
+    std::cout << "tilexr_ccu_signal_wait config"
+              << " rank=" << rank
+              << " peer=" << request.peerRank
+              << " role=" << SignalWaitRoleName(request.role)
+              << " barrier=" << (BarrierSmokeEnabled() ? 1 : 0)
+              << std::endl;
+
+    TileXR::TileXRCcuSignalWaitPlan plan;
+    const int prepareRet = context->backend.PrepareSignalWait(request, &plan);
+    TileXRDirectCcuPrepareReport installReport = SignalWaitInstallReportFromPlan(plan);
+    PrintInstallReport("tilexr_ccu_signal_wait prepare", prepareRet, installReport);
+    PrintPreparedTasks(&plan.attempt, installReport.submitTaskCount);
+
+    int finalRet = 0;
+    const bool submitRequested = EnvFlag(kSubmitEnv);
+    const bool collectiveSubmitReady = submitRequested ?
+        WaitForCollectiveSubmitReadiness(
+            rank,
+            rankSize,
+            prepareRet == TileXR::TILEXR_SUCCESS && installReport.submitReady && plan.ready) :
+        false;
+    if (prepareRet != TileXR::TILEXR_SUCCESS) {
+        finalRet = 6;
+    } else if (submitRequested && !collectiveSubmitReady && CollectiveSubmitReadyGateConfigured()) {
+        std::cout << "tilexr_ccu_signal_wait submit skipped reason=\"collective submitReady gate did not pass\""
+                  << " localSubmitReady=" << (installReport.submitReady ? 1 : 0)
+                  << std::endl;
+    } else if (submitRequested && (!installReport.submitReady || !plan.ready)) {
+        std::cout << "tilexr_ccu_signal_wait submit skipped reason=\"prepare did not reach submitReady\""
+                  << std::endl;
+    } else if (submitRequested) {
+        aclrtStream stream = nullptr;
+        int streamRet = aclrtCreateStream(&stream);
+        if (streamRet != ACL_SUCCESS) {
+            std::cerr << "tilexr_ccu_signal_wait aclrtCreateStream ret=" << streamRet << std::endl;
+            finalRet = 7;
+        } else {
+            const int delayRank = EnvInt(kDelayRankEnv, -1);
+            const int preSubmitDelayMs = EnvInt(kPreSubmitDelayMsEnv, 0);
+            const int effectiveDelayMs = rank == delayRank && preSubmitDelayMs > 0 ? preSubmitDelayMs : 0;
+            if (effectiveDelayMs > 0) {
+                std::cout << "tilexr_ccu_signal_wait preSubmitDelay"
+                          << " rank=" << rank
+                          << " delayMs=" << effectiveDelayMs
+                          << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(effectiveDelayMs));
+            }
+
+            TileXRDirectCcuSubmitReport submitReport;
+            const auto submitBegin = std::chrono::steady_clock::now();
+            const int submitRet = context->backend.SubmitSignalWait(plan, stream, &submitReport);
+            const auto submitEnd = std::chrono::steady_clock::now();
+            PrintSubmitReport("tilexr_ccu_signal_wait submit", submitRet, submitReport);
+            const auto syncBegin = std::chrono::steady_clock::now();
+            TraceLifecycle("before signal/wait aclrtSynchronizeStream");
+            const int syncRet = aclrtSynchronizeStream(stream);
+            TraceLifecycle("after signal/wait aclrtSynchronizeStream");
+            const auto syncEnd = std::chrono::steady_clock::now();
+            std::cout << "tilexr_ccu_signal_wait timing"
+                      << " rank=" << rank
+                      << " role=" << SignalWaitRoleName(request.role)
+                      << " preSubmitDelayMs=" << effectiveDelayMs
+                      << " submitRet=" << submitRet
+                      << " syncRet=" << syncRet
+                      << " submitMs="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(submitEnd - submitBegin).count()
+                      << " syncMs="
+                      << std::chrono::duration_cast<std::chrono::milliseconds>(syncEnd - syncBegin).count()
+                      << std::endl;
+            if (syncRet != ACL_SUCCESS) {
+                std::cerr << "tilexr_ccu_signal_wait aclrtSynchronizeStream ret=" << syncRet << std::endl;
+                if (!plan.submitTasks.empty()) {
+                    PrintMissionContext(context, plan.submitTasks.front(), "tilexr_ccu_signal_wait");
+                }
+                finalRet = 8;
+            } else if (submitRet != TileXR::TILEXR_SUCCESS) {
+                finalRet = 9;
+            }
+            if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet) && finalRet == 0) {
+                finalRet = 13;
+            }
+            aclrtDestroyStream(stream);
+        }
+    }
+
+    const bool passed = finalRet == 0;
+    if (passed) {
+        std::cout << "tilexr_ccu_signal_wait result passed=1"
+                  << " rank=" << rank
+                  << " role=" << SignalWaitRoleName(request.role)
+                  << " ret=" << finalRet
+                  << std::endl;
+    } else {
+        std::cout << "tilexr_ccu_signal_wait result passed=0"
+                  << " rank=" << rank
+                  << " role=" << SignalWaitRoleName(request.role)
+                  << " ret=" << finalRet
+                  << std::endl;
+    }
+    if (ShouldFastExitAfterRun()) {
+        std::cout << "tilexr_ccu_signal_wait fastExitAfterRun=1"
+                  << " ret=" << finalRet
+                  << " reason=\"skipping prepared-task cleanup to isolate cleanup hangs\""
+                  << std::endl;
+        std::fflush(stdout);
+        std::fflush(stderr);
+        std::_Exit(finalRet);
+    }
+    const int releaseRet = TileXR::TileXRCcuReleaseDirectInstallAttemptResources(plan.attempt);
+    if (releaseRet != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "tilexr_ccu_signal_wait prepared destroy ret=" << releaseRet << std::endl;
+        finalRet = finalRet == 0 ? 11 : finalRet;
+    }
+    return finalRet;
+}
+
 int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
 {
+    if (SignalWaitSmokeEnabled() || BarrierSmokeEnabled()) {
+        return RunSignalWaitSmokeForRank(context, rank, rankSize, device);
+    }
+
     TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
     const int peer = rankSize == 2 ? 1 - rank : (rank + 1) % rankSize;
     const bool p2pCcuCopyEnabled = EnvFlag(kP2pCcuCopyEnv);
+    const bool p2pCcuCopyActiveRank = !p2pCcuCopyEnabled || IsP2pCcuCopyActiveRank(rank);
+    const TileXR::TileXRCcuMemoryCopyDirection p2pCcuCopyDirection = P2pCcuCopyDirectionFromEnv();
     P2pCcuCopyState p2pCcuCopy;
     if (p2pCcuCopyEnabled) {
         options.syncResourceCount = 1;
@@ -1104,7 +1520,7 @@ int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
             reinterpret_cast<uint64_t>(p2pCcuCopy.destination.ptr),
             p2pCcuCopy.bytes,
             static_cast<uint32_t>(peer),
-            TileXR::TileXRCcuMemoryCopyDirection::RemoteToLocal,
+            p2pCcuCopyDirection,
             prepared,
             &installReport) :
         context->planner.PrepareDirectCcuInstallAttempt(context->session, options, prepared, &installReport);
@@ -1129,6 +1545,8 @@ int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
     } else if (submitRequested && !installReport.submitReady) {
         std::cout << "tilexr_ccu_direct_smoke submit skipped reason=\"prepare did not reach submitReady\""
                   << std::endl;
+    } else if (submitRequested && !p2pCcuCopyActiveRank) {
+        finalRet = RunInactiveP2pCcuCopyRank(rank, peer, rankSize, &p2pCcuCopy, finalRet);
     } else if (submitRequested) {
         aclrtStream stream = nullptr;
         int streamRet = aclrtCreateStream(&stream);
@@ -1171,6 +1589,9 @@ int RunPreparedSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
                 std::chrono::duration_cast<std::chrono::milliseconds>(syncEnd - syncBegin).count());
             if (syncRet != ACL_SUCCESS) {
                 std::cerr << "tilexr_ccu_direct_smoke aclrtSynchronizeStream ret=" << syncRet << std::endl;
+                if (prepared != nullptr && installReport.submitTaskCount > 0) {
+                    PrintMissionContext(context, prepared->submitTasks.front(), "tilexr_ccu_direct_smoke");
+                }
                 finalRet = 8;
             } else if (submitRet != TileXR::TILEXR_SUCCESS) {
                 finalRet = 9;
@@ -1370,6 +1791,7 @@ int main()
         std::_Exit(finalRet);
     }
     TraceLifecycle("before DirectCcuSmokeContext shutdown");
+    context.backend.Shutdown();
     context.session.Shutdown();
     TraceLifecycle("after DirectCcuSmokeContext shutdown");
     TraceLifecycle("before aclrtResetDevice");

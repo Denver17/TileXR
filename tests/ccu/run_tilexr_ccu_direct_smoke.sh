@@ -37,6 +37,7 @@ endpoint_fields=(
 )
 
 resource_window_token_fields=(
+    EID_INDEX
     TOKEN_ID
     RAW_TOKEN_ID
     TOKEN_VALUE
@@ -80,6 +81,12 @@ default_sync_instruction_count()
     esac
 }
 
+signal_wait_mode_enabled()
+{
+    [ "${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT:-0}" = "1" ] ||
+        [ "${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-0}" = "1" ]
+}
+
 apply_p2p_ccu_copy_defaults()
 {
     if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0}" != "1" ]; then
@@ -112,9 +119,43 @@ apply_p2p_ccu_copy_defaults()
     export TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"
     export TILEXR_CCU_DIRECT_BARRIER_MODE="${TILEXR_CCU_DIRECT_BARRIER_MODE:-sync_cke}"
     export TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE="${TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE:-hcomm_cap}"
+    export TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN="${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-1}"
+}
+
+apply_signal_wait_defaults()
+{
+    if ! signal_wait_mode_enabled; then
+        return
+    fi
+
+    export TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"
+    export TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK="${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK:-0}"
+    export TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"
+    export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
+    export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
+    export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
+    export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW="${TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW:-full_repository}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-instruction_bytes}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-acl}"
+    export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"
+    export TILEXR_CCU_PROBE_RANK0_XN_START="${TILEXR_CCU_PROBE_RANK0_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_RANK1_XN_START="${TILEXR_CCU_PROBE_RANK1_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE="${TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE:-hcomm_cap}"
 }
 
 apply_p2p_ccu_copy_defaults
+apply_signal_wait_defaults
 
 if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
     echo "tilexr_ccu_direct_smoke_runner dryRun=1 workDir=${work_dir}"
@@ -126,6 +167,9 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
         TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE \
         TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE \
         TILEXR_CCU_DIRECT_INSTALL_ORDER \
+        TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT \
+        TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK \
+        TILEXR_CCU_DIRECT_SMOKE_BARRIER \
         TILEXR_CCU_PROBE_SQE_ARG_COUNT \
         TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START; do
         diagnostic_value="${!diagnostic_var:-}"
@@ -336,6 +380,12 @@ fi
 if [ "${TILEXR_CCU_DIRECT_INSTALL_DIE_ID:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_INSTALL_DIE_ID=${TILEXR_CCU_DIRECT_INSTALL_DIE_ID}")
 fi
+if [ "${TILEXR_CCU_DIRECT_TRACE:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_TRACE=${TILEXR_CCU_DIRECT_TRACE}")
+fi
+if [ "${TILEXR_CCU_DIRECT_TRACE_ENDPOINT_ROUTE:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_TRACE_ENDPOINT_ROUTE=${TILEXR_CCU_DIRECT_TRACE_ENDPOINT_ROUTE}")
+fi
 if [ "${TILEXR_CCU_PROBE_MISSION_START:-}" != "" ]; then
     common_env+=("TILEXR_CCU_PROBE_MISSION_START=${TILEXR_CCU_PROBE_MISSION_START}")
 fi
@@ -377,6 +427,27 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-}" != "" ]; then
 fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN=${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_TRACE_LIFECYCLE:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_TRACE_LIFECYCLE=${TILEXR_CCU_DIRECT_SMOKE_TRACE_LIFECYCLE}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_BARRIER=${TILEXR_CCU_DIRECT_SMOKE_BARRIER}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT=${TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT}")
 fi
 if [ "${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-}" != "" ]; then
     common_env+=("TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START=${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START}")
@@ -488,7 +559,7 @@ for token_field in "${resource_window_token_fields[@]}"; do
     fi
 done
 
-echo "tilexr_ccu_direct_smoke_runner begin workDir=${work_dir} devices=${devices} commId=${comm_id} threadMode=${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0} submit=${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0} barrierMode=${TILEXR_CCU_DIRECT_BARRIER_MODE:-} p2pCcuCopy=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0} timeout=${timeout_s} npuSmiTimeout=${TILEXR_CCU_SMOKE_NPU_SMI_TIMEOUT:-20}"
+echo "tilexr_ccu_direct_smoke_runner begin workDir=${work_dir} devices=${devices} commId=${comm_id} threadMode=${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0} submit=${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0} barrierMode=${TILEXR_CCU_DIRECT_BARRIER_MODE:-} p2pCcuCopy=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0} signalWait=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT:-0} signalRank=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK:-0} ccuBarrier=${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-0} timeout=${timeout_s} npuSmiTimeout=${TILEXR_CCU_SMOKE_NPU_SMI_TIMEOUT:-20}"
 
 if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]; then
     thread_log="${work_dir}/ccu_thread.log"
@@ -503,26 +574,55 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]; then
         echo "thread log: ${thread_log}" >&2
         exit 4
     fi
-    if [ "$(grep -c "tilexr_ccu_direct_smoke prepare ret=0" "${thread_log}")" -lt 2 ]; then
-        echo "ERROR: direct CCU thread-mode prepare did not return success for both ranks" >&2
-        exit 5
-    fi
-    if [ "$(grep -c "installSucceeded=1" "${thread_log}")" -lt 2 ]; then
-        echo "ERROR: direct CCU thread-mode prepare did not complete install attempt for both ranks" >&2
-        exit 6
-    fi
-    if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
-        if [ "$(grep -c "submitReady=1" "${thread_log}")" -lt 2 ]; then
-            echo "ERROR: direct CCU thread-mode submit requested but prepare did not reach submitReady=1" >&2
+    if signal_wait_mode_enabled; then
+        if [ "$(grep -c "tilexr_ccu_signal_wait prepare ret=0" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU signal/wait thread-mode prepare did not return success for both ranks" >&2
+            exit 5
+        fi
+        if [ "$(grep -c "installSucceeded=1" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU signal/wait thread-mode prepare did not complete install attempt for both ranks" >&2
             exit 6
         fi
-        if [ "$(grep -c "tilexr_ccu_direct_smoke submit ret=0" "${thread_log}")" -lt 2 ]; then
-            echo "ERROR: direct CCU thread-mode submit did not return success for both ranks" >&2
-            exit 7
+        if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
+            if [ "$(grep -c "submitReady=1" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU signal/wait thread-mode submit requested but prepare did not reach submitReady=1" >&2
+                exit 6
+            fi
+            if [ "$(grep -c "tilexr_ccu_signal_wait submit ret=0" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU signal/wait thread-mode submit did not return success for both ranks" >&2
+                exit 7
+            fi
+            if [ "$(grep -c "tilexr_ccu_signal_wait timing" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU signal/wait thread-mode timing was not reported for both ranks" >&2
+                exit 8
+            fi
         fi
-        if [ "$(grep -c "tilexr_ccu_direct_smoke submitTiming" "${thread_log}")" -lt 2 ]; then
-            echo "ERROR: direct CCU thread-mode submit timing was not reported for both ranks" >&2
+        if [ "$(grep -c "tilexr_ccu_signal_wait result passed=1" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU signal/wait thread-mode result did not pass for both ranks" >&2
             exit 8
+        fi
+    else
+        if [ "$(grep -c "tilexr_ccu_direct_smoke prepare ret=0" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU thread-mode prepare did not return success for both ranks" >&2
+            exit 5
+        fi
+        if [ "$(grep -c "installSucceeded=1" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU thread-mode prepare did not complete install attempt for both ranks" >&2
+            exit 6
+        fi
+        if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
+            if [ "$(grep -c "submitReady=1" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU thread-mode submit requested but prepare did not reach submitReady=1" >&2
+                exit 6
+            fi
+            if [ "$(grep -c "tilexr_ccu_direct_smoke submit ret=0" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU thread-mode submit did not return success for both ranks" >&2
+                exit 7
+            fi
+            if [ "$(grep -c "tilexr_ccu_direct_smoke submitTiming" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU thread-mode submit timing was not reported for both ranks" >&2
+                exit 8
+            fi
         fi
     fi
     if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_P2P_CCU_COPY:-0}" = "1" ]; then
@@ -566,16 +666,36 @@ if [ "${rank0_status}" -ne 0 ] || [ "${rank1_status}" -ne 0 ]; then
     exit 4
 fi
 
-for log in "${rank0_log}" "${rank1_log}"; do
-    if ! grep -q "tilexr_ccu_direct_smoke prepare ret=0" "${log}"; then
-        echo "ERROR: direct CCU prepare did not return success in ${log}" >&2
-        exit 5
-    fi
-    if ! grep -q "installSucceeded=1" "${log}"; then
-        echo "ERROR: direct CCU prepare did not complete install attempt in ${log}" >&2
-        exit 6
-    fi
-done
+if signal_wait_mode_enabled; then
+    for log in "${rank0_log}" "${rank1_log}"; do
+        if ! grep -q "tilexr_ccu_signal_wait prepare ret=0" "${log}"; then
+            echo "ERROR: direct CCU signal/wait prepare did not return success in ${log}" >&2
+            exit 5
+        fi
+        if ! grep -q "installSucceeded=1" "${log}"; then
+            echo "ERROR: direct CCU signal/wait prepare did not complete install attempt in ${log}" >&2
+            exit 6
+        fi
+    done
+else
+    for log in "${rank0_log}" "${rank1_log}"; do
+        if ! grep -q "tilexr_ccu_direct_smoke prepare ret=0" "${log}"; then
+            echo "ERROR: direct CCU prepare did not return success in ${log}" >&2
+            exit 5
+        fi
+        if ! grep -q "installSucceeded=1" "${log}"; then
+            echo "ERROR: direct CCU prepare did not complete install attempt in ${log}" >&2
+            exit 6
+        fi
+    done
+fi
+
+rank_skipped_p2p_ccu_copy_submit()
+{
+    local log="$1"
+    [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0}" = "1" ] &&
+        grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped" "${log}"
+}
 
 if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     for log in "${rank0_log}" "${rank1_log}"; do
@@ -585,13 +705,39 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
         fi
     done
     for log in "${rank0_log}" "${rank1_log}"; do
+        if signal_wait_mode_enabled; then
+            if ! grep -q "tilexr_ccu_signal_wait submit ret=0" "${log}"; then
+                echo "ERROR: direct CCU signal/wait submit did not return success in ${log}" >&2
+                exit 7
+            fi
+            if ! grep -q "tilexr_ccu_signal_wait timing" "${log}"; then
+                echo "ERROR: direct CCU signal/wait timing was not reported in ${log}" >&2
+                exit 8
+            fi
+            continue
+        fi
         if ! grep -q "tilexr_ccu_direct_smoke submit ret=0" "${log}"; then
+            if rank_skipped_p2p_ccu_copy_submit "${log}"; then
+                continue
+            fi
             echo "ERROR: direct CCU submit did not return success in ${log}" >&2
             exit 7
         fi
         if ! grep -q "tilexr_ccu_direct_smoke submitTiming" "${log}"; then
+            if rank_skipped_p2p_ccu_copy_submit "${log}"; then
+                continue
+            fi
             echo "ERROR: direct CCU submit timing was not reported in ${log}" >&2
             exit 8
+        fi
+    done
+fi
+
+if signal_wait_mode_enabled; then
+    for log in "${rank0_log}" "${rank1_log}"; do
+        if ! grep -q "tilexr_ccu_signal_wait result passed=1" "${log}"; then
+            echo "ERROR: direct CCU signal/wait result did not pass in ${log}" >&2
+            exit 9
         fi
     done
 fi
@@ -610,7 +756,7 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_BARRIER_WAIT:-0}" = "1" ]; then
     fi
     wait_sync_ms="$(
         awk '
-            /tilexr_ccu_direct_smoke submitTiming/ {
+            /tilexr_ccu_direct_smoke submitTiming|tilexr_ccu_signal_wait timing/ {
                 for (i = 1; i <= NF; ++i) {
                     if ($i ~ /^syncMs=/) {
                         split($i, parts, "=");

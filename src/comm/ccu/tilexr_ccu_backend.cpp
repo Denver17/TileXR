@@ -20,6 +20,11 @@ public:
     bool Supports(const TileXRCcuCollectiveRequest &request) const;
     int PrepareCollective(const TileXRCcuCollectiveRequest &request, TileXRCcuCollectivePlan *plan);
     int SubmitCollective(const TileXRCcuCollectivePlan &plan, aclrtStream stream);
+    int PrepareSignalWait(const TileXRCcuSignalWaitRequest &request, TileXRCcuSignalWaitPlan *plan);
+    int SubmitSignalWait(
+        const TileXRCcuSignalWaitPlan &plan,
+        aclrtStream stream,
+        TileXRCcuDirectSubmitReport *report);
 #ifdef TILEXR_CCU_TESTING
     bool RuntimeInitializedForTest() const;
 #endif
@@ -105,6 +110,38 @@ int TileXRCcuBackend::Impl::SubmitCollective(const TileXRCcuCollectivePlan &plan
     return executor_->Submit(*runtimeSession_, plan, stream);
 }
 
+int TileXRCcuBackend::Impl::PrepareSignalWait(
+    const TileXRCcuSignalWaitRequest &request,
+    TileXRCcuSignalWaitPlan *plan)
+{
+    if (plan == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *plan = TileXRCcuSignalWaitPlan {};
+    if (runtimeSession_ == nullptr || planner_ == nullptr) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    TileXRCcuDirectInstallReport report;
+    return planner_->PrepareSignalWait(*runtimeSession_, request, plan, &report);
+}
+
+int TileXRCcuBackend::Impl::SubmitSignalWait(
+    const TileXRCcuSignalWaitPlan &plan,
+    aclrtStream stream,
+    TileXRCcuDirectSubmitReport *report)
+{
+    if (report != nullptr) {
+        *report = TileXRCcuDirectSubmitReport {};
+    }
+    if (!plan.ready || plan.submitTasks.empty()) {
+        if (report != nullptr) {
+            report->message = "direct CCU signal/wait plan is not ready";
+        }
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    return TileXRCcuSubmitPreparedTasks(plan.submitTasks, stream, nullptr, nullptr, report);
+}
+
 #ifdef TILEXR_CCU_TESTING
 bool TileXRCcuBackend::Impl::RuntimeInitializedForTest() const
 {
@@ -163,6 +200,27 @@ int TileXRCcuBackend::SubmitCollective(const TileXRCcuCollectivePlan &plan, aclr
         return TILEXR_ERROR_INTERNAL;
     }
     return impl_->SubmitCollective(plan, stream);
+}
+
+int TileXRCcuBackend::PrepareSignalWait(
+    const TileXRCcuSignalWaitRequest &request,
+    TileXRCcuSignalWaitPlan *plan)
+{
+    if (impl_ == nullptr) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return impl_->PrepareSignalWait(request, plan);
+}
+
+int TileXRCcuBackend::SubmitSignalWait(
+    const TileXRCcuSignalWaitPlan &plan,
+    aclrtStream stream,
+    TileXRCcuDirectSubmitReport *report)
+{
+    if (impl_ == nullptr) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    return impl_->SubmitSignalWait(plan, stream, report);
 }
 
 #ifdef TILEXR_CCU_TESTING

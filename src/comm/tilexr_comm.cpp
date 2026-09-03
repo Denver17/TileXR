@@ -102,8 +102,19 @@ bool IsEnvEnabled(const char* name, bool defaultValue)
     return defaultValue;
 }
 
-} // namespace
+constexpr const char* TILEXR_ENABLE_CCU_BACKEND_ENV = "TILEXR_ENABLE_CCU_BACKEND";
 
+bool ShouldEnableCcuBackend()
+{
+    const char *value = std::getenv(TILEXR_ENABLE_CCU_BACKEND_ENV);
+    if (value == nullptr || value[0] == '\0') {
+        return false;
+    }
+    const string text(value);
+    return text == "1" || text == "true" || text == "TRUE" || text == "yes" || text == "on";
+}
+
+} // namespace
 
 // 如果是互联的链路，返回false； 对910B2C那些不互联的链路，返回true
 bool SkipUnusedChannel910B2C(int curRank, int peerRank, ChipName chipName)
@@ -465,6 +476,26 @@ int TileXRComm::InitCcuBackend()
     options.uid = uid_;
     options.exchange = socketExchange_;
     return ccuBackend_->Init(options);
+}
+
+int TileXRComm::InitCcuBackendIfEnabled()
+{
+    if (!ShouldEnableCcuBackend()) {
+        return TILEXR_SUCCESS;
+    }
+
+    const int ccuRet = InitCcuBackend();
+    if (ccuRet != TILEXR_SUCCESS || ccuBackend_ == nullptr || !ccuBackend_->Available()) {
+        TILEXR_LOG(WARN) << "TileXR CCU backend init failed, direct CCU disabled, ret: " << ccuRet;
+        if (ccuBackend_ != nullptr) {
+            ccuBackend_->Shutdown();
+            ccuBackend_.reset();
+        }
+        return TILEXR_SUCCESS;
+    }
+
+    TILEXR_LOG(INFO) << "TileXR CCU backend initialized";
+    return TILEXR_SUCCESS;
 }
 
 TileXRCcuBackend *TileXRComm::GetCcuBackendForCollectives()
@@ -946,6 +977,11 @@ int TileXRComm::Init()
         commArgs_.extraFlag |= ExtraFlag::MEMORY_ONLY;
     }
 
+    ret = InitCcuBackendIfEnabled();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
     // set comm args in device.
     ret = SyncCommArgs();
     if (ret != TILEXR_SUCCESS) {
@@ -1022,6 +1058,10 @@ int TileXRComm::InitThread(const std::string &uid)
     TILEXR_LOG(DEBUG) << "Thread mode: UDMA initialization skipped (single-process multi-thread scenario)";
 
     ret = InitSDMA();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    ret = InitCcuBackendIfEnabled();
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }

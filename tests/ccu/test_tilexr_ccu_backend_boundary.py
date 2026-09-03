@@ -9,6 +9,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMM_HEADER = REPO_ROOT / "src" / "comm" / "tilexr_comm.h"
+PUBLIC_API_HEADER = REPO_ROOT / "src" / "include" / "tilexr_api.h"
 BACKEND_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_backend.h"
 BACKEND_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_backend.cpp"
 RUNTIME_SESSION_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_runtime_session.h"
@@ -54,11 +55,21 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
 
     def test_backend_header_exposes_facade_not_public_c_api(self):
         header = BACKEND_HEADER.read_text(encoding="utf-8")
+        public_api = PUBLIC_API_HEADER.read_text(encoding="utf-8")
         self.assertIn("class TileXRCcuBackend", header)
         self.assertIn("struct TileXRCcuBackendOptions", header)
         self.assertIn("TileXRSockExchange *exchange", header)
         self.assertIn("PrepareCollective", header)
         self.assertIn("SubmitCollective", header)
+        for needle in [
+            "enum class TileXRCcuSignalWaitRole",
+            "struct TileXRCcuSignalWaitRequest",
+            "struct TileXRCcuSignalWaitPlan",
+            "PrepareSignalWait",
+            "SubmitSignalWait",
+        ]:
+            with self.subTest(internal=needle):
+                self.assertIn(needle, header)
         for needle in [
             "TileXRDirectCcuPreparedTasksPtr",
             "TileXRCommPrepareDirectCcu",
@@ -66,6 +77,14 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         ]:
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, header)
+                self.assertNotIn(needle, public_api)
+        for needle in [
+            "TileXRCcuSignalWait",
+            "PrepareSignalWait",
+            "SubmitSignalWait",
+        ]:
+            with self.subTest(public_needle=needle):
+                self.assertNotIn(needle, public_api)
 
     def test_split_sources_own_restored_direct_ccu_runtime_glue(self):
         source = BACKEND_SOURCE.read_text(encoding="utf-8")
@@ -92,12 +111,17 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         for needle in [
             "#include \"ccu/tilexr_ccu_repository.h\"",
             "PrepareDirectCcuInstallAttempt",
+            "PrepareSignalWait",
             "PrepareDirectCcuLowerLayerPlanCallback",
             "TileXRCcuRunDirectInstallAttempt",
+            "TileXRCcuRunDirectSignalWaitInstallAttempt",
             "TileXRCcuMakeRepositoryDeviceMemoryOps",
         ]:
             with self.subTest(needle=needle):
                 self.assertIn(needle, planner)
+
+        self.assertIn("planner_->PrepareSignalWait", source)
+        self.assertNotIn("return TILEXR_ERROR_NOT_SUPPORT;", source[source.index("PrepareSignalWait"):])
 
         planner_header = PLANNER_HEADER.read_text(encoding="utf-8")
         executor_header = EXECUTOR_HEADER.read_text(encoding="utf-8")
@@ -124,6 +148,80 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         ]:
             with self.subTest(fake_ready=fake_ready):
                 self.assertNotIn(fake_ready, source + "\n" + runtime + "\n" + planner + "\n" + executor)
+
+    def test_tilexr_comm_can_auto_initialize_ccu_backend_without_blocking_comm_init(self):
+        source = (REPO_ROOT / "src" / "comm" / "tilexr_comm.cpp").read_text(encoding="utf-8")
+
+        self.assertIn('constexpr const char* TILEXR_ENABLE_CCU_BACKEND_ENV = "TILEXR_ENABLE_CCU_BACKEND"', source)
+        self.assertIn("bool ShouldEnableCcuBackend()", source)
+        self.assertIn("int TileXRComm::InitCcuBackendIfEnabled()", source)
+        self.assertIn("const int ccuRet = InitCcuBackend()", source)
+        self.assertIn("TileXR CCU backend init failed, direct CCU disabled", source)
+        self.assertIn("TileXR CCU backend initialized", source)
+
+        process_init = source[source.index("int TileXRComm::Init()"): source.index("int TileXRComm::InitThread")]
+        thread_init = source[source.index("int TileXRComm::InitThread"): source.index("int TileXRComm::EnablePeerAccess")]
+
+        for body_name, body in [("process", process_init), ("thread", thread_init)]:
+            with self.subTest(body=body_name):
+                self.assertIn("ret = InitCcuBackendIfEnabled();", body)
+                self.assertLess(body.index("ret = InitCcuBackendIfEnabled();"), body.index("ret = SyncCommArgs();"))
+                self.assertIn("if (ret != TILEXR_SUCCESS) {", body)
+                self.assertIn("return ret;", body)
+
+        helper = source[
+            source.index("int TileXRComm::InitCcuBackendIfEnabled()"):
+            source.index("TileXRCcuBackend *TileXRComm::GetCcuBackendForCollectives")
+        ]
+        self.assertIn("if (!ShouldEnableCcuBackend())", helper)
+        self.assertIn("return TILEXR_SUCCESS;", helper)
+        self.assertNotIn("return ccuRet;", helper)
+
+    def test_p2p_ccu_copy_process_token_is_not_urma_shifted(self):
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
+        token_query = planner[
+            planner.index("int QueryDirectCcuProcessMemoryToken"):
+            planner.index("int BuildDirectCcuLocalMemoryCopyEndpoint")
+        ]
+
+        self.assertIn("rtUbDevQueryInfo(QUERY_PROCESS_TOKEN, &info)", token_query)
+        self.assertIn("const uint32_t tokenId = info.tokenId;", token_query)
+        self.assertIn("TileXRCcuPackMemoryToken(tokenId, info.tokenValue, true)", token_query)
+        self.assertNotIn("info.tokenId >>", token_query)
+
+    def test_p2p_ccu_copy_uses_original_va_for_microcode_and_imported_segva_for_route(self):
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
+        endpoint_builder = planner[
+            planner.index("int BuildDirectCcuLocalMemoryCopyEndpoint"):
+            planner.index("void TileXRCcuCollectivePlanner::Reset")
+        ]
+        prepare_copy = planner[
+            planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt"):
+            planner.index("int TileXRCcuCollectivePlanner::RefreshDirectCcuLowerLayerPlan")
+        ]
+
+        self.assertIn("session.RegisterCcuResourceRmaBuffer(basicInfo->resourceAddr)", prepare_copy)
+        self.assertIn("session.RegisterMemoryBuffer(sourceAddr, bytes, &sourceInfo)", endpoint_builder)
+        self.assertIn("session.RegisterMemoryBuffer(destinationAddr, bytes, &destinationInfo)", endpoint_builder)
+        self.assertIn("endpoint->sourceAddr = sourceInfo.addr", endpoint_builder)
+        self.assertIn("endpoint->destinationAddr = destinationInfo.addr", endpoint_builder)
+        self.assertNotIn("endpoint->sourceAddr = sourceInfo.targetSegVa", endpoint_builder)
+        self.assertNotIn("endpoint->destinationAddr = destinationInfo.targetSegVa", endpoint_builder)
+        self.assertIn("endpoint->sourceRemoteImport.key = sourceInfo.key", endpoint_builder)
+        self.assertIn("endpoint->destinationRemoteImport.key = destinationInfo.key", endpoint_builder)
+        self.assertIn("TileXRCcuPackMemoryToken(sourceInfo.tokenId, sourceInfo.tokenValue, true)", endpoint_builder)
+        self.assertIn(
+            "TileXRCcuPackMemoryToken(destinationInfo.tokenId, destinationInfo.tokenValue, true)",
+            endpoint_builder,
+        )
+        self.assertIn("remoteImportRequest = peerEndpoint.sourceRemoteImport", prepare_copy)
+        self.assertIn("remoteImportRequest = peerEndpoint.destinationRemoteImport", prepare_copy)
+        self.assertIn("session.ImportRemoteMemoryBuffer(remoteImportRequest, &importedRemoteBuffer)", prepare_copy)
+        self.assertIn("memoryCopy.remoteAddr = remoteImportRequest.addr", prepare_copy)
+        self.assertIn("SetDirectCcuRemoteRouteMemoryOverride(", prepare_copy)
+        self.assertIn("importedRemoteBuffer.targetSegVa", prepare_copy)
+        self.assertNotIn("QueryDirectCcuProcessMemoryToken(sourceAddr", endpoint_builder)
+        self.assertNotIn("QueryDirectCcuProcessMemoryToken(destinationAddr", endpoint_builder)
 
 
 if __name__ == "__main__":

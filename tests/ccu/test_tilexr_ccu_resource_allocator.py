@@ -937,6 +937,103 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_allocator_release_reclaims_latest_receipt_and_rejects_non_lifo_release(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_resource_allocator.h"
+
+            #include <iostream>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                TileXRCcuResourceSpec spec;
+                spec.dieId = 0;
+                spec.missionKey = 0x12345678U;
+                spec.missionStartId = 10;
+                spec.missionCount = 4;
+                spec.instructionStartId = 100;
+                spec.instructionCount = 64;
+                spec.xnStartId = 200;
+                spec.xnCount = 16;
+                spec.ckeStartId = 300;
+                spec.ckeCount = 8;
+                spec.channelStartId = 20;
+                spec.channelCount = 4;
+
+                TileXRCcuResourceRequest request;
+                request.sqeArgCount = 0;
+                request.syncResourceCount = 1;
+                request.syncInstructionCount = 2;
+                request.bindingsPerSyncResource = 1;
+
+                TileXRCcuResourceAllocator allocator;
+                if (allocator.Init(spec) != TILEXR_SUCCESS) {
+                    std::cerr << "init failed\n";
+                    return 1;
+                }
+
+                TileXRCcuProducerPlan firstPlan;
+                TileXRCcuProducerPlan secondPlan;
+                TileXRCcuProducerPlan thirdPlan;
+                TileXRCcuResourceAllocation first;
+                TileXRCcuResourceAllocation second;
+                TileXRCcuResourceAllocation third;
+                TileXRCcuResourceAllocatorReport report;
+                if (allocator.Allocate(request, &firstPlan, &first, &report) != TILEXR_SUCCESS ||
+                    allocator.Allocate(request, &secondPlan, &second, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "initial allocate failed: " << report.message << "\n";
+                    return 2;
+                }
+                if (first.mission.startId != 10 || second.mission.startId != 11 ||
+                    first.repository.startId != 100 || second.repository.startId != 102 ||
+                    first.localXn.startId == second.localXn.startId ||
+                    first.channels.startId == second.channels.startId) {
+                    std::cerr << "initial allocations did not advance resource cursors\n";
+                    return 3;
+                }
+                if (allocator.Release(first.receiptId) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    std::cerr << "non-LIFO release was accepted\n";
+                    return 4;
+                }
+                if (allocator.Release(second.receiptId) != TILEXR_SUCCESS) {
+                    std::cerr << "latest release failed\n";
+                    return 5;
+                }
+                if (allocator.Allocate(request, &thirdPlan, &third, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "third allocate failed after release: " << report.message << "\n";
+                    return 6;
+                }
+                if (third.mission.startId != second.mission.startId ||
+                    third.repository.startId != second.repository.startId ||
+                    third.localXn.startId != second.localXn.startId ||
+                    third.remoteXn.startId != second.remoteXn.startId ||
+                    third.localWaitCke.startId != second.localWaitCke.startId ||
+                    third.remoteNotifyCke.startId != second.remoteNotifyCke.startId ||
+                    third.channels.startId != second.channels.startId) {
+                    std::cerr << "released resource ranges were not reused\n";
+                    return 7;
+                }
+                if (allocator.Release(first.receiptId) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    std::cerr << "old non-tail receipt release should still be rejected\n";
+                    return 8;
+                }
+                if (allocator.Release(third.receiptId) != TILEXR_SUCCESS ||
+                    allocator.Release(first.receiptId) != TILEXR_SUCCESS) {
+                    std::cerr << "tail releases failed\n";
+                    return 9;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_allocator_rejects_sync_instruction_window_too_small_for_barrier_program(self):
         code = textwrap.dedent(
             r'''

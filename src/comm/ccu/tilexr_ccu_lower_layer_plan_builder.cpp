@@ -457,7 +457,9 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
         result.msidToken.valid = true;
     }
     result.dieId = basicInfo.dieId;
-    result.pfeId = allocation.channels.startId;
+    result.pfeId = remoteCcuBuffers.front().localPfeIdValid ?
+        remoteCcuBuffers.front().localPfeId :
+        allocation.channels.startId;
     result.pfeOffset = SelectLowerLayerPfeOffset(basicInfo.dieId, result.pfeId);
     result.startJettyId = TILEXR_CCU_DEFAULT_START_JETTY_ID;
     result.startLocalJettyCtxId = TILEXR_CCU_DEFAULT_START_LOCAL_JETTY_CTX_ID;
@@ -469,6 +471,8 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
     result.routes.reserve(remoteCcuBuffers.size());
 
     const uint16_t wqeBasicBlockStride = SelectLowerLayerWqeBasicBlockStride();
+    uint16_t verifiedStartJettyId = 0;
+    uint32_t verifiedJettyEnd = 0;
     for (uint32_t i = 0; i < remoteCcuBuffers.size(); ++i) {
         const auto& remoteCcuBuffer = remoteCcuBuffers[i];
         if (remoteCcuBuffer.remoteCcuVa == 0) {
@@ -509,9 +513,23 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
             route.localDoorbellTokenId = remoteCcuBuffer.localDoorbellTokenId;
             route.localDoorbellTokenValue = remoteCcuBuffer.localDoorbellTokenValue;
             route.localSqDepth = remoteCcuBuffer.localSqDepth;
+            route.startJettyId = remoteCcuBuffer.startJettyId;
             route.endpointRouteVerified = true;
+            if (route.startJettyId != 0) {
+                verifiedStartJettyId = verifiedStartJettyId == 0 ?
+                    route.startJettyId :
+                    std::min<uint16_t>(verifiedStartJettyId, route.startJettyId);
+                verifiedJettyEnd = std::max<uint32_t>(
+                    verifiedJettyEnd,
+                    static_cast<uint32_t>(route.startJettyId) + 1U);
+            }
         }
         result.routes.push_back(route);
+    }
+    if (verifiedStartJettyId != 0) {
+        result.startJettyId = verifiedStartJettyId;
+        const uint32_t requiredJettyCount = verifiedJettyEnd - verifiedStartJettyId;
+        result.pfeJettyCount = CheckedU16(std::max<uint32_t>(result.pfeJettyCount, requiredJettyCount));
     }
 
     *snapshot = result;

@@ -225,6 +225,42 @@ struct TileXRCcuHccpMrRegInfo {
     TileXRCcuHccpMemRegInfo out;
 };
 
+union TileXRCcuHccpImportSegFlag {
+    struct {
+        uint32_t cacheable : 1;
+        uint32_t access : 6;
+        uint32_t mapping : 1;
+        uint32_t reserved : 24;
+    } bs;
+    uint32_t value;
+};
+
+struct TileXRCcuHccpMemImportAttr {
+    TileXRCcuHccpMemKey key;
+    union {
+        struct {
+            TileXRCcuHccpImportSegFlag flags;
+            uint64_t mappingAddr;
+            uint32_t tokenValue;
+        } ub;
+    };
+    uint32_t resv[4];
+};
+
+struct TileXRCcuHccpMemImportInfo {
+    union {
+        struct {
+            uint64_t targetSegHandle;
+        } ub;
+    };
+    uint32_t resv[4];
+};
+
+struct TileXRCcuHccpMrImportInfo {
+    TileXRCcuHccpMemImportAttr in;
+    TileXRCcuHccpMemImportInfo out;
+};
+
 union TileXRCcuHccpDataPlaneCstmFlag {
     struct {
         uint32_t pollCqCstm : 1;
@@ -543,6 +579,11 @@ using TileXRCcuRaCtxLmemRegisterFunc = int (*)(
     TileXRCcuHccpMrRegInfo* mr,
     void** lmemHandle);
 using TileXRCcuRaCtxLmemUnregisterFunc = int (*)(void* ctx, void* lmemHandle);
+using TileXRCcuRaCtxRmemImportFunc = int (*)(
+    void* ctx,
+    TileXRCcuHccpMrImportInfo* mr,
+    void** rmemHandle);
+using TileXRCcuRaCtxRmemUnimportFunc = int (*)(void* ctx, void* rmemHandle);
 using TileXRCcuRaGetSecRandomFunc = int (*)(TileXRCcuRaInfo* info, uint32_t* value);
 using TileXRCcuRaCtxChanCreateFunc = int (*)(void* ctx, TileXRCcuHccpChanInfo* info, void** chanHandle);
 using TileXRCcuRaCtxChanDestroyFunc = int (*)(void* ctx, void* chanHandle);

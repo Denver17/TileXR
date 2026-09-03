@@ -47,6 +47,11 @@ public:
         const TileXRCcuDirectInstallOptions &options,
         TileXRCcuDirectInstallAttempt *attempt,
         TileXRCcuDirectInstallReport *report);
+    int PrepareSignalWait(
+        TileXRCcuRuntimeSession &session,
+        const TileXRCcuSignalWaitRequest &request,
+        TileXRCcuSignalWaitPlan *plan,
+        TileXRCcuDirectInstallReport *report);
 #ifdef TILEXR_CCU_TESTING
     int PrepareDirectCcuMemoryCopyInstallAttempt(
         TileXRCcuRuntimeSession &session,
@@ -82,6 +87,17 @@ private:
         const TileXRCcuResourceAllocation &allocation,
         std::vector<TileXRCcuRemoteCcuBufferInfo> *remoteCcuBuffers,
         TileXRCcuLowerLayerPlanBuilderReport *report);
+#ifdef TILEXR_CCU_TESTING
+    void SetDirectCcuRemoteRouteMemoryOverride(
+        uint32_t peerRank,
+        uint64_t remoteCcuVa,
+        uint32_t memoryTokenId,
+        uint32_t rawMemoryTokenId,
+        uint32_t memoryTokenValue);
+    void ClearDirectCcuRemoteRouteMemoryOverride();
+    void ApplyDirectCcuRemoteRouteMemoryOverride(
+        std::vector<TileXRCcuRemoteCcuBufferInfo> *remoteCcuBuffers) const;
+#endif
     static int PrepareDirectCcuLowerLayerPlanCallback(
         const TileXRCcuResourceAllocation &allocation,
         TileXRCcuLowerLayerInstallPlan *plan,
@@ -98,6 +114,10 @@ private:
     std::vector<TileXRCcuLowerLayerTransportRoute> directCcuVerifiedEndpointRoutes_ = {};
     TileXRCcuLowerLayerTransportRoute directCcuLocalVerifiedEndpointRoute_ = {};
     bool directCcuLocalVerifiedEndpointRouteValid_ = false;
+#ifdef TILEXR_CCU_TESTING
+    TileXRCcuRemoteCcuBufferInfo directCcuRemoteRouteMemoryOverride_ = {};
+    bool directCcuRemoteRouteMemoryOverrideValid_ = false;
+#endif
 };
 
 } // namespace TileXR

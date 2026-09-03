@@ -23,6 +23,7 @@ public:
 
     int Rank() const;
     int RankSize() const;
+    int DevId() const;
     int AllGather(const void *sendBuf, size_t sendBytes, void *recvBuf);
 
     int RefreshDirectCcuBasicInfo(uint8_t dieId = 0);
@@ -32,6 +33,10 @@ public:
     const TileXRCcuDriverAdapterReport &GetDirectCcuBasicInfoReport() const;
 
     int RegisterCcuResourceRmaBuffer(uint64_t resourceAddr);
+    int RegisterMemoryBuffer(uint64_t addr, uint64_t bytes, TileXRCcuRegisteredMemoryBufferInfo *info);
+    int ImportRemoteMemoryBuffer(
+        const TileXRCcuRemoteMemoryBufferImportRequest &request,
+        TileXRCcuImportedRemoteMemoryBufferInfo *info);
     int ExportLocalCcuRmaBuffer(TileXRCcuLocalResourceWindowInfo *info);
     int ExportRemoteCcuRmaBuffers(std::vector<TileXRCcuRemoteCcuBufferInfo> *buffers);
     int ExportLowerLayerTransportSnapshot(
@@ -41,10 +46,11 @@ public:
     int RefreshLocalVerifiedEndpointRoute(TileXRCcuDirectRuntimeReport *report);
     int CreateDriverAdapter(TileXRCcuDriverAdapter *adapter, TileXRCcuDriverAdapterReport *report);
 
-    static std::string ProcessDirectCcuRuntimeUnavailableMessage();
+    std::string DirectCcuRuntimeUnavailableMessage() const;
 
 private:
     void ResetDirectCcuBasicInfo();
+    static std::string DirectCcuRuntimeUnavailableMessageForDevice(int devId);
     static int DirectCcuAllGatherCallback(const void *sendBuf, size_t sendBytes, void *recvBuf, void *userData);
     int DirectCcuThreadAllGather(const void *sendBuf, size_t sendBytes, void *recvBuf);
 

@@ -1262,6 +1262,17 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, combined)
 
+    def test_direct_ccu_runtime_init_cleans_sticky_taskkill_state(self):
+        source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
+
+        init_body = source[
+            source.index("int TileXRCcuDirectRuntime::Init("):
+            source.index("void TileXRCcuDirectRuntime::Shutdown()")
+        ]
+        self.assertIn("adapter.CleanTaskKillState", init_body)
+        self.assertIn("TILEXR_CCU_DIRECT_DEFAULT_DIE_ID", init_body)
+        self.assertIn("TraceTaskKillCleanup", source)
+
     def test_direct_ccu_runtime_keeps_ra_custom_channel_provider_alive_for_created_adapters(self):
         header = DIRECT_RUNTIME_HEADER.read_text(encoding="utf-8")
         source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")

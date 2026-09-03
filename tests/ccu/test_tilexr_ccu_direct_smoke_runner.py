@@ -141,10 +141,44 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn('TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-8}"', source)
         self.assertIn('TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"', source)
         self.assertIn('TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"', source)
+        self.assertIn('TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN="${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-1}"', source)
         self.assertIn('common_env+=("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE=${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE}")', source)
         self.assertIn("p2p_passed_count=0", source)
         self.assertIn('grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped"', source)
         self.assertIn("direct CCU P2P CCU-copy produced no passing receiver result", source)
+
+    def test_runner_signal_wait_mode_uses_internal_backend_defaults_and_asserts_result(self):
+        source = RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn("apply_signal_wait_defaults", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_BARRIER", source)
+        self.assertIn('TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT}")', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK}")', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_BARRIER=${TILEXR_CCU_DIRECT_SMOKE_BARRIER}")', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT=${TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT}")', source)
+        self.assertIn('grep -q "tilexr_ccu_signal_wait prepare ret=0"', source)
+        self.assertIn('grep -q "tilexr_ccu_signal_wait submit ret=0"', source)
+        self.assertIn('grep -q "tilexr_ccu_signal_wait result passed=1"', source)
+
+    def test_runner_allows_inactive_p2p_rank_to_skip_submit(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        submit_check = source[
+            source.index('if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]', source.index('if [ "${rank0_status}"')):
+            source.index('if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_BARRIER_WAIT:-0}" = "1" ]')
+        ]
+
+        self.assertIn("rank_skipped_p2p_ccu_copy_submit", source)
+        self.assertIn('grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped"', source)
+        self.assertIn("rank_skipped_p2p_ccu_copy_submit", submit_check)
+        self.assertIn("continue", submit_check)
+        self.assertIn("direct CCU submit did not return success", submit_check)
 
     def test_runner_default_run_skips_without_hardware(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -229,6 +263,15 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertNotIn("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_TOKEN_ID=0x1111", result.stdout)
         self.assertNotIn("npu-smi rc=", result.stdout + result.stderr)
         self.assertNotIn("ccu_rank0.log", result.stdout)
+
+    def test_runner_passes_rank_specific_resource_window_eid_index(self):
+        source = RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn("EID_INDEX", source[source.index("resource_window_token_fields=("):])
+        self.assertIn('rank0_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK0"', source)
+        self.assertIn('rank1_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK1"', source)
+        self.assertIn('echo "dryRun rank0 TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank0_token_value}"', source)
+        self.assertIn('echo "dryRun rank1 TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank1_token_value}"', source)
 
     def test_runner_dry_run_shows_repository_install_diagnostic_variants(self):
         with tempfile.TemporaryDirectory() as temp_dir:

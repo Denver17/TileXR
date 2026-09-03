@@ -27,6 +27,7 @@ PRODUCER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_producer_plan
 BARRIER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_barrier_program.cpp"
 MICROCODE_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_microcode.cpp"
 MEMORY_PROGRAM_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_memory_program.cpp"
+SIGNAL_WAIT_PROGRAM_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_signal_wait_program.cpp"
 RUNTIME_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_runtime.cpp"
 LOWER_LAYER_PLAN_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_lower_layer_plan_builder.cpp"
 LOWER_LAYER_PAYLOAD_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_lower_layer_payloads.cpp"
@@ -137,6 +138,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 str(BARRIER_SOURCE),
                 str(MICROCODE_SOURCE),
                 str(MEMORY_PROGRAM_SOURCE),
+                str(SIGNAL_WAIT_PROGRAM_SOURCE),
                 str(RUNTIME_SOURCE),
                 str(LOWER_LAYER_PLAN_SOURCE),
                 str(LOWER_LAYER_PAYLOAD_SOURCE),
@@ -777,6 +779,29 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("TileXRDirectCcuTrace finalRuntimeTask[0] dieId=1 missionId=6 timeout=68 instStartId=489", result.stderr)
         self.assertIn("TileXRDirectCcuTrace finalRuntimeTask[1] dieId=1 missionId=6 timeout=68 instStartId=502", result.stderr)
         self.assertNotIn("TileXRDirectCcuTrace finalRuntimeTask task=0", result.stderr)
+
+    def test_task_timeout_override_is_applied_before_install_trace_and_manifest(self):
+        source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        body = source[
+            source.index("int RunDirectInstallAttemptImpl("):
+            source.index("int TileXRCcuRunDirectMemoryCopyInstallAttempt(")
+        ]
+
+        first_override = body.index("ApplyTaskTimeoutOverride(options.taskTimeout, attempt)")
+        self.assertLess(first_override, body.index("TraceDirectInstallAttempt(*attempt)"))
+        self.assertLess(first_override, body.index("TileXRCcuBuildInstallManifest"))
+        self.assertLess(first_override, body.index("TileXRCcuInstallHardware"))
+
+    def test_signal_wait_uses_notify_mask_for_source_cke_reserve(self):
+        source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        body = source[
+            source.index("int BuildDirectSignalWaitLaunchPackage("):
+            source.index("void FillReportFromAttempt(")
+        ]
+
+        self.assertIn("spec.remoteNotifyMask = resource.remoteNotifyMask == 0 ? 1U : resource.remoteNotifyMask", body)
+        self.assertIn("spec.sourceCkeMask = spec.remoteNotifyMask", body)
+        self.assertNotIn("spec.sourceCkeMask = resource.sourceCkeMask", body)
 
     def test_direct_install_attempt_can_prepare_lower_layer_plan_after_allocation(self):
         code = textwrap.dedent(
@@ -1664,6 +1689,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("ccu/tilexr_ccu_direct_orchestrator.cpp", cmake)
         self.assertIn("struct TileXRCcuDirectInstallOptions", header)
         self.assertIn("struct TileXRCcuDirectMemoryCopySpec", header)
+        self.assertIn("struct TileXRCcuDirectSignalWaitSpec", header)
         self.assertIn("struct TileXRCcuDirectInstallAttempt", header)
         self.assertIn("struct TileXRCcuDirectInstallReport", header)
         self.assertIn("struct TileXRCcuDirectSubmitReport", header)
@@ -1677,18 +1703,24 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("TileXRCcuSubmitPreparedTasks", header)
         self.assertIn("TileXRCcuRunDirectInstallAttempt", header)
         self.assertIn("TileXRCcuRunDirectMemoryCopyInstallAttempt", header)
+        self.assertIn("TileXRCcuRunDirectSignalWaitInstallAttempt", header)
         self.assertIn("TileXRCcuDecodeBasicInfo", source)
         self.assertIn("TileXRCcuBuildResourceSpec", source)
         self.assertIn("TileXRCcuResourceAllocator", source)
         self.assertIn("TileXRCcuBuildLaunchPackage", source)
         self.assertIn("TileXRCcuBuildMemoryCopyProgram", source)
         self.assertIn("BuildDirectMemoryCopyLaunchPackage", source)
+        self.assertIn("TileXRCcuBuildSignalWaitProgram", source)
+        self.assertIn("BuildDirectSignalWaitLaunchPackage", source)
+        self.assertIn("spec.localWaitCke = resource.localWaitCke == 0 ? resource.notifyCke : resource.localWaitCke", source)
         self.assertIn("TileXRCcuBindLaunchPackageInstallScope", source)
         self.assertIn("TileXRCcuBuildInstallManifest", source)
         self.assertIn("options.prepareLowerLayerPlan", source)
         self.assertIn("TileXRCcuInstallHardware", source)
         self.assertIn("TileXRCcuPrepareSubmitTasks", source)
         self.assertIn("TileXRCcuSubmitTask", source)
+        self.assertIn("uint16_t taskTimeout = 0", header)
+        self.assertIn("ApplyTaskTimeoutOverride(options.taskTimeout, attempt)", source)
         self.assertIn("remote XN install provider is missing", source)
         self.assertIn("TraceDecodedInstr", source)
         self.assertIn("TraceDecodedPfeCtx", source)
@@ -1718,6 +1750,18 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
             header,
         )
         self.assertIn("installRequest.installOrder = options.installOrder", source)
+
+    def test_direct_memory_copy_submit_tasks_keep_planned_runtime_payload(self):
+        source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        memory_copy_body = source[
+            source.index("int BuildDirectMemoryCopyLaunchPackage"):
+            source.index("void FillReportFromAttempt")
+        ]
+
+        self.assertIn("TileXRCcuBuildTasks(attempt->plan, &tasks, &planReport)", memory_copy_body)
+        self.assertIn("attempt->package.tasks = tasks", memory_copy_body)
+        self.assertNotIn("NormalizeDirectMemoryCopySubmitTasks", source)
+        self.assertNotIn("task.argSize = 1", source)
 
 
 if __name__ == "__main__":

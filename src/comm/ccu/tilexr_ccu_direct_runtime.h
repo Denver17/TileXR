@@ -55,6 +55,8 @@ struct TileXRCcuLocalResourceWindowInfo {
     void* lmemHandle = nullptr;
     std::array<uint8_t, TILEXR_CCU_EID_BYTES> eid {};
     uint32_t eidIndex = 0;
+    uint32_t funcId = 0;
+    bool funcIdValid = false;
     bool raCtxRegistered = false;
 };
 
@@ -70,11 +72,49 @@ struct TileXRCcuResourceWindowExchange {
     uint32_t doorbellTokenId = 0;
     uint32_t doorbellTokenValue = 0;
     uint32_t sqDepth = 0;
+    uint16_t startJettyId = 0;
+    uint32_t funcId = 0;
+    bool funcIdValid = false;
     TileXRCcuHccpQpKey qpKey {};
     uint32_t psn = 0;
     bool endpointRouteVerified = false;
     bool channelResourceOwnerVerified = false;
     bool transportResourceExchangeVerified = false;
+};
+
+struct TileXRCcuRegisteredMemoryBufferInfo {
+    uint64_t addr = 0;
+    uint64_t bytes = 0;
+    uint64_t alignedAddr = 0;
+    uint64_t alignedBytes = 0;
+    uint64_t targetSegVa = 0;
+    uint32_t tokenId = 0;
+    uint32_t rawTokenId = 0;
+    uint32_t tokenValue = 0;
+    TileXRCcuHccpMemKey key {};
+    void* tokenIdHandle = nullptr;
+    void* lmemHandle = nullptr;
+    bool valid = false;
+};
+
+struct TileXRCcuRemoteMemoryBufferImportRequest {
+    uint64_t addr = 0;
+    uint64_t bytes = 0;
+    uint64_t alignedAddr = 0;
+    uint64_t offset = 0;
+    uint32_t tokenId = 0;
+    uint32_t rawTokenId = 0;
+    uint32_t tokenValue = 0;
+    TileXRCcuHccpMemKey key {};
+    bool valid = false;
+};
+
+struct TileXRCcuImportedRemoteMemoryBufferInfo {
+    uint64_t addr = 0;
+    uint64_t bytes = 0;
+    uint64_t targetSegVa = 0;
+    void* rmemHandle = nullptr;
+    bool valid = false;
 };
 
 struct TileXRCcuDirectRuntimeReport {
@@ -96,6 +136,10 @@ public:
     int QueryBasicInfo(uint8_t dieId, TileXRCcuBasicInfo* basicInfo, TileXRCcuDriverAdapterReport* report);
     int CreateDriverAdapter(TileXRCcuDriverAdapter* adapter, TileXRCcuDriverAdapterReport* report);
     int RegisterCcuResourceRmaBuffer(uint64_t resourceAddr);
+    int RegisterMemoryBuffer(uint64_t addr, uint64_t bytes, TileXRCcuRegisteredMemoryBufferInfo* info);
+    int ImportRemoteMemoryBuffer(
+        const TileXRCcuRemoteMemoryBufferImportRequest& request,
+        TileXRCcuImportedRemoteMemoryBufferInfo* info);
     int RefreshLocalVerifiedEndpointRoute(TileXRCcuDirectRuntimeReport* report);
     int ConfigureLocalVerifiedEndpointRoute(const TileXRCcuLowerLayerTransportRoute& route);
     int ExportLocalCcuRmaBuffer(TileXRCcuLocalResourceWindowInfo* info) const;
@@ -122,6 +166,8 @@ private:
         uint32_t peerPsn,
         TileXRCcuLowerLayerTransportRoute* importedRoute);
     void ReleasePeerEndpointImports();
+    void ReleaseImportedRemoteMemoryBuffers();
+    void ReleaseRegisteredMemoryBuffers();
     void ReleaseRegisteredResourceWindow();
     void ReleaseLocalEndpointRoute();
 
@@ -139,6 +185,8 @@ private:
     void* endpointQpHandle_ = nullptr;
     void* endpointRemoteQpHandle_ = nullptr;
     std::vector<void*> endpointPeerRemoteQpHandles_;
+    std::vector<TileXRCcuRegisteredMemoryBufferInfo> registeredMemoryBuffers_;
+    std::vector<TileXRCcuImportedRemoteMemoryBufferInfo> importedRemoteMemoryBuffers_;
     TileXRCcuHccpQpKey endpointQpKey_ = {};
     bool endpointQpKeyValid_ = false;
     bool endpointRouteBound_ = false;

@@ -106,6 +106,9 @@ struct TileXRCcuRemoteCcuBufferInfo {
     uint32_t doorbellTokenId = 0;
     uint32_t doorbellTokenValue = 0;
     uint32_t sqDepth = 0;
+    uint16_t startJettyId = 0;
+    uint32_t localPfeId = 0;
+    bool localPfeIdValid = false;
     uint64_t localDoorbellVa = 0;
     uint32_t localDoorbellTokenId = 0;
     uint32_t localDoorbellTokenValue = 0;

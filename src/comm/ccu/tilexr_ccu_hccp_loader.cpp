@@ -141,6 +141,8 @@ int TileXRCcuHccpLoader::Load(TileXRCcuHccpLoaderReport* report)
     LoadOptionalSymbol(raHandle_, RaCtxTokenIdFree, "RaCtxTokenIdFree", "ra_ctx_token_id_free");
     LoadOptionalSymbol(raHandle_, RaCtxLmemRegister, "RaCtxLmemRegister", "ra_ctx_lmem_register");
     LoadOptionalSymbol(raHandle_, RaCtxLmemUnregister, "RaCtxLmemUnregister", "ra_ctx_lmem_unregister");
+    LoadOptionalSymbol(raHandle_, RaCtxRmemImport, "RaCtxRmemImport", "ra_ctx_rmem_import");
+    LoadOptionalSymbol(raHandle_, RaCtxRmemUnimport, "RaCtxRmemUnimport", "ra_ctx_rmem_unimport");
     LoadOptionalSymbol(raHandle_, RaGetSecRandom, "RaGetSecRandom", "ra_get_sec_random");
     LoadOptionalSymbol(raHandle_, RaCtxChanCreate, "RaCtxChanCreate", "ra_ctx_chan_create");
     LoadOptionalSymbol(raHandle_, RaCtxChanDestroy, "RaCtxChanDestroy", "ra_ctx_chan_destroy");
@@ -230,6 +232,8 @@ void TileXRCcuHccpLoader::Unload()
     RaCtxTokenIdFree = nullptr;
     RaCtxLmemRegister = nullptr;
     RaCtxLmemUnregister = nullptr;
+    RaCtxRmemImport = nullptr;
+    RaCtxRmemUnimport = nullptr;
     RaGetSecRandom = nullptr;
     RaCtxChanCreate = nullptr;
     RaCtxChanDestroy = nullptr;

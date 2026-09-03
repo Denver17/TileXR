@@ -553,6 +553,75 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_transport_template_uses_local_pfe_id_from_ra_eid_func_id(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
+
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                TileXRCcuBasicInfo basic;
+                basic.dieId = 1;
+                basic.msId = 0x45;
+                basic.msidToken.tokenId = 0x1234;
+                basic.msidToken.valid = true;
+
+                TileXRCcuResourceAllocation allocation;
+                allocation.channels = {1, 2, 1};
+                allocation.localXn = {1, 0x120, 1};
+                allocation.remoteXn = {1, 0x240, 1};
+                allocation.notifyCke = {1, 0x330, 1};
+
+                std::vector<TileXRCcuRemoteCcuBufferInfo> remoteCcuBuffers;
+                TileXRCcuRemoteCcuBufferInfo remote;
+                remote.remoteCcuVa = 0x0000009234000000ULL;
+                remote.memoryTokenId = 0x23456;
+                remote.localPfeId = 7;
+                remote.localPfeIdValid = true;
+                remoteCcuBuffers.push_back(remote);
+
+                TileXRCcuLowerLayerTransportSnapshot snapshot;
+                TileXRCcuLowerLayerPlanBuilderReport report;
+                if (TileXRCcuBuildLowerLayerTransportTemplate(
+                        basic, allocation, remoteCcuBuffers, &snapshot, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "template build failed: " << report.message << "\n";
+                    return 1;
+                }
+                if (snapshot.pfeId != 7 || snapshot.pfeOffset != 23) {
+                    std::cerr << "local PFE id not applied: pfeId=" << snapshot.pfeId
+                              << " pfeOffset=" << snapshot.pfeOffset << "\n";
+                    return 2;
+                }
+                return 0;
+            }
+            '''
+        )
+        env = os.environ.copy()
+        env["TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE"] = "hcomm_die"
+
+        result = self.compile_and_run(code, env=env)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_transport_template_prefers_ra_eid_func_id_over_channel_id_in_source(self):
+        source = BUILDER_SOURCE.read_text(encoding="utf-8")
+        build_body = source[
+            source.index("int TileXRCcuBuildLowerLayerTransportTemplate"):
+            source.index("int TileXRCcuOverlayVerifiedEndpointRoutes")
+        ]
+
+        self.assertIn("remoteCcuBuffers.front().localPfeId", build_body)
+        self.assertIn("allocation.channels.startId", build_body)
+        self.assertLess(
+            build_body.index("remoteCcuBuffers.front().localPfeId"),
+            build_body.index("SelectLowerLayerPfeOffset"))
+
     def test_builds_lower_layer_install_plan_from_transport_snapshot(self):
         code = textwrap.dedent(
             r'''
@@ -2412,6 +2481,147 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_direct_runtime_source_supports_selecting_ra_ctx_resource_window_eid(self):
+        source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX", source)
+        self.assertIn("SelectRaCtxResourceWindowEidInfo", source)
+        self.assertIn("SelectRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV", source)
+        self.assertIn("TraceRaCtxEidInfos", source)
+        self.assertIn("ctxAttr.ub.eidIndex = selectedEid.eidIndex", source)
+
+    def test_direct_ccu_runtime_can_select_ra_ctx_resource_window_eid_by_env(self):
+        code = textwrap.dedent(
+            r'''
+            #include <cstdint>
+            #include <cstring>
+            #include <iostream>
+
+            #define private public
+            #include "ccu/tilexr_ccu_direct_runtime.h"
+            #undef private
+
+            using namespace TileXR;
+            constexpr uint64_t kResourceAddr = 0x10001234ULL;
+            constexpr uint64_t kAlignedResourceAddr = 0x10001000ULL;
+            constexpr uint64_t kAlignedResourceBytes =
+                TILEXR_CCU_RESOURCE_WINDOW_BYTES + (kResourceAddr - kAlignedResourceAddr);
+
+            int FakeRaCustomChannel(TileXRCcuRaInfo, TileXRCcuCustomChannelIn*, TileXRCcuCustomChannelOut*)
+            {
+                return 0;
+            }
+
+            int FakeRaGetDevEidInfoNum(TileXRCcuRaInfo, uint32_t* num)
+            {
+                *num = 2;
+                return 0;
+            }
+
+            int FakeRaGetDevEidInfoList(TileXRCcuRaInfo, TileXRCcuHccpDevEidInfo* list, uint32_t* num)
+            {
+                if (list == nullptr || num == nullptr || *num != 2) {
+                    return -1;
+                }
+                list[0].eidIndex = 3;
+                list[1].eidIndex = 9;
+                for (uint32_t i = 0; i < TILEXR_CCU_EID_BYTES; ++i) {
+                    list[0].eid.raw[i] = static_cast<uint8_t>(0xa0 + i);
+                    list[1].eid.raw[i] = static_cast<uint8_t>(0xc0 + i);
+                }
+                return 0;
+            }
+
+            int FakeRaCtxInit(TileXRCcuHccpCtxInitCfg*, TileXRCcuHccpCtxInitAttr* attr, void** ctx)
+            {
+                if (attr == nullptr || attr->ub.eidIndex != 9 || attr->ub.eid.raw[0] != 0xc0) {
+                    return -1;
+                }
+                *ctx = reinterpret_cast<void*>(0x1000);
+                return 0;
+            }
+
+            int FakeRaCtxDeinit(void*) { return 0; }
+            int FakeRaCtxTokenIdAlloc(void*, TileXRCcuHccpTokenId* token, void** tokenHandle)
+            {
+                token->tokenId = 0x12345600U;
+                *tokenHandle = reinterpret_cast<void*>(0x2000);
+                return 0;
+            }
+            int FakeRaCtxTokenIdFree(void*, void*) { return 0; }
+            int FakeRaGetSecRandom(TileXRCcuRaInfo*, uint32_t* value)
+            {
+                *value = 0xabcdef01U;
+                return 0;
+            }
+            int FakeRaCtxLmemRegister(void*, TileXRCcuHccpMrRegInfo* mr, void** handle)
+            {
+                if (mr == nullptr || mr->in.mem.addr != kAlignedResourceAddr ||
+                    mr->in.mem.size != kAlignedResourceBytes) {
+                    return -1;
+                }
+                mr->out.ub.tokenId = 0x12345600U;
+                mr->out.ub.targetSegHandle = 0x4455667788ULL;
+                *handle = reinterpret_cast<void*>(0x3000);
+                return 0;
+            }
+            int FakeRaCtxLmemUnregister(void*, void*) { return 0; }
+
+            int main()
+            {
+                TileXRCcuDirectRuntime runtime;
+                runtime.initialized_ = true;
+                runtime.loader_.RaCustomChannel = FakeRaCustomChannel;
+                runtime.loader_.loaded_ = true;
+                runtime.loader_.RaGetDevEidInfoNum = FakeRaGetDevEidInfoNum;
+                runtime.loader_.RaGetDevEidInfoList = FakeRaGetDevEidInfoList;
+                runtime.loader_.RaCtxInit = FakeRaCtxInit;
+                runtime.loader_.RaCtxDeinit = FakeRaCtxDeinit;
+                runtime.loader_.RaCtxTokenIdAlloc = FakeRaCtxTokenIdAlloc;
+                runtime.loader_.RaCtxTokenIdFree = FakeRaCtxTokenIdFree;
+                runtime.loader_.RaGetSecRandom = FakeRaGetSecRandom;
+                runtime.loader_.RaCtxLmemRegister = FakeRaCtxLmemRegister;
+                runtime.loader_.RaCtxLmemUnregister = FakeRaCtxLmemUnregister;
+                runtime.devicePhyId_ = 0x55;
+                runtime.options_.rank = 1;
+                runtime.cachedBasicInfoValid_ = true;
+                runtime.cachedBasicInfo_.resourceAddr = kResourceAddr;
+                runtime.cachedBasicInfo_.caps.cap1 = 7U << 16U;
+
+                if (runtime.RegisterCcuResourceRmaBuffer(kResourceAddr) != TILEXR_SUCCESS) {
+                    std::cerr << "ra ctx resource window register failed\n";
+                    return 1;
+                }
+                TileXRCcuLocalResourceWindowInfo local;
+                if (runtime.ExportLocalCcuRmaBuffer(&local) != TILEXR_SUCCESS ||
+                    local.eidIndex != 9 || local.eid[0] != 0xc0) {
+                    std::cerr << "wrong eid selection index=" << local.eidIndex
+                              << " first=" << static_cast<uint32_t>(local.eid[0]) << "\n";
+                    return 2;
+                }
+                runtime.Shutdown();
+                return 0;
+            }
+            '''
+        )
+        env = os.environ.copy()
+        env["TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE"] = "ra_ctx"
+        env["TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_RANK1"] = "9"
+
+        result = self.compile_and_run(
+            code,
+            env=env,
+            extra_sources=[
+                DIRECT_RUNTIME_SOURCE,
+                REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_hccp_loader.cpp",
+                REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_ra_custom_channel_provider.cpp",
+                REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_driver_adapter.cpp",
+            ],
+            extra_link_flags=["-ldl"])
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_direct_ccu_runtime_collects_ra_ctx_endpoint_route_when_resource_window_uses_ra_ctx(self):
         code = textwrap.dedent(
             r'''
@@ -3703,11 +3913,11 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         ]:
             self.assertNotIn(forbidden, combined)
 
-    def test_tilexr_comm_direct_ccu_prepare_fails_fast_after_process_init_failure(self):
+    def test_tilexr_comm_direct_ccu_prepare_fails_fast_after_device_init_failure(self):
         runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
         planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
 
-        self.assertIn("g_ccuDirectRuntimeUnavailableMessage", runtime_session_source)
+        self.assertIn("g_ccuDirectRuntimeUnavailableByDevice", runtime_session_source)
         init_body = runtime_session_source[
             runtime_session_source.index("int TileXRCcuRuntimeSession::Init("):
             runtime_session_source.index("void TileXRCcuRuntimeSession::ResetDirectCcuBasicInfo")
@@ -3717,11 +3927,11 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             planner_source.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuMemoryCopyInstallAttempt")
         ]
 
-        self.assertIn("g_ccuDirectRuntimeUnavailableMessage = runtimeReport.message", init_body)
-        self.assertIn("direct CCU runtime unavailable after process-level init failure", runtime_session_source)
-        self.assertIn("ProcessDirectCcuRuntimeUnavailableMessage()", prepare_body)
+        self.assertIn("g_ccuDirectRuntimeUnavailableByDevice[devId_] = runtimeReport.message", init_body)
+        self.assertIn("direct CCU runtime unavailable for device", runtime_session_source)
+        self.assertIn("session.DirectCcuRuntimeUnavailableMessage()", prepare_body)
         self.assertLess(
-            prepare_body.index("ProcessDirectCcuRuntimeUnavailableMessage()"),
+            prepare_body.index("session.DirectCcuRuntimeUnavailableMessage()"),
             prepare_body.index("RefreshDirectCcuBasicInfo(installDieId)"),
         )
 
@@ -3735,7 +3945,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         lock_pos = init_body.index("lock_guard<mutex> lock(g_ccuDirectRuntimeMtx);")
         allocation_pos = init_body.index("ccuDirectRuntime_.reset(new (nothrow) TileXRCcuDirectRuntime())")
         runtime_init_pos = init_body.index("ccuDirectRuntime_->Init(runtimeOptions, &runtimeReport)")
-        unavailable_set_pos = init_body.index("g_ccuDirectRuntimeUnavailable = true")
+        unavailable_set_pos = init_body.index("g_ccuDirectRuntimeUnavailableByDevice[devId_] = runtimeReport.message")
 
         self.assertLess(lock_pos, allocation_pos)
         self.assertLess(allocation_pos, runtime_init_pos)
@@ -3755,17 +3965,17 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertIn("basicInfo->dieId != installDieId", prepare_body)
         self.assertNotIn("RefreshDirectCcuBasicInfo(0)", prepare_body)
 
-    def test_tilexr_comm_direct_ccu_thread_allgather_aborts_after_process_init_failure(self):
+    def test_tilexr_comm_direct_ccu_thread_allgather_aborts_after_device_init_failure(self):
         runtime_session_source = CCU_RUNTIME_SESSION_SOURCE.read_text(encoding="utf-8")
         thread_allgather_body = runtime_session_source[
             runtime_session_source.index("int TileXRCcuRuntimeSession::DirectCcuThreadAllGather"):
             runtime_session_source.index("} // namespace TileXR")
         ]
 
-        self.assertIn("ProcessDirectCcuRuntimeUnavailableMessage()", thread_allgather_body)
+        self.assertIn("DirectCcuRuntimeUnavailableMessage()", thread_allgather_body)
         self.assertIn("direct CCU thread allgather abort", thread_allgather_body)
         self.assertLess(
-            thread_allgather_body.index("ProcessDirectCcuRuntimeUnavailableMessage()"),
+            thread_allgather_body.index("DirectCcuRuntimeUnavailableMessage()"),
             thread_allgather_body.index("TILEXR_INIT_TIMEOUT"),
         )
 

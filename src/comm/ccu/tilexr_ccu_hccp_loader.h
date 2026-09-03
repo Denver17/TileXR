@@ -73,6 +73,8 @@ public:
     TileXRCcuRaCtxTokenIdFreeFunc RaCtxTokenIdFree = nullptr;
     TileXRCcuRaCtxLmemRegisterFunc RaCtxLmemRegister = nullptr;
     TileXRCcuRaCtxLmemUnregisterFunc RaCtxLmemUnregister = nullptr;
+    TileXRCcuRaCtxRmemImportFunc RaCtxRmemImport = nullptr;
+    TileXRCcuRaCtxRmemUnimportFunc RaCtxRmemUnimport = nullptr;
     TileXRCcuRaGetSecRandomFunc RaGetSecRandom = nullptr;
     TileXRCcuRaCtxChanCreateFunc RaCtxChanCreate = nullptr;
     TileXRCcuRaCtxChanDestroyFunc RaCtxChanDestroy = nullptr;

@@ -8,7 +8,9 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <vector>
 
+#include "ccu/tilexr_ccu_direct_orchestrator.h"
 #include "acl/acl_base.h"
 #include "tilexr_types.h"
 
@@ -42,6 +44,38 @@ struct TileXRCcuCollectivePlan {
     bool ready = false;
 };
 
+enum class TileXRCcuSignalWaitRole {
+    Signal = 0,
+    Wait = 1,
+    SignalAndWait = 2,
+};
+
+struct TileXRCcuSignalWaitRequest {
+    int peerRank = -1;
+    TileXRCcuSignalWaitRole role = TileXRCcuSignalWaitRole::Signal;
+    uint32_t syncInstructionCount = 0;
+    uint16_t missionStartId = 0;
+    uint16_t instructionStartId = 0;
+    uint16_t missionInstructionStartId = 0;
+    uint16_t xnStartId = 0;
+    uint16_t remoteXnStartId = 0;
+    uint16_t remoteXnCount = 0;
+    uint16_t ckeStartId = 0;
+    uint16_t channelStartId = 0;
+    uint16_t localWaitCkeStartId = 0;
+    uint16_t localWaitCkeCount = 0;
+    uint16_t remoteNotifyCkeStartId = 0;
+    uint16_t remoteNotifyCkeCount = 0;
+    uint16_t timeout = 0;
+    std::string provider;
+};
+
+struct TileXRCcuSignalWaitPlan {
+    bool ready = false;
+    TileXRCcuDirectInstallAttempt attempt;
+    std::vector<TileXRCcuTask> submitTasks;
+};
+
 class TileXRCcuBackend {
 public:
     TileXRCcuBackend();
@@ -56,6 +90,11 @@ public:
     bool Supports(const TileXRCcuCollectiveRequest &request) const;
     int PrepareCollective(const TileXRCcuCollectiveRequest &request, TileXRCcuCollectivePlan *plan);
     int SubmitCollective(const TileXRCcuCollectivePlan &plan, aclrtStream stream);
+    int PrepareSignalWait(const TileXRCcuSignalWaitRequest &request, TileXRCcuSignalWaitPlan *plan);
+    int SubmitSignalWait(
+        const TileXRCcuSignalWaitPlan &plan,
+        aclrtStream stream,
+        TileXRCcuDirectSubmitReport *report);
 #ifdef TILEXR_CCU_TESTING
     bool RuntimeInitializedForTest() const;
 #endif

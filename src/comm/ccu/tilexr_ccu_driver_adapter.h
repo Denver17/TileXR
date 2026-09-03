@@ -17,7 +17,10 @@ namespace TileXR {
 constexpr uint32_t TILEXR_CCU_U_OP_GET_BASIC_INFO = 11;
 constexpr uint32_t TILEXR_CCU_U_OP_GET_DIE_WORKING = 15;
 constexpr uint32_t TILEXR_CCU_U_OP_GET_INSTRUCTION = 201;
+constexpr uint32_t TILEXR_CCU_U_OP_GET_MISSION_CTX = 208;
 constexpr uint32_t TILEXR_CCU_U_OP_SET_MSID_TOKEN = 53;
+constexpr uint32_t TILEXR_CCU_U_OP_SET_TASKKILL = 54;
+constexpr uint32_t TILEXR_CCU_U_OP_CLEAN_TASKKILL_STATE = 55;
 constexpr uint32_t TILEXR_CCU_U_OP_SET_INSTRUCTION = 251;
 constexpr uint32_t TILEXR_CCU_U_OP_SET_XN = 253;
 constexpr uint32_t TILEXR_CCU_U_OP_SET_CKE = 254;
@@ -78,6 +81,12 @@ public:
         uint32_t instructionCount,
         uint32_t instructionBytes,
         TileXRCcuDriverAdapterReport* report) const;
+    int ReadMissionContext(
+        uint8_t dieId,
+        uint8_t missionId,
+        void* missionContext,
+        uint32_t missionContextBytes,
+        TileXRCcuDriverAdapterReport* report) const;
     int InstallInstructions(
         uint8_t dieId,
         uint16_t instructionStartId,
@@ -99,6 +108,7 @@ public:
         uint32_t tokenId,
         uint32_t tokenValue,
         TileXRCcuDriverAdapterReport* report) const;
+    int CleanTaskKillState(uint8_t dieId, TileXRCcuDriverAdapterReport* report) const;
     int InstallPfeCtx(
         uint8_t dieId,
         uint32_t pfeOffset,

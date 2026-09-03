@@ -321,6 +321,34 @@ int TileXRCcuDriverAdapter::ReadInstructions(
     return TILEXR_SUCCESS;
 }
 
+int TileXRCcuDriverAdapter::ReadMissionContext(
+    uint8_t dieId,
+    uint8_t missionId,
+    void* missionContext,
+    uint32_t missionContextBytes,
+    TileXRCcuDriverAdapterReport* report) const
+{
+    ResetReport(report);
+    if (missionContext == nullptr || missionContextBytes == 0 ||
+        missionContextBytes > TILEXR_CCU_DATA_ARRAY_SLOT_BYTES) {
+        return Fail(report, "invalid CCU mission context readback buffer");
+    }
+
+    TileXRCcuCustomChannelIn in;
+    InitRequest(dieId, TILEXR_CCU_U_OP_GET_MISSION_CTX, &in);
+    in.offsetStartIdx = missionId;
+    in.data.dataInfo.dataArraySize = 1;
+    in.data.dataInfo.dataLen = missionContextBytes;
+
+    TileXRCcuCustomChannelOut out;
+    const int ret = CallPrepared(dieId, TILEXR_CCU_U_OP_GET_MISSION_CTX, in, &out, report);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    std::memcpy(missionContext, &out.data.dataInfo.dataArray[0], missionContextBytes);
+    return TILEXR_SUCCESS;
+}
+
 int TileXRCcuDriverAdapter::InstallInstructions(
     uint8_t dieId,
     uint16_t instructionStartId,
@@ -391,6 +419,12 @@ int TileXRCcuDriverAdapter::InstallMsidToken(
 
     TileXRCcuCustomChannelOut out;
     return CallPrepared(dieId, TILEXR_CCU_U_OP_SET_MSID_TOKEN, in, &out, report);
+}
+
+int TileXRCcuDriverAdapter::CleanTaskKillState(uint8_t dieId, TileXRCcuDriverAdapterReport* report) const
+{
+    TileXRCcuCustomChannelOut out;
+    return Call(dieId, TILEXR_CCU_U_OP_CLEAN_TASKKILL_STATE, &out, report);
 }
 
 int TileXRCcuDriverAdapter::InstallPfeCtx(

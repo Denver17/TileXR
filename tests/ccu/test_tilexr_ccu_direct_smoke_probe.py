@@ -242,9 +242,70 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("RunP2pCcuCopy", source)
         self.assertIn("PrepareDirectCcuMemoryCopyInstallAttempt", source)
         self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION", source)
+        self.assertIn("P2pCcuCopyDirectionFromEnv", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::LocalToRemote", source)
         self.assertIn("ACL_MEMCPY_HOST_TO_DEVICE", source)
         self.assertIn("ACL_MEMCPY_DEVICE_TO_HOST", source)
         self.assertIn("p2pCcuCopy", source)
+
+    def test_prepare_options_read_submit_timeout(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepare_options = source[
+            source.index("TileXRDirectCcuPrepareOptions MakePrepareOptions"):
+            source.index("const char* SignalWaitRoleName")
+        ]
+
+        self.assertIn(
+            'options.taskTimeout = static_cast<uint16_t>(EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 0));',
+            prepare_options,
+        )
+
+    def test_local_to_remote_p2p_ccu_copy_inactive_rank_checks_destination(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepared_body = source[
+            source.index("int RunPreparedSmokeForRank"):
+            source.index("int RunThreadModeSmoke")
+        ]
+
+        self.assertIn("ShouldCheckInactiveP2pCcuCopyRank", source)
+        self.assertIn("RunInactiveP2pCcuCopyRank", source)
+        self.assertIn('"local_to_remote"', source)
+        self.assertIn("CheckP2pCcuCopyState", source)
+        inactive_branch = prepared_body[
+            prepared_body.index("!p2pCcuCopyActiveRank"):
+            prepared_body.index("} else if (submitRequested) {", prepared_body.index("!p2pCcuCopyActiveRank"))
+        ]
+        self.assertIn("RunInactiveP2pCcuCopyRank", inactive_branch)
+        self.assertIn("CheckP2pCcuCopyState", source[source.index("RunInactiveP2pCcuCopyRank"):])
+        self.assertNotIn("TileXRDirectCcuSubmitPrepared", inactive_branch)
+
+    def test_p2p_ccu_copy_submit_is_limited_to_active_rank(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepared_body = source[
+            source.index("int RunPreparedSmokeForRank"):
+            source.index("int RunThreadModeSmoke")
+        ]
+
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK", source)
+        self.assertIn("IsP2pCcuCopyActiveRank", source)
+        self.assertIn("p2pCcuCopyActiveRank", prepared_body)
+        self.assertIn("!p2pCcuCopyActiveRank", prepared_body)
+        self.assertIn("PrintP2pCcuCopySkipped", source)
+        self.assertIn("inactive p2p CCU-copy rank", source)
+        self.assertIn("WaitForInactiveP2pCcuCopyRank", source)
+        inactive_branch = prepared_body[
+            prepared_body.index("!p2pCcuCopyActiveRank"):
+            prepared_body.index("} else if (submitRequested) {", prepared_body.index("!p2pCcuCopyActiveRank"))
+        ]
+        inactive_helper = source[
+            source.index("int RunInactiveP2pCcuCopyRank"):
+            source.index("int RunPreparedSmokeForRank")
+        ]
+        self.assertIn("RunInactiveP2pCcuCopyRank", inactive_branch)
+        self.assertIn("PrintP2pCcuCopySkipped", inactive_helper)
+        self.assertIn("WaitForInactiveP2pCcuCopyRank", inactive_helper)
+        self.assertNotIn("TileXRDirectCcuSubmitPrepared", inactive_branch)
 
     def test_thread_mode_path_uses_single_process_init_and_never_rank_ipc_init(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
@@ -258,6 +319,29 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TileXRDirectCcuSubmitPrepared", prepared_body)
         self.assertNotIn("TileXRCommInitRankWithDomain", thread_mode_body)
         self.assertNotIn("TILEXR_COMM_ID", thread_mode_body)
+
+    def test_probe_can_run_signal_wait_through_internal_backend(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepared_body = source[
+            source.index("int RunPreparedSmokeForRank"):
+            source.index("int RunThreadModeSmoke")
+        ]
+
+        self.assertIn("ccu/tilexr_ccu_backend.h", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_BARRIER", source)
+        self.assertIn("TileXRCcuBackend backend", source)
+        self.assertIn("context->backend.Init", source)
+        self.assertIn("RunSignalWaitSmokeForRank", source)
+        self.assertIn("TileXRCcuSignalWaitRequest", source)
+        self.assertIn("PrepareSignalWait", source)
+        self.assertIn("SubmitSignalWait", source)
+        self.assertIn("tilexr_ccu_signal_wait prepare", source)
+        self.assertIn("tilexr_ccu_signal_wait submit", source)
+        self.assertIn("tilexr_ccu_signal_wait timing", source)
+        self.assertIn("tilexr_ccu_signal_wait result passed=1", source)
+        self.assertIn("if (SignalWaitSmokeEnabled() || BarrierSmokeEnabled())", prepared_body)
 
     def test_thread_mode_worker_sets_device_before_direct_ccu_submit(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
@@ -459,6 +543,19 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
             install_order_body.index("TileXRCcuInstallOrder::InstallLowerLayerFirst"),
             install_order_body.index("TileXRCcuInstallOrder::RepositoryFirst"),
         )
+
+    def test_probe_wires_barrier_mode_env_into_prepare_options(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        prepare_options_body = source[
+            source.index("TileXRDirectCcuPrepareOptions MakePrepareOptions"):
+            source.index("const char* SignalWaitRoleName")
+        ]
+
+        self.assertIn("TileXR::TileXRCcuBarrierMode BarrierModeFromEnv()", source)
+        self.assertIn("options.barrierMode = BarrierModeFromEnv();", prepare_options_body)
+        self.assertIn('return TileXR::TileXRCcuBarrierMode::LocalCkePostOnly;', source)
+        self.assertIn('return TileXR::TileXRCcuBarrierMode::SyncCkePostOnly;', source)
+        self.assertIn('return TileXR::TileXRCcuBarrierMode::SyncXnLoadPostOnly;', source)
 
     def test_probe_default_sync_instruction_count_includes_hcomm_style_task1_prelude(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")

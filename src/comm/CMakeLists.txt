@@ -147,6 +147,8 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ccu/tilexr_ccu_resource_allocator.cpp
         ccu/tilexr_ccu_runtime.h
         ccu/tilexr_ccu_runtime.cpp
+        ccu/tilexr_ccu_signal_wait_program.h
+        ccu/tilexr_ccu_signal_wait_program.cpp
         ccu/tilexr_ccu_runtime_session.h
         ccu/tilexr_ccu_runtime_session.cpp
         ccu/tilexr_ccu_executor.h
