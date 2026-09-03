@@ -36,7 +36,7 @@ int TileXREpValidateBasicDispatchParams(const EpDispatchParams &params)
     return TileXR::TILEXR_SUCCESS;
 }
 
-int TileXREpValidateDispatchV2Config(const EpDispatchParams &params, const TileXR::CommArgs &commArgs)
+int TileXREpValidateDispatchCapabilities(const EpDispatchParams &params, const TileXR::CommArgs &commArgs)
 {
     if (params.expertShardType != 0) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
@@ -130,7 +130,7 @@ int TileXREpValidateDispatchConfig(const EpDispatchParams &params, const TileXR:
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
 
-    int ret = TileXREpValidateDispatchV2Config(params, commArgs);
+    int ret = TileXREpValidateDispatchCapabilities(params, commArgs);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }

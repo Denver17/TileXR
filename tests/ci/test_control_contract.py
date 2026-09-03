@@ -393,7 +393,6 @@ class ControlSourceContractTests(unittest.TestCase):
             "TILEXR_COLLECTIVES_RUN_TIMEOUT_SEC=600",
             "test_tilexr_udma",
             "run_tilexr_memory_demo.sh",
-            "run_tilexr_ep_dispatch_demo.sh",
             "allgather allreduce reducescatter",
             "broadcast --root 0",
             "broadcast --root 7",
@@ -407,22 +406,19 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, text)
 
-    def test_910b_hardware_manifest_uses_memory_ep_backend(self):
+    def test_910b_hardware_manifest_excludes_a5_only_ep_memory(self):
         text = self.read("scripts/ci/control/run_hardware.sh")
-        self.assertRegex(
-            text,
-            r'run_tilexr_ep_dispatch_demo[.]sh"\s+8\s+8\s+0\s+100\s+memory',
-        )
+        self.assertNotIn("run_tilexr_ep_dispatch_demo.sh", text)
+        self.assertIn("EP Dispatch/Combine Memory: out of scope on 910B3", text)
 
     def test_every_multirank_launch_has_external_ten_minute_timeout(self):
         text = self.read("scripts/ci/control/run_hardware.sh")
         timeout = "/usr/bin/timeout --signal=TERM --kill-after=10 600"
-        # UDMA MPI, memory, EP, correctness loop, two broadcasts, and perf loop.
+        # UDMA MPI, memory, correctness loop, two broadcasts, and perf loop.
         self.assertGreaterEqual(text.count(timeout), 7)
         for marker in [
             "mpirun -n 8",
             "run_tilexr_memory_demo.sh",
-            "run_tilexr_ep_dispatch_demo.sh",
             "run_collectives_correctness.sh",
             "run_collective_perf.sh",
         ]:
@@ -439,7 +435,6 @@ class ControlSourceContractTests(unittest.TestCase):
             "udma-single-rank-fallback",
             "udma-eight-rank-fallback",
             "memory-eight-rank",
-            "ep-eight-rank",
             "collectives-correctness-${op}",
             "collectives-correctness-broadcast-root-0",
             "collectives-correctness-broadcast-root-7",
@@ -449,6 +444,7 @@ class ControlSourceContractTests(unittest.TestCase):
             self.assertIn(token, text)
         self.assertNotIn("run_tilexr_udma_demo.sh", text)
         self.assertIn("UDMA data plane: out of scope on 910B3", text)
+        self.assertIn("EP Dispatch/Combine Memory: out of scope on 910B3", text)
         self.assertIn("Multi-host validation: out of scope for this gate", text)
         self.assertIn("vLLM model inference: out of scope for this gate", text)
         self.assertIn("Performance regression thresholds: out of scope for this gate", text)

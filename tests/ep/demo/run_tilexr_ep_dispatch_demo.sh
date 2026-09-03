@@ -10,15 +10,20 @@ INSTALL_DIR="${EP_DIR}/install"
 : "${LD_LIBRARY_PATH:=}"
 source "${TILEXR_ROOT}/scripts/common_env.sh"
 
-case "${TILEXR_SOC_NAME}" in
+soc_name_lower="${TILEXR_SOC_NAME,,}"
+case "${soc_name_lower}" in
     ascend950*) default_impl="udma" ;;
-    *) default_impl="memory" ;;
+    ascend910_9*|ascend910-9*|a5*) default_impl="memory" ;;
+    *)
+        echo "EP Dispatch/Combine Memory requires an A5-class SoC, got: ${TILEXR_SOC_NAME}" >&2
+        exit 2
+        ;;
 esac
 
 rank_size="${1:-2}"
 npu_count="${2:-${rank_size}}"
 first_npu="${3:-0}"
-loop_count="${4:-${TILEXR_EP_DEMO_LOOP:-100}}"
+loop_count="${4:-${TILEXR_EP_DEMO_LOOP:-150}}"
 impl="${5:-${TILEXR_EP_DEMO_IMPL:-${default_impl}}}"
 bs="${6:-${TILEXR_EP_DEMO_BS:-4}}"
 h="${7:-${TILEXR_EP_DEMO_H:-8}}"

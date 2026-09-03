@@ -321,9 +321,6 @@ run_case sdma-disabled-comm run_required_no_skip \
 run_case memory-eight-rank \
     /usr/bin/timeout --signal=TERM --kill-after=10 600 \
     bash "${SOURCE_DIR}/tests/memory/demo/run_tilexr_memory_demo.sh" 8 1024 8 0
-run_case ep-eight-rank \
-    /usr/bin/timeout --signal=TERM --kill-after=10 600 \
-    bash "${SOURCE_DIR}/tests/ep/demo/run_tilexr_ep_dispatch_demo.sh" 8 8 0 100 memory
 
 for op in allgather allreduce reducescatter; do
     run_case "collectives-correctness-${op}" run_in_dir \
@@ -361,6 +358,7 @@ for device in 0 1 2 3 4 5 6 7; do
 done
 
 echo "UDMA data plane: out of scope on 910B3"
+echo "EP Dispatch/Combine Memory: out of scope on 910B3"
 echo "Multi-host validation: out of scope for this gate"
 echo "vLLM model inference: out of scope for this gate"
 echo "Performance regression thresholds: out of scope for this gate"

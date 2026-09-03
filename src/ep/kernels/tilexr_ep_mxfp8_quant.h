@@ -283,11 +283,12 @@ __aicore__ inline void ComputeFp8Data(__ubuf__ InputType *srcAddr,
     }
 }
 
-template <typename Fp8Type>
+template <typename Fp8Type, bool ApplyExpertScale = true>
 __aicore__ inline void DequantizeAndAccumulate(__ubuf__ uint8_t *tokenAddr,
     __ubuf__ fp8_e8m0_t *scaleAddr, __ubuf__ float *scaleWorkAddr,
     __ubuf__ float *sumAddr, uint32_t axisH, uint32_t scaleCount, float expertScale)
 {
+    (void)expertScale;
     const uint32_t fp32RepeatSize = GetVectorRegisterSize() / sizeof(float);
     const uint16_t scaleRepeatTimes = static_cast<uint16_t>(
         (scaleCount + fp32RepeatSize - 1U) / fp32RepeatSize);
@@ -341,8 +342,10 @@ __aicore__ inline void DequantizeAndAccumulate(__ubuf__ uint8_t *tokenAddr,
             MicroAPI::Cast<float, Fp8Type, kCastLane2>(tokenFp321, tokenReg, fp8Mask);
             MicroAPI::Mul(weighted0, scaleFp32, tokenFp320, dataMask);
             MicroAPI::Mul(weighted1, scaleFp32, tokenFp321, dataMask);
-            MicroAPI::Muls(weighted0, weighted0, expertScale, dataMask);
-            MicroAPI::Muls(weighted1, weighted1, expertScale, dataMask);
+            if constexpr (ApplyExpertScale) {
+                MicroAPI::Muls(weighted0, weighted0, expertScale, dataMask);
+                MicroAPI::Muls(weighted1, weighted1, expertScale, dataMask);
+            }
             MicroAPI::Add(sum0, sum0, weighted0, dataMask);
             MicroAPI::Add(sum1, sum1, weighted1, dataMask);
             MicroAPI::DataCopy<float, MicroAPI::StoreDist::DIST_INTLV_B32>(

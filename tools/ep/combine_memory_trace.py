@@ -10,49 +10,28 @@ from pathlib import Path
 
 
 PROFILE_PREFIX = "EP_COMBINE_MEMORY_PROFILE"
-PROFILE_VERSION = 1
+PROFILE_VERSION = 2
 PROFILE_CYCLES_PER_US = 1000
 MAX_PROFILE_CORES = 200
 PROFILE_CORE_ROLES = ()
+SEND_GROUP_COUNT_DIAGNOSTIC = "send_group_count"
+HIDDEN_ZERO_DURATION_ROLE_PHASES = ()
 DEFAULT_OUTPUT_PREFIX = "ep_combine_memory"
 TRACE_KERNEL_NAME = "ep_combine_memory"
-TRACE_SCHEMA = "tilexr_ep_combine_memory_trace.v1"
+TRACE_SCHEMA = "tilexr_ep_combine_memory_trace.v2"
 TRACE_OUTPUT_PREFIX = "EP_COMBINE_MEMORY_TRACE"
 TRACE_DESCRIPTION = __doc__
 SAFE_OUTPUT_COMPONENT = re.compile(r"[A-Za-z0-9_.-]{1,128}")
 TIME_POINT_NAMES = (
     "init_begin",
-    "static_init_end",
-    "reuse_wait_end",
-    "send_count_split_end",
-    "send_buffer_init_end",
-    "assist_load_end",
-    "send_issue_end",
-    "dispatch_end",
-    "receive_buffer_init_end",
-    "receive_prepare_end",
+    "init_end",
+    "send_group0_end",
+    "send_end",
     "first_token_ready",
-    "all_tokens_ready",
-    "local_copy_end",
-    "final_barrier_end",
-    "retire_begin",
-    "retire_end",
+    "last_token_ready",
     "final_end",
 )
-METRIC_NAMES = (
-    "assist_load",
-    "dispatch_input_load",
-    "dispatch_pack",
-    "dispatch_store_issue",
-    "scale_load",
-    "flag_prepare",
-    "flag_load",
-    "flag_compare_scan",
-    "payload_load",
-    "reduce_issue",
-    "flag_clear_issue",
-    "output_cast_store_issue",
-)
+METRIC_NAMES = ()
 DIAGNOSTIC_NAMES = (
     "send_rows",
     "receive_tokens",
@@ -61,6 +40,7 @@ DIAGNOSTIC_NAMES = (
     "blocks_per_token",
     "dispatch_buffer_num",
     "receive_buffer_num",
+    "send_group_count",
 )
 PROVENANCE_INT_NAMES = (
     "world_size",
@@ -223,8 +203,13 @@ def validate_iteration(profiles, run_id, iteration, world_size, expected_provena
                 format(iteration, rank, missing))
         generation = records[0]["generation"]
         cycles_per_us = records[0]["cycles_per_us"]
+        send_group_count = records[0]["diagnostics"].get(SEND_GROUP_COUNT_DIAGNOSTIC, 1) \
+            if SEND_GROUP_COUNT_DIAGNOSTIC else 1
         if generation <= 0 or cycles_per_us != PROFILE_CYCLES_PER_US:
             raise ValueError("rank {} has invalid generation or cycle divisor".format(rank))
+        if SEND_GROUP_COUNT_DIAGNOSTIC and send_group_count not in (1, 2):
+            raise ValueError(
+                "rank {} has invalid send group count {}".format(rank, send_group_count))
         for core, record in records.items():
             if record["block_dim"] != block_dim or record["generation"] != generation or \
                     record["cycles_per_us"] != cycles_per_us:
@@ -233,11 +218,18 @@ def validate_iteration(profiles, run_id, iteration, world_size, expected_provena
                 raise ValueError(
                     "rank {} core {} provenance mismatch expected={} actual={}".
                     format(rank, core, expected_provenance, record["provenance"]))
+            if SEND_GROUP_COUNT_DIAGNOSTIC and \
+                    record["diagnostics"].get(SEND_GROUP_COUNT_DIAGNOSTIC) != send_group_count:
+                raise ValueError(
+                    "rank {} core {} has inconsistent send group count".format(rank, core))
             points = record["points"]
             if any(point <= 0 for point in points) or any(
                     points[index] > points[index + 1]
                     for index in range(len(points) - 1)):
                 raise ValueError("rank {} core {} has invalid timestamps".format(rank, core))
+            if SEND_GROUP_COUNT_DIAGNOSTIC and send_group_count == 1 and points[2] != points[3]:
+                raise ValueError(
+                    "rank {} core {} single-group send endpoints differ".format(rank, core))
             if any(metric < 0 for metric in record["metrics"]):
                 raise ValueError("rank {} core {} has invalid metrics".format(rank, core))
             if PROFILE_CORE_ROLES:
@@ -250,6 +242,12 @@ def validate_iteration(profiles, run_id, iteration, world_size, expected_provena
                         record["core_role"] != expected_role:
                     raise ValueError(
                         "rank {} core {} role boundary mismatch".format(rank, core))
+                for phase_role, phase_index in HIDDEN_ZERO_DURATION_ROLE_PHASES:
+                    if record["core_role"] == phase_role and \
+                            points[phase_index] != points[phase_index + 1]:
+                        raise ValueError(
+                            "rank {} core {} role {} phase {} is not zero-duration".
+                            format(rank, core, phase_role, phase_index))
         generations.add(generation)
         rank_records[rank] = records
     if len(generations) != 1:
@@ -314,26 +312,18 @@ def build_trace(role, elapsed_us, rank, records, run_id, iteration, generation,
             "sort_index": core,
         }, tid=tid))
         for index in range(len(TIME_POINT_NAMES) - 1):
+            if SEND_GROUP_COUNT_DIAGNOSTIC and index == 2 and \
+                    record["diagnostics"][SEND_GROUP_COUNT_DIAGNOSTIC] == 1:
+                continue
+            if PROFILE_CORE_ROLES and \
+                    (record["core_role"], index) in HIDDEN_ZERO_DURATION_ROLE_PHASES:
+                continue
             events.append(complete_event(
                 "{} -> {}".format(TIME_POINT_NAMES[index], TIME_POINT_NAMES[index + 1]),
                 "phase", rank, tid,
                 (points[index] - origin) / divisor,
                 (points[index + 1] - origin) / divisor,
                 {"start_point": "t{}".format(index), "end_point": "t{}".format(index + 1)}))
-        metric_args = {
-            "{}_us".format(name): round(record["metrics"][index] / divisor, 6)
-            for index, name in enumerate(METRIC_NAMES)
-        }
-        events.append({
-            "name": "Accumulated metrics",
-            "cat": "metrics",
-            "ph": "i",
-            "s": "t",
-            "pid": rank,
-            "tid": tid,
-            "ts": round((points[-1] - origin) / divisor, 6),
-            "args": metric_args,
-        })
     return {
         "traceEvents": events,
         "otherData": {

@@ -29,9 +29,9 @@ constexpr int TILEXR_ERROR_NOT_FOUND = -7;
 constexpr int64_t TILEXR_INVALID_VALUE = -1;
 
 // shared buffer size，这里要和collectives.cce文件中的常量联动修改！！！
-constexpr int TILEXR_BUFF_BYTES = 1028 * 1024 * 1024;
+constexpr int64_t TILEXR_BUFF_BYTES = 2048LL * 1024 * 1024;
 constexpr int TILEXR_FLAG_BUFF_BYTES = 4 * 1024 * 1024;
-constexpr int TILEXR_COMM_BUFFER_SIZE = 1024; // 单位MB
+constexpr int TILEXR_COMM_BUFFER_SIZE = 2044; // 单位MB
 constexpr int TILEXR_MEMORY_DOMAIN_BUFFER_SIZE = 8; // 单位MB
 
 enum class ChipName {

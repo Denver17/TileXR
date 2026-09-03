@@ -9,9 +9,7 @@
 #include "ep_memory_window.h"
 #include "kernel_operator.h"
 #include "tilexr_data_as_flag.h"
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 #include "tilexr_ep_mxfp8_quant.h"
-#endif
 #include "tilexr_types.h"
 
 #define FLOAT_OVERFLOW_MODE_CTRL 60
@@ -75,10 +73,10 @@ public:
             TileXREp::kEpMemoryStateWindowBytes;
     }
 
-    __aicore__ inline GM_ADDR ProfileRecordBase(uint32_t core) const
+    __aicore__ inline GM_ADDR ProfileRecordBase(uint32_t rank, uint32_t core) const
     {
         return TileXREp::TileXREpMemoryRoundDataBase(
-            args_->peerMems[args_->rank], TileXREp::kEpMemoryCombineProfileBuffer) +
+            args_->peerMems[rank], TileXREp::kEpMemoryCombineProfileBuffer) +
             TileXREp::kEpMemoryDispatchDfxOffset +
             static_cast<uint64_t>(core) * TileXREp::kEpMemoryDispatchDfxStride;
     }
@@ -115,17 +113,18 @@ private:
     __aicore__ inline void BuffInit();
     __aicore__ inline void SetWaitTpStatusAndDisPatch();
     __aicore__ inline void ExpertAlltoAllDispatchCopyAdd();
+    __aicore__ inline bool IsDoubleGroupRankSize() const;
+    __aicore__ inline bool ShouldSendToRankInRound(
+        uint32_t logicalRankId, uint32_t roundId) const;
     __aicore__ inline void ExpertAlltoAllDispatchInnerCopyAdd(
         uint32_t toRankId, uint32_t tokenId, uint32_t topkId, uint32_t tokenIndex);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     template <typename Fp8Type>
     __aicore__ inline void QuantMxfp8(
         LocalTensor<uint8_t> quantLocal, LocalTensor<ExpandXType> inputLocal);
-#endif
     __aicore__ inline void AlltoAllCommBuffInit();
     __aicore__ inline void AlltoAllBuffInitAndMaskCal();
     __aicore__ inline bool CheckPackedFlagRangeArrive(
-        GM_ADDR flagBaseAddr, uint16_t blockCount, uint32_t flagFloatNum, uint32_t srcStrideBytes);
+        GM_ADDR flagBaseAddr, uint16_t blockCount, uint32_t srcStrideBytes);
     __aicore__ inline bool CheckPackedTokenArriveBatch(uint32_t tokenIndex);
     __aicore__ inline bool WaitDispatch(uint32_t tokenIndex);
     __aicore__ inline bool TokenActive(uint32_t tokenIndex);
@@ -143,8 +142,6 @@ private:
     __aicore__ inline void LocalWindowCopy();
     __aicore__ inline void InitProfile(uint64_t startCycles, int64_t magic);
     __aicore__ inline void RecordProfilePoint(uint32_t index);
-    __aicore__ inline uint64_t BeginProfileMetric();
-    __aicore__ inline void EndProfileMetric(uint32_t index, uint64_t startCycles);
     __aicore__ inline void WriteProfile();
 
     TPipe *tpipe_{nullptr};
@@ -197,6 +194,7 @@ private:
     int64_t activeMaskType_{ACTIVE_MASK_NONE};
     bool hasExpertScalesFlag_{false};
     bool hasSharedExpertX_{false};
+    bool isSmallBs_{false};
 
     TBuf<> calBeginBuf_;
     TBuf<> calEndBuf_;
@@ -214,7 +212,7 @@ private:
     TQue<QuePosition::VECIN, 1> moeMainSumQueue_;
     TBuf<> dequantScaleBuf_;
     TBuf<> packedCheckFlagBuf_;
-    TBuf<> packedCheckCompareBuf_;
+    TBuf<> packedCheckReduceBuf_;
     TBuf<> packedClearFlagBuf_;
     TBuf<> activeMaskBuf_;
     TBuf<> expertScalesBuf_;
@@ -230,7 +228,6 @@ private:
     uint64_t profileFlagPollAttempts_{0U};
     uint64_t profileFlagPollMisses_{0U};
     uint64_t profileTimePoint_[TileXREp::kEpCombineMemoryProfileTimePointCapacity];
-    uint64_t profileMetric_[TileXREp::kEpCombineMemoryProfileMetricCapacity];
 #endif
 };
 
@@ -255,9 +252,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::InitProfile(
     for (uint32_t index = 0U; index < TileXREp::kEpCombineMemoryProfileTimePointCapacity; ++index) {
         profileTimePoint_[index] = 0U;
     }
-    for (uint32_t index = 0U; index < TileXREp::kEpCombineMemoryProfileMetricCapacity; ++index) {
-        profileMetric_[index] = 0U;
-    }
     profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_INIT_BEGIN] = startCycles;
 #else
     (void)startCycles;
@@ -275,30 +269,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::RecordProfilePo
     }
 #else
     (void)index;
-#endif
-}
-
-template <typename ExpandXType, int64_t QuantMode>
-__aicore__ inline uint64_t MoeCombineMemory<ExpandXType, QuantMode>::BeginProfileMetric()
-{
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    return static_cast<uint64_t>(GetSystemCycle());
-#else
-    return 0U;
-#endif
-}
-
-template <typename ExpandXType, int64_t QuantMode>
-__aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::EndProfileMetric(
-    uint32_t index, uint64_t startCycles)
-{
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    if (index < TileXREp::kEpCombineMemoryProfileMetricCapacity) {
-        profileMetric_[index] += static_cast<uint64_t>(GetSystemCycle()) - startCycles;
-    }
-#else
-    (void)index;
-    (void)startCycles;
 #endif
 }
 
@@ -325,10 +295,13 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::WriteProfile()
     profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_BLOCKS_PER_TOKEN] = blockCntPerToken_;
     profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_DISPATCH_BUFFER_NUM] = dispatchBufferNum_;
     profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_RECEIVE_BUFFER_NUM] = bufferNum_;
+    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_SEND_GROUP_COUNT] =
+        !isSmallBs_ && IsDoubleGroupRankSize() && sharedExpertRankNum_ == 0U ?
+        TileXREp::kEpMemoryDoubleGroupRoundNum : 1U;
 
     __gm__ TileXREp::EpCombineMemoryProfileRecord *record =
         reinterpret_cast<__gm__ TileXREp::EpCombineMemoryProfileRecord *>(
-            context_.ProfileRecordBase(coreIdx_));
+            context_.ProfileRecordBase(epRankId_, coreIdx_));
     record->marker = TileXREp::kEpCombineMemoryProfileMarker;
     record->version = TileXREp::kEpCombineMemoryProfileVersion;
     record->recordBytes = sizeof(TileXREp::EpCombineMemoryProfileRecord);
@@ -342,7 +315,7 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::WriteProfile()
         record->timePoint[index] = profileTimePoint_[index];
     }
     for (uint32_t index = 0U; index < TileXREp::kEpCombineMemoryProfileMetricCapacity; ++index) {
-        record->metric[index] = profileMetric_[index];
+        record->metric[index] = 0U;
     }
 
     GlobalTensor<uint8_t> recordGlobal;
@@ -419,6 +392,7 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::InitAttrs(
     moeQueueBytes_ = moeQueueBytes_ > hExpandXAlign32Size_ ?
         moeQueueBytes_ : hExpandXAlign32Size_;
     bufferNum_ = CalcReceiveBufferNum();
+    isSmallBs_ = axisBS_ < TileXREp::kEpMemorySmallBsThreshold;
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -447,12 +421,8 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::Init(
     InitInputAndOutput(expertOutGM, assistInfoGM, sendCountsGM, expertScalesGM,
         xActiveMaskGM, sharedExpertXGM, yOutGM);
     InitAttrs(bs, h, topK, moeExpertNum, sharedExpertNum, sharedExpertRankNum, activeMaskType);
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_STATIC_INIT_END);
-
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_REUSE_WAIT_END);
     ReadSendCount();
     SplitCoreCal();
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_COUNT_SPLIT_END);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -505,18 +475,21 @@ __aicore__ inline uint32_t MoeCombineMemory<ExpandXType, QuantMode>::CalcReceive
 {
     const uint64_t maxTokenCountPerCore = CeilDiv(axisBS_, aivNum_);
     const uint64_t mulBufSize = hFloatAlign256Size_;
-    const uint64_t checkFlagCount =
-        static_cast<uint64_t>(slotCount_) * blockCntPerToken_ *
-        TileXR::DATA_AS_FLAG_FLAG_FLOATS;
-    const uint64_t checkCompareCount = AlignUp(checkFlagCount, 64U);
+    const uint64_t checkFlagBlockCount =
+        static_cast<uint64_t>(slotCount_) * blockCntPerToken_;
+    const uint64_t checkFlagBufSize =
+        checkFlagBlockCount * TileXR::DATA_AS_FLAG_ALIGN_BYTES;
+    const uint64_t checkReduceBufSize = TileXR::DATA_AS_FLAG_SUM_RESULT_BYTES +
+        AlignUp(checkFlagBlockCount * sizeof(float), VECTOR_ALIGN);
     uint64_t fixedBufferSize = 4U * UB_ALIGN + hExpandXAlign32Size_ +
         hFloatAlign32Size_ + mulBufSize + hFloatAlign32Size_ +
-        AlignUp(checkCompareCount * sizeof(float), UB_ALIGN) +
-        AlignUp(checkCompareCount * sizeof(uint8_t), VECTOR_ALIGN) +
+        checkFlagBufSize + checkReduceBufSize +
         static_cast<uint64_t>(blockCntPerToken_) * TileXR::DATA_AS_FLAG_FLAG_BYTES +
         AlignUp(static_cast<uint64_t>(axisBS_) * sizeof(bool), UB_ALIGN) +
         AlignUp(maxTokenCountPerCore * sizeof(int32_t), UB_ALIGN);
-    fixedBufferSize += AlignUp(maxTokenCountPerCore * axisK_ * sizeof(float), UB_ALIGN);
+    if (hasExpertScalesFlag_) {
+        fixedBufferSize += AlignUp(maxTokenCountPerCore * axisK_ * sizeof(float), UB_ALIGN);
+    }
     if constexpr (IsMxfp8) {
         fixedBufferSize += AlignUp(quantScaleCount_, 128U) * sizeof(float) * 2U;
     }
@@ -530,12 +503,15 @@ template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::BuffInit()
 {
     tpipe_->Reset();
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
-#endif
     tpipe_->InitBuffer(calBeginBuf_, UB_ALIGN);
     tpipe_->InitBuffer(readStateBuf_, UB_ALIGN);
-    tpipe_->InitBuffer(indexCountsBuf_, UB_ALIGN);
+    if (sendCntNum_ == 0U) {
+        tpipe_->InitBuffer(indexCountsBuf_, UB_ALIGN);
+    } else {
+        tpipe_->InitBuffer(indexCountsBuf_,
+            sendCntNum_ * UB_ALIGN);
+    }
     if constexpr (IsMxfp8) {
         tpipe_->InitBuffer(quantResultBuf_, compactPayloadBytes_);
         tpipe_->InitBuffer(quantWorkBuf_, quantWorkBytes_);
@@ -547,7 +523,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::BuffInit()
     tpipe_->InitBuffer(xOutPackageQueue_, dispatchBufferNum_, hAlignWinSize_);
 }
 
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 template <typename ExpandXType, int64_t QuantMode>
 template <typename Fp8Type>
 __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::QuantMxfp8(
@@ -571,7 +546,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::QuantMxfp8(
         RoundMode::CAST_TRUNC, RoundMode::CAST_RINT>(
         srcAddr, halfScaleAddr, outAddr, quantComputeCount_);
 }
-#endif
 
 template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void
@@ -586,7 +560,6 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchInnerCopyAdd(
     GlobalTensor<float> dstPackedGlobal;
     dstPackedGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(rankGM));
 
-    const uint64_t inputLoadStart = BeginProfileMetric();
     LocalTensor<ExpandXType> inputLocal = expandXInQueue_.AllocTensor<ExpandXType>();
     if constexpr (IsMxfp8) {
         Duplicate<uint32_t>(inputLocal.template ReinterpretCast<uint32_t>(), 0U,
@@ -596,13 +569,9 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchInnerCopyAdd(
     DataCopyPad(inputLocal, expandXGM_[tokenGMOffset], inputCopyParams, copyPadParams);
     expandXInQueue_.EnQue(inputLocal);
     inputLocal = expandXInQueue_.DeQue<ExpandXType>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_DISPATCH_INPUT_LOAD,
-        inputLoadStart);
 
-    const uint64_t packStart = BeginProfileMetric();
     LocalTensor<float> sourceFloat;
     if constexpr (IsMxfp8) {
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         LocalTensor<uint8_t> quantLocal = quantResultBuf_.Get<uint8_t>();
         Duplicate<uint32_t>(quantLocal.template ReinterpretCast<uint32_t>(), 0U,
             compactPayloadBytes_ / sizeof(uint32_t));
@@ -614,12 +583,11 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchInnerCopyAdd(
         }
         sourceFloat = quantLocal.template ReinterpretCast<float>();
         expandXInQueue_.FreeTensor(inputLocal);
-#endif
+        PipeBarrier<PIPE_V>();
     } else {
         sourceFloat = inputLocal.template ReinterpretCast<float>();
     }
 
-    PipeBarrier<PIPE_V>();
     LocalTensor<ExpandXType> packedLocal = xOutPackageQueue_.AllocTensor<ExpandXType>();
     LocalTensor<float> packedFloat = packedLocal.template ReinterpretCast<float>();
     Duplicate(packedFloat, TileXR::DATA_AS_FLAG_READY_VALUE, hAlignWinSize_ / sizeof(float));
@@ -630,11 +598,7 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchInnerCopyAdd(
         static_cast<uint8_t>(blockCntPerToken_), {1, 1, 16, 15});
     xOutPackageQueue_.EnQue(packedLocal);
     packedLocal = xOutPackageQueue_.DeQue<ExpandXType>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_DISPATCH_PACK, packStart);
-    const uint64_t storeStart = BeginProfileMetric();
     DataCopy(dstPackedGlobal, packedFloat, hAlignWinSize_ / sizeof(float));
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_DISPATCH_STORE_ISSUE,
-        storeStart);
     xOutPackageQueue_.FreeTensor(packedLocal);
     if constexpr (!IsMxfp8) {
         expandXInQueue_.FreeTensor(inputLocal);
@@ -645,55 +609,100 @@ template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void
 MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchCopyAdd()
 {
-    if (sendCntNum_ == 0U) {
-        return;
-    }
-    LocalTensor<int32_t> assistLocal = indexCountsBuf_.Get<int32_t>();
-    const DataCopyExtParams assistParams{
-        1U, ASSIST_INFO_WIDTH * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
-    const DataCopyPadExtParams<int32_t> assistPadParams{false, 0U, 0U, 0U};
+    const bool doubleGroupEnabled =
+        !isSmallBs_ && IsDoubleGroupRankSize() && sharedExpertRankNum_ == 0U;
+    const uint32_t roundNum = doubleGroupEnabled ? TileXREp::kEpMemoryDoubleGroupRoundNum : 1U;
 
-    uint32_t permStride = 1U;
-    if (sendCntNum_ > 2U) {
-        permStride = sendCntNum_ / 2U + 1U;
-        if (((sendCntNum_ & 1U) == 0U) && ((permStride & 1U) == 0U)) {
-            permStride++;
-        }
-    }
-    const uint32_t rankOffset = (epRankId_ * sendCntNum_) / epWorldSize_;
-    uint32_t permIdx = rankOffset % sendCntNum_;
-    for (uint32_t loop = 0U; loop < sendCntNum_; ++loop) {
-        const uint32_t tokenIndex = startTokenId_ + permIdx;
-        const uint64_t assistLoadStart = BeginProfileMetric();
-        DataCopyPad(assistLocal, assistInfoGM_[tokenIndex * ASSIST_INFO_WIDTH],
+    if (sendCntNum_ != 0U) {
+        LocalTensor<int32_t> assistLocal = indexCountsBuf_.Get<int32_t>();
+        constexpr uint32_t localRecordStride = UB_ALIGN / sizeof(int32_t);
+        const DataCopyExtParams assistParams{
+            static_cast<uint16_t>(sendCntNum_),
+            ASSIST_INFO_WIDTH * static_cast<uint32_t>(sizeof(int32_t)),
+            (aivNum_ - 1U) * ASSIST_INFO_WIDTH * static_cast<uint32_t>(sizeof(int32_t)),
+            0U, 0U};
+        const DataCopyPadExtParams<int32_t> assistPadParams{
+            true, 0U, static_cast<uint8_t>(localRecordStride - ASSIST_INFO_WIDTH), 0U};
+        DataCopyPad(assistLocal, assistInfoGM_[coreIdx_ * ASSIST_INFO_WIDTH],
             assistParams, assistPadParams);
         SyncFunc<AscendC::HardEvent::MTE2_S>();
-        EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_ASSIST_LOAD,
-            assistLoadStart);
-        const uint32_t toRankId = static_cast<uint32_t>(assistLocal.GetValue(0U));
-        const uint32_t tokenId = static_cast<uint32_t>(assistLocal.GetValue(1U));
-        const uint32_t topkId = static_cast<uint32_t>(assistLocal.GetValue(2U));
-        if (toRankId < epWorldSize_ && tokenId < axisBS_ && topkId < slotCount_) {
-            ExpertAlltoAllDispatchInnerCopyAdd(toRankId, tokenId, topkId, tokenIndex);
+
+        uint32_t permStride = 1U;
+        if (sendCntNum_ > 2U) {
+            permStride = sendCntNum_ / 2U + 1U;
+            if (((sendCntNum_ & 1U) == 0U) && ((permStride & 1U) == 0U)) {
+                permStride++;
+            }
         }
-        permIdx += permStride;
-        if (permIdx >= sendCntNum_) {
-            permIdx -= sendCntNum_;
+        const uint32_t rankOffset = (epRankId_ * sendCntNum_) / epWorldSize_;
+        for (uint32_t roundId = 0U; roundId < roundNum; ++roundId) {
+            uint32_t permIdx = rankOffset % sendCntNum_;
+            for (uint32_t loop = 0U; loop < sendCntNum_; ++loop) {
+                const uint32_t tokenIndex = coreIdx_ + permIdx * aivNum_;
+                const uint32_t baseOffset = permIdx * localRecordStride;
+                const uint32_t toRankId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset));
+                const uint32_t tokenId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 1U));
+                const uint32_t topkId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 2U));
+                const bool isCurrentRound = roundNum == 1U ||
+                    ShouldSendToRankInRound(toRankId, roundId);
+                if (isCurrentRound && toRankId < epWorldSize_ &&
+                    tokenId < axisBS_ && topkId < slotCount_) {
+                    ExpertAlltoAllDispatchInnerCopyAdd(
+                        toRankId, tokenId, topkId, tokenIndex);
+                }
+                permIdx += permStride;
+                if (permIdx >= sendCntNum_) {
+                    permIdx -= sendCntNum_;
+                }
+            }
+            if (doubleGroupEnabled && roundId == 0U) {
+                PipeBarrier<PIPE_ALL>();
+                AscendC::SyncAll<true>();
+                RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_GROUP0_END);
+            }
         }
+    } else if (doubleGroupEnabled) {
+        PipeBarrier<PIPE_ALL>();
+        AscendC::SyncAll<true>();
+        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_GROUP0_END);
     }
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_ASSIST_LOAD_END);
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_ISSUE_END);
+}
+
+template <typename ExpandXType, int64_t QuantMode>
+__aicore__ inline bool
+MoeCombineMemory<ExpandXType, QuantMode>::IsDoubleGroupRankSize() const
+{
+    return epWorldSize_ == TileXREp::kEpMemoryDoubleGroupWorldSize64 ||
+        epWorldSize_ == TileXREp::kEpMemoryDoubleGroupWorldSize128;
+}
+
+template <typename ExpandXType, int64_t QuantMode>
+__aicore__ inline bool
+MoeCombineMemory<ExpandXType, QuantMode>::ShouldSendToRankInRound(
+    uint32_t logicalRankId, uint32_t roundId) const
+{
+    const uint32_t localGroupId =
+        (epRankId_ / TileXREp::kEpMemoryDoubleGroupStripeRankNum) & 1U;
+    const uint32_t targetGroupId =
+        (logicalRankId / TileXREp::kEpMemoryDoubleGroupStripeRankNum) & 1U;
+    return targetGroupId == (localGroupId ^ roundId);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::SetWaitTpStatusAndDisPatch()
 {
     PipeBarrier<PIPE_ALL>();
-    if (coreIdx_ >= selfSendCnt_) {
-        return;
-    }
     ExpertAlltoAllDispatchCopyAdd();
     SyncFunc<AscendC::HardEvent::MTE3_S>();
+#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
+    const uint64_t sendEndCycles = static_cast<uint64_t>(GetSystemCycle());
+    const bool doubleGroupEnabled =
+        !isSmallBs_ && IsDoubleGroupRankSize() && sharedExpertRankNum_ == 0U;
+    if (!doubleGroupEnabled) {
+        profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_SEND_GROUP0_END] = sendEndCycles;
+    }
+    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_SEND_END] = sendEndCycles;
+#endif
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -711,18 +720,18 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::AlltoAllCommBuf
             AlignUp(quantScaleCount_, 128U) * sizeof(float) * 2U);
     }
 
-    const uint32_t checkFlagCount =
-        slotCount_ * blockCntPerToken_ * TileXR::DATA_AS_FLAG_FLAG_FLOATS;
-    const uint32_t checkCompareCount = static_cast<uint32_t>(AlignUp(checkFlagCount, 64U));
-    const uint32_t checkFlagBufSize = static_cast<uint32_t>(AlignUp(
-        static_cast<uint64_t>(checkCompareCount) * sizeof(float), UB_ALIGN));
-    const uint32_t checkCompareBufSize = static_cast<uint32_t>(AlignUp(
-        static_cast<uint64_t>(checkCompareCount) * sizeof(uint8_t), VECTOR_ALIGN));
+    const uint32_t checkFlagBlockCount = slotCount_ * blockCntPerToken_;
+    const uint32_t checkFlagBufSize =
+        checkFlagBlockCount * TileXR::DATA_AS_FLAG_ALIGN_BYTES;
+    const uint32_t checkReduceWorkBufSize = static_cast<uint32_t>(AlignUp(
+        static_cast<uint64_t>(checkFlagBlockCount) * sizeof(float), VECTOR_ALIGN));
+    const uint32_t checkReduceBufSize =
+        TileXR::DATA_AS_FLAG_SUM_RESULT_BYTES + checkReduceWorkBufSize;
     const uint32_t clearFlagBufSize = static_cast<uint32_t>(AlignUp(
         static_cast<uint64_t>(blockCntPerToken_) * TileXR::DATA_AS_FLAG_FLAG_BYTES,
         UB_ALIGN));
     tpipe_->InitBuffer(packedCheckFlagBuf_, checkFlagBufSize);
-    tpipe_->InitBuffer(packedCheckCompareBuf_, checkCompareBufSize);
+    tpipe_->InitBuffer(packedCheckReduceBuf_, checkReduceBufSize);
     tpipe_->InitBuffer(packedClearFlagBuf_, clearFlagBufSize);
     tpipe_->InitBuffer(activeMaskBuf_, AlignUp(
         static_cast<uint64_t>(axisBS_) * sizeof(bool), UB_ALIGN));
@@ -733,9 +742,7 @@ __aicore__ inline void
 MoeCombineMemory<ExpandXType, QuantMode>::AlltoAllBuffInitAndMaskCal()
 {
     tpipe_->Reset();
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
-#endif
     AlltoAllCommBuffInit();
     if (activeMaskType_ == ACTIVE_MASK_TOKEN) {
         LocalTensor<bool> maskLocal = activeMaskBuf_.Get<bool>();
@@ -750,57 +757,32 @@ MoeCombineMemory<ExpandXType, QuantMode>::AlltoAllBuffInitAndMaskCal()
 template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline bool
 MoeCombineMemory<ExpandXType, QuantMode>::CheckPackedFlagRangeArrive(
-    GM_ADDR flagBaseAddr, uint16_t blockCount, uint32_t flagFloatNum, uint32_t srcStrideBytes)
+    GM_ADDR flagBaseAddr, uint16_t blockCount, uint32_t srcStrideBytes)
 {
-    if (flagFloatNum == 0U) {
+    if (blockCount == 0U) {
         return true;
     }
 #if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
     profileFlagPollAttempts_++;
 #endif
-    const uint32_t compareCount = static_cast<uint32_t>(AlignUp(flagFloatNum, 64U));
-    const uint32_t compareU64Count = static_cast<uint32_t>(CeilDiv(flagFloatNum, 64U));
     LocalTensor<float> flagLocal = packedCheckFlagBuf_.Get<float>();
-    LocalTensor<uint8_t> compareLocal = packedCheckCompareBuf_.Get<uint8_t>();
-    LocalTensor<uint64_t> compareU64 = packedCheckCompareBuf_.Get<uint64_t>();
-    const uint64_t prepareStart = BeginProfileMetric();
-    Duplicate(flagLocal, 0.0f, compareCount);
-    PipeBarrier<PIPE_V>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_FLAG_PREPARE,
-        prepareStart);
+    LocalTensor<float> sumOut = packedCheckReduceBuf_.GetWithOffset<float>(
+        TileXR::DATA_AS_FLAG_SUM_RESULT_BYTES / sizeof(float), 0U);
+    const uint32_t reduceWorkFloatCount = static_cast<uint32_t>(AlignUp(
+        static_cast<uint64_t>(blockCount) * sizeof(float), VECTOR_ALIGN)) / sizeof(float);
+    LocalTensor<float> reduceWork = packedCheckReduceBuf_.GetWithOffset<float>(
+        reduceWorkFloatCount, TileXR::DATA_AS_FLAG_SUM_RESULT_BYTES);
 
     GlobalTensor<float> flagGlobal;
     flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(flagBaseAddr));
-    const DataCopyExtParams flagParams{
-        blockCount, TileXR::DATA_AS_FLAG_FLAG_BYTES, srcStrideBytes, 0U, 0U};
-    const DataCopyPadExtParams<float> flagPadParams{false, 0U, 0U, 0U};
-    const uint64_t flagLoadStart = BeginProfileMetric();
-    DataCopyPad(flagLocal, flagGlobal, flagParams, flagPadParams);
+    const DataCopyParams flagParams{blockCount, 1U,
+        static_cast<uint16_t>(srcStrideBytes / TileXR::DATA_AS_FLAG_ALIGN_BYTES), 0U};
+    DataCopy(flagLocal, flagGlobal, flagParams);
     SyncFunc<AscendC::HardEvent::MTE2_V>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_FLAG_LOAD,
-        flagLoadStart);
-    const uint64_t compareStart = BeginProfileMetric();
-    CompareScalar(compareLocal, flagLocal, TileXR::DATA_AS_FLAG_READY_VALUE,
-        AscendC::CMPMODE::EQ, compareCount);
+    ReduceSum(sumOut, flagLocal, reduceWork, 1U, blockCount, 1U);
     SyncFunc<AscendC::HardEvent::V_S>();
-
-    uint32_t arrived = 0U;
-    for (uint32_t index = 0U; index < compareU64Count; ++index) {
-        const uint64_t mask = compareU64.GetValue(index);
-        const int64_t firstInvalid = ScalarGetSFFValue<0>(mask);
-        if (firstInvalid == -1) {
-            arrived += 64U;
-        } else {
-            arrived += static_cast<uint32_t>(firstInvalid);
-            break;
-        }
-    }
-    if (arrived > flagFloatNum) {
-        arrived = flagFloatNum;
-    }
-    const bool ready = arrived == flagFloatNum;
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_FLAG_COMPARE_SCAN,
-        compareStart);
+    const bool ready = sumOut.GetValue(0) ==
+        TileXR::DATA_AS_FLAG_READY_VALUE * blockCount;
 #if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
     if (!ready) {
         profileFlagPollMisses_++;
@@ -816,14 +798,12 @@ MoeCombineMemory<ExpandXType, QuantMode>::CheckPackedTokenArriveBatch(uint32_t t
     if (blockCntPerToken_ == 0U) {
         return true;
     }
-    const uint32_t flagFloatNum =
-        slotCount_ * blockCntPerToken_ * TileXR::DATA_AS_FLAG_FLAG_FLOATS;
     const uint64_t tokenOffset =
         static_cast<uint64_t>(tokenIndex) * slotCount_ * hAlignWinSize_;
     GM_ADDR tokenBaseAddr = epWindowGM_ + tokenOffset;
     return CheckPackedFlagRangeArrive(
         tokenBaseAddr + TileXR::DATA_AS_FLAG_FLAG_OFFSET_BYTES,
-        static_cast<uint16_t>(slotCount_ * blockCntPerToken_), flagFloatNum,
+        static_cast<uint16_t>(slotCount_ * blockCntPerToken_),
         TileXR::DATA_AS_FLAG_PAYLOAD_BYTES);
 }
 
@@ -854,7 +834,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::ClearPackedToke
     const DataCopyExtParams clearFlagParams{
         static_cast<uint16_t>(blockCntPerToken_), TileXR::DATA_AS_FLAG_FLAG_BYTES,
         0U, TileXR::DATA_AS_FLAG_PAYLOAD_BYTES, 0U};
-    const uint64_t clearStart = BeginProfileMetric();
     for (uint32_t slotIndex = 0U; slotIndex < slotCount_; ++slotIndex) {
         const uint64_t slotOffset =
             (static_cast<uint64_t>(tokenIndex) * slotCount_ + slotIndex) * hAlignWinSize_;
@@ -864,8 +843,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::ClearPackedToke
             slotAddr + TileXR::DATA_AS_FLAG_FLAG_OFFSET_BYTES));
         DataCopyPad(dstFlagGlobal, flagTensor, clearFlagParams);
     }
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_FLAG_CLEAR_ISSUE,
-        clearStart);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -875,21 +852,18 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::ExpertScaleCopy
     (void)endIndex;
     expertScaleBeginIdx_ = beginIndex;
     const uint32_t expertScaleCount = tokenPerAivNum * axisK_;
-    tpipe_->InitBuffer(expertScalesBuf_,
-        AlignUp(static_cast<uint64_t>(expertScaleCount) * sizeof(float), UB_ALIGN));
-    expertScalesLocal_ = expertScalesBuf_.Get<float>();
     if (!hasExpertScalesFlag_) {
         return;
     }
+    tpipe_->InitBuffer(expertScalesBuf_,
+        AlignUp(static_cast<uint64_t>(expertScaleCount) * sizeof(float), UB_ALIGN));
+    expertScalesLocal_ = expertScalesBuf_.Get<float>();
     const DataCopyExtParams scaleParams{1U,
         expertScaleCount * static_cast<uint32_t>(sizeof(float)), 0U, 0U, 0U};
     const DataCopyPadExtParams<float> scalePadParams{false, 0U, 0U, 0U};
-    const uint64_t scaleLoadStart = BeginProfileMetric();
     DataCopyPad(expertScalesLocal_, expertScalesGM_[beginIndex * axisK_],
         scaleParams, scalePadParams);
     SyncFunc<AscendC::HardEvent::MTE2_S>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_SCALE_LOAD,
-        scaleLoadStart);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -903,17 +877,12 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::ProcessMoeExper
     GM_ADDR slotAddr = epWindowGM_ +
         static_cast<uint64_t>(tokenIndexOffset + topkId) * hAlignWinSize_;
     rowTmpGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ ExpandXType *>(slotAddr));
-    const uint64_t payloadLoadStart = BeginProfileMetric();
     LocalTensor<ExpandXType> inputLocal = moeMainSumQueue_.AllocTensor<ExpandXType>();
     DataCopyPad(inputLocal, rowTmpGlobal_, inputParams, inputPadParams);
     moeMainSumQueue_.EnQue(inputLocal);
     inputLocal = moeMainSumQueue_.DeQue<ExpandXType>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_PAYLOAD_LOAD,
-        payloadLoadStart);
 
-    const uint64_t reduceStart = BeginProfileMetric();
     if constexpr (IsMxfp8) {
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         __ubuf__ uint8_t *tokenAddr =
             reinterpret_cast<__ubuf__ uint8_t *>(inputLocal.GetPhyAddr());
         __ubuf__ fp8_e8m0_t *scaleAddr = reinterpret_cast<__ubuf__ fp8_e8m0_t *>(
@@ -922,17 +891,27 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::ProcessMoeExper
             dequantScaleBuf_.Get<float>().GetPhyAddr());
         __ubuf__ float *sumAddr =
             reinterpret_cast<__ubuf__ float *>(sumFloatBufLocal_.GetPhyAddr());
-        const float expertScale = hasExpertScalesFlag_ ? scaleVal : 1.0f;
         if constexpr (QuantMode == MXFP8_E5M2_COMM_QUANT) {
-            TileXRMxfp8Quant::DequantizeAndAccumulate<fp8_e5m2_t>(
-                tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
-                axisH_, quantScaleCount_, expertScale);
+            if (hasExpertScalesFlag_) {
+                TileXRMxfp8Quant::DequantizeAndAccumulate<fp8_e5m2_t>(
+                    tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
+                    axisH_, quantScaleCount_, scaleVal);
+            } else {
+                TileXRMxfp8Quant::DequantizeAndAccumulate<fp8_e5m2_t, false>(
+                    tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
+                    axisH_, quantScaleCount_, 1.0f);
+            }
         } else {
-            TileXRMxfp8Quant::DequantizeAndAccumulate<fp8_e4m3fn_t>(
-                tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
-                axisH_, quantScaleCount_, expertScale);
+            if (hasExpertScalesFlag_) {
+                TileXRMxfp8Quant::DequantizeAndAccumulate<fp8_e4m3fn_t>(
+                    tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
+                    axisH_, quantScaleCount_, scaleVal);
+            } else {
+                TileXRMxfp8Quant::DequantizeAndAccumulate<fp8_e4m3fn_t, false>(
+                    tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
+                    axisH_, quantScaleCount_, 1.0f);
+            }
         }
-#endif
     } else {
         Cast(rowTmpFloatLocal_, inputLocal, AscendC::RoundMode::CAST_NONE, axisH_);
         PipeBarrier<PIPE_V>();
@@ -944,8 +923,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::ProcessMoeExper
             AscendC::Add(sumFloatBufLocal_, sumFloatBufLocal_, rowTmpFloatLocal_, axisH_);
         }
     }
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_REDUCE_ISSUE,
-        reduceStart);
     moeMainSumQueue_.FreeTensor(inputLocal);
 }
 
@@ -977,16 +954,11 @@ MoeCombineMemory<ExpandXType, QuantMode>::ProcessSharedExpertsLoop(
         GM_ADDR slotAddr = epWindowGM_ +
             static_cast<uint64_t>(tokenIndexOffset + topkId) * hAlignWinSize_;
         rowTmpGlobal_.SetGlobalBuffer(reinterpret_cast<__gm__ ExpandXType *>(slotAddr));
-        const uint64_t payloadLoadStart = BeginProfileMetric();
         LocalTensor<ExpandXType> inputLocal = moeMainSumQueue_.AllocTensor<ExpandXType>();
         DataCopyPad(inputLocal, rowTmpGlobal_, inputParams, inputPadParams);
         moeMainSumQueue_.EnQue(inputLocal);
         inputLocal = moeMainSumQueue_.DeQue<ExpandXType>();
-        EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_PAYLOAD_LOAD,
-            payloadLoadStart);
-        const uint64_t reduceStart = BeginProfileMetric();
         if constexpr (IsMxfp8) {
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
             __ubuf__ uint8_t *tokenAddr =
                 reinterpret_cast<__ubuf__ uint8_t *>(inputLocal.GetPhyAddr());
             __ubuf__ fp8_e8m0_t *scaleAddr = reinterpret_cast<__ubuf__ fp8_e8m0_t *>(
@@ -1004,15 +976,12 @@ MoeCombineMemory<ExpandXType, QuantMode>::ProcessSharedExpertsLoop(
                     tokenAddr, scaleAddr, scaleWorkAddr, sumAddr,
                     axisH_, quantScaleCount_, 1.0f);
             }
-#endif
         } else {
             Cast(rowTmpFloatLocal_, inputLocal, AscendC::RoundMode::CAST_NONE, processLen);
             PipeBarrier<PIPE_V>();
             AscendC::Add(sumFloatBufLocal_, sumFloatBufLocal_, rowTmpFloatLocal_, processLen);
             PipeBarrier<PIPE_V>();
         }
-        EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_REDUCE_ISSUE,
-            reduceStart);
         moeMainSumQueue_.FreeTensor(inputLocal);
     }
 }
@@ -1025,18 +994,12 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::AddSharedExpert
     const DataCopyPadExtParams<ExpandXType> inputPadParams{false, 0U, 0U, 0U};
     LocalTensor<ExpandXType> rowTmpLocal = tokenBuf_.Get<ExpandXType>();
     SyncFunc<AscendC::HardEvent::V_MTE2>();
-    const uint64_t payloadLoadStart = BeginProfileMetric();
     DataCopyPad(rowTmpLocal, sharedExpertXGM_[tokenIndex * axisH_],
         inputParams, inputPadParams);
     SyncFunc<AscendC::HardEvent::MTE2_V>();
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_PAYLOAD_LOAD,
-        payloadLoadStart);
-    const uint64_t reduceStart = BeginProfileMetric();
     Cast(rowTmpFloatLocal_, rowTmpLocal, AscendC::RoundMode::CAST_NONE, processLen);
     PipeBarrier<PIPE_V>();
     AscendC::Add(sumFloatBufLocal_, sumFloatBufLocal_, rowTmpFloatLocal_, processLen);
-    EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_REDUCE_ISSUE,
-        reduceStart);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -1070,10 +1033,8 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::LocalWindowCopy
         beginIndex += remainderToken;
     }
     if (tokenPerAivNum == 0U) {
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_RECEIVE_PREPARE_END);
         RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FIRST_TOKEN_READY);
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_ALL_TOKENS_READY);
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_LOCAL_COPY_END);
+        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_LAST_TOKEN_READY);
         return;
     }
 #if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
@@ -1095,7 +1056,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::LocalWindowCopy
     Duplicate(flagTensor, 0.0f,
         blockCntPerToken_ * TileXR::DATA_AS_FLAG_FLAG_FLOATS);
     SyncFunc<AscendC::HardEvent::V_S>();
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_RECEIVE_PREPARE_END);
     const DataCopyExtParams outputParams{1U, rowBytes_, 0U, 0U, 0U};
 
     uint32_t completed = 0U;
@@ -1114,7 +1074,7 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::LocalWindowCopy
                 RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FIRST_TOKEN_READY);
             }
             if (completed == tokenPerAivNum) {
-                RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_ALL_TOKENS_READY);
+                RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_LAST_TOKEN_READY);
             }
             tokenStatus.SetValue(localIndex, 1);
             if (tokenActive) {
@@ -1124,17 +1084,13 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::LocalWindowCopy
                 Duplicate(sumFloatBufLocal_, 0.0f, processLen);
             }
 
-            const uint64_t outputStart = BeginProfileMetric();
             PipeBarrier<PIPE_V>();
             LocalTensor<ExpandXType> sumLocal = tokenBuf_.Get<ExpandXType>();
             Cast(sumLocal, sumFloatBufLocal_, AscendC::RoundMode::CAST_RINT, processLen);
             SyncFunc<AscendC::HardEvent::V_MTE3>();
             DataCopyPad(expandOutGM_[tokenIndex * axisH_], sumLocal, outputParams);
-            EndProfileMetric(TileXREp::EP_COMBINE_MEMORY_METRIC_OUTPUT_CAST_STORE_ISSUE,
-                outputStart);
         }
     }
-    RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_LOCAL_COPY_END);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -1142,16 +1098,14 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::Process()
 {
     if ASCEND_IS_AIV {
         BuffInit();
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_BUFFER_INIT_END);
+        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_INIT_END);
         SetWaitTpStatusAndDisPatch();
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_DISPATCH_END);
         PipeBarrier<PIPE_ALL>();
         AlltoAllBuffInitAndMaskCal();
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_RECEIVE_BUFFER_INIT_END);
         LocalWindowCopy();
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FINAL_BARRIER_END);
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_RETIRE_BEGIN);
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_RETIRE_END);
+#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
+        SyncFunc<AscendC::HardEvent::MTE3_S>();
+#endif
         RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FINAL_END);
         WriteProfile();
     }
@@ -1183,25 +1137,26 @@ __aicore__ inline void RunCombine(GM_ADDR commArgsGM, GM_ADDR expertOutGM,
     int64_t activeMaskType, int64_t quantMode, int64_t magic)
 {
     if (quantMode == UNQUANT) {
-        RunCombineMode<ExpandXType, UNQUANT>(commArgsGM, expertOutGM, assistInfoGM,
+        RunCombineMode<ExpandXType, UNQUANT>(
+            commArgsGM, expertOutGM, assistInfoGM,
             sendCountsGM, expertScalesGM, xActiveMaskGM, sharedExpertXGM, yOutGM,
             bs, h, topK, moeExpertNum, sharedExpertNum, sharedExpertRankNum,
             globalBs, activeMaskType, quantMode, magic);
         return;
     }
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     if (quantMode == MXFP8_E5M2_COMM_QUANT) {
-        RunCombineMode<ExpandXType, MXFP8_E5M2_COMM_QUANT>(commArgsGM, expertOutGM,
+        RunCombineMode<ExpandXType, MXFP8_E5M2_COMM_QUANT>(
+            commArgsGM, expertOutGM,
             assistInfoGM, sendCountsGM, expertScalesGM, xActiveMaskGM,
             sharedExpertXGM, yOutGM, bs, h, topK, moeExpertNum, sharedExpertNum,
             sharedExpertRankNum, globalBs, activeMaskType, quantMode, magic);
     } else if (quantMode == MXFP8_E4M3_COMM_QUANT) {
-        RunCombineMode<ExpandXType, MXFP8_E4M3_COMM_QUANT>(commArgsGM, expertOutGM,
+        RunCombineMode<ExpandXType, MXFP8_E4M3_COMM_QUANT>(
+            commArgsGM, expertOutGM,
             assistInfoGM, sendCountsGM, expertScalesGM, xActiveMaskGM,
             sharedExpertXGM, yOutGM, bs, h, topK, moeExpertNum, sharedExpertNum,
             sharedExpertRankNum, globalBs, activeMaskType, quantMode, magic);
     }
-#endif
 }
 
 } // namespace Mc2Kernel

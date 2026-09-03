@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <mutex>
 
@@ -301,8 +302,18 @@ int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpH
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
 
+    const char *blockDimOverride = std::getenv("TILEXR_EP_DISPATCH_MEMORY_BLOCK_DIM");
+    uint32_t blockDim = 0U;
+    const int blockDimRet = TileXREpResolveMemoryBlockDim(
+        static_cast<uint32_t>(vectorCoreNum), 2U, blockDimOverride, &blockDim);
+    if (blockDimRet != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "Invalid TILEXR_EP_DISPATCH_MEMORY_BLOCK_DIM="
+                  << (blockDimOverride == nullptr ? "<unset>" : blockDimOverride)
+                  << ", device vector cores=" << vectorCoreNum << std::endl;
+        return blockDimRet;
+    }
+
     EpMemoryDispatchReferenceConfig memoryConfig {};
-    const uint32_t blockDim = static_cast<uint32_t>(vectorCoreNum);
     const int configRet = TileXREpValidateDispatchMemoryConfig(
         params, *context.hostArgs, blockDim, &memoryConfig);
     if (configRet != TileXR::TILEXR_SUCCESS) {
@@ -340,13 +351,24 @@ int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHos
         vectorCoreNum <= 0 || vectorCoreNum > static_cast<int64_t>(UINT32_MAX)) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
-    const uint32_t blockDim = static_cast<uint32_t>(vectorCoreNum);
+    const char *blockDimOverride = std::getenv("TILEXR_EP_COMBINE_MEMORY_BLOCK_DIM");
+    uint32_t blockDim = 0U;
+    const int blockDimRet = TileXREpResolveMemoryBlockDim(
+        static_cast<uint32_t>(vectorCoreNum), 1U, blockDimOverride, &blockDim);
+    if (blockDimRet != TileXR::TILEXR_SUCCESS) {
+        std::cerr << "Invalid TILEXR_EP_COMBINE_MEMORY_BLOCK_DIM="
+                  << (blockDimOverride == nullptr ? "<unset>" : blockDimOverride)
+                  << ", device vector cores=" << vectorCoreNum << std::endl;
+        return blockDimRet;
+    }
+
     EpMemoryCombineReferenceConfig memoryConfig {};
     const int configRet = TileXREpValidateCombineMemoryConfig(
         params, *context.hostArgs, blockDim, &memoryConfig);
     if (configRet != TileXR::TILEXR_SUCCESS) {
         return configRet;
     }
+
     const int64_t globalBs = params.globalBs == 0 ? params.bs * context.hostArgs->rankSize : params.globalBs;
     int64_t magic = 0;
     const int magicRet = TileXRCommNextMagic(params.comm, &magic);

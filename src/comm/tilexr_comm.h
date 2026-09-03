@@ -24,6 +24,19 @@
 
 namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
+constexpr int64_t TILEXR_MIB_BYTES = 1024LL * 1024;
+constexpr uint64_t TILEXR_MEMORY_DOMAIN_EXTRA_ALLOC_BYTES = 1024ULL * 1024ULL;
+constexpr uint64_t TILEXR_MEMORY_DOMAIN_RANK_OFFSET_BYTES = 1024ULL;
+static_assert(static_cast<uint64_t>(TILEXR_MAX_RANK_SIZE - 1) *
+        TILEXR_MEMORY_DOMAIN_RANK_OFFSET_BYTES <
+        TILEXR_MEMORY_DOMAIN_EXTRA_ALLOC_BYTES,
+    "memory-domain rank offsets must fit in the extra allocation");
+static_assert(TILEXR_BUFF_BYTES ==
+        static_cast<int64_t>(TILEXR_COMM_BUFFER_SIZE) * TILEXR_MIB_BYTES + TILEXR_FLAG_BUFF_BYTES,
+    "communicator allocation constants are inconsistent");
+static_assert(TILEXR_BUFF_BYTES ==
+        PING_PONG_SIZE * (IPC_DATA_OFFSET + IPC_BUFF_MAX_SIZE),
+    "communicator allocation must cover both ping-pong windows");
 
 class TileXRSockExchange;
 class TileXRUDMAContext;
@@ -115,7 +128,8 @@ private:
     bool memoryOnlyDomain_ = false;
     bool udmaPeerMemMode_ = false;
 
-    // shared ping pong buff，这个地址就是一开始申请在HBM上的，所以host上可以取到，但不能直接修改。
+    // Allocation/mapping bases own the runtime lifecycle; peerMem_ exposes rank-offset logical windows.
+    GM_ADDR peerMemAllocation_[TILEXR_MAX_RANK_SIZE] = {};
     GM_ADDR peerMem_[TILEXR_MAX_RANK_SIZE] = {};
     GM_ADDR creditIpcMem_[TILEXR_MAX_RANK_SIZE] = {};
     PhysicalInfo physicalInfo_ = {};

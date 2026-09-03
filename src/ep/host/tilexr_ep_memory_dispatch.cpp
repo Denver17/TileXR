@@ -1,9 +1,16 @@
 #include "tilexr_ep.h"
 
+#ifndef TILEXR_EP_MEMORY_SUPPORTED
+#define TILEXR_EP_MEMORY_SUPPORTED 1
+#endif
+
+#if TILEXR_EP_MEMORY_SUPPORTED
 #include "ep_host.h"
 #include "ep_kernel_launch.h"
+#endif
 #include "tilexr_types.h"
 
+#if TILEXR_EP_MEMORY_SUPPORTED
 namespace {
 
 int LaunchEpDispatchMemory(const TileXREp::EpDispatchParams &params)
@@ -23,8 +30,9 @@ int LaunchEpDispatchMemory(const TileXREp::EpDispatchParams &params)
 }
 
 } // namespace
+#endif
 
-int TileXRMoeEpDispatchMemoryV2(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
+int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, int64_t epWorldSize,
     int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,
@@ -33,6 +41,9 @@ int TileXRMoeEpDispatchMemoryV2(void *x, int32_t *expertIds, void *scales, bool 
     int32_t *tpRecvCountsOut, void *expandScalesOut, TileXR::TileXRDataType dtype,
     TileXR::TileXRDataType expandXOutDtype, aclrtStream stream)
 {
+#if !TILEXR_EP_MEMORY_SUPPORTED
+    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+#else
     TileXREp::EpDispatchParams params {};
     params.x = x;
     params.expertIds = expertIds;
@@ -68,15 +79,5 @@ int TileXRMoeEpDispatchMemoryV2(void *x, int32_t *expertIds, void *scales, bool 
     params.stream = stream;
 
     return LaunchEpDispatchMemory(params);
-}
-
-int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, TileXRCommPtr comm,
-    int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
-    void *expandXOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
-    int32_t *assistInfoForCombineOut, TileXR::TileXRDataType dtype, aclrtStream stream)
-{
-    return TileXRMoeEpDispatchMemoryV2(x, expertIds, nullptr, nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE,
-        nullptr, comm, bs, h, topK, moeExpertNum, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        TileXREp::kEpExpertTokenNumsTypeCount, expandXOut, nullptr,
-        assistInfoForCombineOut, expertTokenNumsOut, sendCountsOut, nullptr, nullptr, dtype, dtype, stream);
+#endif
 }

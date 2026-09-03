@@ -6,11 +6,6 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_memory_kernel(GM_ADDR co
     int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t globalBs,
     int64_t activeMaskType, int64_t quantMode, int64_t dtype, int64_t magic)
 {
-#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 3510)
-    if (quantMode == Mc2Kernel::MXFP8_E5M2_COMM_QUANT || quantMode == Mc2Kernel::MXFP8_E4M3_COMM_QUANT) {
-        return;
-    }
-#endif
     if (commArgsGM == nullptr || expertOutGM == nullptr || assistInfoForCombineGM == nullptr ||
         sendCountsGM == nullptr || yOutGM == nullptr || bs <= 0 || h <= 0 || topK <= 0 ||
         moeExpertNum <= 0 || sharedExpertNum < 0 || sharedExpertRankNum < 0 || globalBs <= 0 || magic <= 0 ||

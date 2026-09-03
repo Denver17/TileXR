@@ -3,24 +3,21 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly TILEXR_ROOT=$(cd -- "${script_dir}/../../.." && pwd)
-readonly REMOTE_ROOT=/home/h00580772/combine_test
-readonly MASTER_HOST=141.61.94.18
+readonly REMOTE_ROOT=${TILEXR_EP_CLUSTER_REMOTE_ROOT:-/home/h00580772/combine_test}
+readonly MASTER_HOST=${TILEXR_EP_CLUSTER_MASTER_HOST:-141.61.94.18}
 readonly SSH_USER=root
 readonly LOCAL_NPU_COUNT=8
 readonly LAST_SAMPLE_COUNT=50
-readonly WARMUP_COUNT=50
-readonly ITERATION_COUNT=150
-readonly FUNCTIONAL_LOOP_COUNT=1
-readonly NPU_WAIT_SECONDS=120
-readonly NPU_RETRY_SECONDS=5
-readonly MSPROF=/usr/local/Ascend/cann-9.1.T555/tools/profiler/bin/msprof
-readonly PYTHON=python
-readonly HOST_FILE="${script_dir}/hosts_terbo_64p.txt"
-readonly DISPATCH_CONFIG_FILE="${script_dir}/memory_dispatch_64p.env"
-readonly COMBINE_CONFIG_FILE="${script_dir}/combine_memory_64p.env"
+readonly MSPROF_94=${TILEXR_EP_CLUSTER_MSPROF_94:-${TILEXR_EP_CLUSTER_MSPROF:-/usr/local/Ascend/cann-9.1.T555/tools/profiler/bin/msprof}}
+readonly CANN_ENV_SCRIPT_94=${TILEXR_EP_CLUSTER_CANN_ENV_SCRIPT_94:-${TILEXR_EP_CLUSTER_CANN_ENV_SCRIPT:-/usr/local/Ascend/cann-9.1.T555/bin/setenv.bash}}
+readonly MSPROF_95=${TILEXR_EP_CLUSTER_MSPROF_95:-${TILEXR_EP_CLUSTER_MSPROF:-/home/pkg/920_b106/cann-9.2.0/tools/profiler/bin/msprof}}
+readonly CANN_ENV_SCRIPT_95=${TILEXR_EP_CLUSTER_CANN_ENV_SCRIPT_95:-${TILEXR_EP_CLUSTER_CANN_ENV_SCRIPT:-/home/pkg/920_b106/cann-9.2.0/bin/setenv.bash}}
+readonly PYTHON=/usr/bin/python3
+readonly HOST_FILE=${TILEXR_EP_CLUSTER_HOST_FILE:-"${script_dir}/hosts_terbo_64p.txt"}
+readonly DISPATCH_CONFIG_FILE=${TILEXR_EP_CLUSTER_DISPATCH_CONFIG_FILE:-"${script_dir}/memory_dispatch_64p.env"}
+readonly COMBINE_CONFIG_FILE=${TILEXR_EP_CLUSTER_COMBINE_CONFIG_FILE:-"${script_dir}/combine_memory_64p.env"}
 readonly DISPATCH_NODE_SCRIPT="${REMOTE_ROOT}/tests/ep/cluster/run_memory_dispatch_node.sh"
 readonly COMBINE_NODE_SCRIPT="${REMOTE_ROOT}/tests/ep/cluster/run_memory_combine_node.sh"
-readonly NPU_PROBE_SCRIPT="${REMOTE_ROOT}/tests/ep/cluster/probe_npu_processes.sh"
 readonly STATS_SCRIPT="${REMOTE_ROOT}/tools/ep/msprof_kernel_stats.py"
 readonly DISPATCH_TRACE_SCRIPT="${REMOTE_ROOT}/tools/ep/dispatch_memory_trace.py"
 readonly COMBINE_TRACE_SCRIPT="${REMOTE_ROOT}/tools/ep/combine_memory_trace.py"
@@ -30,11 +27,13 @@ readonly RSYNC_RSH='ssh -o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttemp
 
 OP_SELECTION=dispatch
 RUN_MODE=performance
+FORCE_BUILD=false
 declare -a selected_ops=()
 declare -a hosts=()
 declare -A perf_min=()
 declare -A perf_max=()
 declare -A perf_avg=()
+declare -A perf_json=()
 declare -A breakdown_result=()
 declare -A functional_result=()
 
@@ -52,10 +51,19 @@ usage() {
     cat <<'EOF'
 Usage: run_memory_dispatch_msprof_64p.sh [--op dispatch|combine|both]
                                          [--mode functional|performance|breakdown]
+                                         [--build]
 
 Defaults:
   --op dispatch
   --mode performance
+
+Options:
+  --build  Force a full rebuild and replace deployed artifacts.
+
+Configuration:
+  TILEXR_EP_CLUSTER_HOST_FILE
+  TILEXR_EP_CLUSTER_DISPATCH_CONFIG_FILE
+  TILEXR_EP_CLUSTER_COMBINE_CONFIG_FILE
 EOF
 }
 
@@ -77,6 +85,10 @@ parse_args() {
                 }
                 RUN_MODE=$2
                 shift 2
+                ;;
+            --build)
+                FORCE_BUILD=true
+                shift
                 ;;
             -h|--help)
                 usage
@@ -127,6 +139,20 @@ run_on_host() {
     fi
 }
 
+select_profiler_for_host() {
+    local host=$1
+    case "${host}" in
+        141.61.95.*)
+            HOST_MSPROF=${MSPROF_95}
+            HOST_CANN_ENV_SCRIPT=${CANN_ENV_SCRIPT_95}
+            ;;
+        *)
+            HOST_MSPROF=${MSPROF_94}
+            HOST_CANN_ENV_SCRIPT=${CANN_ENV_SCRIPT_94}
+            ;;
+    esac
+}
+
 wait_for_jobs() {
     local label=$1
     local -n pids_ref=$2
@@ -148,10 +174,12 @@ wait_for_jobs() {
 
 load_case_config() {
     CASE_OP=$1
-    unset TILEXR_EP_CLUSTER_COMM_QUANT_MODE TILEXR_EP_CLUSTER_MXFP8_FORMAT
+    unset TILEXR_EP_CLUSTER_BLOCK_DIM TILEXR_EP_CLUSTER_COMM_QUANT_MODE \
+        TILEXR_EP_CLUSTER_MXFP8_FORMAT
     case "${CASE_OP}" in
         dispatch)
             CASE_CONFIG_FILE=${DISPATCH_CONFIG_FILE}
+            CASE_REMOTE_CONFIG_FILE="${REMOTE_ROOT}/tests/ep/cluster/$(basename -- "${DISPATCH_CONFIG_FILE}")"
             CASE_NODE_SCRIPT=${DISPATCH_NODE_SCRIPT}
             CASE_KERNEL_NAME=tilexr_ep_dispatch_memory_kernel
             CASE_TRACE_SCRIPT=${DISPATCH_TRACE_SCRIPT}
@@ -159,6 +187,7 @@ load_case_config() {
             ;;
         combine)
             CASE_CONFIG_FILE=${COMBINE_CONFIG_FILE}
+            CASE_REMOTE_CONFIG_FILE="${REMOTE_ROOT}/tests/ep/cluster/$(basename -- "${COMBINE_CONFIG_FILE}")"
             CASE_NODE_SCRIPT=${COMBINE_NODE_SCRIPT}
             CASE_KERNEL_NAME=tilexr_ep_combine_memory_kernel
             CASE_TRACE_SCRIPT=${COMBINE_TRACE_SCRIPT}
@@ -169,9 +198,10 @@ load_case_config() {
         echo "Missing cluster config: ${CASE_CONFIG_FILE}" >&2
         return 2
     }
-    source "${CASE_CONFIG_FILE}"
+    source <(sed 's/\r$//' "${CASE_CONFIG_FILE}")
 
     CASE_RANK_SIZE=${TILEXR_EP_CLUSTER_RANK_SIZE}
+    CASE_BLOCK_DIM=${TILEXR_EP_CLUSTER_BLOCK_DIM:-auto}
     CASE_BS=${TILEXR_EP_CLUSTER_BS}
     CASE_H=${TILEXR_EP_CLUSTER_H}
     CASE_TOPK=${TILEXR_EP_CLUSTER_TOPK}
@@ -183,13 +213,16 @@ load_case_config() {
     CASE_ACTIVE_MASK_TYPE=${TILEXR_EP_CLUSTER_ACTIVE_MASK_TYPE}
     CASE_EXPERT_MODE=${TILEXR_EP_CLUSTER_EXPERT_MODE}
     CASE_EXPERT_SEED=${TILEXR_EP_CLUSTER_EXPERT_SEED}
+    CASE_FUNCTIONAL_LOOP_COUNT=${TILEXR_EP_CLUSTER_CORRECTNESS_LOOPS}
+    CASE_WARMUP_COUNT=${TILEXR_EP_CLUSTER_WARMUP}
+    CASE_ITERATION_COUNT=${TILEXR_EP_CLUSTER_PERF_LOOPS}
     CASE_TIMEOUT_SECONDS=${TILEXR_EP_CLUSTER_TIMEOUT_SECONDS}
 }
 
 validate_case_config() {
     local value_name value
     for value_name in CASE_RANK_SIZE CASE_BS CASE_H CASE_TOPK CASE_EXPERTS \
-        CASE_TIMEOUT_SECONDS; do
+        CASE_FUNCTIONAL_LOOP_COUNT CASE_ITERATION_COUNT CASE_TIMEOUT_SECONDS; do
         value=${!value_name}
         [[ "${value}" =~ ^[1-9][0-9]*$ ]] || {
             echo "${value_name} must be a positive integer: ${value}" >&2
@@ -200,9 +233,20 @@ validate_case_config() {
         echo "expert seed must be non-negative: ${CASE_EXPERT_SEED}" >&2
         return 2
     }
-    ((CASE_RANK_SIZE == 64 && CASE_TOPK <= CASE_EXPERTS &&
+    [[ "${CASE_WARMUP_COUNT}" =~ ^[0-9]+$ ]] || {
+        echo "warmup count must be a non-negative integer: ${CASE_WARMUP_COUNT}" >&2
+        return 2
+    }
+    if [[ "${RUN_MODE}" == performance ]] &&
+        ((CASE_ITERATION_COUNT < LAST_SAMPLE_COUNT)); then
+        echo "performance iterations must be at least ${LAST_SAMPLE_COUNT}: ${CASE_ITERATION_COUNT}" >&2
+        return 2
+    fi
+    ((CASE_RANK_SIZE >= LOCAL_NPU_COUNT &&
+        CASE_RANK_SIZE % LOCAL_NPU_COUNT == 0 &&
+        CASE_TOPK <= CASE_EXPERTS &&
         CASE_EXPERTS % CASE_RANK_SIZE == 0)) || {
-        echo "Require rankSize=64, topK <= experts, and experts divisible by rankSize" >&2
+        echo "Require rankSize divisible by local NPU count, topK <= experts, and experts divisible by rankSize" >&2
         return 2
     }
     [[ "${CASE_DTYPE}" == fp16 || "${CASE_DTYPE}" == bf16 ]] || {
@@ -217,7 +261,16 @@ validate_case_config() {
         echo "expert mode must be uniform or random: ${CASE_EXPERT_MODE}" >&2
         return 2
     }
+    if [[ "${CASE_BLOCK_DIM}" != auto ]] && [[ ! "${CASE_BLOCK_DIM}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "${CASE_OP} block dim must be auto or a positive integer: ${CASE_BLOCK_DIM}" >&2
+        return 2
+    fi
     if [[ "${CASE_OP}" == dispatch ]]; then
+        if [[ "${CASE_BLOCK_DIM}" != auto ]] &&
+            ((CASE_BLOCK_DIM < 2)); then
+            echo "dispatch block dim must be auto or an integer greater than one: ${CASE_BLOCK_DIM}" >&2
+            return 2
+        fi
         [[ "${CASE_QUANT_MODE}" == 0 || "${CASE_QUANT_MODE}" == 4 ]] || {
             echo "dispatch quant mode must be 0 or 4: ${CASE_QUANT_MODE}" >&2
             return 2
@@ -246,13 +299,15 @@ validate_case_config() {
 }
 
 case_label() {
-    local quant_label=none
+    local quant_label=none core_label=""
     if [[ "${CASE_OP}" == dispatch && "${CASE_QUANT_MODE}" == 4 ]] ||
         [[ "${CASE_OP}" == combine && "${CASE_COMM_QUANT_MODE}" != 0 ]]; then
         quant_label="mxfp8_${CASE_MXFP8_FORMAT}"
     fi
-    printf 'memory_%s_%dp_%s_%s_bs%d_h%d_k%d_e%d' \
+    core_label="_c${CASE_BLOCK_DIM}"
+    printf 'memory_%s_%dp_%s_%s%s_bs%d_h%d_k%d_e%d' \
         "${CASE_OP}" "${CASE_RANK_SIZE}" "${CASE_DTYPE}" "${quant_label}" \
+        "${core_label}" \
         "${CASE_BS}" "${CASE_H}" "${CASE_TOPK}" "${CASE_EXPERTS}"
 }
 
@@ -263,6 +318,7 @@ print_case() {
     printf 'mode=%s\n' "${RUN_MODE}"
     printf 'impl=memory\n'
     printf 'ranks=%d\n' "${CASE_RANK_SIZE}"
+    printf 'block_dim=%s\n' "${CASE_BLOCK_DIM}"
     printf 'BS=%d\n' "${CASE_BS}"
     printf 'H=%d\n' "${CASE_H}"
     printf 'TopK=%d\n' "${CASE_TOPK}"
@@ -281,16 +337,17 @@ print_case() {
     printf 'expert_mode=%s\n' "${CASE_EXPERT_MODE}"
     if [[ "${RUN_MODE}" == functional ]]; then
         printf 'warmup=0\n'
-        printf 'iterations=%d\n' "${FUNCTIONAL_LOOP_COUNT}"
+        printf 'iterations=%d\n' "${CASE_FUNCTIONAL_LOOP_COUNT}"
     else
-        printf 'warmup=%d\n' "${WARMUP_COUNT}"
-        printf 'iterations=%d\n' "${ITERATION_COUNT}"
+        printf 'warmup=%d\n' "${CASE_WARMUP_COUNT}"
+        printf 'iterations=%d\n' "${CASE_ITERATION_COUNT}"
     fi
     if [[ "${RUN_MODE}" == performance ]]; then
         printf 'result_rounds=%d\n' "${LAST_SAMPLE_COUNT}"
-        printf 'reduction=slowest_of_64_cards_per_round\n'
+        printf 'server_reduction=mean_of_50_rounds_x_8_cards\n'
+        printf 'cluster_reduction=min_max_mean_of_%d_server_averages\n' "${#hosts[@]}"
     elif [[ "${RUN_MODE}" == breakdown ]]; then
-        printf 'profile_iteration=%d\n' "$((ITERATION_COUNT - 1))"
+        printf 'profile_iteration=%d\n' "$((CASE_ITERATION_COUNT - 1))"
         printf 'rank_selection=fastest_p50_slowest\n'
     fi
     printf 'run_id=%s\n' "${CASE_RUN_ID}"
@@ -322,7 +379,7 @@ build_flags_match() {
 
 ensure_build() {
     expected_profile_flags
-    if build_flags_match; then
+    if [[ "${FORCE_BUILD}" != true ]] && build_flags_match; then
         print_stage "编译配置检查完成"
         printf 'dispatch_profiling=%s\n' "${EXPECT_DISPATCH_PROFILE}"
         printf 'combine_profiling=%s\n' "${EXPECT_COMBINE_PROFILE}"
@@ -331,6 +388,7 @@ ensure_build() {
     fi
 
     print_stage "代码编译开始"
+    printf 'force_build=%s\n' "${FORCE_BUILD}"
     (
         cd "${TILEXR_ROOT}"
         TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING="${EXPECT_DISPATCH_PROFILE}" \
@@ -354,9 +412,9 @@ deploy_runtime_scripts() {
         deploy_logs[index]="${SESSION_LOG_DIR}/deploy_runtime_${index}.log"
         (
             ssh "${ssh_options[@]}" "${SSH_USER}@${host}" \
-                mkdir -p -- "${REMOTE_ROOT}/tests/ep/cluster" "${REMOTE_ROOT}/tools/ep"
+                mkdir -p -- "${REMOTE_ROOT}/tests/ep/cluster" "${REMOTE_ROOT}/tools/ep" \
+                    "${REMOTE_ROOT}/scripts"
             scp "${ssh_options[@]}" \
-                "${script_dir}/probe_npu_processes.sh" \
                 "${script_dir}/run_memory_dispatch_node.sh" \
                 "${script_dir}/run_memory_combine_node.sh" \
                 "${DISPATCH_CONFIG_FILE}" \
@@ -365,6 +423,10 @@ deploy_runtime_scripts() {
             scp "${ssh_options[@]}" \
                 "${TILEXR_ROOT}/tools/ep/msprof_kernel_stats.py" \
                 "${SSH_USER}@${host}:${REMOTE_ROOT}/tools/ep/"
+            scp "${ssh_options[@]}" \
+                "${TILEXR_ROOT}/scripts/common_env.sh" \
+                "${TILEXR_ROOT}/scripts/common_util.sh" \
+                "${SSH_USER}@${host}:${REMOTE_ROOT}/scripts/"
         ) >"${deploy_logs[index]}" 2>&1 &
         deploy_pids[index]=$!
     done
@@ -391,17 +453,23 @@ deploy_artifacts() {
 }
 
 prepare_case_hosts() {
-    local host index
+    local host index node_config
     declare -a prepare_pids=()
     declare -a prepare_logs=()
     for index in "${!hosts[@]}"; do
         host=${hosts[index]}
+        node_config=${CASE_REMOTE_CONFIG_FILE}
+        [[ "${host}" == "${MASTER_HOST}" ]] && node_config=${CASE_CONFIG_FILE}
         prepare_logs[index]="${CASE_LOG_DIR}/prepare_${index}.log"
         (
             run_on_host "${host}" test -x "${DEMO_BIN}" -a -r "${CASE_NODE_SCRIPT}" \
-                -a -r "${NPU_PROBE_SCRIPT}"
+                -a -r "${node_config}"
+            select_profiler_for_host "${host}"
+            if [[ -n "${HOST_CANN_ENV_SCRIPT}" ]]; then
+                run_on_host "${host}" test -r "${HOST_CANN_ENV_SCRIPT}"
+            fi
             if [[ "${RUN_MODE}" == performance ]]; then
-                run_on_host "${host}" test -x "${MSPROF}" -a -x "${PYTHON}" \
+                run_on_host "${host}" test -x "${HOST_MSPROF}" -a -x "${PYTHON}" \
                     -a -r "${STATS_SCRIPT}"
                 run_on_host "${host}" test ! -e "${CASE_RAW_ROOT}"
                 run_on_host "${host}" mkdir -p -- "${CASE_RAW_ROOT}"
@@ -412,69 +480,46 @@ prepare_case_hosts() {
     wait_for_jobs HOST_PREPARE prepare_pids prepare_logs
 }
 
-wait_for_npus_idle() {
-    local deadline=$((SECONDS + NPU_WAIT_SECONDS))
-    local attempt=0 host index status all_idle probe_failure
-    while true; do
-        attempt=$((attempt + 1))
-        all_idle=1
-        probe_failure=0
-        declare -a probe_pids=()
-        declare -a probe_logs=()
-        for index in "${!hosts[@]}"; do
-            host=${hosts[index]}
-            probe_logs[index]="${CASE_LOG_DIR}/npu_probe_${attempt}_${index}.log"
-            run_on_host "${host}" bash "${NPU_PROBE_SCRIPT}" \
-                >"${probe_logs[index]}" 2>&1 &
-            probe_pids[index]=$!
-        done
-
-        for index in "${!probe_pids[@]}"; do
-            set +e
-            wait "${probe_pids[index]}"
-            status=$?
-            set -e
-            if ((status == 0)); then
-                continue
-            fi
-            all_idle=0
-            cat "${probe_logs[index]}" >&2
-            if ((status != 3)); then
-                printf 'NPU_PROBE_FAILED host=%s status=%d\n' \
-                    "${hosts[index]}" "${status}" >&2
-                probe_failure=${status}
-            fi
-        done
-
-        if ((probe_failure != 0)); then
-            return "${probe_failure}"
-        fi
-
-        if ((all_idle)); then
-            printf 'NPU_PREFLIGHT_PASS hosts=%d attempt=%d\n' \
-                "${#hosts[@]}" "${attempt}"
-            return 0
-        fi
-        if ((SECONDS + NPU_RETRY_SECONDS > deadline)); then
-            printf 'NPU_PREFLIGHT_TIMEOUT wait_seconds=%d\n' \
-                "${NPU_WAIT_SECONDS}" >&2
-            return 75
-        fi
-        sleep "${NPU_RETRY_SECONDS}"
-    done
-}
-
 run_performance_host() {
     local host=$1
     local rank_base=$2
-    local application profile_command
-    application="bash ${CASE_NODE_SCRIPT} ${rank_base} ${CASE_RUN_ID} ${ITERATION_COUNT} perf ${WARMUP_COUNT}"
+    local application profile_command node_config=${CASE_REMOTE_CONFIG_FILE}
+    [[ "${host}" == "${MASTER_HOST}" ]] && node_config=${CASE_CONFIG_FILE}
+    select_profiler_for_host "${host}"
+    application="bash ${CASE_NODE_SCRIPT} ${rank_base} ${CASE_RUN_ID} ${CASE_ITERATION_COUNT} perf ${CASE_WARMUP_COUNT} ${node_config}"
     printf -v profile_command '%q --application=%q --output=%q' \
-        "${MSPROF}" "${application}" "${CASE_RAW_ROOT}"
+        "${HOST_MSPROF}" "${application}" "${CASE_RAW_ROOT}"
+    if [[ -n "${HOST_CANN_ENV_SCRIPT}" ]]; then
+        printf -v profile_command 'source %q >/dev/null 2>&1 && %s' \
+            "${HOST_CANN_ENV_SCRIPT}" "${profile_command}"
+    fi
     if [[ "${host}" == "${MASTER_HOST}" ]]; then
         bash -lc "${profile_command}"
     else
         ssh "${ssh_options[@]}" "${SSH_USER}@${host}" "${profile_command}"
+    fi
+}
+
+run_direct_host() {
+    local host=$1
+    local rank_base=$2
+    local loop_count=$3
+    local node_mode=$4
+    local warmup_count=$5
+    local direct_command node_config=${CASE_REMOTE_CONFIG_FILE}
+    [[ "${host}" == "${MASTER_HOST}" ]] && node_config=${CASE_CONFIG_FILE}
+    select_profiler_for_host "${host}"
+    printf -v direct_command '%q %q %q %q %q %q %q %q' \
+        bash "${CASE_NODE_SCRIPT}" "${rank_base}" "${CASE_RUN_ID}" \
+        "${loop_count}" "${node_mode}" "${warmup_count}" "${node_config}"
+    if [[ -n "${HOST_CANN_ENV_SCRIPT}" ]]; then
+        printf -v direct_command 'source %q >/dev/null 2>&1 && %s' \
+            "${HOST_CANN_ENV_SCRIPT}" "${direct_command}"
+    fi
+    if [[ "${host}" == "${MASTER_HOST}" ]]; then
+        bash -lc "${direct_command}"
+    else
+        ssh "${ssh_options[@]}" "${SSH_USER}@${host}" "${direct_command}"
     fi
 }
 
@@ -483,15 +528,15 @@ run_case_host() {
     local rank_base=$2
     case "${RUN_MODE}" in
         functional)
-            run_on_host "${host}" bash "${CASE_NODE_SCRIPT}" "${rank_base}" \
-                "${CASE_RUN_ID}" "${FUNCTIONAL_LOOP_COUNT}" correctness 0
+            run_direct_host "${host}" "${rank_base}" \
+                "${CASE_FUNCTIONAL_LOOP_COUNT}" correctness 0
             ;;
         performance)
             run_performance_host "${host}" "${rank_base}"
             ;;
         breakdown)
-            run_on_host "${host}" bash "${CASE_NODE_SCRIPT}" "${rank_base}" \
-                "${CASE_RUN_ID}" "${ITERATION_COUNT}" profile "${WARMUP_COUNT}"
+            run_direct_host "${host}" "${rank_base}" \
+                "${CASE_ITERATION_COUNT}" profile "${CASE_WARMUP_COUNT}"
             ;;
     esac
 }
@@ -534,6 +579,7 @@ summarize_performance_host() {
     local output="${CASE_RAW_ROOT}/node_${index}_last50_internal.json"
     run_on_host "${host}" "${PYTHON}" "${STATS_SCRIPT}" "${CASE_RAW_ROOT}" \
         --kernel-name "${CASE_KERNEL_NAME}" \
+        --aggregation server-samples \
         --expected-inputs "${LOCAL_NPU_COUNT}" \
         --label "${host}_ranks_${rank_base}_$((rank_base + LOCAL_NPU_COUNT - 1))" \
         --output "${output}"
@@ -561,7 +607,7 @@ gather_performance_summaries() {
 }
 
 summarize_performance() {
-    local index status ret=0 stats_output
+    local index status ret=0 stats_output summary_output
     declare -a stats_pids=()
     declare -a stats_logs=()
     for index in "${!hosts[@]}"; do
@@ -575,14 +621,18 @@ summarize_performance() {
 
     gather_performance_summaries
     local -a summaries=("${CASE_STATS_DIR}"/node_*_last50_internal.json)
+    summary_output="${CASE_STATS_DIR}/${CASE_OP}_${CASE_RANK_SIZE}p_last50.json"
     stats_output=$("${PYTHON}" "${STATS_SCRIPT}" "${summaries[@]}" \
         --kernel-name "${CASE_KERNEL_NAME}" \
+        --aggregation server-averages \
         --expected-inputs "${#hosts[@]}" \
-        --label "${CASE_RUN_ID}_64_cards")
+        --label "${CASE_RUN_ID}_${#hosts[@]}_servers" \
+        --output "${summary_output}")
 
     perf_min[${CASE_OP}]=$(awk -F= '$1 == "minimum_us" {print $2}' <<<"${stats_output}")
     perf_max[${CASE_OP}]=$(awk -F= '$1 == "maximum_us" {print $2}' <<<"${stats_output}")
     perf_avg[${CASE_OP}]=$(awk -F= '$1 == "average_us" {print $2}' <<<"${stats_output}")
+    perf_json[${CASE_OP}]=${summary_output}
     [[ -n "${perf_min[${CASE_OP}]}" && -n "${perf_max[${CASE_OP}]}" &&
         -n "${perf_avg[${CASE_OP}]}" ]] || {
         echo "Failed to parse performance statistics for ${CASE_OP}" >&2
@@ -595,6 +645,7 @@ summarize_performance() {
     printf 'minimum_us=%s\n' "${perf_min[${CASE_OP}]}"
     printf 'maximum_us=%s\n' "${perf_max[${CASE_OP}]}"
     printf 'average_us=%s\n' "${perf_avg[${CASE_OP}]}"
+    printf 'summary_json=%s\n' "${perf_json[${CASE_OP}]}"
     print_separator
 }
 
@@ -718,9 +769,9 @@ run_operator() {
     local op=$1
     load_case_config "${op}"
     validate_case_config
-    CASE_RUN_ID="$(case_label)_${RUN_MODE}_w${WARMUP_COUNT}_i${ITERATION_COUNT}_${SESSION_TIMESTAMP}"
+    CASE_RUN_ID="$(case_label)_${RUN_MODE}_w${CASE_WARMUP_COUNT}_i${CASE_ITERATION_COUNT}_${SESSION_TIMESTAMP}"
     if [[ "${RUN_MODE}" == functional ]]; then
-        CASE_RUN_ID="$(case_label)_functional_i${FUNCTIONAL_LOOP_COUNT}_${SESSION_TIMESTAMP}"
+        CASE_RUN_ID="$(case_label)_functional_i${CASE_FUNCTIONAL_LOOP_COUNT}_${SESSION_TIMESTAMP}"
     fi
     [[ "${CASE_RUN_ID}" =~ ^[A-Za-z0-9_.-]+$ && ${#CASE_RUN_ID} -le 128 ]] || {
         echo "Generated run_id is invalid or exceeds 128 characters: ${CASE_RUN_ID}" >&2
@@ -737,9 +788,6 @@ run_operator() {
     print_stage "服务器准备开始"
     prepare_case_hosts
     print_stage "服务器准备完成"
-    print_stage "NPU 空闲检查开始"
-    wait_for_npus_idle
-    print_stage "NPU 空闲检查完成"
     print_stage "算子测试启动"
     run_case_all_hosts
     print_stage "算子测试结束"
@@ -783,7 +831,8 @@ print_final_summary() {
                 printf 'op=%s\n' "${op}"
                 printf 'minimum_us=%s\n' "${perf_min[${op}]}"
                 printf 'maximum_us=%s\n' "${perf_max[${op}]}"
-                printf 'average_us=%s\n\n' "${perf_avg[${op}]}"
+                printf 'average_us=%s\n' "${perf_avg[${op}]}"
+                printf 'summary_json=%s\n\n' "${perf_json[${op}]}"
             done
             ;;
         breakdown)
@@ -810,15 +859,29 @@ main() {
             exit 2
         }
     done
-    [[ -r "${script_dir}/probe_npu_processes.sh" ]] || {
-        echo "Missing required file: ${script_dir}/probe_npu_processes.sh" >&2
+    local op cluster_rank_size=0 required_host_count
+    local -a available_hosts=()
+    mapfile -t available_hosts < <(sed -n -E '/^[[:space:]]*($|#)/d; s/[[:space:]]+$//; p' "${HOST_FILE}")
+    for op in "${selected_ops[@]}"; do
+        load_case_config "${op}"
+        if ((cluster_rank_size == 0)); then
+            cluster_rank_size=${CASE_RANK_SIZE}
+        elif ((cluster_rank_size != CASE_RANK_SIZE)); then
+            echo "Selected operators must use the same rank size" >&2
+            exit 2
+        fi
+    done
+    ((cluster_rank_size >= LOCAL_NPU_COUNT &&
+        cluster_rank_size % LOCAL_NPU_COUNT == 0)) || {
+        echo "Rank size must be divisible by local NPU count: ${cluster_rank_size}" >&2
         exit 2
     }
-    mapfile -t hosts < <(sed -n -E '/^[[:space:]]*($|#)/d; s/[[:space:]]+$//; p' "${HOST_FILE}")
-    (( ${#hosts[@]} * LOCAL_NPU_COUNT == 64 )) || {
-        echo "Host count does not describe 64 ranks: ${#hosts[@]} hosts" >&2
+    required_host_count=$((cluster_rank_size / LOCAL_NPU_COUNT))
+    (( ${#available_hosts[@]} >= required_host_count )) || {
+        echo "Host inventory has ${#available_hosts[@]} nodes, need ${required_host_count}" >&2
         exit 2
     }
+    hosts=("${available_hosts[@]:0:required_host_count}")
     [[ " $(hostname -I 2>/dev/null) " == *" ${MASTER_HOST} "* ]] || {
         echo "Run this script on ${MASTER_HOST}" >&2
         exit 2

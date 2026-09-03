@@ -2,17 +2,16 @@
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-readonly CONFIG_FILE="${script_dir}/combine_memory_64p.env"
+if (( $# < 4 || $# > 6 )); then
+    echo "Usage: $0 rank_base run_id loop_count correctness|perf|profile [warmup_count] [config_file]" >&2
+    exit 2
+fi
+readonly CONFIG_FILE=${6:-"${script_dir}/combine_memory_64p.env"}
 [[ -r "${CONFIG_FILE}" ]] || {
     echo "Missing cluster config: ${CONFIG_FILE}" >&2
     exit 2
 }
-source "${CONFIG_FILE}"
-
-if (( $# < 4 || $# > 5 )); then
-    echo "Usage: $0 rank_base run_id loop_count correctness|perf|profile [warmup_count]" >&2
-    exit 2
-fi
+source <(sed 's/\r$//' "${CONFIG_FILE}")
 
 readonly RANK_BASE=$1
 readonly RUN_ID=$2
@@ -22,6 +21,7 @@ readonly RANK_SIZE=${TILEXR_EP_CLUSTER_RANK_SIZE}
 readonly LOCAL_NPU_COUNT=8
 readonly COMM_ID=${TILEXR_EP_CLUSTER_COMM_ID}
 readonly BARRIER_ADDR=${TILEXR_EP_CLUSTER_BARRIER_ADDR}
+readonly BLOCK_DIM=${TILEXR_EP_CLUSTER_BLOCK_DIM:-auto}
 readonly BS=${TILEXR_EP_CLUSTER_BS}
 readonly H=${TILEXR_EP_CLUSTER_H}
 readonly TOPK=${TILEXR_EP_CLUSTER_TOPK}
@@ -67,6 +67,10 @@ done
     echo "warmup count must be a non-negative integer: ${WARMUP_COUNT}" >&2
     exit 2
 }
+if [[ "${BLOCK_DIM}" != auto ]] && [[ ! "${BLOCK_DIM}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "block dim must be auto or a positive integer: ${BLOCK_DIM}" >&2
+    exit 2
+fi
 ((TOPK <= MOE_EXPERT_NUM && MOE_EXPERT_NUM % RANK_SIZE == 0)) || {
     echo "Require topK <= moeExpertNum and moeExpertNum divisible by rankSize" >&2
     exit 2
@@ -144,6 +148,11 @@ export TILEXR_EP_DEMO_QUANT_MODE="${QUANT_MODE}"
 export TILEXR_EP_DEMO_COMM_QUANT_MODE="${COMM_QUANT_MODE}"
 export TILEXR_EP_DEMO_MXFP8_FORMAT="${MXFP8_FORMAT}"
 export TILEXR_EP_DEMO_DTYPE="${DTYPE}"
+if [[ "${BLOCK_DIM}" == auto ]]; then
+    unset TILEXR_EP_COMBINE_MEMORY_BLOCK_DIM
+else
+    export TILEXR_EP_COMBINE_MEMORY_BLOCK_DIM="${BLOCK_DIM}"
+fi
 export LD_LIBRARY_PATH="${TILEXR_ROOT}/install/lib64:${TILEXR_ROOT}/install/lib:"\
 "${TILEXR_ROOT}/tests/ep/install/lib64:${TILEXR_ROOT}/tests/ep/install/lib:${LD_LIBRARY_PATH:-}"
 

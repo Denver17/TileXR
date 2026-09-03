@@ -15,7 +15,11 @@ constexpr int64_t kEpMemoryFullUbBytes = 190 * 1024;
 constexpr uint32_t kEpMemoryMaxCountCoreNum = 8;
 constexpr uint32_t kEpMemoryMaxVectorCoreNum = 200;
 constexpr uint32_t kEpMemoryAssistInfoWidth = 3U;
-constexpr uint32_t kEpMemoryAllCoreCountBsThreshold = 128U;
+constexpr uint32_t kEpMemorySmallBsThreshold = 48U;
+constexpr uint32_t kEpMemoryDoubleGroupStripeRankNum = 32U;
+constexpr uint32_t kEpMemoryDoubleGroupRoundNum = 2U;
+constexpr uint32_t kEpMemoryDoubleGroupWorldSize64 = 64U;
+constexpr uint32_t kEpMemoryDoubleGroupWorldSize128 = 128U;
 constexpr uint32_t kEpMemoryCumsumStatusPerCore = 32U;
 
 constexpr uint64_t kEpMemoryRoundStrideBytes =

@@ -44,6 +44,9 @@ struct EpMemoryCombineReferenceConfig {
 
 uint32_t TileXREpMemoryCountCoreNum(int64_t totalExpertNum, int64_t rscvStatusNum, uint32_t blockDim);
 
+int TileXREpResolveMemoryBlockDim(uint32_t vectorCoreNum, uint32_t minimumBlockDim,
+    const char *overrideValue, uint32_t *blockDim);
+
 int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, int64_t bs, int64_t h,
     int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
     int64_t globalBs, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,

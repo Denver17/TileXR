@@ -191,6 +191,9 @@ void TestMxfp8Golden()
 
 void TestMemoryCoreAllocation()
 {
+    CheckInt("small BS threshold", TileXREp::kEpMemorySmallBsThreshold, 48);
+    CheckBool("47 is small BS", 47U < TileXREp::kEpMemorySmallBsThreshold, true);
+    CheckBool("48 is not small BS", 48U < TileXREp::kEpMemorySmallBsThreshold, false);
     CheckInt("8 experts count cores", TileXREp::TileXREpMemoryCountCoreNum(8, 8, 48), 1);
     CheckInt("32 experts count cores", TileXREp::TileXREpMemoryCountCoreNum(32, 32, 48), 2);
     CheckInt("count cores capped at eight", TileXREp::TileXREpMemoryCountCoreNum(256, 128, 48), 8);
@@ -230,7 +233,23 @@ void TestMemoryWindowConfig()
     CheckInt64("memory expert segment", config.expertPerSizeOnWin, 2048);
     CheckInt64("memory combine reserve", config.combineReserveBytes, 4096);
     CheckInt64("memory workspace", config.workspaceBytes, 1536);
-    CheckInt64("memory round payload", config.roundPayloadBytes, 535822336);
+    CheckInt64("memory round payload", config.roundPayloadBytes, 1070596096);
+
+    TileXREp::EpMemoryDispatchReferenceConfig smallBsConfig {};
+    CheckInt("small BS config ret",
+        TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
+            64, 0, 47, 8, 7, 64, 0, 0, 3008, TileXR::TILEXR_DATA_TYPE_FP16,
+            TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &smallBsConfig),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("small BS uses all-core count allocation", smallBsConfig.aivUsedCumSum, 2);
+
+    TileXREp::EpMemoryDispatchReferenceConfig largeBsConfig {};
+    CheckInt("large BS boundary config ret",
+        TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
+            64, 0, 48, 8, 2, 64, 0, 0, 3072, TileXR::TILEXR_DATA_TYPE_FP16,
+            TileXR::TILEXR_DATA_TYPE_FP16, 0, 48, &largeBsConfig),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("large BS disables all-core count allocation", largeBsConfig.aivUsedCumSum, 4);
 
     const int sharedRet = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
         8, 0, 4, 8, 2, 8, 2, 4, 32, TileXR::TILEXR_DATA_TYPE_FP16,
@@ -334,6 +353,17 @@ void TestMemoryWindowConfig()
     CheckInt("dispatch accepts payload larger than old half", fullRoundDispatchRet, TileXR::TILEXR_SUCCESS);
     CheckInt64("dispatch full round payload usage", fullRoundDispatchConfig.combineReserveBytes +
         fullRoundDispatchConfig.rscvStatusNum * fullRoundDispatchConfig.expertPerSizeOnWin, 283115520);
+
+    TileXREp::EpMemoryDispatchReferenceConfig dispatch64pNonQuantConfig {};
+    const int dispatch64pNonQuantRet = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
+        64, 0, 94, 7168, 6, 384, 0, 0, 6016, TileXR::TILEXR_DATA_TYPE_BFP16,
+        TileXR::TILEXR_DATA_TYPE_BFP16, 0, 64, &dispatch64pNonQuantConfig);
+    CheckInt("64p non-quant memory dispatch config ret", dispatch64pNonQuantRet, TileXR::TILEXR_SUCCESS);
+    CheckInt64("64p non-quant memory dispatch token slot", dispatch64pNonQuantConfig.hCommuSize, 15360);
+    CheckInt64("64p non-quant memory dispatch payload",
+        dispatch64pNonQuantConfig.combineReserveBytes +
+            dispatch64pNonQuantConfig.rscvStatusNum * dispatch64pNonQuantConfig.expertPerSizeOnWin,
+        563097600);
 
     TileXREp::EpMemoryCombineReferenceConfig largeCombineConfig {};
     const int largeCombineRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(

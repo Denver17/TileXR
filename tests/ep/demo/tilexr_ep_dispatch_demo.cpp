@@ -1182,9 +1182,11 @@ bool CaptureDispatchMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
     }
     const uint64_t alltoallCoreCount = first.timePoint[
         TileXREp::EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT];
-    if (alltoallCoreCount > blockDim) {
+    const uint64_t sendGroupCount = first.timePoint[
+        TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT];
+    if (alltoallCoreCount > blockDim || (sendGroupCount != 1U && sendGroupCount != 2U)) {
         std::cerr << "rank " << rank << " invalid dispatch alltoall core count="
-                  << alltoallCoreCount << std::endl;
+                  << alltoallCoreCount << " send group count=" << sendGroupCount << std::endl;
         return false;
     }
 
@@ -1203,7 +1205,9 @@ bool CaptureDispatchMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
             record.metricCount != TileXREp::kEpDispatchMemoryProfileMetricCount ||
             record.generation != expectedGeneration ||
             record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT] !=
-                alltoallCoreCount) {
+                alltoallCoreCount ||
+            record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT] !=
+                sendGroupCount) {
             std::cerr << "rank " << rank << " core " << core
                       << " invalid dispatch profile metadata generation=" << record.generation
                       << " expected_generation=" << expectedGeneration
@@ -1219,6 +1223,16 @@ bool CaptureDispatchMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
                           << " invalid dispatch profile timestamp t" << point << std::endl;
                 return false;
             }
+        }
+        if ((sendGroupCount == 1U &&
+                record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END] !=
+                    record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_END]) ||
+            (expectedRole == TileXREp::EP_DISPATCH_MEMORY_ROLE_SENDER &&
+                record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_END] !=
+                    record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_END])) {
+            std::cerr << "rank " << rank << " core " << core
+                      << " invalid dispatch role/group phase endpoints" << std::endl;
+            return false;
         }
         const uint64_t kernelCycles =
             record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_END] -
@@ -1312,6 +1326,8 @@ bool CaptureDispatchMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
             << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_MAX_COPY_TOKEN_COUNT]
             << " blocks_per_token="
             << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_BLOCKS_PER_TOKEN]
+            << " send_group_count="
+            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT]
             << std::endl;
     }
     return true;
@@ -1458,6 +1474,8 @@ bool CaptureCombineMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
                   << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_DISPATCH_BUFFER_NUM]
                   << " receive_buffer_num="
                   << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_RECEIVE_BUFFER_NUM]
+                  << " send_group_count="
+                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_SEND_GROUP_COUNT]
                   << std::endl;
     }
     return true;
@@ -1498,7 +1516,7 @@ int main(int argc, char **argv)
     const int rank = argc > 2 ? std::atoi(argv[2]) : GetEnvInt("RANK", 0);
     const int npuCount = argc > 3 ? std::atoi(argv[3]) : GetEnvInt("TILEXR_DEMO_NPUS", rankSize);
     const int firstNpu = argc > 4 ? std::atoi(argv[4]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
-    const int loopCount = GetEnvInt("TILEXR_EP_DEMO_LOOP", 100);
+    const int loopCount = GetEnvInt("TILEXR_EP_DEMO_LOOP", 150);
     const bool perfMode = EnvEnabled("TILEXR_EP_DEMO_PERF");
     const bool dispatchProfileMode = EnvEnabled("TILEXR_EP_DEMO_DISPATCH_MEMORY_PROFILE");
     const char *dispatchProfileRunIdText =
@@ -1510,7 +1528,7 @@ int main(int argc, char **argv)
         std::getenv("TILEXR_EP_COMBINE_MEMORY_PROFILE_RUN_ID");
     const std::string combineProfileRunId =
         combineProfileRunIdText == nullptr ? "" : combineProfileRunIdText;
-    const int warmupCount = GetEnvInt("TILEXR_EP_DEMO_WARMUP", 20);
+    const int warmupCount = GetEnvInt("TILEXR_EP_DEMO_WARMUP", 50);
     const char *backendText = std::getenv("TILEXR_EP_DEMO_IMPL");
     bool validBackend = true;
     DemoBackend backend = DemoBackend::UDMA;
@@ -1862,7 +1880,7 @@ int main(int argc, char **argv)
 
     const auto DispatchOnce = [&]() -> int {
         if (useMemory) {
-            return TileXRMoeEpDispatchMemoryV2(xDev, static_cast<int32_t *>(expertIdsDev), scalesDev,
+            return TileXRMoeEpDispatchMemory(xDev, static_cast<int32_t *>(expertIdsDev), scalesDev,
                 static_cast<bool *>(xActiveMaskDev), activeMaskType, nullptr, comm, config.bs, config.h, config.topK,
                 config.moeExpertNum,
                 expertRankSize, ExpertRankForRank(rank, config), config.tpWorldSize, config.tpRankId, 0,
@@ -1871,7 +1889,7 @@ int main(int argc, char **argv)
                 static_cast<int64_t *>(expertTokenNumsDev), static_cast<int32_t *>(recvCountsDev),
                 static_cast<int32_t *>(tpRecvCountsDev), nullptr, dtype, expandXOutDtype, stream);
         }
-        return TileXRMoeEpDispatchV2(xDev, static_cast<int32_t *>(expertIdsDev), scalesDev,
+        return TileXRMoeEpDispatch(xDev, static_cast<int32_t *>(expertIdsDev), scalesDev,
             static_cast<bool *>(xActiveMaskDev), nullptr, comm, config.bs, config.h, config.topK, config.moeExpertNum,
             expertRankSize, ExpertRankForRank(rank, config), config.tpWorldSize, config.tpRankId, 0,
             config.sharedExpertNum, config.sharedExpertRankNum, quantMode, config.bs * rankSize,
@@ -1883,14 +1901,14 @@ int main(int argc, char **argv)
     const auto CombineOnce = [&]() -> int {
         void *combineExpertOutDev = runMode == DemoRunMode::DISPATCH_COMBINE ? expandXDev : expertOutDev;
         if (useMemory) {
-            return TileXRMoeEpCombineMemoryV2(combineExpertOutDev, static_cast<int32_t *>(assistDev),
+            return TileXRMoeEpCombineMemory(combineExpertOutDev, static_cast<int32_t *>(assistDev),
                 static_cast<int32_t *>(recvCountsDev), static_cast<float *>(expertScalesDev),
                 static_cast<bool *>(xActiveMaskDev), activeMaskType, nullptr, comm, config.bs, config.h,
                 config.topK, config.moeExpertNum, rankSize, rank,
                 config.tpWorldSize, config.tpRankId, 0, config.sharedExpertNum, config.sharedExpertRankNum,
                 commQuantMode, config.bs * rankSize, yOutDev, dtype, stream);
         }
-        return TileXRMoeEpCombineV2(combineExpertOutDev, static_cast<int32_t *>(assistDev),
+        return TileXRMoeEpCombine(combineExpertOutDev, static_cast<int32_t *>(assistDev),
             static_cast<int32_t *>(recvCountsDev), comm, config.bs, config.h, config.topK, config.moeExpertNum,
             yOutDev, workspaceDev, dtype, stream);
     };
@@ -1918,60 +1936,29 @@ int main(int argc, char **argv)
     }
 
     if (runDispatch && perfMode) {
-        aclrtEvent startEvent = nullptr;
-        aclrtEvent stopEvent = nullptr;
-        const auto DestroyPerfEvents = [&]() {
-            if (startEvent != nullptr) {
-                (void)aclrtDestroyEvent(startEvent);
-            }
-            if (stopEvent != nullptr) {
-                (void)aclrtDestroyEvent(stopEvent);
-            }
-        };
-        if (!CheckAcl(aclrtCreateEvent(&startEvent), "aclrtCreateEvent dispatch start") ||
-            !CheckAcl(aclrtCreateEvent(&stopEvent), "aclrtCreateEvent dispatch stop")) {
-            DestroyPerfEvents();
-            Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
-            return 1;
-        }
         for (int loop = 0; loop < warmupCount; ++loop) {
             if (!CheckTileXR(DispatchOnce(), useMemory ? "memory dispatch warmup" : "udma dispatch warmup")) {
                 std::cerr << "rank " << rank << " dispatch warmup " << loop << " failed" << std::endl;
-                DestroyPerfEvents();
                 Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
                 return 1;
             }
         }
         if (!CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream dispatch warmup") ||
-            !DemoBarrierAll(rank, rankSize, "dispatch timed batch start") ||
-            !CheckAcl(aclrtRecordEvent(startEvent, stream), "aclrtRecordEvent dispatch batch start")) {
-            DestroyPerfEvents();
+            !DemoBarrierAll(rank, rankSize, "dispatch measured batch start")) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
         for (int loop = 0; loop < loopCount; ++loop) {
             if (!CheckTileXR(DispatchOnce(), useMemory ? "memory dispatch" : "udma dispatch")) {
                 std::cerr << "rank " << rank << " dispatch perf loop " << loop << " failed" << std::endl;
-                DestroyPerfEvents();
                 Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
                 return 1;
             }
         }
-        if (!CheckAcl(aclrtRecordEvent(stopEvent, stream), "aclrtRecordEvent dispatch batch stop") ||
-            !CheckAcl(aclrtSynchronizeEvent(stopEvent), "aclrtSynchronizeEvent dispatch batch stop")) {
-            DestroyPerfEvents();
+        if (!CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream dispatch measured batch")) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
-        float batchElapsedMs = 0.0f;
-        if (!CheckAcl(aclrtEventElapsedTime(&batchElapsedMs, startEvent, stopEvent),
-                "aclrtEventElapsedTime dispatch batch")) {
-            DestroyPerfEvents();
-            Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
-            return 1;
-        }
-        const double batchElapsedUs = static_cast<double>(batchElapsedMs) * 1000.0;
-        const double averageUs = batchElapsedUs / static_cast<double>(loopCount);
         const uint64_t expectedGeneration = static_cast<uint64_t>(warmupCount) +
             static_cast<uint64_t>(loopCount);
         const bool profileOk = !dispatchProfileMode || CaptureDispatchMemoryProfile(
@@ -1979,16 +1966,12 @@ int main(int argc, char **argv)
             config, dtype, quantMode, activeMaskType, expertTokenNumsType);
         const bool barrierOk = DemoBarrierAll(rank, rankSize,
             dispatchProfileMode ? "dispatch profile captured" : "dispatch perf synchronized");
-        DestroyPerfEvents();
         if (!profileOk || !barrierOk) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
         std::cout << "rank " << rank << " dispatch perf warmup " << warmupCount << " loops " << loopCount
-                  << std::fixed << std::setprecision(3)
-                  << " avg(us) " << averageUs
-                  << " batch_total(us) " << batchElapsedUs
-                  << " timing_source batch_acl_event" << std::endl;
+                  << " completed timing_source external_profiler" << std::endl;
     } else if (runDispatch && runMode != DemoRunMode::DISPATCH_COMBINE) {
         for (int loop = 0; loop < loopCount; ++loop) {
             const int dispatchRet = DispatchOnce();
@@ -2006,60 +1989,29 @@ int main(int argc, char **argv)
         }
     }
     if (runCombine && perfMode) {
-        aclrtEvent startEvent = nullptr;
-        aclrtEvent stopEvent = nullptr;
-        const auto DestroyPerfEvents = [&]() {
-            if (startEvent != nullptr) {
-                (void)aclrtDestroyEvent(startEvent);
-            }
-            if (stopEvent != nullptr) {
-                (void)aclrtDestroyEvent(stopEvent);
-            }
-        };
-        if (!CheckAcl(aclrtCreateEvent(&startEvent), "aclrtCreateEvent combine start") ||
-            !CheckAcl(aclrtCreateEvent(&stopEvent), "aclrtCreateEvent combine stop")) {
-            DestroyPerfEvents();
-            Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
-            return 1;
-        }
         for (int loop = 0; loop < warmupCount; ++loop) {
             if (!CheckTileXR(CombineOnce(), useMemory ? "memory combine warmup" : "udma combine warmup")) {
                 std::cerr << "rank " << rank << " combine warmup " << loop << " failed" << std::endl;
-                DestroyPerfEvents();
                 Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
                 return 1;
             }
         }
         if (!CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream combine warmup") ||
-            !DemoBarrierAll(rank, rankSize, "combine timed batch start") ||
-            !CheckAcl(aclrtRecordEvent(startEvent, stream), "aclrtRecordEvent combine batch start")) {
-            DestroyPerfEvents();
+            !DemoBarrierAll(rank, rankSize, "combine measured batch start")) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
         for (int loop = 0; loop < loopCount; ++loop) {
             if (!CheckTileXR(CombineOnce(), useMemory ? "memory combine" : "udma combine")) {
                 std::cerr << "rank " << rank << " combine perf loop " << loop << " failed" << std::endl;
-                DestroyPerfEvents();
                 Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
                 return 1;
             }
         }
-        if (!CheckAcl(aclrtRecordEvent(stopEvent, stream), "aclrtRecordEvent combine batch stop") ||
-            !CheckAcl(aclrtSynchronizeEvent(stopEvent), "aclrtSynchronizeEvent combine batch stop")) {
-            DestroyPerfEvents();
+        if (!CheckAcl(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream combine measured batch")) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
-        float batchElapsedMs = 0.0f;
-        if (!CheckAcl(aclrtEventElapsedTime(&batchElapsedMs, startEvent, stopEvent),
-                "aclrtEventElapsedTime combine batch")) {
-            DestroyPerfEvents();
-            Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
-            return 1;
-        }
-        const double batchElapsedUs = static_cast<double>(batchElapsedMs) * 1000.0;
-        const double averageUs = batchElapsedUs / static_cast<double>(loopCount);
         const uint64_t expectedGeneration = static_cast<uint64_t>(warmupCount) +
             static_cast<uint64_t>(loopCount);
         const bool profileOk = !combineProfileMode || CaptureCombineMemoryProfile(
@@ -2067,16 +2019,12 @@ int main(int argc, char **argv)
             config, dtype, quantMode, commQuantMode, activeMaskType);
         const bool barrierOk = DemoBarrierAll(rank, rankSize,
             combineProfileMode ? "combine profile captured" : "combine perf synchronized");
-        DestroyPerfEvents();
         if (!profileOk || !barrierOk) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
         std::cout << "rank " << rank << " combine perf warmup " << warmupCount << " loops " << loopCount
-                  << std::fixed << std::setprecision(3)
-                  << " avg(us) " << averageUs
-                  << " batch_total(us) " << batchElapsedUs
-                  << " timing_source batch_acl_event" << std::endl;
+                  << " completed timing_source external_profiler" << std::endl;
     } else if (runMode == DemoRunMode::COMBINE) {
         for (int loop = 0; loop < loopCount; ++loop) {
             const int combineRet = CombineOnce();

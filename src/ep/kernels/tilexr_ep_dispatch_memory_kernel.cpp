@@ -8,11 +8,6 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel(GM_ADDR c
     int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t dtype, int64_t expandXOutDtype, int64_t magic)
 {
-#if !defined(__NPU_ARCH__) || (__NPU_ARCH__ != 3510)
-    if (quantMode == Mc2Kernel::MX_QUANT) {
-        return;
-    }
-#endif
     if (commArgsGM == nullptr || xGM == nullptr || expertIdsGM == nullptr || expandXOutGM == nullptr ||
         expertTokenNumsOutGM == nullptr || sendCountsOutGM == nullptr || assistInfoForCombineOutGM == nullptr ||
         bs <= 0 || h <= 0 || topK <= 0 || moeExpertNum <= 0 || sharedExpertNum < 0 ||

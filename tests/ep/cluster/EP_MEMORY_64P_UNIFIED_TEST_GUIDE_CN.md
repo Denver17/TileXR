@@ -1,7 +1,7 @@
-# EP Memory 64P 统一测试脚本使用指南
+# EP Memory 多规模统一测试脚本使用指南
 
-本文说明如何在当前8节点、每节点8张NPU的64P环境中，通过同一个入口执行
-Memory Dispatch、Memory Combine或两个算子顺序连跑。
+本文说明如何通过同一个入口执行Memory Dispatch、Memory Combine或两个算子顺序连跑。
+脚本默认使用8节点、每节点8张NPU的64P配置，也可以显式选择记录的128P配置或其他规模配置。
 
 ## 1. 测试入口
 
@@ -53,10 +53,10 @@ bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
 
 1. 每张卡从`op_summary_*.csv`中匹配目标Kernel。
 2. 每张卡只保留最后50次执行。
-3. 每个轮次取64张卡中的最大耗时，作为该轮耗时。
-4. 对这50个轮次计算`minimum_us`、`maximum_us`和`average_us`。
+3. 每台server将8张卡的`50 * 8 = 400`个耗时数据取平均值。
+4. 对全部server的平均值计算`minimum_us`、`maximum_us`和`average_us`。
 
-性能模式最终只打印统计数字，不生成最终性能结果JSON。节点之间用于保留50轮数据的
+性能模式最终打印统计数字并生成汇总JSON。节点之间用于保存单机400个样本均值的
 `*_internal.json`属于脚本内部汇总文件。
 
 耗时拆解模式不启动msprof。固定DFX区域只保留最后一次Kernel记录，因此Trace对应
@@ -93,10 +93,40 @@ TILEXR_EP_CLUSTER_ACTIVE_MASK_TYPE
 TILEXR_EP_CLUSTER_EXPERT_MODE
 ```
 
-脚本固定使用50轮热身和150轮测试，不读取环境文件中的`WARMUP`和`PERF_LOOPS`作为
-本流程的轮次配置。
+Dispatch和Combine配置文件默认使用50轮热身和150轮测试；performance和breakdown模式均读取
+`TILEXR_EP_CLUSTER_WARMUP`和`TILEXR_EP_CLUSTER_PERF_LOOPS`作为轮次配置。
 
-### 3.2 同步到主节点
+### 3.2 选择128P或其他规模
+
+仓库记录的128P算子配置为：
+
+```text
+tests/ep/cluster/memory_dispatch_128p.env
+tests/ep/cluster/combine_memory_128p.env
+```
+
+128P需要16台8卡节点。主机清单属于执行环境配置，不提交到仓库；通过环境变量同时选择
+128P算子配置和外部主机清单：
+
+```bash
+TILEXR_EP_CLUSTER_DISPATCH_CONFIG_FILE=tests/ep/cluster/memory_dispatch_128p.env \
+TILEXR_EP_CLUSTER_COMBINE_CONFIG_FILE=tests/ep/cluster/combine_memory_128p.env \
+TILEXR_EP_CLUSTER_HOST_FILE=/path/to/hosts_128p.txt \
+TILEXR_EP_CLUSTER_MASTER_HOST=141.61.94.70 \
+bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
+  --op both --mode functional
+```
+
+测试其他规模时，从最接近的配置复制一份到执行环境，并通过同样的两个`*_CONFIG_FILE`
+变量选择，不要覆盖仓库内的64P/128P记录。配置需满足：
+
+1. `TILEXR_EP_CLUSTER_RANK_SIZE`不少于8且能被每节点卡数8整除。
+2. 主机清单至少包含`RANK_SIZE / 8`台机器，脚本按顺序取所需数量。
+3. `TILEXR_EP_CLUSTER_MOE_EXPERT_NUM`能被`RANK_SIZE`整除。
+4. 为本轮测试配置独立的`COMM_ID`和`BARRIER_ADDR`，避免与其他任务端口冲突。
+5. `BLOCK_DIM`使用`auto`，或填写目标设备支持的Vector Core数量。
+
+### 3.3 同步到主节点
 
 在Windows Git Bash中执行：
 
@@ -109,11 +139,11 @@ mutagen sync flush tilexr-deepep-combine-0823-64p
 该Mutagen会话必须为`one-way-safe`。Mutagen只用于Windows到主节点同步。主节点向
 其他七个节点同步脚本和编译产物时由测试脚本并行使用`scp`或`rsync`。
 
-### 3.3 NPU空闲门禁
+### 3.4 NPU空闲门禁
 
-统一脚本在每个算子启动前并行检查8个节点上的全部NPU。任意NPU进程都视为占用，
-每隔5秒重新检查；120秒内未全部空闲时脚本以状态75停止，不启动本轮测试。直接调用
-节点脚本时，调用方也必须先执行同样的空闲门禁。
+统一run脚本只负责执行，不检查NPU是否空闲。调用方必须在启动run脚本前完成全部目标节点的
+空闲门禁：任意NPU进程都视为占用，每隔5秒重新检查；120秒内未全部空闲时停止本次任务，
+不得调用统一run脚本。直接调用节点脚本时也遵循同一前置条件。
 
 ## 4. 常用命令
 

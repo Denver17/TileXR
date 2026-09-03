@@ -55,7 +55,7 @@ TileXREp::EpDispatchParams ValidParams()
     return params;
 }
 
-TileXREp::EpDispatchParams ValidV2Params()
+TileXREp::EpDispatchParams ValidDispatchConfigParams()
 {
     static bool xActiveMask[4] = {true, false, true, true};
     TileXREp::EpDispatchParams params = ValidParams();
@@ -76,7 +76,7 @@ TileXREp::EpDispatchParams ValidV2Params()
 
 TileXREp::EpDispatchParams ValidStaticQuantParams()
 {
-    TileXREp::EpDispatchParams params = ValidV2Params();
+    TileXREp::EpDispatchParams params = ValidDispatchConfigParams();
     static int8_t expandXOutI8[64] = {};
     static float scales[1] = {1.0f};
     params.scales = scales;
@@ -88,7 +88,7 @@ TileXREp::EpDispatchParams ValidStaticQuantParams()
 
 TileXREp::EpDispatchParams ValidPerTokenDynamicQuantParams()
 {
-    TileXREp::EpDispatchParams params = ValidV2Params();
+    TileXREp::EpDispatchParams params = ValidDispatchConfigParams();
     static int8_t expandXOutI8[64] = {};
     static float dynamicScalesOut[8] = {};
     params.expandXOut = expandXOutI8;
@@ -100,7 +100,7 @@ TileXREp::EpDispatchParams ValidPerTokenDynamicQuantParams()
 
 TileXREp::EpDispatchParams ValidMemoryMxfp8Params()
 {
-    TileXREp::EpDispatchParams params = ValidV2Params();
+    TileXREp::EpDispatchParams params = ValidDispatchConfigParams();
     static uint8_t expandXOutFp8[64] = {};
     static uint8_t dynamicScalesOut[16] = {};
     params.expandXOut = expandXOutFp8;
@@ -185,6 +185,45 @@ int ValidateMemoryDispatch(
     return TileXREp::TileXREpValidateDispatchMemoryConfig(params, commArgs, 48, &config);
 }
 
+void TestDispatchMemoryBlockDimOverride()
+{
+    uint32_t blockDim = 0U;
+    CheckInt("block dim defaults to device cores",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, nullptr, &blockDim),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("default block dim value", static_cast<int>(blockDim), 64);
+
+    CheckInt("empty block dim defaults to device cores",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "", &blockDim),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("empty block dim value", static_cast<int>(blockDim), 64);
+
+    CheckInt("explicit block dim accepted",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "48", &blockDim),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("explicit block dim value", static_cast<int>(blockDim), 48);
+
+    CheckInt("one block rejected",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "1", &blockDim),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("block dim above device rejected",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "65", &blockDim),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("non-numeric block dim rejected",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "48x", &blockDim),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("signed block dim rejected",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "-48", &blockDim),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("null block dim output rejected",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 2U, "48", nullptr),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("combine one block accepted",
+        TileXREp::TileXREpResolveMemoryBlockDim(64U, 1U, "1", &blockDim),
+        TileXR::TILEXR_SUCCESS);
+    CheckInt("combine one block value", static_cast<int>(blockDim), 1);
+}
+
 void TestBasicValidation()
 {
     TileXREp::EpDispatchParams params = ValidParams();
@@ -247,7 +286,7 @@ void TestCommValidation()
     CheckInt("cross-node memory dispatch missing peer mem", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_ERROR_NOT_INITIALIZED);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     commArgs = ValidCommArgs();
     params.tpWorldSize = 2;
     params.epWorldSize = 1;
@@ -281,7 +320,7 @@ void TestCommValidation()
     CheckInt("memory mxfp8 requires fp8 output dtype", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.epWorldSize = 4;
     params.globalBs = 16;
     params.sharedExpertNum = 1;
@@ -295,20 +334,20 @@ void TestCommValidation()
     CheckInt("memory dispatch supports shared experts", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.xActiveMask = nullptr;
     params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_TOKEN;
     commArgs = ValidCommArgs();
     CheckInt("memory token mask requires pointer", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_NONE;
     commArgs = ValidCommArgs();
     CheckInt("memory none mask rejects pointer", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     static bool expertMask[8] = {true, true, false, true, true, false, true, true};
     params.xActiveMask = expertMask;
     params.activeMaskType = TileXREp::TILEXR_EP_ACTIVE_MASK_EXPERT;
@@ -316,7 +355,7 @@ void TestCommValidation()
     CheckInt("memory expert mask rejected", ValidateMemoryDispatch(params, commArgs),
         TileXR::TILEXR_ERROR_NOT_SUPPORT);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.epWorldSize = 8;
     params.globalBs = 32;
     params.sharedExpertNum = 2;
@@ -428,90 +467,91 @@ void TestCombineValidation()
         TileXR::TILEXR_ERROR_NOT_SUPPORT);
 }
 
-void TestV2CapabilityValidation()
+void TestDispatchCapabilityValidation()
 {
-    TileXREp::EpDispatchParams params = ValidV2Params();
+    TileXREp::EpDispatchParams params = ValidDispatchConfigParams();
     TileXR::CommArgs commArgs = ValidCommArgs();
-    CheckInt("valid v2 params", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_SUCCESS);
+    CheckInt("valid dispatch params", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.tpWorldSize = 0;
-    CheckInt("v2 no tp world zero", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities accept zero tp world size",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     static int32_t tpRecvCountsOut[2] = {};
     params.tpRecvCountsOut = tpRecvCountsOut;
-    CheckInt("v2 supports tp recv counts output for tp size one",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_SUCCESS);
+    CheckInt("dispatch capabilities supports tp recv counts output for tp size one",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.expertTokenNumsType = 0;
-    CheckInt("v2 supports prefix-sum expert token counts", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities supports prefix-sum expert token counts", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.expertTokenNumsType = 2;
-    CheckInt("v2 rejects unsupported expert token count type", TileXREp::TileXREpValidateDispatchV2Config(params,
+    CheckInt("dispatch capabilities rejects unsupported expert token count type", TileXREp::TileXREpValidateDispatchCapabilities(params,
         commArgs), TileXR::TILEXR_ERROR_NOT_SUPPORT);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.quantMode = 1;
-    CheckInt("v2 static quant requires int8 output", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities static quant requires int8 output", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
     params = ValidStaticQuantParams();
-    CheckInt("v2 supports static quant int8", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities supports static quant int8", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
     params = ValidStaticQuantParams();
     params.scales = nullptr;
-    CheckInt("v2 static quant requires scales", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities static quant requires scales", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
     params = ValidPerTokenDynamicQuantParams();
-    CheckInt("v2 supports per-token dynamic quant int8",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_SUCCESS);
+    CheckInt("dispatch capabilities supports per-token dynamic quant int8",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_SUCCESS);
 
     params = ValidPerTokenDynamicQuantParams();
     params.dynamicScalesOut = nullptr;
-    CheckInt("v2 per-token dynamic quant requires dynamic scales output",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("dispatch capabilities per-token dynamic quant requires dynamic scales output",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
     params = ValidPerTokenDynamicQuantParams();
     params.scales = reinterpret_cast<void *>(0x5000);
-    CheckInt("v2 per-token dynamic quant does not take input scales",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckInt("dispatch capabilities per-token dynamic quant does not take input scales",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.quantMode = 3;
-    CheckInt("v2 rejects unsupported quant modes after per-token dynamic quant",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_ERROR_NOT_SUPPORT);
+    CheckInt("dispatch capabilities rejects unsupported quant modes after per-token dynamic quant",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_ERROR_NOT_SUPPORT);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.tpWorldSize = 2;
     params.epWorldSize = 1;
     static int32_t tpRecvCountsOutForTp[2] = {};
     params.tpRecvCountsOut = tpRecvCountsOutForTp;
-    CheckInt("v2 supports same-node tp size two", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities supports same-node tp size two", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.tpWorldSize = 2;
     params.epWorldSize = 1;
     params.tpRankId = 2;
     params.tpRecvCountsOut = tpRecvCountsOutForTp;
-    CheckInt("v2 rejects invalid tp rank", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities rejects invalid tp rank", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.tpWorldSize = 2;
     params.epWorldSize = 1;
     params.tpRecvCountsOut = nullptr;
-    CheckInt("v2 tp size two requires tp recv counts", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities tp size two requires tp recv counts", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     static int32_t tpRecvCountsOutForTp4[4] = {};
     params.tpWorldSize = 4;
     params.epWorldSize = 1;
@@ -521,25 +561,25 @@ void TestV2CapabilityValidation()
     commArgs.localRankSize = 4;
     commArgs.peerMems[2] = reinterpret_cast<GM_ADDR>(0x30000000);
     commArgs.peerMems[3] = reinterpret_cast<GM_ADDR>(0x40000000);
-    CheckInt("v2 supports same-node tp size four", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities supports same-node tp size four", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.sharedExpertNum = 1;
-    CheckInt("v2 rejects shared expert", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities rejects shared expert", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_NOT_SUPPORT);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.epWorldSize = 4;
     params.globalBs = 16;
     params.sharedExpertNum = 1;
     params.sharedExpertRankNum = 1;
     params.moeExpertNum = 6;
     commArgs.rankSize = 4;
-    CheckInt("v2 supports shared expert on leading ep ranks",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_SUCCESS);
+    CheckInt("dispatch capabilities supports shared expert on leading ep ranks",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     static int32_t tpRecvCountsOutForSharedTp[8] = {};
     params.epWorldSize = 4;
     params.globalBs = 32;
@@ -554,22 +594,22 @@ void TestV2CapabilityValidation()
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {
         commArgs.peerMems[rank] = reinterpret_cast<GM_ADDR>(0x10000000 + rank * 0x10000000);
     }
-    CheckInt("v2 supports tp with shared expert",
-        TileXREp::TileXREpValidateDispatchV2Config(params, commArgs), TileXR::TILEXR_SUCCESS);
+    CheckInt("dispatch capabilities supports tp with shared expert",
+        TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs), TileXR::TILEXR_SUCCESS);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.expertShardType = 1;
-    CheckInt("v2 rejects shard type", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities rejects shard type", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_NOT_SUPPORT);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.epWorldSize = 4;
-    CheckInt("v2 rejects ep world mismatch", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities rejects ep world mismatch", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 
-    params = ValidV2Params();
+    params = ValidDispatchConfigParams();
     params.epRankId = 1;
-    CheckInt("v2 rejects ep rank mismatch", TileXREp::TileXREpValidateDispatchV2Config(params, commArgs),
+    CheckInt("dispatch capabilities rejects ep rank mismatch", TileXREp::TileXREpValidateDispatchCapabilities(params, commArgs),
         TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
 }
 
@@ -577,9 +617,10 @@ void TestV2CapabilityValidation()
 
 int main()
 {
+    TestDispatchMemoryBlockDimOverride();
     TestBasicValidation();
     TestCommValidation();
     TestCombineValidation();
-    TestV2CapabilityValidation();
+    TestDispatchCapabilityValidation();
     return g_failures == 0 ? 0 : 1;
 }

@@ -6,53 +6,27 @@ import combine_memory_trace as trace
 
 
 trace.PROFILE_PREFIX = "EP_DISPATCH_MEMORY_PROFILE"
-trace.PROFILE_VERSION = 1
+trace.PROFILE_VERSION = 2
 trace.PROFILE_CYCLES_PER_US = 1000
 trace.PROFILE_CORE_ROLES = ("sender", "count_cumsum")
+trace.SEND_GROUP_COUNT_DIAGNOSTIC = "send_group_count"
+trace.HIDDEN_ZERO_DURATION_ROLE_PHASES = (("sender", 3),)
 trace.DEFAULT_OUTPUT_PREFIX = "ep_dispatch_memory"
 trace.TRACE_KERNEL_NAME = "ep_dispatch_memory"
-trace.TRACE_SCHEMA = "tilexr_ep_dispatch_memory_trace.v1"
+trace.TRACE_SCHEMA = "tilexr_ep_dispatch_memory_trace.v2"
 trace.TRACE_OUTPUT_PREFIX = "EP_DISPATCH_MEMORY_TRACE"
 trace.TRACE_DESCRIPTION = __doc__
 trace.TIME_POINT_NAMES = (
     "init_begin",
-    "static_init_end",
-    "route_prepare_end",
-    "count_publish_end",
-    "send_buffer_init_end",
-    "send_issue_end",
-    "count_status_wait_end",
-    "cumsum_publish_end",
-    "pre_local_barrier_end",
-    "local_copy_init_end",
-    "cumsum_gate_end",
-    "receive_metadata_end",
+    "init_end",
+    "transfer_group0_end",
+    "transfer_end",
+    "cumsum_end",
     "first_payload_ready",
-    "all_payloads_ready",
-    "output_drain_end",
-    "flag_clear_issue_end",
-    "local_copy_end",
-    "final_barrier_end",
+    "last_payload_ready",
     "final_end",
 )
-trace.METRIC_NAMES = (
-    "route_prepare",
-    "count_compute",
-    "count_store_issue",
-    "dispatch_input_load",
-    "dispatch_quant",
-    "dispatch_pack",
-    "dispatch_store_issue",
-    "status_flag_load",
-    "status_flag_reduce",
-    "cumsum_peer_wait",
-    "cumsum_gate_wait",
-    "payload_flag_load",
-    "payload_flag_reduce",
-    "payload_load",
-    "output_store_issue",
-    "payload_flag_clear_issue",
-)
+trace.METRIC_NAMES = ()
 trace.DIAGNOSTIC_NAMES = (
     "assigned_routes",
     "issued_routes",
@@ -70,6 +44,7 @@ trace.DIAGNOSTIC_NAMES = (
     "payload_poll_misses",
     "max_copy_token_count",
     "blocks_per_token",
+    "send_group_count",
 )
 trace.PROVENANCE_INT_NAMES = (
     "world_size",

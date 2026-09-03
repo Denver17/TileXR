@@ -5,6 +5,11 @@ and `ops-transformer`. The memory backend uses TileXR peer-memory windows for bo
 dispatch/combine, while the UDMA backend uses TileXR-registered workspaces. Memory generally performs better for
 small transfers, while UDMA generally performs better for large transfers.
 
+Dispatch Memory and Combine Memory are supported only on A5-class SoCs
+(`Ascend950`, `Ascend910_9`, or `A5`). Their AICore binaries are not built on
+Ascend910B; the public Memory API symbols remain available and return
+`TILEXR_ERROR_NOT_SUPPORT` without launching a kernel.
+
 Internal Memory classes, profiling artifacts, trace tools, and test helpers use unversioned names. Version suffixes
 are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
@@ -35,7 +40,9 @@ bash demo/run_tilexr_ep_dispatch_demo.sh 2
 
 `full` mode builds and installs `tile-comm`, `tilexr-ep`, `libtilexr_ep_dispatch_kernel.so`, and
 `libtilexr_ep_combine_kernel.so` under the repository `install` directory, then builds the EP demo. The memory
-dispatch/combine CCE binaries are embedded in `libtilexr-ep.so` rather than installed as separate shared libraries.
+dispatch/combine CCE binaries are embedded in `libtilexr-ep.so` on A5-class SoCs rather than installed as separate
+shared libraries. Non-A5 builds link zero-length placeholders to preserve the public library ABI without compiling
+the unsupported Memory kernels.
 
 The EP demo is linked without RPATH/RUNPATH. CANN `devlib` is a link-time fallback only; embedding it in the demo's
 runtime search path can make the loader select the stub `libascend_hal.so` before the real driver HAL, causing
@@ -51,8 +58,10 @@ The demo has exactly two execution backends, selected with `TILEXR_EP_DEMO_IMPL=
 same-node/cross-node topology are handled inside the TileXR library and are not demo branches. Select the operator
 sequence with `TILEXR_EP_DEMO_RUN_MODE=dispatch|combine|dispatch_combine`.
 
-When the backend is not specified, the runner selects `udma` on Ascend950 and `memory` on other supported SoCs,
-including Ascend910B. Pass the fifth argument or set `TILEXR_EP_DEMO_IMPL` to override this default.
+When the backend is not specified, the runner selects `udma` on Ascend950 and
+`memory` on other A5-class SoCs. The hardware demo has no supported backend on
+Ascend910B. Pass the fifth argument or set `TILEXR_EP_DEMO_IMPL` to override the
+default on a supported SoC.
 
 The runner accepts:
 
@@ -147,7 +156,7 @@ TILEXR_EP_DEMO_IMPL=memory \
   bash demo/run_tilexr_ep_dispatch_demo.sh 2
 ```
 
-The fourth argument is the loop count and defaults to `100`. In dispatch-only or combine-only mode it controls the
+The fourth argument is the loop count and defaults to `150`. In dispatch-only or combine-only mode it controls the
 number of operator calls. In dispatch+combine mode it controls the number of paired rounds, with each dispatch
 immediately followed by the combine that consumes its outputs. Each repeated call reaches a stream/rank completion
 point before its communication window is reused, and only the final output is copied back. For example, this runs
@@ -160,11 +169,10 @@ bash demo/run_tilexr_ep_dispatch_demo.sh 8 8 0 100 memory
 Set `TILEXR_EP_DEMO_LOOP=<n>` when using the environment instead of the fourth argument. Use a fourth argument of
 `1` for a single dispatch+combine smoke test.
 
-For device-event timing, set `TILEXR_EP_DEMO_PERF=1`. `TILEXR_EP_DEMO_WARMUP` controls the warmup count and defaults
-to `20`; `loop_count` defaults to `100`. After warmup and a rank barrier, one event pair encloses all measured
-iterations and the reported average is `batch_elapsed / loop_count`. This approximates operator latency while also
-reflecting any device idle gaps between direct host submissions. Performance mode supports dispatch-only or
-combine-only execution, not `dispatch_combine`.
+Set `TILEXR_EP_DEMO_PERF=1` for externally profiled performance runs. `TILEXR_EP_DEMO_WARMUP` controls the warmup
+count and defaults to `50`; `loop_count` defaults to `150`. After warmup and a rank barrier, the demo submits all
+measured iterations and synchronizes the stream once at the end. It does not insert ACL Runtime timing events into
+the measured batch. Performance mode supports dispatch-only or combine-only execution, not `dispatch_combine`.
 
 The current demo and Memory API accept `TILEXR_EP_DEMO_ACTIVE_MASK_TYPE=none|token`. The legacy
 `TILEXR_EP_DEMO_ACTIVE_MASK=1` setting remains an alias for token masking. Expert-mask mode is unsupported by the

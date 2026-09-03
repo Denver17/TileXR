@@ -88,7 +88,7 @@ int TileXREpValidateDispatchConfig(const EpDispatchParams &params, const TileXR:
     EpWindowConfig *window);
 int TileXREpValidateDispatchMemoryConfig(const EpDispatchParams &params, const TileXR::CommArgs &commArgs,
     uint32_t blockDim, EpMemoryDispatchReferenceConfig *config);
-int TileXREpValidateDispatchV2Config(const EpDispatchParams &params, const TileXR::CommArgs &commArgs);
+int TileXREpValidateDispatchCapabilities(const EpDispatchParams &params, const TileXR::CommArgs &commArgs);
 int TileXREpPrepareLaunchContext(const EpDispatchParams &params, EpHostLaunchContext *context);
 int TileXREpPrepareMemoryLaunchContext(const EpDispatchParams &params, EpHostLaunchContext *context);
 

@@ -50,13 +50,38 @@ using namespace chrono;
 namespace TileXR {
 constexpr int HCCL_IPC_PID_ARRAY_SIZE = 1; // 固定每次只传一个PID数据
 constexpr int TILEXR_INIT_TIMEOUT = 600;
-static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemMap;
+static map<string, GM_ADDR [TILEXR_MAX_RANK_SIZE]> g_localPeerMemAllocationMap;
 static map<string, int[TILEXR_MAX_RANK_SIZE]> g_devList;
 static std::mutex g_mtx;
 static std::mutex g_sdmaMtx;
 static bool g_sdmaUnavailable = false;
 
 namespace {
+
+uint64_t GetPeerMemBytes(int bufferSize)
+{
+    return static_cast<uint64_t>(bufferSize) *
+        static_cast<uint64_t>(TILEXR_MIB_BYTES) + TILEXR_FLAG_BUFF_BYTES;
+}
+
+uint64_t GetPeerMemAllocationBytes(int bufferSize, bool memoryOnlyDomain)
+{
+    return GetPeerMemBytes(bufferSize) +
+        (memoryOnlyDomain ? TILEXR_MEMORY_DOMAIN_EXTRA_ALLOC_BYTES : 0U);
+}
+
+uint64_t GetPeerMemRankOffset(int rank, bool memoryOnlyDomain)
+{
+    return memoryOnlyDomain ? static_cast<uint64_t>(rank) *
+        TILEXR_MEMORY_DOMAIN_RANK_OFFSET_BYTES : 0U;
+}
+
+GM_ADDR GetPeerMemLogicalAddress(
+    GM_ADDR allocation, int rank, bool memoryOnlyDomain)
+{
+    return allocation == nullptr ? nullptr :
+        allocation + GetPeerMemRankOffset(rank, memoryOnlyDomain);
+}
 
 bool IsEnvEnabled(const char* name, bool defaultValue)
 {
@@ -508,9 +533,7 @@ int TileXRComm::SyncCommArgs()
     commArgs_.rankSize = rankSize_;
     commArgs_.localRankSize = localRankSize_;
     commArgs_.commDomain = commDomain_;
-    commArgs_.peerMemBytes =
-        static_cast<uint64_t>(bufferSize_) * 1024U * 1024U +
-        TILEXR_FLAG_BUFF_BYTES;
+    commArgs_.peerMemBytes = GetPeerMemBytes(bufferSize_);
     for (int i = 0; i < rankSize_; ++i) {
         commArgs_.peerMems[i] = peerMem_[i];    // 这里不会越界，之前有逻辑校验过越界了
     }
@@ -705,13 +728,14 @@ int TileXRComm::InitCommon()
 void TileXRComm::CloseIpcMem()
 {
     for (int i = 0; i < rankSize_; ++i) {
-        if (i == rank_ || peerMem_[i] == nullptr) {
+        if (i == rank_ || peerMemAllocation_[i] == nullptr) {
             continue;
         }
-        int ret = rtIpcCloseMemory(static_cast<void *>(peerMem_[i]));
+        int ret = rtIpcCloseMemory(static_cast<void *>(peerMemAllocation_[i]));
         if (ret != RT_ERROR_NONE) {
             TILEXR_LOG(WARN) << "Close ipc[" << i << "] memory failed! ret: " << ret;
         }
+        peerMemAllocation_[i] = nullptr;
         peerMem_[i] = nullptr;
     }
 }
@@ -922,9 +946,9 @@ int TileXRComm::InitThread(const std::string &uid)
     }
     {
         lock_guard<mutex> lock(g_mtx);
-        if (g_localPeerMemMap.find(uid) == g_localPeerMemMap.end()) {
+        if (g_localPeerMemAllocationMap.find(uid) == g_localPeerMemAllocationMap.end()) {
             for (int i = 0; i < rankSize_; ++i) {
-                g_localPeerMemMap[uid][i] = nullptr;
+                g_localPeerMemAllocationMap[uid][i] = nullptr;
             }
         }
         uid_ = uid;
@@ -934,20 +958,24 @@ int TileXRComm::InitThread(const std::string &uid)
         TILEXR_LOG(ERROR) << "InitMem failed! ret: " << ret;
         return ret;
     }
-    g_localPeerMemMap[uid][rank_] = peerMem_[rank_];
+    g_localPeerMemAllocationMap[uid][rank_] = peerMemAllocation_[rank_];
 
     auto start = high_resolution_clock::now();
     for (int i = 0; i < rankSize_; ++i) {
-        while (g_localPeerMemMap[uid][i] == nullptr) { // check other threads
+        while (g_localPeerMemAllocationMap[uid][i] == nullptr) { // check other threads
             this_thread::sleep_for(1ms);
             auto elapsed = duration_cast<seconds>(high_resolution_clock::now() - start);
             if (elapsed.count() > TILEXR_INIT_TIMEOUT) {
                 TILEXR_LOG(ERROR) << "Lccl Init timeout!";
-                FreePeerMem(g_localPeerMemMap[uid][rank_]);
+                FreePeerMem(peerMemAllocation_[rank_]);
+                g_localPeerMemAllocationMap[uid][rank_] = nullptr;
+                peerMem_[rank_] = nullptr;
                 return TILEXR_ERROR_TIMEOUT;
             }
         }
-        peerMem_[i] = g_localPeerMemMap[uid][i];
+        peerMemAllocation_[i] = g_localPeerMemAllocationMap[uid][i];
+        peerMem_[i] = GetPeerMemLogicalAddress(
+            peerMemAllocation_[i], i, memoryOnlyDomain_);
     }
     localRank_ = rank_;
     localRankSize_ = rankSize_;
@@ -1093,20 +1121,32 @@ int TileXRComm::GetDevThread(const std::string &uid)
 
 int TileXRComm::InitMem()
 {
-    // 申请并初始化IpcBuff
-    constexpr int32_t bufferSizeUint = 1024 * 1024;
-    int tilexrBuffSize = bufferSize_ * bufferSizeUint + TILEXR_FLAG_BUFF_BYTES;
+    const uint64_t peerMemBytes = GetPeerMemBytes(bufferSize_);
+    const uint64_t allocationBytes =
+        GetPeerMemAllocationBytes(bufferSize_, memoryOnlyDomain_);
+    const uint64_t rankOffset = GetPeerMemRankOffset(rank_, memoryOnlyDomain_);
 
-    TILEXR_LOG(DEBUG) << "tilexr buffer size " << tilexrBuffSize;
+    TILEXR_LOG(DEBUG) << "tilexr peer memory bytes " << peerMemBytes
+                      << ", allocation bytes " << allocationBytes
+                      << ", rank offset " << rankOffset;
     aclError ret = aclrtMalloc(
-        reinterpret_cast<void **>(&peerMem_[rank_]), tilexrBuffSize,
+        reinterpret_cast<void **>(&peerMemAllocation_[rank_]), allocationBytes,
         (GetChipName() == ChipName::CHIP_310P3) ? ACL_MEM_MALLOC_HUGE_FIRST_P2P : ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "allocate device mem error " << __FILE__ << ":" << __LINE__ << " " << ret;
         return TILEXR_ERROR_INTERNAL;
     }
+    ret = aclrtMemset(
+        peerMemAllocation_[rank_], allocationBytes, 0, allocationBytes);
+    if (ret != ACL_SUCCESS) {
+        TILEXR_LOG(ERROR) << "initialize device mem error " << __FILE__ << ":"
+                          << __LINE__ << " " << ret;
+        FreePeerMem(peerMemAllocation_[rank_]);
+        return TILEXR_ERROR_INTERNAL;
+    }
+    peerMem_[rank_] = GetPeerMemLogicalAddress(
+        peerMemAllocation_[rank_], rank_, memoryOnlyDomain_);
     TILEXR_LOG(DEBUG) << "peerMem[rank" << rank_ << "], allocate finished.";
-    aclrtMemset(peerMem_[rank_], tilexrBuffSize, 0, tilexrBuffSize);
     return TILEXR_SUCCESS;
 }
 
@@ -1234,13 +1274,16 @@ int TileXRComm::OpenIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]
         if (SkipUnusedChannel910B2C(rank_, i, GetChipName())) {
             continue;
         }
-        int ret = rtIpcOpenMemory(reinterpret_cast<void **>(&peerMem_[i]), names[i]);
+        int ret = rtIpcOpenMemory(
+            reinterpret_cast<void **>(&peerMemAllocation_[i]), names[i]);
         if (ret != RT_ERROR_NONE) {
             CloseIpcMem();
             TILEXR_LOG(ERROR) << "rank : " << rank_ << " localRank : " << localRank_ << " peerMem: " << i <<
                 " IpcOpenMemory err " << ret;
             return TILEXR_ERROR_INTERNAL;
         }
+        peerMem_[i] = GetPeerMemLogicalAddress(
+            peerMemAllocation_[i], i, memoryOnlyDomain_);
     }
     ipcMemInited_ = true;
     return TILEXR_SUCCESS;
@@ -1338,9 +1381,10 @@ int TileXRComm::SetMemoryName(string &name)
 {
     char nameModified[IPC_NAME_SIZE] = {};
     int memRank = rank_;
-    constexpr int32_t bufferSizeUint = 1024 * 1024;
-    int tilexrBuffSize = bufferSize_ * bufferSizeUint + TILEXR_FLAG_BUFF_BYTES;
-    if (rtIpcSetMemoryName(peerMem_[memRank], tilexrBuffSize, nameModified, IPC_NAME_SIZE) != RT_ERROR_NONE) {
+    const uint64_t allocationBytes =
+        GetPeerMemAllocationBytes(bufferSize_, memoryOnlyDomain_);
+    if (rtIpcSetMemoryName(peerMemAllocation_[memRank], allocationBytes,
+            nameModified, IPC_NAME_SIZE) != RT_ERROR_NONE) {
         return TILEXR_ERROR_INTERNAL;
     }
     name = nameModified;
@@ -1383,8 +1427,8 @@ TileXRComm::~TileXRComm()
 {
     {
         lock_guard<mutex> lock(g_mtx);
-        if (g_localPeerMemMap.find(uid_) != g_localPeerMemMap.end()) {
-            g_localPeerMemMap.erase(uid_);
+        if (g_localPeerMemAllocationMap.find(uid_) != g_localPeerMemAllocationMap.end()) {
+            g_localPeerMemAllocationMap.erase(uid_);
         }
     }
     if (udmaContext_ != nullptr) {
@@ -1405,7 +1449,8 @@ TileXRComm::~TileXRComm()
     }
     FreePeerMem(commArgs_.dumpAddr);
     ResetProfilingState();
-    FreePeerMem(peerMem_[rank_]);
+    FreePeerMem(peerMemAllocation_[rank_]);
+    peerMem_[rank_] = nullptr;
     FreePeerMem(creditIpcMem_[rank_]);
     FreePeerMem(commArgsPtr_);
     ResetSDMAState();

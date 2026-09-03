@@ -29,6 +29,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME test_dispatch_memory_trace
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/test_dispatch_memory_trace.py")
+    add_test(NAME test_msprof_kernel_stats
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/test_msprof_kernel_stats.py")
 endif()
 set(ASCEND_HOME_PATH "${_tilexr_default_ascend_home_path}" CACHE PATH "Ascend toolkit path")
 
@@ -62,6 +65,101 @@ set(TILEXR_EP_TEST_INCLUDE_DIRS
     ${TILEXR_ROOT}/src/moonep/planner_v2/common
     ${TILEXR_ROOT}/src/moonep/planner_v2/host
 )
+
+set(TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR "${CMAKE_CURRENT_BINARY_DIR}/fake_runtime_include")
+file(MAKE_DIRECTORY "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/acl")
+file(MAKE_DIRECTORY "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/runtime")
+file(WRITE "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/acl/acl_base.h" [=[
+#ifndef TILEXR_EP_FAKE_ACL_BASE_H
+#define TILEXR_EP_FAKE_ACL_BASE_H
+typedef int aclError;
+typedef void *aclrtStream;
+#define ACL_SUCCESS 0
+#endif
+]=])
+file(WRITE "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/acl/acl_rt.h" [=[
+#ifndef TILEXR_EP_FAKE_ACL_RT_H
+#define TILEXR_EP_FAKE_ACL_RT_H
+#include <stddef.h>
+#include <stdint.h>
+#include "acl_base.h"
+typedef enum aclrtDevAttr {
+    ACL_DEV_ATTR_VECTOR_CORE_NUM = 0,
+    ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE = 1
+} aclrtDevAttr;
+typedef enum aclrtMemcpyKind {
+    ACL_MEMCPY_HOST_TO_DEVICE = 1,
+    ACL_MEMCPY_DEVICE_TO_HOST = 2,
+    ACL_MEMCPY_DEVICE_TO_DEVICE = 3
+} aclrtMemcpyKind;
+#ifdef __cplusplus
+extern "C" {
+#endif
+aclError aclrtGetDevice(int32_t *deviceId);
+aclError aclrtGetDeviceInfo(uint32_t deviceId, aclrtDevAttr attr, int64_t *value);
+aclError aclrtSynchronizeStream(aclrtStream stream);
+aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
+    size_t count, aclrtMemcpyKind kind);
+#ifdef __cplusplus
+}
+#endif
+#endif
+]=])
+file(WRITE "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/runtime/kernel.h" [=[
+#ifndef TILEXR_EP_FAKE_RUNTIME_KERNEL_H
+#define TILEXR_EP_FAKE_RUNTIME_KERNEL_H
+#include <stddef.h>
+#include <stdint.h>
+typedef char char_t;
+typedef int32_t rtError_t;
+typedef void *rtStream_t;
+typedef struct rtDevBinary {
+    uint32_t magic;
+    uint32_t version;
+    const void *data;
+    uint64_t length;
+} rtDevBinary_t;
+typedef struct rtArgsEx {
+    void *args;
+    size_t argsSize;
+} rtArgsEx_t;
+typedef struct rtSmDesc {
+    uint32_t reserved;
+} rtSmDesc_t;
+typedef struct rtTaskCfgInfo {
+    uint32_t schemMode;
+    uint32_t localMemorySize;
+} rtTaskCfgInfo_t;
+#define RT_ERROR_NONE 0
+#ifdef __cplusplus
+extern "C" {
+#endif
+rtError_t rtDevBinaryRegister(const rtDevBinary_t *binary, void **handle);
+rtError_t rtFunctionRegister(void *handle, const void *signature,
+    const char_t *name, const void *kernelInfoExt, uint32_t flags);
+rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim,
+    rtArgsEx_t *argsInfo, rtSmDesc_t *smDesc, rtStream_t stream,
+    uint32_t flags, const rtTaskCfgInfo_t *cfgInfo);
+#ifdef __cplusplus
+}
+#endif
+#endif
+]=])
+file(WRITE "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/runtime/rt.h" [=[
+#ifndef TILEXR_EP_FAKE_RUNTIME_RT_H
+#define TILEXR_EP_FAKE_RUNTIME_RT_H
+#include <stdint.h>
+typedef int32_t rtError_t;
+#define RT_ERROR_NONE 0
+#ifdef __cplusplus
+extern "C" {
+#endif
+rtError_t rtGetSocVersion(char *version, const uint32_t maxLen);
+#ifdef __cplusplus
+}
+#endif
+#endif
+]=])
 foreach(dir
     "${ASCEND_DRIVER_PATH}/kernel/inc"
     "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc"
@@ -188,6 +286,21 @@ add_executable(test_tilexr_ep_host_validation
     ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
 )
 
+add_executable(test_tilexr_ep_kernel_launch
+    unit/test_tilexr_ep_kernel_launch.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_kernel_launch.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_dispatch_memory_host.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
+)
+
+add_executable(test_tilexr_ep_memory_unsupported
+    unit/test_tilexr_ep_memory_unsupported.cpp
+    ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_dispatch.cpp
+    ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_combine.cpp
+)
+
 target_include_directories(test_tilexr_ep_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/demo
@@ -200,6 +313,18 @@ target_include_directories(test_tilexr_ep_expert_ids PRIVATE
 target_include_directories(test_tilexr_ep_host_validation PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
+
+target_include_directories(test_tilexr_ep_kernel_launch BEFORE PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+)
+
+target_include_directories(test_tilexr_ep_memory_unsupported BEFORE PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}
+    ${TILEXR_EP_TEST_INCLUDE_DIRS}
+)
+target_compile_definitions(test_tilexr_ep_memory_unsupported PRIVATE
+    TILEXR_EP_MEMORY_SUPPORTED=0)
 
 target_include_directories(test_tilexr_ep_plan_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
@@ -232,6 +357,8 @@ target_include_directories(test_tilexr_ep_plan_host PRIVATE
 add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_expert_ids COMMAND test_tilexr_ep_expert_ids)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
+add_test(NAME test_tilexr_ep_kernel_launch COMMAND test_tilexr_ep_kernel_launch)
+add_test(NAME test_tilexr_ep_memory_unsupported COMMAND test_tilexr_ep_memory_unsupported)
 add_test(NAME test_tilexr_moonep_planner_public_abi COMMAND test_tilexr_moonep_planner_public_abi)
 add_test(NAME test_tilexr_ep_plan_layout COMMAND test_tilexr_ep_plan_layout)
 add_test(NAME test_tilexr_ep_plan_reference COMMAND test_tilexr_ep_plan_reference)
@@ -244,6 +371,8 @@ install(TARGETS
     test_tilexr_ep_layout
     test_tilexr_ep_expert_ids
     test_tilexr_ep_host_validation
+    test_tilexr_ep_kernel_launch
+    test_tilexr_ep_memory_unsupported
     test_tilexr_ep_plan_layout
     test_tilexr_ep_plan_reference
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

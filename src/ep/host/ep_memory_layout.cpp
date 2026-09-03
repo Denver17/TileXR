@@ -1,6 +1,8 @@
 #include "ep_memory_layout.h"
 
 #include <algorithm>
+#include <cerrno>
+#include <cstdlib>
 #include <limits>
 
 #include "comm_args.h"
@@ -51,6 +53,34 @@ bool CeilDivInt64(int64_t value, int64_t divisor, int64_t *out)
 
 } // namespace
 
+int TileXREpResolveMemoryBlockDim(uint32_t vectorCoreNum, uint32_t minimumBlockDim,
+    const char *overrideValue, uint32_t *blockDim)
+{
+    if (blockDim == nullptr || minimumBlockDim == 0U || vectorCoreNum < minimumBlockDim ||
+        vectorCoreNum > kEpMemoryMaxVectorCoreNum) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (overrideValue == nullptr || overrideValue[0] == '\0') {
+        *blockDim = vectorCoreNum;
+        return TileXR::TILEXR_SUCCESS;
+    }
+    for (const char *cursor = overrideValue; *cursor != '\0'; ++cursor) {
+        if (*cursor < '0' || *cursor > '9') {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    }
+
+    errno = 0;
+    char *end = nullptr;
+    const unsigned long long parsed = std::strtoull(overrideValue, &end, 10);
+    if (errno != 0 || end == overrideValue || end == nullptr || *end != '\0' ||
+        parsed < minimumBlockDim || parsed > vectorCoreNum || parsed > kEpMemoryMaxVectorCoreNum) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *blockDim = static_cast<uint32_t>(parsed);
+    return TileXR::TILEXR_SUCCESS;
+}
+
 uint32_t TileXREpMemoryCountCoreNum(int64_t totalExpertNum, int64_t rscvStatusNum, uint32_t blockDim)
 {
     if (totalExpertNum <= 0 || rscvStatusNum <= 0 || blockDim < 2) {
@@ -98,7 +128,8 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
     if (!AddInt64(sharedExpertRankNum, moeExpertNum, &totalExpertNum)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    const bool useAllCoreCount = bs < static_cast<int64_t>(kEpMemoryAllCoreCountBsThreshold);
+    const bool isSmallBs = static_cast<uint64_t>(bs) < kEpMemorySmallBsThreshold;
+    const bool useAllCoreCount = isSmallBs;
     if (useAllCoreCount) {
         uint64_t count = static_cast<uint64_t>(next.rscvStatusNum) /
             kEpMemoryCumsumStatusPerCore;

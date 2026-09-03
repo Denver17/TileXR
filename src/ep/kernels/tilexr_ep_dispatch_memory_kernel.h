@@ -8,9 +8,7 @@
 #include "ep_dispatch_memory_profile.h"
 #include "ep_memory_window.h"
 #include "kernel_operator.h"
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 #include "tilexr_ep_mxfp8_quant.h"
-#endif
 #include "tilexr_types.h"
 
 #define FLOAT_OVERFLOW_MODE_CTRL 60
@@ -24,9 +22,8 @@ constexpr int32_t FULL_MESH_MAX_UB_SIZE = 190 * 1024;
 constexpr uint32_t SPLIT_BLOCK_DATA_SIZE = 480U;
 constexpr uint32_t SPLIT_BLOCK_DATA_COUNT = 120U;
 constexpr uint32_t SIZE_ALIGN_256 = 256U;
-constexpr uint32_t CUMSUM_MAX_CORE_NUM = 8U;
+constexpr uint32_t CUMSUM_MAX_CORE_NUM = TileXREp::kEpMemoryMaxCountCoreNum;
 constexpr uint32_t CUMSUM_STATUS_PER_CORE = TileXREp::kEpMemoryCumsumStatusPerCore;
-constexpr uint32_t ALL_CORE_COUNT_BS_THRESHOLD = TileXREp::kEpMemoryAllCoreCountBsThreshold;
 constexpr uint8_t VALID_EVENT_FLAG_NUM = 8U;
 constexpr uint8_t LOCAL_COPY_BUFFER_NUM = 2U;
 constexpr uint32_t DATA_COPY_MAX_BLOCK_COUNT = 4095U;
@@ -36,6 +33,7 @@ constexpr uint8_t BUFFER_NUM = 2U;
 constexpr uint32_t STATE_OFFSET = 32U;
 constexpr uint8_t COMBINE_IN_DATA_SIZE = 2U;
 constexpr int32_t BITS_PER_BYTE = 8;
+constexpr uint32_t VECTOR_COUNT_MIN_ROUTE_NUM = SIZE_ALIGN_256 / sizeof(int32_t);
 constexpr uint64_t A5_MTE_STATE_WIN_SIZE = TileXREp::kEpMemoryStateWindowBytes;
 constexpr int64_t ACTIVE_MASK_NONE = 0;
 constexpr int64_t ACTIVE_MASK_TOKEN = 1;
@@ -106,8 +104,6 @@ private:
     int64_t magic_{0};
 };
 
-
-
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 class MoeDispatchMemory {
 public:
@@ -122,6 +118,9 @@ public:
 
 private:
     __aicore__ inline void ExpIdsCopyAndMaskCal();
+    __aicore__ inline bool IsDoubleGroupRankSize() const;
+    __aicore__ inline void CalSendRound();
+    __aicore__ inline void SyncBeforeSendRound(uint32_t curRound);
     __aicore__ inline void TokenActiveMaskCal();
     __aicore__ inline void SetDataStatus();
     __aicore__ inline void SetTilingDataAndCal();
@@ -135,7 +134,13 @@ private:
     __aicore__ inline int32_t CalExpertCnt(uint32_t expertId, uint32_t maskCnt);
     __aicore__ inline void CalAndSendCnt();
     __aicore__ inline void CalAndSendCntByRankAndExpert();
-    __aicore__ inline void SendExpertCntRange(uint32_t startExpertId, uint32_t endExpertId);
+    __aicore__ inline void CalAndSendCntByLegacyReduce(
+        uint32_t startExpertId, uint32_t endExpertId, uint32_t maskCnt);
+    __aicore__ inline void CalAndSendCntByVectorRange(
+        uint32_t startExpertId, uint32_t endExpertId, uint32_t sendExpertNum,
+        uint32_t maskCnt, uint32_t maskAllocBytes);
+    __aicore__ inline void SendExpertCntRange(
+        uint32_t startExpertId, uint32_t endExpertId, uint32_t curRound);
     __aicore__ inline void BufferInit();
     __aicore__ inline void WaitDispatchClearStatus();
     __aicore__ inline void GatherSumRecvCnt(LocalTensor<float> &gatherMaskOutTensor,
@@ -157,8 +162,7 @@ private:
         TBuf<> tBuf, uint32_t validNum, uint32_t localExpertNum);
     __aicore__ inline void InitProfile(uint64_t startCycles, int64_t magic);
     __aicore__ inline void RecordProfilePoint(uint32_t index);
-    __aicore__ inline uint64_t BeginProfileMetric();
-    __aicore__ inline void EndProfileMetric(uint32_t index, uint64_t startCycles);
+    __aicore__ inline void RecordTransferEnd(bool senderRole);
     __aicore__ inline void WriteProfile();
     __aicore__ inline void SplitToCore(uint32_t curSendCnt, uint32_t curUseAivNum, uint32_t &startTokenId,
                                        uint32_t &endTokenId, uint32_t &sendTokenNum, bool isFront = true);
@@ -166,12 +170,10 @@ private:
     __aicore__ inline void CalTokenSendExpertCnt(uint32_t dstExpertId, int32_t calCnt, int32_t &curExpertCnt);
     __aicore__ inline void TokenToExpert(GlobalTensor<uint8_t> dstWinGMTensor, TQue<QuePosition::VECIN, 1> inQueue,
                                         uint32_t srcTokenIndex, uint32_t toExpertIndex);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     __aicore__ inline void TokenToExpertInQuant(GlobalTensor<uint8_t> dstWinGMTensor,
         TQue<QuePosition::VECIN, 1> inQueue, uint32_t srcTokenIndex, uint32_t toExpertIndex);
     template <typename Fp8Type>
     __aicore__ inline void QuantMxfp8(LocalTensor<uint8_t> &outLocal, LocalTensor<XType> &inLocal);
-#endif
     __aicore__ inline GM_ADDR GetWindAddrByRankId(const int32_t rankId)
     {
         return ctx_.GetWindAddrByRankId(rankId) + winDataSizeOffset_;
@@ -264,6 +266,8 @@ private:
     uint32_t endId_;
     uint32_t sendNum_;
     uint32_t statusCntAlign_;
+    uint32_t statusHistogramOffset_{0};
+    uint32_t statusBufSize_{0};
     uint32_t tBufRealSize_{0};
     uint64_t winDataSizeOffset_{0};
     uint64_t expertPerSizeOnWin_{0};
@@ -271,6 +275,7 @@ private:
     uint64_t sendToMoeExpTokenCnt_{0};
     bool isTokenMaskFlag_ = false;
     bool isShareExpertRankFlag_ = false;
+    bool isSmallBs_ = false;
     bool useAllCoreCount_ = false;
     uint32_t expertTokenNumsType_{1};
     int32_t expertIdsCnt_{0};
@@ -295,9 +300,8 @@ private:
     uint32_t copyInAxisH_{0};
     uint32_t copyOutAxisH_{0};
     uint64_t totalUbSize_{0};
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+    uint32_t sendRoundNum_{1U};
     int64_t originalOverflowMode_{0};
-#endif
     TileXRDispatchMemoryContext ctx_;
 
     DataCopyParams hCopyParams_;
@@ -317,7 +321,6 @@ private:
     uint64_t profilePayloadPollMisses_{0U};
     uint64_t profileMaxCopyTokenCount_{0U};
     uint64_t profileTimePoint_[TileXREp::kEpDispatchMemoryProfileTimePointCapacity];
-    uint64_t profileMetric_[TileXREp::kEpDispatchMemoryProfileMetricCapacity];
 #endif
 };
 
@@ -353,9 +356,6 @@ MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::InitProfile(
     for (uint32_t index = 0U; index < TileXREp::kEpDispatchMemoryProfileTimePointCapacity; ++index) {
         profileTimePoint_[index] = 0U;
     }
-    for (uint32_t index = 0U; index < TileXREp::kEpDispatchMemoryProfileMetricCapacity; ++index) {
-        profileMetric_[index] = 0U;
-    }
     profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_BEGIN] = startCycles;
 #else
     (void)startCycles;
@@ -378,28 +378,21 @@ MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::RecordProfilePoint(
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
-__aicore__ inline uint64_t
-MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::BeginProfileMetric()
-{
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    return static_cast<uint64_t>(GetSystemCycle());
-#else
-    return 0U;
-#endif
-}
-
-template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void
-MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::EndProfileMetric(
-    uint32_t index, uint64_t startCycles)
+MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::RecordTransferEnd(bool senderRole)
 {
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    if (index < TileXREp::kEpDispatchMemoryProfileMetricCapacity) {
-        profileMetric_[index] += static_cast<uint64_t>(GetSystemCycle()) - startCycles;
+    const uint64_t transferEndCycles = static_cast<uint64_t>(GetSystemCycle());
+    if (profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END] == 0U) {
+        profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END] =
+            transferEndCycles;
+    }
+    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_END] = transferEndCycles;
+    if (senderRole) {
+        profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_END] = transferEndCycles;
     }
 #else
-    (void)index;
-    (void)startCycles;
+    (void)senderRole;
 #endif
 }
 
@@ -451,6 +444,8 @@ MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WriteProfile()
         profileMaxCopyTokenCount_;
     profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_BLOCKS_PER_TOKEN] =
         blockCntPerToken_;
+    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT] =
+        sendRoundNum_;
 
     __gm__ TileXREp::EpDispatchMemoryProfileRecord *record =
         reinterpret_cast<__gm__ TileXREp::EpDispatchMemoryProfileRecord *>(
@@ -471,7 +466,7 @@ MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WriteProfile()
         record->timePoint[index] = profileTimePoint_[index];
     }
     for (uint32_t index = 0U; index < TileXREp::kEpDispatchMemoryProfileMetricCapacity; ++index) {
-        record->metric[index] = profileMetric_[index];
+        record->metric[index] = 0U;
     }
 
     GlobalTensor<uint8_t> recordGlobal;
@@ -520,7 +515,8 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SetTiling
     expertPerSizeOnWin_ = axisMaxBS_ * hCommuSize_;
     rscvStatusNum_ = isShareExpertRankFlag_ ? epWorldSize_ : epWorldSize_ * moeExpertNumPerRank_;
     totalExpertNum_ = sharedExpertRankNum_ + moeExpertNum_;
-    useAllCoreCount_ = axisBS_ < ALL_CORE_COUNT_BS_THRESHOLD;
+    isSmallBs_ = axisBS_ < TileXREp::kEpMemorySmallBsThreshold;
+    useAllCoreCount_ = isSmallBs_;
     if (useAllCoreCount_) {
         aivUsedCumSum_ = Ceil(rscvStatusNum_, CUMSUM_STATUS_PER_CORE);
     } else {
@@ -530,12 +526,9 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SetTiling
     aivUsedCumSum_ = aivUsedCumSum_ >= aivNum_ / 2 ? aivNum_ / 2 : aivUsedCumSum_;
     aivUsedCumSum_ = aivUsedCumSum_ >= CUMSUM_MAX_CORE_NUM ? CUMSUM_MAX_CORE_NUM : aivUsedCumSum_;
     aivUsedCumSum_ = aivUsedCumSum_ >= rscvStatusNum_ ? rscvStatusNum_ : aivUsedCumSum_;
-    if (useAllCoreCount_) {
-        uint32_t countNumPerCore = Ceil(totalExpertNum_, aivNum_);
-        statusCntAlign_ = Ceil(countNumPerCore, UB_ALIGN_DATA_COUNT) * UB_ALIGN_DATA_COUNT;
-    } else {
-        statusCntAlign_ = Ceil(totalExpertNum_, UB_ALIGN_DATA_COUNT) * UB_ALIGN_DATA_COUNT;
-    }
+    uint32_t countCoreNum = useAllCoreCount_ ? aivNum_ : aivUsedCumSum_;
+    uint32_t maxCountPerCore = Ceil(totalExpertNum_, countCoreNum);
+    statusCntAlign_ = Ceil(maxCountPerCore, UB_ALIGN_DATA_COUNT) * UB_ALIGN_DATA_COUNT;
     aivUsedAllToAll_ = aivNum_ - aivUsedCumSum_;
     if (sharedExpertRankNum_ != 0U) {
         sharedUsedAivNum_ = aivUsedAllToAll_ * sharedExpertNum_ / (axisK_ + sharedExpertNum_);
@@ -553,13 +546,17 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SetTiling
         }
     }
     totalUbSize_ = FULL_MESH_MAX_UB_SIZE;
+    statusHistogramOffset_ = statusCntAlign_ * UB_ALIGN_DATA_COUNT;
+    const uint32_t histogramBytes =
+        Ceil(statusCntAlign_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN;
+    statusBufSize_ = statusCntAlign_ * STATE_OFFSET + histogramBytes;
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SetDataStatus()
 {
     statusDataSpaceGM_ = ctx_.GetStatusDataSpaceGm();
-    uint64_t hSizeAlignCombine =
+    const uint64_t hSizeAlignCombine =
         Ceil(axisH_ * COMBINE_IN_DATA_SIZE, SPLIT_BLOCK_DATA_SIZE) * SPLIT_BLOCK_SIZE;
     winDataSizeOffset_ = axisMaxBS_ * (axisK_ + sharedExpertNum_) * hSizeAlignCombine;
 }
@@ -568,8 +565,9 @@ template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_ADDR commArgs, GM_ADDR x,
     GM_ADDR expertIds, GM_ADDR xActiveMask, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut,
     GM_ADDR expertTokenNumsOut,
-    GM_ADDR sendCountsOut, GM_ADDR assistInfoForCombineOut, int64_t bs, int64_t h, int64_t topK,
-    int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t globalBs,
+    GM_ADDR sendCountsOut, GM_ADDR assistInfoForCombineOut, int64_t bs, int64_t h,
+    int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum,
+    int64_t sharedExpertRankNum, int64_t globalBs,
     int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t expandXOutDtype, int64_t magic, TPipe *pipe)
 {
@@ -579,17 +577,16 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     const uint64_t profileStartCycles = 0U;
 #endif
     InitProfile(profileStartCycles, magic);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
     originalOverflowMode_ = AscendC::GetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>();
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
-#endif
     tpipe_ = pipe;
     (void)quantMode;
     (void)expandXOutDtype;
     tpipe_->InitBuffer(calBeginBuf_, UB_ALIGN);
     aivId_ = GetBlockIdx();
     ctx_.Init(commArgs, magic);
-
+    epRankId_ = static_cast<int32_t>(ctx_.GetEpRankId());
+    epWorldSize_ = ctx_.GetEpWorldSize();
     axisBS_ = static_cast<uint32_t>(bs);
     axisH_ = static_cast<uint32_t>(h);
     axisK_ = static_cast<uint32_t>(topK);
@@ -598,8 +595,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     sharedExpertRankNum_ = static_cast<uint32_t>(sharedExpertRankNum);
     globalBS_ = static_cast<uint32_t>(globalBs);
     expertTokenNumsType_ = static_cast<uint32_t>(expertTokenNumsType);
-    epRankId_ = static_cast<int32_t>(ctx_.GetEpRankId());
-    epWorldSize_ = ctx_.GetEpWorldSize();
     aivNum_ = GetBlockNum();
     axisMaxBS_ = globalBS_ / epWorldSize_;
     isTokenMaskFlag_ = activeMaskType == ACTIVE_MASK_TOKEN;
@@ -611,7 +606,8 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     dynamicScalesOutGMTensor_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(dynamicScalesOut));
 
     SetTilingDataAndCal();
-    uint64_t workspaceBytes = Ceil(static_cast<uint64_t>(aivNum_) * rscvStatusNum_ * sizeof(int32_t),
+    const uint64_t workspaceBytes = Ceil(
+        static_cast<uint64_t>(aivNum_) * rscvStatusNum_ * sizeof(int32_t),
         static_cast<uint64_t>(UB_ALIGN)) * UB_ALIGN;
     SetDataStatus();
 
@@ -624,7 +620,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     selfRankWinInGMTensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(statusDataSpaceGM_));
     windowGM_ = GetWindAddrByRankId(epRankId_);
     hCopyParams_ = {1U, static_cast<uint32_t>(copyInAxisH_ * sizeof(XType)), 0U, 0U};
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_STATIC_INIT_END);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -637,7 +632,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::FillTripl
     xOutTint32(tokenQuantAlign_ + 2) = k;
 }
 
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 template <typename Fp8Type>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::QuantMxfp8(
@@ -665,13 +659,9 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
 {
     DataCopyPadParams copyPadParams{true, 0U, 0U, 0U};
     LocalTensor<XType> xInTensor = inQueue.AllocTensor<XType>();
-    const uint64_t inputLoadStart = BeginProfileMetric();
     DataCopyPad(xInTensor, xGMTensor_[srcTokenIndex * axisH_], hCopyParams_, copyPadParams);
     inQueue.EnQue(xInTensor);
     xInTensor = inQueue.DeQue<XType>();
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_INPUT_LOAD,
-        inputLoadStart);
-    const uint64_t quantStart = BeginProfileMetric();
     if constexpr (IsMxfp8E4M3) {
         QuantMxfp8<fp8_e4m3fn_t>(quantTensor_, xInTensor);
     } else {
@@ -679,9 +669,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
     }
     inQueue.FreeTensor<XType>(xInTensor);
     SyncFunc<AscendC::HardEvent::V_S>();
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_QUANT,
-        quantStart);
-    const uint64_t packStart = BeginProfileMetric();
     FillTriple(quantTensor_, srcTokenIndex, toExpertIndex);
     SyncFunc<AscendC::HardEvent::S_V>();
     AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(syncFlagId_ % sendTokenBufNum_);
@@ -693,19 +680,13 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
         uint8_t(blockCntPerToken_), {1, 1, 16, 15});
     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(syncFlagId_ % sendTokenBufNum_);
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(syncFlagId_ % sendTokenBufNum_);
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_PACK,
-        packStart);
-    const uint64_t storeStart = BeginProfileMetric();
     DataCopy(dstWinGMTensor, outTensor_[(syncFlagId_ % sendTokenBufNum_) * axisHCommu_], axisHCommu_);
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_STORE_ISSUE,
-        storeStart);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(syncFlagId_ % sendTokenBufNum_);
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
     ++profileIssuedRoutes_;
 #endif
     ++syncFlagId_;
 }
-#endif
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToExpert(
@@ -714,14 +695,10 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
 {
     DataCopyPadParams copyPadParams{false, 0U, 0U, 0U};
     LocalTensor<XType> xInTensor = inQueue.AllocTensor<XType>();
-    const uint64_t inputLoadStart = BeginProfileMetric();
     DataCopyPad(xInTensor, xGMTensor_[srcTokenIndex * axisH_], hCopyParams_, copyPadParams);
     inQueue.EnQue(xInTensor);
     xInTensor = inQueue.DeQue<XType>();
     SyncFunc<AscendC::HardEvent::MTE2_S>();
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_INPUT_LOAD,
-        inputLoadStart);
-    const uint64_t packStart = BeginProfileMetric();
     LocalTensor<uint8_t> xInTensorBytes = xInTensor.template ReinterpretCast<uint8_t>();
     FillTriple(xInTensorBytes, srcTokenIndex, toExpertIndex);
     SyncFunc<AscendC::HardEvent::S_V>();
@@ -736,12 +713,7 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
     inQueue.FreeTensor<XType>(xInTensor);
     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(syncFlagId_ % sendTokenBufNum_);
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(syncFlagId_ % sendTokenBufNum_);
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_PACK,
-        packStart);
-    const uint64_t storeStart = BeginProfileMetric();
     DataCopy(dstWinGMTensor, outTensor_[(syncFlagId_ % sendTokenBufNum_) * axisHCommu_], axisHCommu_);
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_DISPATCH_STORE_ISSUE,
-        storeStart);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(syncFlagId_ % sendTokenBufNum_);
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
     ++profileIssuedRoutes_;
@@ -806,15 +778,11 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SendToSha
         int32_t toRankId = idInSharedGroup + toSharedExpertIndex * rankNumPerSharedExpert_;
         dstWinGMTensor.SetGlobalBuffer((__gm__ uint8_t *)(uint64_t(GetWindAddrByRankId(toRankId))
             + expertPerSizeOnWin_ * epRankId_ + sendTokenIndex * hCommuSize_));
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         if constexpr (IsMxfp8) {
             TokenToExpertInQuant(dstWinGMTensor, inQueue, sendTokenIndex, axisK_ + toSharedExpertIndex);
         } else {
-#endif
             TokenToExpert(dstWinGMTensor, inQueue, sendTokenIndex, axisK_ + toSharedExpertIndex);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         }
-#endif
     }
     for (int i = 0; i < sendTokenBufNum_; i ++) {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(i % sendTokenBufNum_);
@@ -838,33 +806,50 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SendToMoe
         AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(i % sendTokenBufNum_);
     }
 
-    for (int32_t index = aivId_; index < validTokenNum; index += moeUsedAivNum_) {
+    // // Rotate the global route order per rank while preserving the original core partition.
+    // const uint32_t routeOffset = static_cast<uint32_t>(epRankId_) % validTokenNum;
+    // for (uint32_t position = aivId_; position < validTokenNum; position += moeUsedAivNum_) {
+    //     uint32_t index = position + routeOffset;
+    //     if (index >= validTokenNum) {
+    //         index -= validTokenNum;
+    //     }
+    for (uint32_t curRound = 0U; curRound < sendRoundNum_; ++curRound) {
+        SyncBeforeSendRound(curRound);
+        for (int32_t index = aivId_; index < validTokenNum; index += moeUsedAivNum_) {
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-        ++profileAssignedRoutes_;
+            if (curRound == 0U) {
+                ++profileAssignedRoutes_;
+            }
 #endif
-        const uint32_t activeTokenIndex = index / axisK_;
-        int32_t tokenId = isTokenMaskFlag_ ?
-            static_cast<int32_t>(validBsIndexTensor_.GetValue(activeTokenIndex)) :
-            static_cast<int32_t>(activeTokenIndex);
-        int32_t topKId = index % axisK_;
-        int32_t expertId = validExpertIdsTensor_(index);
-        if (expertId >= moeExpertNum_ || expertId < 0)
-            continue;
-        int32_t toRankId = expertId / moeExpertNumPerRank_ + sharedExpertRankNum_;
-        CalTokenSendExpertCnt(expertId, index, dstTokenIdx);
+            const uint32_t activeTokenIndex = index / axisK_;
+            int32_t tokenId = isTokenMaskFlag_ ?
+                static_cast<int32_t>(validBsIndexTensor_.GetValue(activeTokenIndex)) :
+                static_cast<int32_t>(activeTokenIndex);
+            int32_t topKId = index % axisK_;
+            int32_t expertId = validExpertIdsTensor_(index);
+            if (expertId >= moeExpertNum_ || expertId < 0) {
+                continue;
+            }
+            int32_t toRankId = expertId / moeExpertNumPerRank_ + sharedExpertRankNum_;
+            const uint32_t targetGroupId = (static_cast<uint32_t>(toRankId) /
+                TileXREp::kEpMemoryDoubleGroupStripeRankNum) & 1U;
+            const uint32_t localGroupId = (static_cast<uint32_t>(epRankId_) /
+                TileXREp::kEpMemoryDoubleGroupStripeRankNum) & 1U;
+            if (sendRoundNum_ > 1U &&
+                targetGroupId != (localGroupId ^ curRound)) {
+                continue;
+            }
+            CalTokenSendExpertCnt(expertId, index, dstTokenIdx);
 
-        dstWinGMTensor.SetGlobalBuffer((__gm__ uint8_t *)(uint64_t(GetWindAddrByRankId(toRankId))
-            + expertPerSizeOnWin_ * ((epRankId_ + toRankId) % epWorldSize_ * moeExpertNumPerRank_
-            + expertId % moeExpertNumPerRank_) + dstTokenIdx * hCommuSize_));
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-        if constexpr (IsMxfp8) {
-            TokenToExpertInQuant(dstWinGMTensor, inQueue, tokenId, topKId);
-        } else {
-#endif
-            TokenToExpert(dstWinGMTensor, inQueue, tokenId, topKId);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
+            dstWinGMTensor.SetGlobalBuffer((__gm__ uint8_t *)(uint64_t(GetWindAddrByRankId(toRankId))
+                + expertPerSizeOnWin_ * ((epRankId_ + toRankId) % epWorldSize_ * moeExpertNumPerRank_
+                + expertId % moeExpertNumPerRank_) + dstTokenIdx * hCommuSize_));
+            if constexpr (IsMxfp8) {
+                TokenToExpertInQuant(dstWinGMTensor, inQueue, tokenId, topKId);
+            } else {
+                TokenToExpert(dstWinGMTensor, inQueue, tokenId, topKId);
+            }
         }
-#endif
     }
 
     for (int i = 0; i < sendTokenBufNum_; i ++) {
@@ -885,7 +870,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalcSendT
         sendTokenBufNum = VALID_EVENT_FLAG_NUM;
     }
     sendTokenBufNum_ = static_cast<uint8_t>(sendTokenBufNum);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_SEND_BUFFER_INIT_END);
     if (sendTokenBufNum_ == 0) { return; }
 
 
@@ -936,16 +920,22 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::AllToAllD
     tpipe_->InitBuffer(calTempBuf, calTokenIdxBuffSize);
     workLocalTensor_ = calTempBuf.Get<float>();
     ExpIdsCopyAndMaskCal();
+    CalSendRound();
+    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_END);
     if (useAllCoreCount_) {
-        tpipe_->InitBuffer(statusBuf_, statusCntAlign_ * UB_ALIGN);
+        tpipe_->InitBuffer(statusBuf_, statusBufSize_);
         statusTensor_ = statusBuf_.Get<int32_t>();
         CalAndSendCnt();
     }
     if (activeMaskBsCnt_ == 0) {
+        for (uint32_t curRound = 0U; curRound < sendRoundNum_; ++curRound) {
+            SyncBeforeSendRound(curRound);
+        }
+        RecordTransferEnd(true);
         return;
     }
     AllToAllDispatchA5(inQueue, outBuf);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_SEND_ISSUE_END);
+    RecordTransferEnd(true);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1013,15 +1003,13 @@ template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalAndSendCnt()
 {
     CalAndSendCntByRankAndExpert();
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_COUNT_PUBLISH_END);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SendExpertCntRange(
-    uint32_t startExpertId, uint32_t endExpertId)
+    uint32_t startExpertId, uint32_t endExpertId, uint32_t curRound)
 {
     GlobalTensor<int32_t> rankGMTensor;
-    const uint64_t storeStart = BeginProfileMetric();
     for (uint32_t expertId = startExpertId; expertId < endExpertId;) {
         bool isSharedExpert = expertId < sharedExpertRankNum_;
         uint32_t moeExpertId = isSharedExpert ? 0U : expertId - sharedExpertRankNum_;
@@ -1035,18 +1023,24 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SendExper
             sendExpertNum = sendExpertNum < expertNumLeftInRank ? sendExpertNum : expertNumLeftInRank;
         }
 
-        uint32_t offset = STATE_OFFSET * static_cast<uint32_t>(epRankId_) +
-            localExpertId * epWorldSize_ * STATE_OFFSET;
-        GM_ADDR rankGM = reinterpret_cast<__gm__ uint8_t *>(GetWindStateAddrByRankId(dstRankId)) + offset;
-        rankGMTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(rankGM));
-        DataCopyParams cntCopyParams{static_cast<uint16_t>(sendExpertNum), 1U, 0U,
-            static_cast<uint16_t>(epWorldSize_ - 1U)};
-        DataCopy<int32_t>(rankGMTensor,
-            statusTensor_[(expertId - startExpertId) * UB_ALIGN_DATA_COUNT], cntCopyParams);
+        const uint32_t targetGroupId =
+            (dstRankId / TileXREp::kEpMemoryDoubleGroupStripeRankNum) & 1U;
+        const uint32_t localGroupId = (static_cast<uint32_t>(epRankId_) /
+            TileXREp::kEpMemoryDoubleGroupStripeRankNum) & 1U;
+        const bool isCurrentRound = sendRoundNum_ == 1U ||
+            targetGroupId == (localGroupId ^ curRound);
+        if (isCurrentRound) {
+            uint32_t offset = STATE_OFFSET * static_cast<uint32_t>(epRankId_) +
+                localExpertId * epWorldSize_ * STATE_OFFSET;
+            GM_ADDR rankGM = reinterpret_cast<__gm__ uint8_t *>(GetWindStateAddrByRankId(dstRankId)) + offset;
+            rankGMTensor.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(rankGM));
+            DataCopyParams cntCopyParams{static_cast<uint16_t>(sendExpertNum), 1U, 0U,
+                static_cast<uint16_t>(epWorldSize_ - 1U)};
+            DataCopy<int32_t>(rankGMTensor,
+                statusTensor_[(expertId - startExpertId) * UB_ALIGN_DATA_COUNT], cntCopyParams);
+        }
         expertId += sendExpertNum;
     }
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_COUNT_STORE_ISSUE,
-        storeStart);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1059,14 +1053,44 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalAndSen
     SplitToCore(totalExpertNum_, countCoreNum, startExpertId, endExpertId,
         sendExpertNum, useAllCoreCount_);
     if (sendExpertNum == 0) {
+        for (uint32_t curRound = 0U; curRound < sendRoundNum_; ++curRound) {
+            SyncBeforeSendRound(curRound);
+        }
         return;
     }
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
     profileCountRecords_ += sendExpertNum;
 #endif
 
-    const uint64_t computeStart = BeginProfileMetric();
     uint32_t maskCnt = isTokenMaskFlag_ ? activeMaskBsCnt_ * axisK_ : expertIdsCnt_;
+    bool useVectorRange = false;
+    uint32_t moeRecordBegin = startExpertId > sharedExpertRankNum_ ?
+        startExpertId : sharedExpertRankNum_;
+    uint32_t moeRecordEnd = endExpertId < totalExpertNum_ ? endExpertId : totalExpertNum_;
+    uint32_t maskDataBytes = Ceil(maskCnt, static_cast<uint32_t>(BITS_PER_BYTE));
+    uint32_t maskAllocBytes = Ceil(maskDataBytes, UB_ALIGN) * UB_ALIGN;
+    useVectorRange = maskCnt >= VECTOR_COUNT_MIN_ROUTE_NUM &&
+        moeRecordEnd > moeRecordBegin &&
+        2U * maskAllocBytes <= maxSize_ &&
+        maskCnt * sizeof(int32_t) <= maxSize_;
+    if (useVectorRange) {
+        CalAndSendCntByVectorRange(startExpertId, endExpertId, sendExpertNum,
+            maskCnt, maskAllocBytes);
+    }
+    if (!useVectorRange) {
+        CalAndSendCntByLegacyReduce(startExpertId, endExpertId, maskCnt);
+    }
+    SyncFunc<AscendC::HardEvent::S_MTE3>();
+    for (uint32_t curRound = 0U; curRound < sendRoundNum_; ++curRound) {
+        SyncBeforeSendRound(curRound);
+        SendExpertCntRange(startExpertId, endExpertId, curRound);
+    }
+}
+
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalAndSendCntByLegacyReduce(
+    uint32_t startExpertId, uint32_t endExpertId, uint32_t maskCnt)
+{
     uint64_t flagMask[2] = {0x0101010101010101ULL, 0ULL};
     Duplicate<int32_t>(statusTensor_, 0, statusCntAlign_ * UB_ALIGN_DATA_COUNT);
     PipeBarrier<PIPE_V>();
@@ -1078,10 +1102,68 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalAndSen
         uint32_t cntPosIndex = (expertId - startExpertId) * UB_ALIGN_DATA_COUNT + 1U;
         statusTensor_.SetValue(cntPosIndex, expertCnt);
     }
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_COUNT_COMPUTE,
-        computeStart);
-    SyncFunc<AscendC::HardEvent::S_MTE3>();
-    SendExpertCntRange(startExpertId, endExpertId);
+}
+
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalAndSendCntByVectorRange(
+    uint32_t startExpertId, uint32_t endExpertId, uint32_t sendExpertNum,
+    uint32_t maskCnt, uint32_t maskAllocBytes)
+{
+    LocalTensor<int32_t> localCountTensor = statusTensor_[statusHistogramOffset_];
+    LocalTensor<int32_t> selectedExpertIds = dstExpBuf_.Get<int32_t>();
+    LocalTensor<uint8_t> lowerMask = subExpBuf_.Get<uint8_t>();
+    LocalTensor<uint8_t> upperMask = lowerMask[maskAllocBytes];
+
+    Duplicate<int32_t>(statusTensor_, 0, statusCntAlign_ * UB_ALIGN_DATA_COUNT);
+    Duplicate<int32_t>(localCountTensor, 0, statusCntAlign_);
+
+    uint32_t moeRecordBegin = startExpertId > sharedExpertRankNum_ ?
+        startExpertId : sharedExpertRankNum_;
+    uint32_t moeRecordEnd = endExpertId < totalExpertNum_ ? endExpertId : totalExpertNum_;
+    uint32_t moeIdBegin = moeRecordBegin - sharedExpertRankNum_;
+    uint32_t moeIdEnd = moeRecordEnd - sharedExpertRankNum_;
+
+    Compares(lowerMask, validExpertIdsTensor_, static_cast<int32_t>(moeIdBegin),
+        AscendC::CMPMODE::GE, maskCnt);
+    Compares(upperMask, validExpertIdsTensor_, static_cast<int32_t>(moeIdEnd),
+        AscendC::CMPMODE::LT, maskCnt);
+    PipeBarrier<PIPE_V>();
+    And(lowerMask.ReinterpretCast<uint16_t>(), lowerMask.ReinterpretCast<uint16_t>(),
+        upperMask.ReinterpretCast<uint16_t>(),
+        static_cast<int32_t>(maskAllocBytes / sizeof(uint16_t)));
+    PipeBarrier<PIPE_V>();
+
+    uint64_t selectedCount = 0U;
+    GatherMask(selectedExpertIds, validExpertIdsTensor_,
+        lowerMask.ReinterpretCast<uint32_t>(), true, maskCnt,
+        {1U, 1U, 0U, 0U}, selectedCount);
+    SyncFunc<AscendC::HardEvent::V_S>();
+
+    for (uint32_t expertId = startExpertId;
+         expertId < moeRecordBegin; ++expertId) {
+        int32_t expertCnt = 0;
+        if (activeMaskBsCnt_ > 0U &&
+            expertId % rankNumPerSharedExpert_ ==
+                static_cast<uint32_t>(epRankId_) % rankNumPerSharedExpert_) {
+            expertCnt = static_cast<int32_t>(activeMaskBsCnt_);
+        }
+        localCountTensor.SetValue(expertId - startExpertId, expertCnt);
+    }
+
+    for (uint32_t index = 0U; index < static_cast<uint32_t>(selectedCount); ++index) {
+        int32_t moeExpertId = selectedExpertIds.GetValue(index);
+        uint32_t localRecord = static_cast<uint32_t>(moeExpertId) +
+            sharedExpertRankNum_ - startExpertId;
+        localCountTensor.SetValue(localRecord,
+            localCountTensor.GetValue(localRecord) + 1);
+    }
+
+    for (uint32_t localRecord = 0U; localRecord < sendExpertNum; ++localRecord) {
+        uint32_t recordOffset = localRecord * UB_ALIGN_DATA_COUNT;
+        statusTensor_.SetValue(recordOffset, 0x3F800000);
+        statusTensor_.SetValue(recordOffset + 1U,
+            localCountTensor.GetValue(localRecord));
+    }
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1176,7 +1258,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::GetCumSum
     gatherSumPattern.SetValue(0, 2);
     SyncFunc<AscendC::HardEvent::S_V>();
 
-    const uint64_t cumsumWaitStart = BeginProfileMetric();
     while (true) {
         DataCopy(sumLocalTensor, selfRankWinInGMTensor_[(CUMSUM_CAL_OFFSET + newAivId * UB_ALIGN) / sizeof(float)], sumIntriParams);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
@@ -1192,10 +1273,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::GetCumSum
             break;
         }
     }
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_CUMSUM_PEER_WAIT,
-        cumsumWaitStart);
-
-
     if (newAivId == 0) {
         outLocal.SetValue(0, 0);
     } else {
@@ -1237,18 +1314,12 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitDispa
     DataCopyParams intriParams{static_cast<uint16_t>(recStatusNumPerCore_), 1, 0, 0};
     SyncFunc<AscendC::HardEvent::S_V>();
     while (sumOfFlag != compareTarget) {
-        const uint64_t flagLoadStart = BeginProfileMetric();
         DataCopy(statusFp32Tensor_, windowInstatusFp32Tensor_[startStatusIndex_ * STATE_OFFSET / sizeof(float)], intriParams);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
-        EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_STATUS_FLAG_LOAD,
-            flagLoadStart);
-        const uint64_t flagReduceStart = BeginProfileMetric();
         ReduceSum(statusSumOutTensor, statusFp32Tensor_, gatherMaskOutTensor,
             mask, recStatusNumPerCore_, 1U);
         SyncFunc<AscendC::HardEvent::V_S>();
         sumOfFlag = statusSumOutTensor.GetValue(0);
-        EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_STATUS_FLAG_REDUCE,
-            flagReduceStart);
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
         ++profileStatusPollAttempts_;
         if (sumOfFlag != compareTarget) {
@@ -1259,7 +1330,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitDispa
 
     WaitDispatchClearStatus();
     GatherSumRecvCnt(gatherMaskOutTensor, gatherTmpTensor, statusSumOutTensor);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_COUNT_STATUS_WAIT_END);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1311,16 +1381,19 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalCumSum
     tpipe_->InitBuffer(subExpBuf_, maxSize_);
     tpipe_->InitBuffer(gatherMaskTBuf_, expertIdsBufSize_);
     tpipe_->InitBuffer(expertIdsBuf_, expertIdsBufSize_);
-    tpipe_->InitBuffer(statusBuf_, statusCntAlign_ * UB_ALIGN);
+    tpipe_->InitBuffer(statusBuf_, statusBufSize_);
     workLocalTensor_ = gatherMaskTBuf_.Get<float>();
     statusTensor_ = statusBuf_.Get<int32_t>();
     ExpIdsCopyAndMaskCal();
+    CalSendRound();
+    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_END);
     CalAndSendCnt();
+    RecordTransferEnd(false);
     SplitToCore(rscvStatusNum_, aivUsedCumSum_, startStatusIndex_, endStatusIndex_, recStatusNumPerCore_, false);
     BufferInit();
     WaitDispatch();
     CalRecvAndSetFlag();
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_PUBLISH_END);
+    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_END);
 
 }
 
@@ -1335,7 +1408,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitCumSu
     SumParams sumFlagParams{1, innerSumParams, aivUsedCumSum_ * UB_ALIGN_DATA_COUNT};
     LocalTensor<float> statusSumOutTensor = scalarBuf_.Get<float>();
 
-    const uint64_t cumsumGateStart = BeginProfileMetric();
     while (true) {
         DataCopy(statusFp32Tensor_, selfRankWinInGMTensor_[cumSumFlagOffset], aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
@@ -1349,8 +1421,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitCumSu
             break;
         }
     }
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_CUMSUM_GATE_WAIT,
-        cumsumGateStart);
     Duplicate<float>(statusCleanFp32Tensor_, static_cast<float>(0), aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
     SyncFunc<AscendC::HardEvent::S_MTE3>();
 
@@ -1377,12 +1447,13 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SetValidE
         LocalTensor<int64_t> expertTokenNumsLocalTensor = tokenNumBuf_.Get<int64_t>();
         for (uint32_t localExpertIdx = 0; localExpertIdx < localExpertNum; ++localExpertIdx) {
             if (expertTokenNumsType_ == 0) {
-                expertTokenNumsLocalTensor(localExpertIdx) = int64_t(sendCntTensor_(localExpertIdx * epWorldSize_ +
-                epWorldSize_ - 1));
+                expertTokenNumsLocalTensor(localExpertIdx) = int64_t(
+                    sendCntTensor_(localExpertIdx * epWorldSize_ + epWorldSize_ - 1));
             } else {
-                expertTokenNumsLocalTensor(localExpertIdx) = int64_t(sendCntTensor_(localExpertIdx * epWorldSize_ +
-                epWorldSize_ - 1)) - lastVal;
-                lastVal = int64_t(sendCntTensor_(localExpertIdx * epWorldSize_ + epWorldSize_ -1));
+                expertTokenNumsLocalTensor(localExpertIdx) = int64_t(
+                    sendCntTensor_(localExpertIdx * epWorldSize_ + epWorldSize_ - 1)) - lastVal;
+                lastVal = int64_t(
+                    sendCntTensor_(localExpertIdx * epWorldSize_ + epWorldSize_ - 1));
             }
         }
         SyncFunc<AscendC::HardEvent::S_MTE3>();
@@ -1416,18 +1487,12 @@ __aicore__ inline uint32_t MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Check
     GM_ADDR wAddr = (__gm__ uint8_t*)(windowGM_) + srcExpDataIdx * expertPerSizeOnWin_ +
         beginIdx * hCommuSize_ + SPLIT_BLOCK_DATA_SIZE;
     dataFlagGlobal.SetGlobalBuffer((__gm__ float *)(wAddr));
-    const uint64_t flagLoadStart = BeginProfileMetric();
     DataCopy(flagRecvTensor_, dataFlagGlobal, expFlagCopyParams);
     SyncFunc<AscendC::HardEvent::MTE2_V>();
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_LOAD,
-        flagLoadStart);
     LocalTensor<float> flagSumOutTensor = scalarBuf_.Get<float>();
-    const uint64_t flagReduceStart = BeginProfileMetric();
     ReduceSum(flagSumOutTensor, flagRecvTensor_, flagReduceWorkTensor_, 1U, flagNum, 1U);
     SyncFunc<AscendC::HardEvent::V_S>();
     const bool arrived = flagSumOutTensor.GetValue(0) == 1.0f * flagNum;
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_REDUCE,
-        flagReduceStart);
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
     ++profilePayloadPollAttempts_;
     if (!arrived) {
@@ -1461,7 +1526,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CopyInAnd
         packedPayloadBytes_ / UB_ALIGN - 1U, 0U, 0U};
     DataCopyPadParams srcTokenPadParams{false, 0U, 0U, 0U};
 
-    const uint64_t payloadLoadStart = BeginProfileMetric();
     if (isDataBufferReused) {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(dataBufferId);
         AscendC::SetFlag<AscendC::HardEvent::V_MTE2>(dataBufferId);
@@ -1472,10 +1536,7 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CopyInAnd
         srcTokenCopyParams, srcTokenPadParams);
     AscendC::SetFlag<AscendC::HardEvent::MTE2_MTE3>(dataBufferId);
     AscendC::WaitFlag<AscendC::HardEvent::MTE2_MTE3>(dataBufferId);
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_PAYLOAD_LOAD,
-        payloadLoadStart);
 
-    const uint64_t outputStart = BeginProfileMetric();
     if constexpr (IsMxfp8) {
         LocalTensor<uint8_t> scaleLocal = xTmpTensor[Ceil(axisH_, 256U) * 256U];
         DataCopyPad(dynamicScalesOutGMTensor_[dstPosition * scaleOutBytes_],
@@ -1486,8 +1547,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CopyInAnd
     DataCopyPad(assistGlobal[dstPosition * TileXREp::kEpMemoryAssistInfoWidth],
         xTmpInt32[tokenQuantAlign_], assistCopyParams);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(dataBufferId);
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_OUTPUT_STORE_ISSUE,
-        outputStart);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1532,7 +1591,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ClearLoca
 
     GlobalTensor<float> cleanGlobal;
     DataCopyParams cleanParams{1U, 1U, 0U, SPLIT_BLOCK_DATA_SIZE / UB_ALIGN};
-    const uint64_t clearStart = BeginProfileMetric();
     for (uint32_t index = 0U; index < validNum; ++index) {
         uint32_t srcExpertId = expertMapTensor_(index);
         uint32_t srcDataBlockIdx =
@@ -1554,8 +1612,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ClearLoca
             leftRecordNum -= curCleanRecordNum;
         }
     }
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_PAYLOAD_FLAG_CLEAR_ISSUE,
-        clearStart);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1623,6 +1679,10 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
             if (copyBatchId == 0U) {
                 RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
             }
+            if (expertLeftNumTensor_(index) == arriveCount &&
+                finishNum + 1U == validNum) {
+                RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
+            }
             uint32_t dstPosition =
                 srcExpertId != 0U ? sendCntTensor_(srcExpertId - 1U) : 0U;
             dstPosition += expertFinishNumTensor_(index);
@@ -1643,9 +1703,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
             if (expertLeftNumTensor_(index) == 0U) {
                 ++finishNum;
             }
-            if (finishNum == validNum) {
-                RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_ALL_PAYLOADS_READY);
-            }
         } else {
             index = (index + 1U) % validNum;
         }
@@ -1661,9 +1718,7 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
          dataBufferId < usedDataBufferNum; ++dataBufferId) {
         AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(dataBufferId);
     }
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_OUTPUT_DRAIN_END);
     ClearLocalWindowDataFlags(tBuf, validNum, localExpertNum);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FLAG_CLEAR_ISSUE_END);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1683,10 +1738,10 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWind
     statusCleanFp32Tensor_ = statusCleanBuf.Get<float>();
     sendCntTensor_ = cumSumBuf.Get<int32_t>();
     SplitToCore(rscvStatusNum_, aivNum_, startId_, endId_, sendNum_, true);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LOCAL_COPY_INIT_END);
     WaitCumSumFlag();
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_GATE_END);
     if (sendNum_ == 0U) {
+        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
+        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
         return;
     }
 
@@ -1711,8 +1766,9 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWind
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
     profileValidExperts_ = validNum;
 #endif
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_RECEIVE_METADATA_END);
     if (validNum == 0U) {
+        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
+        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
         return;
     }
 
@@ -1758,7 +1814,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenActi
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ExpIdsCopyAndMaskCal()
 {
-    const uint64_t prepareStart = BeginProfileMetric();
     activeMaskBsCnt_ = axisBS_;
     sendToMoeExpTokenCnt_ = axisBS_ * axisK_;
     validExpertIdsTensor_ = expertIdsBuf_.Get<int32_t>();
@@ -1767,9 +1822,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ExpIdsCop
         TokenActiveMaskCal();
     }
     if (activeMaskBsCnt_ == 0U) {
-        EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_ROUTE_PREPARE,
-            prepareStart);
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_ROUTE_PREPARE_END);
         return;
     }
 
@@ -1801,9 +1853,33 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ExpIdsCop
             allExpertIdsPadParams);
     }
     SyncFunc<AscendC::HardEvent::MTE2_S>();
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_ROUTE_PREPARE,
-        prepareStart);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_ROUTE_PREPARE_END);
+}
+
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline bool
+MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::IsDoubleGroupRankSize() const
+{
+    return epWorldSize_ == TileXREp::kEpMemoryDoubleGroupWorldSize64 ||
+        epWorldSize_ == TileXREp::kEpMemoryDoubleGroupWorldSize128;
+}
+
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalSendRound()
+{
+    const bool doubleGroupEnabled = !isSmallBs_ && IsDoubleGroupRankSize() &&
+        sharedExpertRankNum_ == 0U;
+    sendRoundNum_ = doubleGroupEnabled ? TileXREp::kEpMemoryDoubleGroupRoundNum : 1U;
+}
+
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline void
+MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SyncBeforeSendRound(uint32_t curRound)
+{
+    if (sendRoundNum_ > 1U && curRound > 0U) {
+        PipeBarrier<PIPE_ALL>();
+        SyncAll();
+        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END);
+    }
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1817,15 +1893,12 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Run()
         }
 
         PipeBarrier<PIPE_ALL>();
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_PRE_LOCAL_BARRIER_END);
         LocalWindowCopy();
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LOCAL_COPY_END);
-        PipeBarrier<PIPE_ALL>();
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_BARRIER_END);
-    }
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
-    AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(originalOverflowMode_);
+#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
+        SyncFunc<AscendC::HardEvent::MTE3_S>();
 #endif
+    }
+    AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(originalOverflowMode_);
     if ASCEND_IS_AIV {
         RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_END);
         WriteProfile();
@@ -1837,7 +1910,8 @@ __aicore__ inline void RunMoeDispatchMemoryTyped(
     GM_ADDR commArgsGM, GM_ADDR xGM, GM_ADDR expertIdsGM, GM_ADDR xActiveMaskGM,
     GM_ADDR expandXOutGM, GM_ADDR dynamicScalesOutGM, GM_ADDR expertTokenNumsOutGM,
     GM_ADDR sendCountsOutGM, GM_ADDR assistInfoForCombineOutGM, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum,
+    int64_t sharedExpertRankNum,
     int64_t globalBs, int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t expandXOutDtype, int64_t magic, TPipe *pipe)
 {
@@ -1853,7 +1927,8 @@ __aicore__ inline void RunMoeDispatchMemory(
     GM_ADDR commArgsGM, GM_ADDR xGM, GM_ADDR expertIdsGM, GM_ADDR xActiveMaskGM,
     GM_ADDR expandXOutGM, GM_ADDR dynamicScalesOutGM, GM_ADDR expertTokenNumsOutGM,
     GM_ADDR sendCountsOutGM, GM_ADDR assistInfoForCombineOutGM, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    int64_t topK, int64_t moeExpertNum, int64_t sharedExpertNum,
+    int64_t sharedExpertRankNum,
     int64_t globalBs, int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t dtype, int64_t expandXOutDtype, int64_t magic, TPipe *pipe)
 {
@@ -1868,7 +1943,6 @@ __aicore__ inline void RunMoeDispatchMemory(
                 expertTokenNumsOutGM, sendCountsOutGM, assistInfoForCombineOutGM, bs, h, topK,
                 moeExpertNum, sharedExpertNum, sharedExpertRankNum, globalBs, expertTokenNumsType,
                 activeMaskType, quantMode, expandXOutDtype, magic, pipe);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         } else if (quantMode == MX_QUANT && expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3) {
             RunMoeDispatchMemoryTyped<half, true, true>(commArgsGM, xGM,
                 expertIdsGM, xActiveMaskGM, expandXOutGM, dynamicScalesOutGM,
@@ -1881,7 +1955,6 @@ __aicore__ inline void RunMoeDispatchMemory(
                 expertTokenNumsOutGM, sendCountsOutGM, assistInfoForCombineOutGM, bs, h, topK,
                 moeExpertNum, sharedExpertNum, sharedExpertRankNum, globalBs, expertTokenNumsType,
                 activeMaskType, quantMode, expandXOutDtype, magic, pipe);
-#endif
         }
     } else if (dtype == TileXR::TILEXR_DATA_TYPE_BFP16) {
         if (quantMode == 0 && expandXOutDtype == TileXR::TILEXR_DATA_TYPE_BFP16) {
@@ -1890,7 +1963,6 @@ __aicore__ inline void RunMoeDispatchMemory(
                 expertTokenNumsOutGM, sendCountsOutGM, assistInfoForCombineOutGM, bs, h, topK,
                 moeExpertNum, sharedExpertNum, sharedExpertRankNum, globalBs, expertTokenNumsType,
                 activeMaskType, quantMode, expandXOutDtype, magic, pipe);
-#if defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)
         } else if (quantMode == MX_QUANT && expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3) {
             RunMoeDispatchMemoryTyped<bfloat16_t, true, true>(commArgsGM, xGM,
                 expertIdsGM, xActiveMaskGM, expandXOutGM, dynamicScalesOutGM,
@@ -1903,7 +1975,6 @@ __aicore__ inline void RunMoeDispatchMemory(
                 expertTokenNumsOutGM, sendCountsOutGM, assistInfoForCombineOutGM, bs, h, topK,
                 moeExpertNum, sharedExpertNum, sharedExpertRankNum, globalBs, expertTokenNumsType,
                 activeMaskType, quantMode, expandXOutDtype, magic, pipe);
-#endif
         }
     }
 }

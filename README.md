@@ -211,7 +211,7 @@ Initial collectives APIs:
 
 `src/ep/` builds the first TileXR-native Expert Parallelism dispatch path:
 
-- `libtilexr-ep.so` exposes `TileXRMoeEpDispatch`, `TileXRMoeEpDispatchV2`, `TileXRMoeEpCombine`, and `TileXRMoeEpCombineV2` through `src/include/tilexr_ep.h`.
+- `libtilexr-ep.so` exposes the canonical `TileXRMoeEpDispatch`, `TileXRMoeEpCombine`, `TileXRMoeEpDispatchMemory`, and `TileXRMoeEpCombineMemory` entries through `src/include/tilexr_ep.h`.
 - `libtilexr_ep_dispatch_kernel.so` contains the Ascend C dispatch kernels.
 - `libtilexr_ep_combine_kernel.so` contains the Ascend C combine kernels, including the cross-node UDMA combine path.
 - Host code validates MoE shape, dtype, communicator state, and IPC window size before launch.
