@@ -85,6 +85,23 @@ struct TileXRCcuDirectAllToAll2RankSpec {
     uint32_t memSlicePerBlock = TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_BLOCK;
 };
 
+struct TileXRCcuDirectAllToAllMeshPeerSpec {
+    uint32_t peerRank = 0;
+    uint64_t remoteRecvAddr = 0;
+    uint64_t remoteRecvToken = 0;
+};
+
+struct TileXRCcuDirectAllToAllMeshSpec {
+    uint32_t rankSize = 4;
+    uint32_t localRank = 0;
+    uint64_t localSendAddr = 0;
+    uint64_t localSendToken = 0;
+    uint64_t localRecvAddr = 0;
+    uint64_t localRecvToken = 0;
+    uint64_t chunkBytes = 0;
+    std::vector<TileXRCcuDirectAllToAllMeshPeerSpec> peers;
+};
+
 struct TileXRCcuDirectSignalWaitSpec {
     TileXRCcuSignalWaitProgramRole role = TileXRCcuSignalWaitProgramRole::Signal;
     bool overrideBarrierMode = false;
@@ -158,6 +175,12 @@ int TileXRCcuRunDirectMemoryCopyInstallAttempt(
 int TileXRCcuRunDirectAllToAll2RankInstallAttempt(
     const TileXRCcuDirectInstallOptions& options,
     const TileXRCcuDirectAllToAll2RankSpec& alltoall,
+    TileXRCcuDirectInstallAttempt* attempt,
+    TileXRCcuDirectInstallReport* report);
+
+int TileXRCcuRunDirectAllToAllMeshInstallAttempt(
+    const TileXRCcuDirectInstallOptions& options,
+    const TileXRCcuDirectAllToAllMeshSpec& alltoall,
     TileXRCcuDirectInstallAttempt* attempt,
     TileXRCcuDirectInstallReport* report);
 

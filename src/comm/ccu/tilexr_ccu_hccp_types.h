@@ -493,6 +493,33 @@ struct TileXRCcuHccpTpInfo {
     uint32_t resv;
 };
 
+#pragma pack(push, 1)
+struct TileXRCcuHccpTpAttr {
+    uint8_t retryTimesInit : 3;
+    uint8_t at : 5;
+    uint8_t sip[16];
+    uint8_t dip[16];
+    uint8_t sma[6];
+    uint8_t dma[6];
+    uint16_t vlanId : 12;
+    uint8_t vlanEn : 1;
+    uint8_t dscp : 6;
+    uint8_t atTimes : 5;
+    uint8_t sl : 4;
+    uint8_t ttl;
+    uint16_t ackUdpSrcport;
+    uint16_t dataUdpSrcport;
+    uint8_t udpSrcportRange : 4;
+    uint8_t sprayEn : 1;
+    uint8_t udpGlobalEn : 1;
+    uint8_t reserve0 : 2;
+    uint16_t slBitmap;
+    uint8_t dscpConfigMode : 1;
+    uint8_t reserve1 : 7;
+    uint8_t reserved[70];
+};
+#pragma pack(pop)
+
 struct TileXRCcuRaInitConfig {
     uint32_t phyId;
     uint32_t nicPosition;
@@ -607,6 +634,18 @@ using TileXRCcuRaGetTpInfoListAsyncFunc = int (*)(
     TileXRCcuHccpGetTpCfg* cfg,
     TileXRCcuHccpTpInfo infoList[],
     uint32_t* num,
+    void** reqHandle);
+using TileXRCcuRaGetTpAttrAsyncFunc = int (*)(
+    void* ctx,
+    uint64_t tpHandle,
+    uint32_t* attrBitmap,
+    TileXRCcuHccpTpAttr* attr,
+    void** reqHandle);
+using TileXRCcuRaSetTpAttrAsyncFunc = int (*)(
+    void* ctx,
+    uint64_t tpHandle,
+    uint32_t attrBitmap,
+    TileXRCcuHccpTpAttr* attr,
     void** reqHandle);
 using TileXRCcuRaGetAsyncReqResultFunc = int (*)(void* reqHandle, int* reqResult);
 

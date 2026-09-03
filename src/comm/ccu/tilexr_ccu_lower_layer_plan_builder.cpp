@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
 
 namespace TileXR {
 namespace {
@@ -19,6 +20,7 @@ constexpr uint16_t TILEXR_CCU_WQE_BASIC_BLOCKS_PER_ROUTE = 4;
 constexpr uint16_t TILEXR_CCU_HCOMM_WQE_BASIC_BLOCKS_PER_ROUTE = 256;
 constexpr uint32_t TILEXR_CCU_HCOMM_PER_DIE_PFE_RESERVED_NUM = 16;
 constexpr uint16_t TILEXR_CCU_HCOMM_INNER_FE_JETTY_NUM = 23;
+constexpr uint16_t TILEXR_CCU_HCOMM_PER_DIE_JETTY_NUM = 128;
 constexpr uint16_t TILEXR_CCU_HCOMM_OUTER_FE_START_JETTY_CTX_ID = 92;
 constexpr uint16_t TILEXR_CCU_HCOMM_OUTER_FE_JETTY_NUM = 36;
 constexpr uint32_t TILEXR_CCU_HCOMM_MAX_INNER_FE_ID = 7;
@@ -140,7 +142,11 @@ void NormalizeVerifiedEndpointRouteJettyWindow(TileXRCcuLowerLayerTransportSnaps
         ++explicitStartCount;
     }
 
-    if (minExplicitStart != 0) {
+    const bool configuredWindowContainsExplicitJettys =
+        snapshot->startJettyId != 0 && snapshot->pfeJettyCount != 0 && minExplicitStart != 0 &&
+        minExplicitStart >= snapshot->startJettyId &&
+        explicitEnd <= static_cast<uint32_t>(snapshot->startJettyId) + snapshot->pfeJettyCount;
+    if (minExplicitStart != 0 && !configuredWindowContainsExplicitJettys) {
         snapshot->startJettyId = minExplicitStart;
     }
 
@@ -193,7 +199,7 @@ void ApplyHcommOrderedPfePartition(TileXRCcuLowerLayerTransportSnapshot* snapsho
         return;
     }
     snapshot->startLocalJettyCtxId = 0;
-    snapshot->pfeJettyCount = TILEXR_CCU_HCOMM_INNER_FE_JETTY_NUM;
+    snapshot->pfeJettyCount = TILEXR_CCU_HCOMM_PER_DIE_JETTY_NUM;
     snapshot->startJettyId = TILEXR_CCU_DEFAULT_START_JETTY_ID;
 }
 
@@ -326,6 +332,14 @@ void AppendRemoteXnClears(
     if (plan == nullptr) {
         return;
     }
+    if (snapshot.remoteXnStartId != 0 && snapshot.remoteXnCount != 0) {
+        plan->xnClears.push_back({
+            snapshot.dieId,
+            snapshot.remoteXnStartId,
+            snapshot.remoteXnCount,
+        });
+        return;
+    }
     std::vector<uint32_t> remoteXns;
     remoteXns.reserve(snapshot.routes.size());
     for (const auto& route : snapshot.routes) {
@@ -403,7 +417,9 @@ int TileXRCcuBuildLowerLayerInstallPlan(
 
     TileXRCcuJettyInstall jettyInstall;
     jettyInstall.dieId = spec.pfe.dieId;
-    jettyInstall.startJettyCtxId = spec.pfe.startLocalJettyCtxId;
+    jettyInstall.startJettyCtxId = spec.jettys.front().startJettyCtxId == 0 ?
+        spec.pfe.startLocalJettyCtxId :
+        spec.jettys.front().startJettyCtxId;
     for (const auto& jettySpec : spec.jettys) {
         if (jettySpec.startJettyCtxId != 0 && jettySpec.startJettyCtxId != jettyInstall.startJettyCtxId +
             jettyInstall.ctxs.size()) {
@@ -512,13 +528,15 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
     ApplyLowerLayerPfePartition(result.pfeId, &result);
     result.xnStartId = allocation.localXn.startId;
     result.xnCount = allocation.localXn.num;
+    result.remoteXnStartId = allocation.remoteXn.startId;
+    result.remoteXnCount = allocation.remoteXn.num;
     result.ckeStartId = localWaitCke.startId;
     result.ckeCount = localWaitCke.num;
     result.routes.reserve(remoteCcuBuffers.size());
 
     const uint16_t wqeBasicBlockStride = SelectLowerLayerWqeBasicBlockStride();
-    uint16_t verifiedStartJettyId = 0;
-    uint32_t verifiedJettyEnd = 0;
+    std::map<uint16_t, uint16_t> wqeStartByJettyId;
+    uint32_t nextVerifiedWqeStartId = 0;
     for (uint32_t i = 0; i < remoteCcuBuffers.size(); ++i) {
         const auto& remoteCcuBuffer = remoteCcuBuffers[i];
         if (remoteCcuBuffer.remoteCcuVa == 0) {
@@ -538,7 +556,6 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
         if (i > std::numeric_limits<uint16_t>::max() / wqeBasicBlockStride) {
             return Fail(nullptr, report, "lower-layer CCU WQE basic block start overflows");
         }
-        route.wqeBasicBlockStartId = static_cast<uint16_t>(i * wqeBasicBlockStride);
         route.remoteCcuVa = remoteCcuBuffer.remoteCcuVa;
         route.memoryTokenId = remoteCcuBuffer.memoryTokenId;
         route.memoryTokenValue = remoteCcuBuffer.memoryTokenValue;
@@ -561,21 +578,41 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
             route.localSqDepth = remoteCcuBuffer.localSqDepth;
             route.startJettyId = remoteCcuBuffer.startJettyId;
             route.endpointRouteVerified = true;
-            if (route.startJettyId != 0) {
-                verifiedStartJettyId = verifiedStartJettyId == 0 ?
-                    route.startJettyId :
-                    std::min<uint16_t>(verifiedStartJettyId, route.startJettyId);
-                verifiedJettyEnd = std::max<uint32_t>(
-                    verifiedJettyEnd,
-                    static_cast<uint32_t>(route.startJettyId) + 1U);
+        }
+        uint32_t wqeOrdinal = i;
+        if (route.startJettyId != 0) {
+            const uint32_t sqDepth = route.localSqDepth == 0 ? route.sqDepth : route.localSqDepth;
+            const uint32_t wqeBasicBlockCount = sqDepth * TILEXR_CCU_WQE_BASIC_BLOCKS_PER_ROUTE;
+            if (wqeBasicBlockCount == 0 || nextVerifiedWqeStartId > std::numeric_limits<uint16_t>::max()) {
+                return Fail(nullptr, report, "invalid verified endpoint WQE basic block window");
             }
+            uint32_t wqeBasicBlockStartId = nextVerifiedWqeStartId;
+            const bool pfeWindowContainsJetty = result.pfeJettyCount != 0 &&
+                route.startJettyId >= result.startJettyId &&
+                static_cast<uint32_t>(route.startJettyId) <
+                    static_cast<uint32_t>(result.startJettyId) + result.pfeJettyCount;
+            if (pfeWindowContainsJetty) {
+                const uint32_t localJettyOffset =
+                    static_cast<uint32_t>(route.startJettyId) - result.startJettyId;
+                wqeBasicBlockStartId = localJettyOffset * wqeBasicBlockCount;
+            }
+            if (wqeBasicBlockStartId > std::numeric_limits<uint16_t>::max()) {
+                return Fail(nullptr, report, "verified endpoint WQE basic block start overflows");
+            }
+            const auto inserted = wqeStartByJettyId.emplace(
+                route.startJettyId,
+                static_cast<uint16_t>(wqeBasicBlockStartId));
+            route.wqeBasicBlockStartId = inserted.first->second;
+            if (inserted.second && !pfeWindowContainsJetty) {
+                nextVerifiedWqeStartId += wqeBasicBlockCount;
+            }
+        } else {
+            if (wqeOrdinal > std::numeric_limits<uint16_t>::max() / wqeBasicBlockStride) {
+                return Fail(nullptr, report, "lower-layer CCU WQE basic block start overflows");
+            }
+            route.wqeBasicBlockStartId = static_cast<uint16_t>(wqeOrdinal * wqeBasicBlockStride);
         }
         result.routes.push_back(route);
-    }
-    if (verifiedStartJettyId != 0) {
-        result.startJettyId = verifiedStartJettyId;
-        const uint32_t requiredJettyCount = verifiedJettyEnd - verifiedStartJettyId;
-        result.pfeJettyCount = CheckedU16(std::max<uint32_t>(result.pfeJettyCount, requiredJettyCount));
     }
     NormalizeVerifiedEndpointRouteJettyWindow(&result);
 
@@ -670,12 +707,28 @@ int TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
     spec.ckeClear.count = normalized.ckeCount;
     spec.ckeClear.valid = normalized.ckeCount != 0;
 
-    uint32_t routeIndex = 0;
-    for (const auto& route : normalized.routes) {
+    std::map<uint16_t, const TileXRCcuLowerLayerTransportRoute*> jettyRoutes;
+    for (uint32_t i = 0; i < normalized.routes.size(); ++i) {
+        const auto& route = normalized.routes[i];
+        const uint16_t jettyId = route.startJettyId == 0 ?
+            static_cast<uint16_t>(normalized.startJettyId + i) :
+            route.startJettyId;
+        jettyRoutes.emplace(jettyId, &route);
+    }
+    for (const auto& entry : jettyRoutes) {
+        if (entry.first < normalized.startJettyId) {
+            return Fail(plan, report, "lower-layer CCU endpoint jetty ID precedes the PFE jetty window");
+        }
+        const uint32_t localJettyOffset = static_cast<uint32_t>(entry.first) - normalized.startJettyId;
+        if (localJettyOffset >= normalized.pfeJettyCount ||
+            static_cast<uint32_t>(normalized.startLocalJettyCtxId) + localJettyOffset >= 128U) {
+            return Fail(plan, report, "lower-layer CCU endpoint jetty ID is outside the PFE jetty window");
+        }
+        const auto& route = *entry.second;
         TileXRCcuLowerLayerJettySpec jetty;
         jetty.dieId = normalized.dieId;
         jetty.pfeId = normalized.pfeId;
-        jetty.startJettyCtxId = static_cast<uint16_t>(normalized.startLocalJettyCtxId + routeIndex);
+        jetty.startJettyCtxId = static_cast<uint16_t>(normalized.startLocalJettyCtxId + localJettyOffset);
         jetty.doorbellVa = route.localDoorbellVa == 0 ? route.doorbellVa : route.localDoorbellVa;
         jetty.doorbellTokenId = route.localDoorbellTokenId == 0 ?
             route.doorbellTokenId :
@@ -686,7 +739,10 @@ int TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
         jetty.sqDepth = route.localSqDepth == 0 ? route.sqDepth : route.localSqDepth;
         jetty.wqeBasicBlockStartId = route.wqeBasicBlockStartId;
         spec.jettys.push_back(jetty);
+    }
 
+    uint32_t routeIndex = 0;
+    for (const auto& route : normalized.routes) {
         TileXRCcuLowerLayerChannelSpec channel;
         channel.dieId = normalized.dieId;
         channel.channelId = route.channelId;

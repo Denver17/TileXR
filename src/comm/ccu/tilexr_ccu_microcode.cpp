@@ -13,8 +13,11 @@ constexpr uint64_t TILEXR_CCU_LOAD_IMD_TO_GSA_HEADER = 0x0002U;
 constexpr uint64_t TILEXR_CCU_LOAD_IMD_TO_XN_HEADER = 0x0003U;
 constexpr uint64_t TILEXR_CCU_SET_CKE_HEADER = 0x0802U;
 constexpr uint64_t TILEXR_CCU_CLEAR_CKE_HEADER = 0x0804U;
+constexpr uint64_t TILEXR_CCU_TRANS_LOC_MEM_TO_LOC_MS_HEADER = 0x1000U;
+constexpr uint64_t TILEXR_CCU_TRANS_LOC_MS_TO_LOC_MEM_HEADER = 0x1002U;
 constexpr uint64_t TILEXR_CCU_TRANS_RMT_MEM_TO_LOC_MEM_HEADER = 0x1008U;
 constexpr uint64_t TILEXR_CCU_TRANS_LOC_MEM_TO_RMT_MEM_HEADER = 0x1009U;
+constexpr uint64_t TILEXR_CCU_TRANS_LOC_MEM_TO_LOC_MEM_HEADER = 0x100aU;
 constexpr uint64_t TILEXR_CCU_SYNC_CKE_HEADER = 0x100bU;
 constexpr uint64_t TILEXR_CCU_SYNC_XN_HEADER = 0x100dU;
 constexpr uint64_t TILEXR_CCU_SYNC_XN_TRACE_FLAG = 0x0001000000000000ULL;
@@ -80,6 +83,23 @@ int ValidateTransferSpec(const TileXRCcuMemTransferSpec& spec)
 bool CompleteOrAbsentCkePair(uint16_t ckeId, uint16_t mask)
 {
     return (ckeId == 0) == (mask == 0);
+}
+
+int ValidateLocalMsTransferSpec(const TileXRCcuLocalMsTransferSpec& spec)
+{
+    if (spec.localGsa == 0 || spec.localXn == 0 || spec.lengthXn == 0) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if ((spec.setCkeId == 0) != (spec.setCkeMask == 0) ||
+        (spec.waitCkeId == 0) != (spec.waitCkeMask == 0)) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return TILEXR_SUCCESS;
+}
+
+uint16_t LocalMsTransferFlagSlot(const TileXRCcuLocalMsTransferSpec& spec)
+{
+    return static_cast<uint16_t>((spec.clearWait ? 1U : 0U) | (spec.lengthFromXn ? 2U : 0U));
 }
 
 void WriteLe16(uint8_t* bytes, size_t offset, uint16_t value)
@@ -260,6 +280,59 @@ int TileXRCcuEncodeTransLocMemToRmtMem(const TileXRCcuMemTransferSpec& spec, Til
         spec.localGsa);
     instr->words[1] = PackSlots(spec.localXn, spec.lengthXn, spec.channelId, TransferControlSlot(spec));
     instr->words[2] = PackSlots(0, 0, 0, TransferFlagSlot(spec));
+    instr->words[3] = PackSlots(spec.setCkeId, spec.setCkeMask, spec.waitCkeId, spec.waitCkeMask);
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuEncodeTransLocMemToLocMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr)
+{
+    if (ValidateInstrOutput(instr) != TILEXR_SUCCESS || ValidateTransferSpec(spec) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    instr->words[0] = PackSlots(
+        static_cast<uint16_t>(TILEXR_CCU_TRANS_LOC_MEM_TO_LOC_MEM_HEADER),
+        spec.remoteGsa,
+        spec.remoteXn,
+        spec.localGsa);
+    instr->words[1] = PackSlots(spec.localXn, spec.lengthXn, spec.channelId, TransferControlSlot(spec));
+    instr->words[2] = PackSlots(0, 0, 0, TransferFlagSlot(spec));
+    instr->words[3] = PackSlots(spec.setCkeId, spec.setCkeMask, spec.waitCkeId, spec.waitCkeMask);
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuEncodeTransLocMemToLocMs(const TileXRCcuLocalMsTransferSpec& spec, TileXRCcuInstr* instr)
+{
+    if (ValidateInstrOutput(instr) != TILEXR_SUCCESS ||
+        ValidateLocalMsTransferSpec(spec) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    instr->words[0] = PackSlots(
+        static_cast<uint16_t>(TILEXR_CCU_TRANS_LOC_MEM_TO_LOC_MS_HEADER),
+        spec.localMs,
+        spec.localGsa,
+        spec.localXn);
+    instr->words[1] = PackSlots(spec.lengthXn, spec.channelId, 0, 0);
+    instr->words[2] = PackSlots(0, 0, 0, LocalMsTransferFlagSlot(spec));
+    instr->words[3] = PackSlots(spec.setCkeId, spec.setCkeMask, spec.waitCkeId, spec.waitCkeMask);
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuEncodeTransLocMsToLocMem(const TileXRCcuLocalMsTransferSpec& spec, TileXRCcuInstr* instr)
+{
+    if (ValidateInstrOutput(instr) != TILEXR_SUCCESS ||
+        ValidateLocalMsTransferSpec(spec) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    instr->words[0] = PackSlots(
+        static_cast<uint16_t>(TILEXR_CCU_TRANS_LOC_MS_TO_LOC_MEM_HEADER),
+        spec.localGsa,
+        spec.localXn,
+        spec.localMs);
+    instr->words[1] = PackSlots(spec.lengthXn, spec.channelId, 0, 0);
+    instr->words[2] = PackSlots(0, 0, 0, LocalMsTransferFlagSlot(spec));
     instr->words[3] = PackSlots(spec.setCkeId, spec.setCkeMask, spec.waitCkeId, spec.waitCkeMask);
     return TILEXR_SUCCESS;
 }

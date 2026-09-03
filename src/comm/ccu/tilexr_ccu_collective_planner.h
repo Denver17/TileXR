@@ -72,6 +72,14 @@ public:
         uint32_t peerRank,
         TileXRCcuDirectInstallAttempt *attempt,
         TileXRCcuDirectInstallReport *report);
+    int PrepareDirectCcuAllToAllMeshInstallAttempt(
+        TileXRCcuRuntimeSession &session,
+        const TileXRCcuDirectInstallOptions &options,
+        uint64_t localSourceAddr,
+        uint64_t localDestinationAddr,
+        uint64_t chunkBytes,
+        TileXRCcuDirectInstallAttempt *attempt,
+        TileXRCcuDirectInstallReport *report);
     int PrepareDirectCcuSyncXnPingInstallAttempt(
         TileXRCcuRuntimeSession &session,
         const TileXRCcuDirectInstallOptions &options,
@@ -140,10 +148,13 @@ private:
     TileXRCcuLowerLayerTransportRoute directCcuLocalVerifiedEndpointRoute_ = {};
     bool directCcuLocalVerifiedEndpointRouteValid_ = false;
 #ifdef TILEXR_CCU_TESTING
-    TileXRCcuRemoteCcuBufferInfo directCcuRemoteRouteMemoryOverride_ = {};
-    bool directCcuRemoteRouteMemoryOverrideValid_ = false;
-    bool directCcuRemoteRouteMemoryOverrideAllRoutes_ = true;
-    uint32_t directCcuRemoteRouteMemoryOverrideSyncRouteIndex_ = 0;
+    struct DirectCcuRemoteRouteMemoryOverride {
+        uint32_t syncRouteIndex = 0;
+        bool allRoutes = false;
+        bool applyMemory = false;
+        TileXRCcuRemoteCcuBufferInfo buffer;
+    };
+    std::vector<DirectCcuRemoteRouteMemoryOverride> directCcuRemoteRouteMemoryOverrides_;
 #endif
 };
 

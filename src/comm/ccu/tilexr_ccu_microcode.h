@@ -68,6 +68,20 @@ struct TileXRCcuMemTransferSpec {
     bool reduceEnabled = false;
 };
 
+struct TileXRCcuLocalMsTransferSpec {
+    uint16_t localGsa = 0;
+    uint16_t localXn = 0;
+    uint16_t localMs = 0;
+    uint16_t lengthXn = 0;
+    uint16_t channelId = 0;
+    uint16_t setCkeId = 0;
+    uint16_t setCkeMask = 0;
+    uint16_t waitCkeId = 0;
+    uint16_t waitCkeMask = 0;
+    bool clearWait = true;
+    bool lengthFromXn = true;
+};
+
 int TileXRCcuEncodeLoadSqeArgsToX(uint16_t xnId, uint32_t sqeArgId, TileXRCcuInstr* instr);
 
 int TileXRCcuEncodeLoadImdToXn(uint16_t xnId, uint64_t immediate, uint16_t secFlag, TileXRCcuInstr* instr);
@@ -85,6 +99,12 @@ int TileXRCcuEncodeClearCke(const TileXRCcuCkeSpec& spec, TileXRCcuInstr* instr)
 int TileXRCcuEncodeTransRmtMemToLocMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr);
 
 int TileXRCcuEncodeTransLocMemToRmtMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr);
+
+int TileXRCcuEncodeTransLocMemToLocMem(const TileXRCcuMemTransferSpec& spec, TileXRCcuInstr* instr);
+
+int TileXRCcuEncodeTransLocMemToLocMs(const TileXRCcuLocalMsTransferSpec& spec, TileXRCcuInstr* instr);
+
+int TileXRCcuEncodeTransLocMsToLocMem(const TileXRCcuLocalMsTransferSpec& spec, TileXRCcuInstr* instr);
 
 int TileXRCcuBuildSqeLoadProgram(
     uint16_t firstXnId,

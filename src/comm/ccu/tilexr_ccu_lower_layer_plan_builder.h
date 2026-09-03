@@ -153,6 +153,8 @@ struct TileXRCcuLowerLayerTransportSnapshot {
     uint16_t startLocalJettyCtxId = 0;
     uint32_t xnStartId = 0;
     uint32_t xnCount = 0;
+    uint32_t remoteXnStartId = 0;
+    uint32_t remoteXnCount = 0;
     uint32_t ckeStartId = 0;
     uint32_t ckeCount = 0;
     std::vector<TileXRCcuLowerLayerTransportRoute> routes;

@@ -122,6 +122,7 @@ public:
         uint32_t tokenId,
         uint32_t tokenValue,
         TileXRCcuDriverAdapterReport* report) const;
+    int SetTaskKill(uint8_t dieId, TileXRCcuDriverAdapterReport* report) const;
     int CleanTaskKillState(uint8_t dieId, TileXRCcuDriverAdapterReport* report) const;
     int InstallPfeCtx(
         uint8_t dieId,

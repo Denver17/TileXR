@@ -18,6 +18,7 @@ TYPES_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_hccp_types.h"
 ABI_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_abi_constants.h"
 DIRECT_RUNTIME_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_runtime.h"
 DIRECT_RUNTIME_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_runtime.cpp"
+TOPOLOGY_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_topology.cpp"
 DRIVER_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_driver_adapter.h"
 DRIVER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_driver_adapter.cpp"
 
@@ -39,6 +40,8 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
         if compiler is None:
             self.skipTest("no local C++ compiler found")
         extra_sources = extra_sources or []
+        if DIRECT_RUNTIME_SOURCE in extra_sources and TOPOLOGY_SOURCE not in extra_sources:
+            extra_sources = [*extra_sources, TOPOLOGY_SOURCE]
         extra_link_flags = extra_link_flags or []
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -149,6 +152,8 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
             "TileXRCcuRaCtxQpBindFunc",
             "TileXRCcuRaCtxQpUnbindFunc",
             "TileXRCcuRaGetTpInfoListAsyncFunc",
+            "TileXRCcuRaGetTpAttrAsyncFunc",
+            "TileXRCcuRaSetTpAttrAsyncFunc",
             "TileXRCcuRaGetAsyncReqResultFunc",
             "TileXRCcuHccpQpCreateAttr",
             "TileXRCcuHccpQpImportInfo",
@@ -167,6 +172,8 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
             "RaCtxQpBind",
             "RaCtxQpUnbind",
             "RaGetTpInfoListAsync",
+            "RaGetTpAttrAsync",
+            "RaSetTpAttrAsync",
             "RaGetAsyncReqResult",
         ]:
             with self.subTest(needle=needle):
@@ -1270,8 +1277,50 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
             source.index("void TileXRCcuDirectRuntime::Shutdown()")
         ]
         self.assertIn("adapter.CleanTaskKillState", init_body)
-        self.assertIn("TILEXR_CCU_DIRECT_DEFAULT_DIE_ID", init_body)
-        self.assertIn("TraceTaskKillCleanup", source)
+        self.assertIn("adapter.SetTaskKill", init_body)
+        self.assertIn("TILEXR_CCU_DIRECT_RECOVER_TASK_KILL_STATE", source)
+        self.assertLess(
+            init_body.index("adapter.SetTaskKill"),
+            init_body.index("adapter.CleanTaskKillState"),
+        )
+        self.assertIn("cleanupRet = TILEXR_SUCCESS", init_body)
+        self.assertIn("RecoverTaskKillState() && cleanupRet != TILEXR_SUCCESS", init_body)
+        self.assertIn("SelectDirectCcuCleanupDieId", init_body)
+        self.assertIn("TraceTaskKillStep", source)
+
+    def test_direct_runtime_selects_tp_sl_before_creating_peer_qp(self):
+        source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        create_body = source[
+            source.index("int TileXRCcuDirectRuntime::CreatePeerEndpointState("):
+            source.index("int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes(")
+        ]
+
+        self.assertIn("TILEXR_CCU_TP_HANDLE_REQUEST_NUM = 8", source)
+        self.assertIn("RaGetTpAttrAsync", source)
+        self.assertIn("RaSetTpAttrAsync", source)
+        self.assertLess(
+            create_body.index("SelectTpRouteForPeer("),
+            create_body.index("RaCtxQpCreate("),
+        )
+        self.assertIn("qpAttr.ub.priority = state->mappedJettyPriority", create_body)
+        self.assertNotIn("qpAttr.ub.priority = 2", create_body)
+
+    def test_peer_endpoint_route_uses_the_driver_returned_jetty_id(self):
+        source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        prepare_body = source[
+            source.index("int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes("):
+            source.index("int TileXRCcuDirectRuntime::QueryTpHandleForPeer(")
+        ]
+
+        self.assertIn(
+            "state.route.startJettyId = static_cast<uint16_t>(state.qpInfo.ub.id)",
+            prepare_body,
+        )
+        self.assertNotIn(
+            "state.route.startJettyId = static_cast<uint16_t>(TILEXR_CCU_DIRECT_LOOP_JETTY_ID + ordinal)",
+            prepare_body,
+        )
+
 
     def test_direct_ccu_runtime_keeps_ra_custom_channel_provider_alive_for_created_adapters(self):
         header = DIRECT_RUNTIME_HEADER.read_text(encoding="utf-8")
@@ -1484,7 +1533,7 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
                     return 2;
                 }
                 if (buffers.size() != 1 || !buffers[0].endpointRouteVerified ||
-                    buffers[0].remoteEid[0] != 0xaa ||
+                    buffers[0].remoteEid[15] != 0xaa ||
                     buffers[0].tpn != 0x10203 ||
                     buffers[0].doorbellVa != 0x1122334455667788ULL ||
                     buffers[0].doorbellTokenId != 0x3456 ||

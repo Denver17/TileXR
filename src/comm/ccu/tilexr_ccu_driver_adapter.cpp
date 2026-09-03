@@ -480,6 +480,12 @@ int TileXRCcuDriverAdapter::InstallMsidToken(
     return CallPrepared(dieId, TILEXR_CCU_U_OP_SET_MSID_TOKEN, in, &out, report);
 }
 
+int TileXRCcuDriverAdapter::SetTaskKill(uint8_t dieId, TileXRCcuDriverAdapterReport* report) const
+{
+    TileXRCcuCustomChannelOut out;
+    return Call(dieId, TILEXR_CCU_U_OP_SET_TASKKILL, &out, report);
+}
+
 int TileXRCcuDriverAdapter::CleanTaskKillState(uint8_t dieId, TileXRCcuDriverAdapterReport* report) const
 {
     TileXRCcuCustomChannelOut out;
@@ -515,21 +521,34 @@ int TileXRCcuDriverAdapter::InstallJettyCtx(
     if (ctxs == nullptr) {
         return Fail(report, "missing CCU local jetty context payloads");
     }
-    if (count == 0 || count > TILEXR_CCU_MAX_DATA_ARRAY_SIZE) {
+    if (count == 0) {
         return Fail(report, "invalid CCU local jetty context count");
     }
 
-    TileXRCcuCustomChannelIn in;
-    InitRequest(dieId, TILEXR_CCU_U_OP_SET_JETTY_CTX, &in);
-    in.offsetStartIdx = startJettyCtxId;
-    in.data.dataInfo.dataArraySize = count;
-    in.data.dataInfo.dataLen = count * TILEXR_CCU_LOCAL_JETTY_CTX_BYTES;
-    for (uint32_t i = 0; i < count; ++i) {
-        CopyPayloadToSlot(ctxs[i], &in.data.dataInfo.dataArray[i]);
-    }
+    uint32_t remaining = count;
+    uint32_t offset = startJettyCtxId;
+    uint32_t inputOffset = 0;
+    while (remaining > 0) {
+        const uint32_t batch = std::min(remaining, TILEXR_CCU_MAX_DATA_ARRAY_SIZE);
+        TileXRCcuCustomChannelIn in;
+        InitRequest(dieId, TILEXR_CCU_U_OP_SET_JETTY_CTX, &in);
+        in.offsetStartIdx = offset;
+        in.data.dataInfo.dataArraySize = batch;
+        in.data.dataInfo.dataLen = batch * TILEXR_CCU_LOCAL_JETTY_CTX_BYTES;
+        for (uint32_t i = 0; i < batch; ++i) {
+            CopyPayloadToSlot(ctxs[inputOffset + i], &in.data.dataInfo.dataArray[i]);
+        }
 
-    TileXRCcuCustomChannelOut out;
-    return CallPrepared(dieId, TILEXR_CCU_U_OP_SET_JETTY_CTX, in, &out, report);
+        TileXRCcuCustomChannelOut out;
+        const int ret = CallPrepared(dieId, TILEXR_CCU_U_OP_SET_JETTY_CTX, in, &out, report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+        remaining -= batch;
+        offset += batch;
+        inputOffset += batch;
+    }
+    return TILEXR_SUCCESS;
 }
 
 int TileXRCcuDriverAdapter::InstallChannelCtxV1(

@@ -200,7 +200,10 @@ int TileXRCcuResourceAllocator::Allocate(
     const uint32_t requiredPostWaitInstructionCount =
         postOnly ? request.syncResourceCount : request.syncResourceCount * 2U;
     const uint32_t sourceCkeInitCount = syncCkeMode ? 1U : 0U;
-    const uint32_t sourceCkeResourceCount = syncCkeMode ? 1U : 0U;
+    const uint32_t sourceCkeResourceCount = syncCkeMode ? request.sourceCkeCount : 0U;
+    if (syncCkeMode && sourceCkeResourceCount == 0) {
+        return Fail(report, "invalid CCU source CKE resource request");
+    }
     const uint32_t task1PreludeInstructionCount =
         hcommStyleTask1Prelude ? TILEXR_CCU_HCOMM_TASK1_PRELUDE_INSTRUCTION_COUNT : 0U;
     const uint32_t requiredBarrierInstructionCount =

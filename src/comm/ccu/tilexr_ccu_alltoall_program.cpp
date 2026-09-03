@@ -5,8 +5,23 @@
 
 #include "ccu/tilexr_ccu_alltoall_program.h"
 
+#include <algorithm>
+#include <set>
+
 namespace TileXR {
 namespace {
+
+constexpr uint16_t TILEXR_CCU_TRACE_LOAD_SQE_ARGS_TO_X_HEADER = 0x0001U;
+constexpr uint16_t TILEXR_CCU_TRACE_LOAD_IMD_TO_XN_HEADER = 0x0003U;
+constexpr uint16_t TILEXR_CCU_TRACE_SET_CKE_HEADER = 0x0802U;
+constexpr uint16_t TILEXR_CCU_TRACE_CLEAR_CKE_HEADER = 0x0804U;
+constexpr uint16_t TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_RMT_MEM_HEADER = 0x1009U;
+constexpr uint16_t TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_LOC_MEM_HEADER = 0x100aU;
+constexpr uint16_t TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_LOC_MS_HEADER = 0x1000U;
+constexpr uint16_t TILEXR_CCU_TRACE_TRANS_LOC_MS_TO_LOC_MEM_HEADER = 0x1002U;
+constexpr uint16_t TILEXR_CCU_TRACE_SYNC_CKE_HEADER = 0x100bU;
+constexpr uint16_t TILEXR_CCU_TRACE_SYNC_XN_HEADER = 0x100dU;
+constexpr uint16_t TILEXR_CCU_ALLTOALL_SOURCE_CKE_INIT_MASK = 0xffffU;
 
 uint16_t PreSyncSignalMask(const TileXRCcuAllToAll2RankProgramSpec& spec)
 {
@@ -200,6 +215,33 @@ int AppendRemoteNotify(
     return TILEXR_SUCCESS;
 }
 
+int AppendSyncXnNotify(
+    uint16_t remoteNotifyCke,
+    uint16_t channelId,
+    uint16_t localXn,
+    uint16_t remoteXn,
+    uint16_t mask,
+    const char* phase,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    TileXRCcuSyncXnSpec notify;
+    notify.remoteXn = remoteXn;
+    notify.localXn = localXn;
+    notify.channelId = channelId;
+    notify.notifyCke = remoteNotifyCke;
+    notify.notifyMask = mask;
+    notify.clearWait = true;
+
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeSyncXn(notify, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, std::string("failed to encode direct CCU alltoall ") + phase +
+            " SyncXn notify");
+    }
+    program->push_back(instr);
+    return TILEXR_SUCCESS;
+}
+
 int AppendRemoteMarkerNotify(
     uint16_t remoteNotifyCke,
     uint16_t channelId,
@@ -248,12 +290,14 @@ int AppendPreSyncPhase(
         spec.preSyncLocalTokenXn == 0 ? spec.lengthXn : spec.preSyncLocalTokenXn;
     const uint16_t tokenChannelId =
         spec.preSyncTokenChannelId == 0 ? outputChannelId : spec.preSyncTokenChannelId;
+    const uint16_t markerChannelId =
+        spec.preSyncMarkerChannelId == 0 ? outputChannelId : spec.preSyncMarkerChannelId;
     const uint16_t tokenNotifyCke =
         spec.preSyncRemoteTokenNotifyCke == 0 ? remoteNotifyCke : spec.preSyncRemoteTokenNotifyCke;
     if (spec.preSyncMarkerEnabled &&
         AppendRemoteMarkerNotify(
             remoteNotifyCke,
-            outputChannelId,
+            markerChannelId,
             spec,
             program,
             report) != TILEXR_SUCCESS) {
@@ -364,6 +408,42 @@ int AppendCopyBlock(
     return TILEXR_SUCCESS;
 }
 
+int AppendMeshRemoteCopyBlock(
+    const TileXRCcuAllToAll2RankProgramSpec& spec,
+    uint64_t offset,
+    uint64_t bytesPerBlock,
+    uint16_t completionCke,
+    uint16_t completionMask,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    TileXRCcuMemoryCopySpec copy;
+    copy.direction = TileXRCcuMemoryCopyDirection::LocalToRemote;
+    copy.localGsa = spec.localGsa;
+    copy.localXn = spec.localXn;
+    copy.remoteGsa = spec.remoteGsa;
+    copy.remoteXn = spec.remoteXn;
+    copy.lengthXn = spec.lengthXn;
+    copy.localAddr = spec.localSendAddr + offset;
+    copy.localToken = spec.localSendToken;
+    copy.remoteAddr = spec.remoteRecvAddr + offset;
+    copy.remoteToken = spec.remoteRecvToken;
+    copy.lengthBytes = bytesPerBlock;
+    copy.channelId = spec.copyChannelId == 0 ? spec.channelId : spec.copyChannelId;
+    copy.completionCke = completionCke;
+    copy.completionMask = completionMask;
+
+    std::vector<TileXRCcuInstr> block;
+    TileXRCcuMemoryProgramReport memoryReport;
+    if (TileXRCcuBuildMemoryCopyProgram(copy, &block, &memoryReport) != TILEXR_SUCCESS || block.size() != 7U) {
+        return Fail(program, report, memoryReport.message.empty() ?
+            "failed to build direct CCU alltoall mesh remote copy block" : memoryReport.message);
+    }
+    block.pop_back();
+    program->insert(program->end(), block.begin(), block.end());
+    return TILEXR_SUCCESS;
+}
+
 int AppendFinish(
     const TileXRCcuAllToAll2RankProgramSpec& spec,
     std::vector<TileXRCcuInstr>* program,
@@ -398,7 +478,441 @@ void FillReport(
     report->message = "ok";
 }
 
+int ValidateMeshSpec(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    if (program == nullptr) {
+        return Fail(program, report, "missing output direct CCU alltoall mesh program");
+    }
+    if (spec.rankSize != 4U || spec.localRank >= spec.rankSize || spec.peers.size() != 3U) {
+        return Fail(program, report, "direct CCU alltoall mesh requires four ranks and three peers");
+    }
+    if (spec.localSendAddr == 0 || spec.localRecvAddr == 0 ||
+        spec.localSendToken == 0 || spec.localRecvToken == 0 || spec.chunkBytes == 0 ||
+        spec.chunkBytes % TILEXR_CCU_ALLTOALL_BLOCK_BYTES != 0) {
+        return Fail(program, report, "invalid direct CCU alltoall mesh local buffer");
+    }
+    if (spec.selfSourceGsa == 0 || spec.selfDestinationGsa == 0 || spec.selfSourceXn == 0 ||
+        spec.selfDestinationXn == 0 || spec.selfLengthXn == 0 ||
+        spec.selfCompletionCke == 0 || spec.remoteCompletionCke == 0) {
+        return Fail(program, report, "missing direct CCU alltoall mesh self-copy resource");
+    }
+    bool peerRanks[4] = {};
+    std::set<uint16_t> channelIds;
+    const auto& sharedRoute = spec.peers.front().route;
+    if (spec.remoteCompletionCke == sharedRoute.sourceCke) {
+        return Fail(program, report, "alltoall mesh completion CKE overlaps source CKE");
+    }
+    for (const auto& peer : spec.peers) {
+        if (peer.peerRank >= spec.rankSize || peer.peerRank == spec.localRank || peerRanks[peer.peerRank]) {
+            return Fail(program, report, "invalid direct CCU alltoall mesh peer rank");
+        }
+        peerRanks[peer.peerRank] = true;
+        if (peer.route.localRank != spec.localRank || peer.route.localSendAddr != spec.localSendAddr ||
+            peer.route.localSendToken != spec.localSendToken || peer.route.localRecvAddr != spec.localRecvAddr ||
+            peer.route.localRecvToken != spec.localRecvToken || peer.route.bytes != spec.chunkBytes ||
+            peer.route.preSyncMarkerEnabled || !peer.route.preSyncNotify || !peer.route.preSyncWait ||
+            !peer.route.postSyncNotify || !peer.route.postSyncWait) {
+            return Fail(program, report, "invalid direct CCU alltoall mesh peer route");
+        }
+        if (peer.route.preSyncLocalAddrXn != sharedRoute.preSyncLocalAddrXn ||
+            peer.route.preSyncLocalTokenXn != sharedRoute.preSyncLocalTokenXn ||
+            peer.route.preSyncChannelId != peer.route.copyChannelId ||
+            peer.route.preSyncTokenChannelId != peer.route.copyChannelId ||
+            peer.route.postSyncChannelId != peer.route.copyChannelId ||
+            peer.route.copyCompletionCke != spec.remoteCompletionCke ||
+            peer.route.ckeMask != TILEXR_CCU_ALLTOALL_POST_SYNC_MASK ||
+            !channelIds.insert(peer.route.copyChannelId).second) {
+            return Fail(program, report, "duplicate direct CCU alltoall mesh peer resource");
+        }
+        TileXRCcuAllToAll2RankProgramSpec validationRoute = peer.route;
+        validationRoute.localRank = 0;
+        std::vector<TileXRCcuInstr> ignored;
+        TileXRCcuAllToAllProgramReport ignoredReport;
+        if (ValidateSpec(validationRoute, &ignored, &ignoredReport) != TILEXR_SUCCESS) {
+            return Fail(program, report, ignoredReport.message);
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+
+int AppendMeshPeerPosts(
+    const std::vector<TileXRCcuAllToAllMeshPeerSpec>& peers,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    if (peers.empty()) {
+        return Fail(program, report, "missing direct CCU alltoall mesh peers");
+    }
+    const auto& shared = peers.front().route;
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeLoadImdToXn(shared.preSyncLocalAddrXn, shared.localRecvAddr, 0, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh output variable");
+    }
+    program->push_back(instr);
+    if (TileXRCcuEncodeLoadImdToXn(shared.preSyncLocalTokenXn, shared.localRecvToken, 1, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh token variable");
+    }
+    program->push_back(instr);
+
+    if (AppendSetSourceCke(shared, TILEXR_CCU_ALLTOALL_SOURCE_CKE_INIT_MASK, program, report) != TILEXR_SUCCESS) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    for (const auto& peer : peers) {
+        const auto& route = peer.route;
+        if (AppendSyncXnNotify(
+                route.preSyncRemoteNotifyCke,
+                route.preSyncChannelId,
+                shared.preSyncLocalAddrXn,
+                route.preSyncRemoteAddrXn,
+                PreSyncSignalMask(route),
+                "mesh PreSync output",
+                program,
+                report) != TILEXR_SUCCESS) {
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        if (AppendSyncXnNotify(
+                route.preSyncRemoteTokenNotifyCke,
+                route.preSyncTokenChannelId,
+                shared.preSyncLocalTokenXn,
+                route.preSyncRemoteTokenXn,
+                PreSyncTokenMask(route),
+                "mesh PreSync token",
+                program,
+                report) != TILEXR_SUCCESS) {
+            return TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+
+int AppendLocalCopyBlock(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
+    uint64_t offset,
+    uint64_t bytesPerBlock,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeLoadImdToGsa(spec.selfSourceGsa, spec.localSendAddr + offset, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh self source address");
+    }
+    program->push_back(instr);
+    if (TileXRCcuEncodeLoadImdToXn(spec.selfSourceXn, spec.localSendToken, 1U, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh self source token");
+    }
+    program->push_back(instr);
+    if (TileXRCcuEncodeLoadImdToGsa(spec.selfDestinationGsa, spec.localRecvAddr + offset, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh self destination address");
+    }
+    program->push_back(instr);
+    if (TileXRCcuEncodeLoadImdToXn(spec.selfDestinationXn, spec.localRecvToken, 1U, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh self destination token");
+    }
+    program->push_back(instr);
+    if (TileXRCcuEncodeLoadImdToXn(spec.selfLengthXn, bytesPerBlock, 0, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to load direct CCU alltoall mesh self length");
+    }
+    program->push_back(instr);
+
+    TileXRCcuLocalMsTransferSpec transfer;
+    transfer.localGsa = spec.selfSourceGsa;
+    transfer.localXn = spec.selfSourceXn;
+    transfer.localMs = 0;
+    transfer.lengthXn = spec.selfLengthXn;
+    transfer.channelId = 0;
+    transfer.setCkeId = spec.selfCompletionCke;
+    transfer.setCkeMask = 1U;
+    if (TileXRCcuEncodeTransLocMemToLocMs(transfer, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to encode direct CCU alltoall mesh self transfer to local MS");
+    }
+    program->push_back(instr);
+
+    TileXRCcuCkeSpec wait;
+    wait.waitCkeId = spec.selfCompletionCke;
+    wait.waitMask = 1U;
+    if (TileXRCcuEncodeClearCke(wait, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to wait direct CCU alltoall mesh self transfer");
+    }
+    program->push_back(instr);
+
+    transfer.localGsa = spec.selfDestinationGsa;
+    transfer.localXn = spec.selfDestinationXn;
+    if (TileXRCcuEncodeTransLocMsToLocMem(transfer, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to encode direct CCU alltoall mesh self transfer from local MS");
+    }
+    program->push_back(instr);
+    if (TileXRCcuEncodeClearCke(wait, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to wait direct CCU alltoall mesh self transfer from local MS");
+    }
+    program->push_back(instr);
+    return TILEXR_SUCCESS;
+}
+
+int AppendMeshPostNotify(
+    const TileXRCcuAllToAll2RankProgramSpec& route,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    TileXRCcuSyncCkeSpec post;
+    post.remoteCke = route.postSyncRemoteNotifyCke;
+    post.localCke = route.sourceCke;
+    post.localCkeMask = route.ckeMask;
+    post.channelId = route.postSyncChannelId;
+    post.clearWait = true;
+    TileXRCcuInstr instr;
+    if (TileXRCcuEncodeSyncCke(post, &instr) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to notify direct CCU alltoall mesh completion");
+    }
+    program->push_back(instr);
+    return TILEXR_SUCCESS;
+}
+
+uint16_t InstructionSlot(const TileXRCcuInstr& instr, uint32_t slot)
+{
+    return static_cast<uint16_t>(
+        (instr.words[slot / 4U] >> ((slot % 4U) * 16U)) & 0xffffU);
+}
+
+int FailBindingValidation(TileXRCcuAllToAllProgramReport* report, const std::string& message)
+{
+    if (report != nullptr) {
+        report->message = "direct CCU alltoall encoded binding validation failed: " + message;
+    }
+    return TILEXR_ERROR_PARA_CHECK_FAIL;
+}
+
+bool MatchesSyncXn(
+    const TileXRCcuInstr& instr,
+    uint16_t remoteXn,
+    uint16_t localXn,
+    uint16_t channelId,
+    uint16_t notifyCke,
+    uint16_t notifyMask)
+{
+    return InstructionSlot(instr, 0) == TILEXR_CCU_TRACE_SYNC_XN_HEADER &&
+        InstructionSlot(instr, 1) == remoteXn &&
+        InstructionSlot(instr, 2) == localXn &&
+        InstructionSlot(instr, 4) == channelId &&
+        InstructionSlot(instr, 5) == notifyCke &&
+        InstructionSlot(instr, 6) == notifyMask;
+}
+
+bool MatchesWait(
+    const TileXRCcuInstr& instr,
+    uint16_t header,
+    uint16_t waitCke,
+    uint16_t waitMask)
+{
+    return InstructionSlot(instr, 0) == header &&
+        InstructionSlot(instr, 4) == waitCke &&
+        InstructionSlot(instr, 5) == waitMask;
+}
+
+bool MatchesTransfer(
+    const TileXRCcuInstr& instr,
+    uint16_t header,
+    uint16_t remoteGsa,
+    uint16_t remoteXn,
+    uint16_t localGsa,
+    uint16_t localXn,
+    uint16_t lengthXn,
+    uint16_t channelId,
+    uint16_t completionCke,
+    uint16_t completionMask)
+{
+    return InstructionSlot(instr, 0) == header &&
+        InstructionSlot(instr, 1) == remoteGsa &&
+        InstructionSlot(instr, 2) == remoteXn &&
+        InstructionSlot(instr, 3) == localGsa &&
+        InstructionSlot(instr, 4) == localXn &&
+        InstructionSlot(instr, 5) == lengthXn &&
+        InstructionSlot(instr, 6) == channelId &&
+        InstructionSlot(instr, 12) == completionCke &&
+        InstructionSlot(instr, 13) == completionMask;
+}
+
+bool MatchesLocalMsTransfer(
+    const TileXRCcuInstr& instr,
+    uint16_t header,
+    uint16_t localGsa,
+    uint16_t localXn,
+    uint16_t localMs,
+    uint16_t lengthXn,
+    uint16_t channelId,
+    uint16_t completionCke,
+    uint16_t completionMask)
+{
+    const bool memToMs = header == TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_LOC_MS_HEADER;
+    return InstructionSlot(instr, 0) == header &&
+        InstructionSlot(instr, memToMs ? 1U : 3U) == localMs &&
+        InstructionSlot(instr, memToMs ? 2U : 1U) == localGsa &&
+        InstructionSlot(instr, memToMs ? 3U : 2U) == localXn &&
+        InstructionSlot(instr, 4) == lengthXn &&
+        InstructionSlot(instr, 5) == channelId &&
+        InstructionSlot(instr, 12) == completionCke &&
+        InstructionSlot(instr, 13) == completionMask;
+}
+
+int ValidateMeshProgramBindings(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
+    const std::vector<TileXRCcuInstr>& program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    auto peers = spec.peers;
+    std::sort(peers.begin(), peers.end(), [](const TileXRCcuAllToAllMeshPeerSpec& lhs,
+                                             const TileXRCcuAllToAllMeshPeerSpec& rhs) {
+        return lhs.peerRank < rhs.peerRank;
+    });
+    const uint32_t blocksPerChunk = static_cast<uint32_t>(
+        spec.chunkBytes / TILEXR_CCU_ALLTOALL_BLOCK_BYTES);
+    const size_t expectedSize = 12U + static_cast<size_t>(blocksPerChunk) * 28U + 6U + 1U;
+    if (peers.size() != 3U || blocksPerChunk == 0 || program.size() != expectedSize) {
+        return FailBindingValidation(report, "unexpected mesh program shape");
+    }
+
+    const auto& sharedRoute = peers.front().route;
+    if (InstructionSlot(program[0], 0) != TILEXR_CCU_TRACE_LOAD_IMD_TO_XN_HEADER ||
+        InstructionSlot(program[0], 1) != sharedRoute.preSyncLocalAddrXn ||
+        InstructionSlot(program[1], 0) != TILEXR_CCU_TRACE_LOAD_IMD_TO_XN_HEADER ||
+        InstructionSlot(program[1], 1) != sharedRoute.preSyncLocalTokenXn ||
+        InstructionSlot(program[2], 0) != TILEXR_CCU_TRACE_SET_CKE_HEADER ||
+        InstructionSlot(program[2], 2) != sharedRoute.sourceCke ||
+        InstructionSlot(program[2], 3) != TILEXR_CCU_ALLTOALL_SOURCE_CKE_INIT_MASK) {
+        return FailBindingValidation(report, "pre-sync variable loads do not match the shared mesh resources");
+    }
+    for (size_t ordinal = 0; ordinal < peers.size(); ++ordinal) {
+        const auto& route = peers[ordinal].route;
+        if (!MatchesSyncXn(
+                program[3U + ordinal * 2U],
+                route.preSyncRemoteAddrXn,
+                sharedRoute.preSyncLocalAddrXn,
+                route.preSyncChannelId,
+                route.preSyncRemoteNotifyCke,
+                PreSyncSignalMask(route))) {
+            return FailBindingValidation(report, "output SyncXn does not match its peer route");
+        }
+        if (!MatchesSyncXn(
+                program[4U + ordinal * 2U],
+                route.preSyncRemoteTokenXn,
+                sharedRoute.preSyncLocalTokenXn,
+                route.preSyncTokenChannelId,
+                route.preSyncRemoteTokenNotifyCke,
+                PreSyncTokenMask(route))) {
+            return FailBindingValidation(report, "token SyncXn does not match its peer route");
+        }
+        const size_t wait = 9U + ordinal;
+        if (!MatchesWait(
+                program[wait],
+                TILEXR_CCU_TRACE_SET_CKE_HEADER,
+                route.preSyncLocalWaitCke,
+                static_cast<uint16_t>(PreSyncSignalMask(route) | PreSyncTokenMask(route)))) {
+            return FailBindingValidation(report, "pre-sync waits do not match their peer route");
+        }
+    }
+
+    size_t instruction = 12U;
+    for (uint32_t block = 0; block < blocksPerChunk; ++block) {
+        for (size_t ordinal = 0; ordinal < peers.size(); ++ordinal) {
+            const auto& route = peers[ordinal].route;
+            if (!MatchesTransfer(
+                    program[instruction + 5U],
+                    TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_RMT_MEM_HEADER,
+                    route.remoteGsa,
+                    route.remoteXn,
+                    route.localGsa,
+                    route.localXn,
+                    route.lengthXn,
+                    route.copyChannelId,
+                    spec.remoteCompletionCke,
+                    static_cast<uint16_t>(1U << ordinal))) {
+                return FailBindingValidation(report, "remote copy does not match its peer route");
+            }
+            instruction += 6U;
+        }
+        if (!MatchesLocalMsTransfer(
+                program[instruction + 5U],
+                TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_LOC_MS_HEADER,
+                spec.selfSourceGsa,
+                spec.selfSourceXn,
+                0,
+                spec.selfLengthXn,
+                0,
+                spec.selfCompletionCke,
+                1U) ||
+            !MatchesWait(
+                program[instruction + 6U],
+                TILEXR_CCU_TRACE_CLEAR_CKE_HEADER,
+                spec.selfCompletionCke,
+                1U) ||
+            !MatchesLocalMsTransfer(
+                program[instruction + 7U],
+                TILEXR_CCU_TRACE_TRANS_LOC_MS_TO_LOC_MEM_HEADER,
+                spec.selfDestinationGsa,
+                spec.selfDestinationXn,
+                0,
+                spec.selfLengthXn,
+                0,
+                spec.selfCompletionCke,
+                1U) ||
+            !MatchesWait(
+                program[instruction + 8U],
+                TILEXR_CCU_TRACE_CLEAR_CKE_HEADER,
+                spec.selfCompletionCke,
+                1U)) {
+            return FailBindingValidation(report, "self copy does not match its local route");
+        }
+        instruction += 9U;
+        if (!MatchesWait(
+                program[instruction],
+                TILEXR_CCU_TRACE_CLEAR_CKE_HEADER,
+                spec.remoteCompletionCke,
+                0x7U)) {
+            return FailBindingValidation(report, "combined remote copy wait does not match the mesh completion CKE");
+        }
+        ++instruction;
+    }
+    for (const auto& peer : peers) {
+        const auto& route = peer.route;
+        if (InstructionSlot(program[instruction], 0) != TILEXR_CCU_TRACE_SYNC_CKE_HEADER ||
+            InstructionSlot(program[instruction], 1) != route.postSyncRemoteNotifyCke ||
+            InstructionSlot(program[instruction], 2) != route.sourceCke ||
+            InstructionSlot(program[instruction], 3) != route.ckeMask ||
+            InstructionSlot(program[instruction], 4) != route.postSyncChannelId) {
+            return FailBindingValidation(report, "post-sync notify does not match its peer route");
+        }
+        ++instruction;
+    }
+    for (const auto& peer : peers) {
+        if (!MatchesWait(
+                program[instruction],
+                TILEXR_CCU_TRACE_CLEAR_CKE_HEADER,
+                peer.route.postSyncLocalWaitCke,
+                peer.route.ckeMask)) {
+            return FailBindingValidation(report, "post-sync wait does not match its peer route");
+        }
+        ++instruction;
+    }
+    if (instruction + 1U != program.size() ||
+        InstructionSlot(program[instruction], 0) != TILEXR_CCU_TRACE_LOAD_IMD_TO_XN_HEADER ||
+        InstructionSlot(program[instruction], 1) != spec.selfSourceXn) {
+        return FailBindingValidation(report, "finish instruction does not match the mesh program");
+    }
+    return TILEXR_SUCCESS;
+}
+
 } // namespace
+
+int TileXRCcuValidateAllToAllMeshProgramBindings(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
+    const std::vector<TileXRCcuInstr>& program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    return ValidateMeshProgramBindings(spec, program, report);
+}
 
 int TileXRCcuBuildAllToAll2RankProgram(
     const TileXRCcuAllToAll2RankProgramSpec& spec,
@@ -465,6 +979,133 @@ int TileXRCcuBuildAllToAll2RankProgram(
     }
 
     FillReport(spec, *program, report);
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuBuildAllToAllMeshProgram(
+    const TileXRCcuAllToAllMeshProgramSpec& spec,
+    std::vector<TileXRCcuInstr>* program,
+    TileXRCcuAllToAllProgramReport* report)
+{
+    ResetReport(report);
+    if (program != nullptr) {
+        program->clear();
+    }
+    int ret = ValidateMeshSpec(spec, program, report);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    auto peers = spec.peers;
+    std::sort(peers.begin(), peers.end(), [](const TileXRCcuAllToAllMeshPeerSpec& lhs,
+                                             const TileXRCcuAllToAllMeshPeerSpec& rhs) {
+        return lhs.peerRank < rhs.peerRank;
+    });
+    const uint64_t bytesPerBlock = TILEXR_CCU_ALLTOALL_BLOCK_BYTES;
+    const uint32_t blocksPerChunk = static_cast<uint32_t>(spec.chunkBytes / bytesPerBlock);
+    program->reserve(12U + blocksPerChunk * 28U + 6U + 1U);
+
+    ret = AppendMeshPeerPosts(peers, program, report);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    for (const auto& peer : peers) {
+        ret = AppendNotifyWait(
+            peer.route.preSyncLocalWaitCke,
+            static_cast<uint16_t>(PreSyncSignalMask(peer.route) | PreSyncTokenMask(peer.route)),
+            "mesh PreSync",
+            false,
+            program,
+            report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+    }
+
+    const uint64_t selfBaseOffset = static_cast<uint64_t>(spec.localRank) * spec.chunkBytes;
+    for (uint32_t block = 0; block < blocksPerChunk; ++block) {
+        for (size_t ordinal = 0; ordinal < peers.size(); ++ordinal) {
+            const auto& peer = peers[ordinal];
+            TileXRCcuAllToAll2RankProgramSpec route = peer.route;
+            route.localSendAddr = spec.localSendAddr + static_cast<uint64_t>(peer.peerRank) * spec.chunkBytes;
+            route.remoteRecvAddr += static_cast<uint64_t>(spec.localRank) * spec.chunkBytes;
+            ret = AppendMeshRemoteCopyBlock(
+                route,
+                static_cast<uint64_t>(block) * bytesPerBlock,
+                bytesPerBlock,
+                spec.remoteCompletionCke,
+                static_cast<uint16_t>(1U << ordinal),
+                program,
+                report);
+            if (ret != TILEXR_SUCCESS) {
+                return ret;
+            }
+        }
+        ret = AppendLocalCopyBlock(
+            spec,
+            selfBaseOffset + static_cast<uint64_t>(block) * bytesPerBlock,
+            bytesPerBlock,
+            program,
+            report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+        ret = AppendNotifyWait(
+            spec.remoteCompletionCke,
+            0x7U,
+            "mesh Copy",
+            true,
+            program,
+            report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+    }
+
+    for (const auto& peer : peers) {
+        ret = AppendMeshPostNotify(peer.route, program, report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+    }
+    for (const auto& peer : peers) {
+        ret = AppendNotifyWait(
+            peer.route.postSyncLocalWaitCke,
+            peer.route.ckeMask,
+            "mesh PostSync",
+            true,
+            program,
+            report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+    }
+
+    TileXRCcuInstr finish;
+    if (TileXRCcuEncodeLoadImdToXn(spec.selfSourceXn, 0, 0, &finish) != TILEXR_SUCCESS) {
+        return Fail(program, report, "failed to encode direct CCU alltoall mesh finish");
+    }
+    program->push_back(finish);
+
+    if (TileXRCcuValidateAllToAllMeshProgramBindings(spec, *program, report) != TILEXR_SUCCESS) {
+        program->clear();
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    if (report != nullptr) {
+        report->preSyncInstructionCount = 12U;
+        report->blockCount = blocksPerChunk;
+        report->bytesPerBlock = static_cast<uint32_t>(bytesPerBlock);
+        report->copyInstructionCount = blocksPerChunk * 28U;
+        report->postSyncInstructionCount = 6U;
+        report->finishInstructionCount = 1U;
+        report->totalInstructionCount = static_cast<uint32_t>(program->size());
+        report->peerCount = 3U;
+        report->syncResourceCount = 3U;
+        report->remoteBlockCount = 3U * blocksPerChunk;
+        report->selfBlockCount = blocksPerChunk;
+        report->message = "ok";
+    }
     return TILEXR_SUCCESS;
 }
 

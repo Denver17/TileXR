@@ -127,6 +127,21 @@ struct TileXRCcuDirectRuntimeReport {
     std::string message;
 };
 
+struct TileXRCcuPeerEndpointState {
+    uint32_t peerRank = 0;
+    uint32_t peerDevicePhyId = 0;
+    TileXRCcuLocalResourceWindowInfo resourceWindow;
+    TileXRCcuHccpDevEidInfo eidInfo {};
+    void* cqHandle = nullptr;
+    void* qpHandle = nullptr;
+    void* remoteQpHandle = nullptr;
+    TileXRCcuHccpQpCreateInfo qpInfo {};
+    TileXRCcuLowerLayerTransportRoute route;
+    uint32_t psn = 0;
+    uint64_t localTpHandle = 0;
+    uint8_t mappedJettyPriority = 0;
+};
+
 class TileXRCcuDirectRuntime {
 public:
     int Init(const TileXRCcuDirectRuntimeOptions& options, TileXRCcuDirectRuntimeReport* report);
@@ -155,7 +170,26 @@ private:
     int CollectLocalEndpointRouteWithRaCtxOnce(
         TileXRCcuLowerLayerTransportRoute* route,
         bool* asyncWaitFailed);
+    int PreparePeerEndpointRoutes(TileXRCcuDirectRuntimeReport* report);
+    int CreatePeerEndpointState(
+        uint32_t peerRank,
+        uint32_t peerDevicePhyId,
+        const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
+        const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+        uint32_t peerOrdinal,
+        TileXRCcuPeerEndpointState* state);
+    int SelectTpRouteForPeer(
+        void* ctxHandle,
+        const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
+        const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+        uint64_t* tpHandle,
+        uint8_t* mappedJettyPriority);
     int QueryTpHandleForPeer(
+        const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+        uint64_t* tpHandle);
+    int QueryTpHandleForPeer(
+        void* ctxHandle,
+        const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
         const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
         uint64_t* tpHandle);
     int ImportPeerEndpointRoute(
@@ -170,6 +204,8 @@ private:
     void ReleaseRegisteredMemoryBuffers();
     void ReleaseRegisteredResourceWindow();
     void ReleaseLocalEndpointRoute();
+    void ReleasePeerEndpointState(TileXRCcuPeerEndpointState* state);
+    void ReleasePeerEndpointRoutes();
 
     TileXRCcuDirectRuntimeOptions options_;
     TileXRCcuHccpLoader loader_;
@@ -185,6 +221,7 @@ private:
     void* endpointQpHandle_ = nullptr;
     void* endpointRemoteQpHandle_ = nullptr;
     std::vector<void*> endpointPeerRemoteQpHandles_;
+    std::vector<TileXRCcuPeerEndpointState> peerEndpointStates_;
     std::vector<TileXRCcuRegisteredMemoryBufferInfo> registeredMemoryBuffers_;
     std::vector<TileXRCcuImportedRemoteMemoryBufferInfo> importedRemoteMemoryBuffers_;
     TileXRCcuHccpQpKey endpointQpKey_ = {};

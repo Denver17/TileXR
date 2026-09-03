@@ -4,6 +4,7 @@
 #
 
 import shutil
+import json
 import os
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ BUILDER_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_lower_layer_pl
 BUILDER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_lower_layer_plan_builder.cpp"
 DIRECT_RUNTIME_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_runtime.h"
 DIRECT_RUNTIME_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_runtime.cpp"
+TOPOLOGY_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_topology.cpp"
 PAYLOAD_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_lower_layer_payloads.cpp"
 SPECS_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_specs.cpp"
 ALLOCATOR_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_resource_allocator.cpp"
@@ -57,6 +59,8 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         if compiler is None:
             self.skipTest("no local C++ compiler found")
         extra_sources = extra_sources or []
+        if DIRECT_RUNTIME_SOURCE in extra_sources and TOPOLOGY_SOURCE not in extra_sources:
+            extra_sources = [*extra_sources, TOPOLOGY_SOURCE]
         extra_link_flags = extra_link_flags or []
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -128,6 +132,75 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 text=True,
                 capture_output=True,
             )
+
+    def test_topology_resolver_selects_peer_specific_hccs_eids(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_topology.h"
+
+            #include <cstdlib>
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                const char* rootPath = std::getenv("TILEXR_TEST_CCU_ROOT_INFO");
+                std::vector<TileXRCcuPeerEidRoute> routes;
+                std::string message;
+                const int ret = TileXRCcuResolvePeerEidRoutes(
+                    rootPath == nullptr ? "" : rootPath,
+                    0,
+                    {1, 2, 3},
+                    &routes,
+                    &message);
+                if (ret != TILEXR_SUCCESS || routes.size() != 3) {
+                    std::cerr << "resolve failed ret=" << ret << " message=" << message << "\n";
+                    return 1;
+                }
+                if (routes[0].localPort != "0/8" || routes[0].localEid[5] != 0x08 ||
+                    routes[1].localPort != "0/0" || routes[1].localEid[5] != 0x00 ||
+                    routes[2].localPort != "0/7" || routes[2].localEid[5] != 0x07) {
+                    std::cerr << "peer-specific EID mapping mismatch\n";
+                    return 2;
+                }
+                return 0;
+            }
+            ''')
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            topo_path = temp_path / "topology.json"
+            root_path = temp_path / "rootinfo.json"
+            topo_path.write_text(json.dumps({
+                "edge_list": [
+                    {"local_a": 0, "local_a_ports": ["0/8"], "local_b": 1, "local_b_ports": ["0/7"]},
+                    {"local_a": 0, "local_a_ports": ["0/0"], "local_b": 2, "local_b_ports": ["0/0"]},
+                    {"local_a": 0, "local_a_ports": ["0/7"], "local_b": 3, "local_b_ports": ["0/7"]},
+                ]
+            }), encoding="utf-8")
+            root_path.write_text(json.dumps({
+                "topo_file_path": str(topo_path),
+                "rank_list": [
+                    {"device_id": device, "local_id": device, "level_list": [{"rank_addr_list": addresses}]}
+                    for device, addresses in [
+                        (0, [
+                            {"addr": "000000000000030000100000df160100", "ports": ["0/0"]},
+                            {"addr": "000000000008030000100000df160900", "ports": ["0/8"]},
+                            {"addr": "000000000007030000100000df160800", "ports": ["0/7"]},
+                        ]),
+                        (1, []),
+                        (2, []),
+                        (3, []),
+                    ]
+                ]
+            }), encoding="utf-8")
+            env = os.environ.copy()
+            env["TILEXR_TEST_CCU_ROOT_INFO"] = str(root_path)
+            result = self.compile_and_run(code, env=env, extra_sources=[TOPOLOGY_SOURCE])
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_builds_lower_layer_install_plan_from_tilexr_owned_specs(self):
         code = textwrap.dedent(
@@ -470,7 +543,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 if (snapshot.pfeId != 3 ||
                     snapshot.startLocalJettyCtxId != 0 ||
                     snapshot.startJettyId != 1024 ||
-                    snapshot.pfeJettyCount != 23 ||
+                    snapshot.pfeJettyCount != 128 ||
                     snapshot.routes.size() != 2) {
                     std::cerr << "hcomm ordered pfe partition not applied: pfeId=" << snapshot.pfeId
                               << " startLocalJettyCtxId=" << snapshot.startLocalJettyCtxId
@@ -549,6 +622,75 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         env["TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION"] = "hcomm_fe_id"
 
         result = self.compile_and_run(code, env=env)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_hcomm_pfe_window_keeps_base_and_maps_sparse_verified_jetty_context(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
+
+            #include <cstdlib>
+            #include <iostream>
+
+            using namespace TileXR;
+
+            int main()
+            {
+                setenv("TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION", "hcomm", 1);
+                TileXRCcuBasicInfo basic;
+                basic.dieId = 0;
+                basic.msId = 0x45;
+                basic.msidToken.tokenId = 0x1234;
+                basic.msidToken.valid = true;
+
+                TileXRCcuResourceAllocation allocation;
+                allocation.channels = {0, 2, 1};
+                allocation.localXn = {0, 1961, 1};
+                allocation.remoteXn = {0, 2361, 1};
+                allocation.notifyCke = {0, 332, 1};
+
+                TileXRCcuRemoteCcuBufferInfo remote;
+                remote.remoteCcuVa = 0xf98000000000ULL;
+                remote.memoryTokenId = 0x1100;
+                remote.remoteEid[0] = 1;
+                remote.tpn = 0x51;
+                remote.doorbellVa = 0x3fffff85080ULL;
+                remote.doorbellTokenId = 0x1103;
+                remote.sqDepth = 8;
+                remote.startJettyId = 1026;
+                remote.endpointRouteVerified = true;
+
+                TileXRCcuLowerLayerTransportSnapshot snapshot;
+                TileXRCcuLowerLayerPlanBuilderReport report;
+                if (TileXRCcuBuildLowerLayerTransportTemplate(
+                        basic, allocation, {remote}, &snapshot, &report) != TILEXR_SUCCESS) {
+                    std::cerr << report.message << "\n";
+                    return 1;
+                }
+                if (snapshot.startJettyId != 1024 || snapshot.pfeJettyCount != 128 ||
+                    snapshot.routes[0].wqeBasicBlockStartId != 64) {
+                    std::cerr << "PFE window was narrowed\n";
+                    return 2;
+                }
+
+                TileXRCcuLowerLayerInstallPlan plan;
+                if (TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
+                        snapshot, &plan, &report) != TILEXR_SUCCESS) {
+                    std::cerr << report.message << "\n";
+                    return 3;
+                }
+                if (plan.pfes.size() != 1 || plan.jettys.size() != 1 ||
+                    plan.jettys[0].startJettyCtxId != 2 || plan.jettys[0].ctxs.size() != 1) {
+                    std::cerr << "sparse jetty context mapping mismatch\n";
+                    return 4;
+                }
+                return 0;
+            }
+            ''')
+
+        result = self.compile_and_run(code)
 
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
@@ -1663,7 +1805,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                               << " routeCount=" << snapshot.routes.size() << "\n";
                     return 3;
                 }
-                if (plan.jettys.empty() || plan.jettys[0].ctxs.size() != 3 || plan.pfes.empty()) {
+                if (plan.jettys.empty() || plan.jettys[0].ctxs.size() != 1 || plan.pfes.empty()) {
                     std::cerr << "install plan shape mismatch\n";
                     return 4;
                 }
@@ -1870,6 +2012,125 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                     !proof.transportResourceExchangeVerified) {
                     std::cerr << "install proof did not preserve owner/exchange proof\n";
                     return 7;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
+    def test_shared_peer_jetty_routes_reuse_one_wqe_window_per_peer(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_lower_layer_plan_builder.h"
+
+            #include <cstdlib>
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            uint16_t DecodeWqeStart(const TileXRCcuLocalJettyCtxData& ctx)
+            {
+                const uint16_t word22 = static_cast<uint16_t>(ctx.raw[22]) |
+                    static_cast<uint16_t>(ctx.raw[23] << 8U);
+                const uint16_t word24 = static_cast<uint16_t>(ctx.raw[24]) |
+                    static_cast<uint16_t>(ctx.raw[25] << 8U);
+                return static_cast<uint16_t>(((word22 >> 12U) & 0xfU) | ((word24 & 0xffU) << 4U));
+            }
+
+            uint16_t DecodeChannelJetty(const TileXRCcuChannelCtxDataV1& ctx)
+            {
+                const uint16_t word18 = static_cast<uint16_t>(ctx.raw[18]) |
+                    static_cast<uint16_t>(ctx.raw[19] << 8U);
+                const uint16_t word20 = static_cast<uint16_t>(ctx.raw[20]) |
+                    static_cast<uint16_t>(ctx.raw[21] << 8U);
+                return static_cast<uint16_t>(((word18 >> 12U) & 0xfU) | ((word20 & 0xfffU) << 4U));
+            }
+
+            int main()
+            {
+                setenv("TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE", "hcomm_cap", 1);
+                TileXRCcuBasicInfo basic;
+                basic.dieId = 0;
+                basic.msId = 0x45;
+                basic.msidToken.tokenId = 0x1234;
+                basic.msidToken.valid = true;
+
+                TileXRCcuResourceAllocation allocation;
+                allocation.channels = {0, 2, 9};
+                allocation.localXn = {0, 1961, 9};
+                allocation.remoteXn = {0, 2361, 9};
+                allocation.notifyCke = {0, 332, 9};
+                allocation.localWaitCke = {0, 332, 9};
+                allocation.remoteNotifyCke = {0, 364, 9};
+
+                std::vector<TileXRCcuRemoteCcuBufferInfo> buffers(9);
+                for (uint32_t route = 0; route < buffers.size(); ++route) {
+                    const uint32_t peerOrdinal = route / 3U;
+                    auto& buffer = buffers[route];
+                    buffer.remoteCcuVa = 0x90000000ULL + route * 0x1000ULL;
+                    buffer.memoryTokenId = 0x2000U + route;
+                    buffer.memoryTokenValue = 0x3000U + route;
+                    buffer.remoteXnId = static_cast<uint16_t>(2361U + route);
+                    buffer.remoteNotifyCke = static_cast<uint16_t>(364U + route);
+                    buffer.peerRank = peerOrdinal + 1U;
+                    for (uint32_t byte = 0; byte < buffer.remoteEid.size(); ++byte) {
+                        buffer.remoteEid[byte] = static_cast<uint8_t>(0x20U + peerOrdinal * 0x10U + byte);
+                    }
+                    buffer.tpn = 0x50U + peerOrdinal;
+                    buffer.doorbellVa = 0x10000000ULL + peerOrdinal * 0x10000ULL;
+                    buffer.doorbellTokenId = 0x4000U + peerOrdinal;
+                    buffer.sqDepth = 8;
+                    buffer.localDoorbellVa = 0x20000000ULL + peerOrdinal * 0x10000ULL;
+                    buffer.localDoorbellTokenId = 0x5000U + peerOrdinal;
+                    buffer.localSqDepth = 8;
+                    buffer.startJettyId = static_cast<uint16_t>(1024U + peerOrdinal);
+                    buffer.endpointRouteVerified = true;
+                }
+
+                TileXRCcuLowerLayerTransportSnapshot snapshot;
+                TileXRCcuLowerLayerPlanBuilderReport report;
+                if (TileXRCcuBuildLowerLayerTransportTemplate(
+                        basic, allocation, buffers, &snapshot, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "template failed: " << report.message << "\n";
+                    return 1;
+                }
+                for (uint32_t route = 0; route < snapshot.routes.size(); ++route) {
+                    const uint16_t expected = static_cast<uint16_t>((route / 3U) * 32U);
+                    if (snapshot.routes[route].wqeBasicBlockStartId != expected) {
+                        std::cerr << "route WQE mismatch route=" << route << " observed="
+                                  << snapshot.routes[route].wqeBasicBlockStartId << "\n";
+                        return 2;
+                    }
+                }
+
+                TileXRCcuLowerLayerInstallPlan plan;
+                if (TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(snapshot, &plan, &report) !=
+                    TILEXR_SUCCESS) {
+                    std::cerr << "plan failed: " << report.message << "\n";
+                    return 3;
+                }
+                if (plan.jettys.size() != 1U || plan.jettys[0].ctxs.size() != 3U ||
+                    plan.channels.size() != 9U) {
+                    std::cerr << "unexpected plan shape\n";
+                    return 4;
+                }
+                for (uint32_t peer = 0; peer < 3U; ++peer) {
+                    if (DecodeWqeStart(plan.jettys[0].ctxs[peer]) != peer * 32U) {
+                        std::cerr << "jetty context WQE mismatch peer=" << peer << "\n";
+                        return 5;
+                    }
+                    for (uint32_t route = 0; route < 3U; ++route) {
+                        if (DecodeChannelJetty(plan.channels[peer * 3U + route].ctx) != 1024U + peer) {
+                            std::cerr << "channel jetty mismatch peer=" << peer << " route=" << route << "\n";
+                            return 6;
+                        }
+                    }
                 }
                 return 0;
             }
@@ -2256,22 +2517,27 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             "peerLocalXnId = static_cast<uint16_t>(static_cast<uint32_t>(peerResources.localXnStartId) + peerLocalXnOffset)",
             compact_body)
         self.assertIn("selectedRemoteXnOffset >= peerResources.remoteXnCount", compact_body)
-        self.assertIn("SelectDirectCcuChannelBoundRemoteXnId(", compact_body)
+        self.assertIn("peerLocalIndex * routesPerPeer + routeWithinPeer", compact_body)
         self.assertIn("peerResources.remoteXnStartId", compact_body)
         self.assertNotIn("SelectDirectCcuRemoteBindingOverride", compact_body)
-        self.assertIn("(*remoteCcuBuffers)[routeIndex].remoteXnId = channelBoundRemoteXnId", compact_body)
         self.assertNotIn("(*remoteCcuBuffers)[routeIndex].remoteCcuVa +=", compact_body)
         self.assertNotIn("static_cast<uint64_t>(peerLocalXnId) * TILEXR_CCU_XN_SLOT_BYTES", compact_body)
         self.assertNotIn("TILEXR_CCU_V1_XN_RESOURCE_OFFSET + static_cast<uint64_t>(peerLocalXnId)", compact_body)
-        self.assertNotIn(
-            "uint16_t remoteXnId = static_cast<uint16_t>(peerResources.localXnStartId + peerLocalIndex)",
-            compact_body)
+        self.assertIn("(*remoteCcuBuffers)[routeIndex].remoteXnId = channelBoundRemoteXnId", compact_body)
         self.assertNotIn(
             "channelBoundRemoteXnId = static_cast<uint16_t>(allocation.remoteXn.startId + routeIndex)",
             compact_body)
         self.assertNotIn(
             "static_cast<uint64_t>((*remoteCcuBuffers)[routeIndex].remoteXnId) * TILEXR_CCU_XN_SLOT_BYTES",
             compact_body)
+
+    def test_lower_layer_clears_the_complete_allocated_remote_xn_range(self):
+        source = BUILDER_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("result.remoteXnStartId = allocation.remoteXn.startId", source)
+        self.assertIn("result.remoteXnCount = allocation.remoteXn.num", source)
+        self.assertIn("snapshot.remoteXnStartId", source)
+        self.assertIn("snapshot.remoteXnCount", source)
 
     def test_remote_notify_cke_targets_peer_local_wait_cke(self):
         planner_source = CCU_PLANNER_SOURCE.read_text(encoding="utf-8")
@@ -2305,14 +2571,19 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
 
         self.assertIn("const size_t peerRouteCount = static_cast<size_t>(rankSize - 1)", compact_body)
         self.assertIn("const size_t syncRouteCount = allocation.remoteXn.num", compact_body)
-        self.assertIn("allocation.remoteXn.num < static_cast<uint16_t>(rankSize - 1)", compact_body)
+        self.assertIn("allocation.remoteXn.num < routedPeerCount", compact_body)
         self.assertNotIn("allocation.remoteXn.num != static_cast<uint16_t>(rankSize - 1)", compact_body)
-        self.assertIn("std::vector<TileXRCcuRemoteCcuBufferInfo> peerCcuBuffers = *remoteCcuBuffers", compact_body)
+        self.assertIn("peerCcuBuffersByRank", compact_body)
+        self.assertIn("peerCcuBuffer.peerRank", compact_body)
+        self.assertIn("invalid direct CCU peer buffer rank mapping", compact_body)
+        self.assertIn("incomplete direct CCU peer buffer rank mapping", compact_body)
         self.assertIn("remoteCcuBuffers->assign(syncRouteCount, TileXRCcuRemoteCcuBufferInfo{})", compact_body)
         self.assertIn("for (uint32_t syncIndex = 0; syncIndex < allocation.remoteXn.num; ++syncIndex)", compact_body)
-        self.assertIn("const size_t peerBufferIndex = syncIndex % peerRouteCount", compact_body)
-        self.assertIn("(*remoteCcuBuffers)[routeIndex] = peerCcuBuffers[peerBufferIndex]", compact_body)
-        self.assertIn("SelectDirectCcuChannelBoundRemoteXnId(", compact_body)
+        self.assertIn("const size_t peerBufferIndex = syncIndex / routesPerPeer", compact_body)
+        self.assertIn(
+            "(*remoteCcuBuffers)[routeIndex] = *peerCcuBuffersByRank[static_cast<size_t>(peer)]",
+            compact_body)
+        self.assertIn("peerLocalIndex * routesPerPeer + routeWithinPeer", compact_body)
         self.assertIn("peerResources.remoteXnStartId", compact_body)
         self.assertIn("DirectCcuRemoteXnProofSpan(allocation.remoteXn.num)", compact_body)
 
@@ -2336,6 +2607,15 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertIn("remote.localDoorbellVa = localVerifiedEndpointRoute_.doorbellVa", compact_body)
         self.assertIn("remote.localDoorbellTokenId = localVerifiedEndpointRoute_.doorbellTokenId", compact_body)
         self.assertIn("remote.localDoorbellTokenValue = localVerifiedEndpointRoute_.doorbellTokenValue", compact_body)
+
+    def test_peer_endpoints_keep_per_peer_resource_and_jetty_tokens(self):
+        source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("offer.resourceTokenId = state.resourceWindow.tokenId", source)
+        self.assertIn("offer.resourceTokenValue = state.resourceWindow.tokenValue", source)
+        self.assertIn("offer.jettyTokenValue = state.resourceWindow.tokenValue", source)
+        self.assertIn("importInfo.in.ub.tokenValue = peerOffer.jettyTokenValue", source)
+        self.assertIn("state.route.memoryTokenValue = peerOffer.resourceTokenValue", source)
 
     def test_direct_ccu_runtime_can_override_resource_window_token_from_rank_env(self):
         code = textwrap.dedent(
@@ -2601,10 +2881,17 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX", source)
-        self.assertIn("SelectRaCtxResourceWindowEidInfo", source)
+        self.assertIn("BuildRaCtxResourceWindowEidCandidates", source)
         self.assertIn("SelectRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV", source)
+        self.assertIn("SelectDirectCcuCleanupDieId()", source)
+        self.assertIn("it->dieId == dieId", source)
+        self.assertIn("TILEXR_CCU_UBOE_DEV_FLAG_RIGHT_SHIFT = 19U", source)
+        self.assertIn("QueryTpHandleForPeer(ctxHandle, candidateEid, candidateEid", source)
+        self.assertIn("loopEidCandidate", source)
         self.assertIn("TraceRaCtxEidInfos", source)
-        self.assertIn("ctxAttr.ub.eidIndex = selectedEid.eidIndex", source)
+        self.assertIn("ctxAttr.ub.eidIndex = candidate.eidIndex", source)
+        self.assertEqual(2, source.count(
+            "qpAttr.ub.errTimeout = TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT"))
 
     def test_direct_ccu_runtime_can_select_ra_ctx_resource_window_eid_by_env(self):
         code = textwrap.dedent(

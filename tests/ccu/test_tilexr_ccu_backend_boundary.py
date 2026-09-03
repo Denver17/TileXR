@@ -237,9 +237,47 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         self.assertIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(", prepare_alltoall)
         self.assertIn("0U", prepare_alltoall)
         self.assertIn("uint32_t routeIndex = 0", override_apply)
-        self.assertIn("routeIndex != directCcuRemoteRouteMemoryOverrideSyncRouteIndex_", override_apply)
+        self.assertIn("override.syncRouteIndex != routeIndex", override_apply)
         self.assertIn("++routeIndex", override_apply)
-        self.assertIn("directCcuRemoteRouteMemoryOverrideAllRoutes_", override_apply)
+        self.assertIn("override.allRoutes", override_apply)
+
+    def test_four_rank_mesh_gathers_imports_and_maps_three_routes_per_peer(self):
+        header = PLANNER_HEADER.read_text(encoding="utf-8")
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("PrepareDirectCcuAllToAllMeshInstallAttempt", header)
+        self.assertIn("PrepareDirectCcuAllToAllMeshInstallAttempt", planner)
+        mesh_body = planner[
+            planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAllMeshInstallAttempt"):
+            planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuSyncXnPingInstallAttempt")
+        ]
+        self.assertIn("rankSize != 4", mesh_body)
+        self.assertEqual(1, mesh_body.count("session.AllGather("))
+        self.assertIn("endpoint.rank != peerRank", mesh_body)
+        self.assertIn("session.ImportRemoteMemoryBuffer", mesh_body)
+        self.assertNotIn("routeWithinPeer", mesh_body)
+        self.assertNotIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute", mesh_body)
+        self.assertNotIn("peer.imported.targetSegVa", mesh_body)
+        self.assertIn("ClearDirectCcuRemoteRouteMemoryOverride", mesh_body)
+        self.assertIn("TileXRCcuRunDirectAllToAllMeshInstallAttempt", mesh_body)
+
+        exchange = planner[
+            planner.index("int TileXRCcuCollectivePlanner::ExchangeDirectCcuRemoteNotifyCke"):
+            planner.index("void TileXRCcuCollectivePlanner::SetDirectCcuRemoteRouteMemoryOverride")
+        ]
+        self.assertIn("routesPerPeer = syncRouteCount / routedPeerCount", exchange)
+        self.assertIn("peerBufferIndex = syncIndex / routesPerPeer", exchange)
+        self.assertIn("peerLocalResourceOffset =", exchange)
+        self.assertIn("peerLocalIndex * routesPerPeer + routeWithinPeer", exchange)
+
+        self.assertIn("std::vector<DirectCcuRemoteRouteMemoryOverride>", header)
+        self.assertIn("directCcuRemoteRouteMemoryOverrides_", header)
+        override_apply = planner[
+            planner.index("void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride"):
+            planner.index("#endif", planner.index("void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride"))
+        ]
+        self.assertIn("for (const auto &override : directCcuRemoteRouteMemoryOverrides_)", override_apply)
+        self.assertIn("override.syncRouteIndex != routeIndex", override_apply)
 
 
 if __name__ == "__main__":

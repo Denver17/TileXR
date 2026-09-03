@@ -87,6 +87,8 @@ public:
     TileXRCcuRaCtxQpBindFunc RaCtxQpBind = nullptr;
     TileXRCcuRaCtxQpUnbindFunc RaCtxQpUnbind = nullptr;
     TileXRCcuRaGetTpInfoListAsyncFunc RaGetTpInfoListAsync = nullptr;
+    TileXRCcuRaGetTpAttrAsyncFunc RaGetTpAttrAsync = nullptr;
+    TileXRCcuRaSetTpAttrAsyncFunc RaSetTpAttrAsync = nullptr;
     TileXRCcuRaGetAsyncReqResultFunc RaGetAsyncReqResult = nullptr;
     TileXRCcuEndpointRouteProviderFunc CollectLocalEndpointRoute = nullptr;
 

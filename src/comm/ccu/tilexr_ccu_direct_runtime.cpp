@@ -5,6 +5,8 @@
 
 #include "ccu/tilexr_ccu_direct_runtime.h"
 
+#include "ccu/tilexr_ccu_topology.h"
+
 #include <algorithm>
 #include <cerrno>
 #include <cstdlib>
@@ -30,6 +32,7 @@ constexpr uint32_t TILEXR_CCU_DIRECT_CCU_POLL_CQ_DEPTH = 64;
 constexpr uint32_t TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_ASYNC_MAX_POLLS = 1000;
 constexpr uint32_t TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_ASYNC_SLEEP_US = 1000;
 constexpr uint32_t TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_MAX_ATTEMPTS = 8;
+constexpr uint8_t TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT = 16;
 constexpr int TILEXR_CCU_DIRECT_MAX_RANK_SIZE = 128;
 constexpr int TILEXR_CCU_HCCP_JFC_MODE_CCU_POLL = 2;
 constexpr int TILEXR_CCU_HCCP_ASYNC_EAGAIN = 128301;
@@ -44,6 +47,8 @@ constexpr const char* TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE_ENV =
     "TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE";
 constexpr const char* TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV =
     "TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX";
+constexpr const char* TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_ENV =
+    "TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID";
 constexpr const char* TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_COLLECTION_MODE_ENV =
     "TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_COLLECTION_MODE";
 constexpr const char* TILEXR_CCU_DIRECT_TRACE_ENDPOINT_ROUTE_ENV =
@@ -52,11 +57,19 @@ constexpr const char* TILEXR_CCU_DIRECT_TRUST_SYNTHETIC_ENDPOINT_ROUTE_ENV =
     "TILEXR_CCU_DIRECT_TRUST_SYNTHETIC_ENDPOINT_ROUTE";
 constexpr const char* TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_EXCHANGE_MODE_ENV =
     "TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_EXCHANGE_MODE";
+constexpr const char* TILEXR_CCU_HCCL_ROOT_INFO_PATH = "/etc/hccl_rootinfo.json";
 constexpr const char* TILEXR_CCU_DIRECT_REMOTE_CCU_VA_OFFSET_ENV =
     "TILEXR_CCU_DIRECT_REMOTE_CCU_VA_OFFSET";
+constexpr const char* TILEXR_CCU_DIRECT_RECOVER_TASK_KILL_STATE_ENV =
+    "TILEXR_CCU_DIRECT_RECOVER_TASK_KILL_STATE";
 constexpr uint8_t TILEXR_CCU_DIRECT_DEFAULT_DIE_ID = 0;
 constexpr uint64_t TILEXR_CCU_UB_MEM_PAGE_SIZE = 4096ULL;
 constexpr uint32_t TILEXR_CCU_URMA_TOKEN_ID_RIGHT_SHIFT = 8;
+constexpr uint32_t TILEXR_CCU_TP_HANDLE_REQUEST_NUM = 8;
+constexpr uint32_t TILEXR_CCU_TP_ATTR_BITMAP_SL = 1U << 10U;
+constexpr uint32_t TILEXR_CCU_TP_ATTR_BITMAP_SL_AVAILABLE = 1U << 17U;
+constexpr uint32_t TILEXR_CCU_DEFAULT_HCCL_QOS = 4;
+constexpr uint32_t TILEXR_CCU_UBOE_DEV_FLAG_RIGHT_SHIFT = 19U;
 
 struct TileXRCcuEndpointTpHandleExchange {
     uint64_t tpHandles[TILEXR_CCU_DIRECT_MAX_RANK_SIZE] = {};
@@ -109,10 +122,50 @@ bool HasCompleteEndpointRoute(const TileXRCcuLowerLayerTransportRoute& route)
         route.sqDepth != 0;
 }
 
+struct TileXRCcuPeerEndpointOffer {
+    uint64_t resourceAddr = 0;
+    uint32_t resourceTokenId = 0;
+    uint32_t resourceRawTokenId = 0;
+    uint32_t resourceTokenValue = 0;
+    uint32_t jettyTokenValue = 0;
+    std::array<uint8_t, TILEXR_CCU_EID_BYTES> eid {};
+    TileXRCcuHccpQpKey qpKey {};
+    uint32_t psn = 0;
+    uint32_t funcId = 0;
+    bool funcIdValid = false;
+    bool valid = false;
+};
+
+bool SameEid(
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& expected,
+    const TileXRCcuHccpEid& actual)
+{
+    return std::memcmp(expected.data(), actual.raw, expected.size()) == 0;
+}
+
 bool UseImportedPeerEndpointRoute()
 {
     const char* mode = std::getenv(TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_EXCHANGE_MODE_ENV);
     return mode == nullptr || mode[0] == '\0' || std::strcmp(mode, "imported_peer") == 0;
+}
+
+uint8_t SelectDirectCcuCleanupDieId()
+{
+    const char* value = std::getenv("TILEXR_CCU_DIRECT_INSTALL_DIE_ID");
+    if (value == nullptr || value[0] == '\0') {
+        return TILEXR_CCU_DIRECT_DEFAULT_DIE_ID;
+    }
+    char* end = nullptr;
+    const unsigned long parsed = std::strtoul(value, &end, 10);
+    return end != value && *end == '\0' && parsed <= UINT8_MAX ?
+        static_cast<uint8_t>(parsed) :
+        TILEXR_CCU_DIRECT_DEFAULT_DIE_ID;
+}
+
+bool RecoverTaskKillState()
+{
+    const char* value = std::getenv(TILEXR_CCU_DIRECT_RECOVER_TASK_KILL_STATE_ENV);
+    return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
 uint64_t SelectResourceWindowBytes(const TileXRCcuBasicInfo& basicInfo)
@@ -213,12 +266,16 @@ void TraceEndpointRouteStep(const std::string& message)
     }
 }
 
-void TraceTaskKillCleanup(uint8_t dieId, int ret, const TileXRCcuDriverAdapterReport& report)
+void TraceTaskKillStep(
+    const char* step,
+    uint8_t dieId,
+    int ret,
+    const TileXRCcuDriverAdapterReport& report)
 {
     if (!TraceEndpointRoute()) {
         return;
     }
-    std::cerr << "TileXRDirectCcuTrace taskKillCleanup"
+    std::cerr << "TileXRDirectCcuTrace taskKill" << step
               << " dieId=" << static_cast<uint32_t>(dieId)
               << " ret=" << ret
               << " opcode=" << report.opcode
@@ -237,37 +294,63 @@ void TraceRaCtxEidInfos(const std::vector<TileXRCcuHccpDevEidInfo>& eidInfos)
         std::cerr << "TileXRDirectCcuTrace endpointRoute raCtxEidInfo"
                   << " ordinal=" << i
                   << " eidIndex=" << eidInfos[i].eidIndex
+                  << " dieId=" << eidInfos[i].dieId
                   << " funcId=" << eidInfos[i].funcId
+                  << " devFeature=0x" << std::hex << eidInfos[i].resv << std::dec
                   << " eid=" << FormatEndpointEid(CopyRawEid(eidInfos[i].eid))
                   << std::endl;
     }
 }
 
-bool SelectRaCtxResourceWindowEidInfo(
+bool ParseEndpointEid(const char* value, std::array<uint8_t, TILEXR_CCU_EID_BYTES>* eid);
+
+bool BuildRaCtxResourceWindowEidCandidates(
     int rank,
+    uint8_t dieId,
     const std::vector<TileXRCcuHccpDevEidInfo>& eidInfos,
-    TileXRCcuHccpDevEidInfo* selectedEid)
+    std::vector<TileXRCcuHccpDevEidInfo>* candidates)
 {
-    if (eidInfos.empty() || selectedEid == nullptr) {
+    if (eidInfos.empty() || candidates == nullptr) {
         return false;
     }
+    candidates->clear();
     TraceRaCtxEidInfos(eidInfos);
-    const char* configured = SelectRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV, rank);
-    if (configured == nullptr) {
-        *selectedEid = eidInfos[0];
-        return true;
-    }
-    uint64_t configuredIndex = 0;
-    if (!ParseUnsignedEnv(configured, &configuredIndex) || configuredIndex > 0xffffffffULL) {
+    const char* configuredEid = SelectRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_ENV, rank);
+    if (configuredEid != nullptr) {
+        std::array<uint8_t, TILEXR_CCU_EID_BYTES> expected {};
+        if (!ParseEndpointEid(configuredEid, &expected)) {
+            return false;
+        }
+        for (const auto& eidInfo : eidInfos) {
+            if (CopyRawEid(eidInfo.eid) == expected) {
+                candidates->push_back(eidInfo);
+                return true;
+            }
+        }
         return false;
     }
-    for (const auto& eidInfo : eidInfos) {
-        if (eidInfo.eidIndex == static_cast<uint32_t>(configuredIndex)) {
-            *selectedEid = eidInfo;
-            return true;
+    const char* configured = SelectRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV, rank);
+    if (configured != nullptr) {
+        uint64_t configuredIndex = 0;
+        if (!ParseUnsignedEnv(configured, &configuredIndex) || configuredIndex > 0xffffffffULL) {
+            return false;
+        }
+        for (const auto& eidInfo : eidInfos) {
+            if (eidInfo.eidIndex == static_cast<uint32_t>(configuredIndex)) {
+                candidates->push_back(eidInfo);
+                return true;
+            }
+        }
+        return false;
+    }
+    for (auto it = eidInfos.rbegin(); it != eidInfos.rend(); ++it) {
+        const bool uboeOnly =
+            ((it->resv >> TILEXR_CCU_UBOE_DEV_FLAG_RIGHT_SHIFT) & 1U) != 0U;
+        if (it->dieId == dieId && !uboeOnly) {
+            candidates->push_back(*it);
         }
     }
-    return false;
+    return !candidates->empty();
 }
 
 bool IsRaCtxLoopEndpointRouteCollectionMode()
@@ -314,6 +397,55 @@ bool HasRaCtxEndpointRouteSymbols(const TileXRCcuHccpLoader& loader)
         loader.RaCtxQpUnimport != nullptr &&
         loader.RaGetTpInfoListAsync != nullptr &&
         loader.RaGetAsyncReqResult != nullptr;
+}
+
+uint32_t CountAvailableSl(uint16_t mask)
+{
+    uint32_t count = 0;
+    for (uint32_t bit = 0; bit < 16U; ++bit) {
+        count += (mask & (1U << bit)) != 0U ? 1U : 0U;
+    }
+    return count;
+}
+
+uint8_t SlAtRank(uint16_t mask, uint32_t rank)
+{
+    uint32_t seen = 0;
+    for (uint8_t bit = 0; bit < 16U; ++bit) {
+        if ((mask & (1U << bit)) != 0U && seen++ == rank) {
+            return bit;
+        }
+    }
+    return 0;
+}
+
+bool MapQosToTpAndSl(
+    uint32_t qos,
+    uint32_t tpCount,
+    uint16_t slMask,
+    uint32_t* tpIndex,
+    uint8_t* mappedSl)
+{
+    if (tpIndex == nullptr || mappedSl == nullptr || tpCount == 0) {
+        return false;
+    }
+    const uint32_t slCount = CountAvailableSl(slMask);
+    const uint32_t k = std::min(tpCount, slCount);
+    if (k == 0) {
+        return false;
+    }
+    const uint32_t groupCount = std::min(8U, k);
+    const uint32_t q = qos & 7U;
+    const uint32_t group = k == 3U ? (q < 3U ? 0U : (q < 5U ? 1U : 2U)) :
+        (q * groupCount) / 8U;
+    const uint32_t slot = (group * k) / groupCount;
+    if (slot >= k || slot >= tpCount) {
+        return false;
+    }
+    const uint32_t slRank = (slCount - 1U) - slot;
+    *tpIndex = (k - 1U) - slot;
+    *mappedSl = SlAtRank(slMask, slRank);
+    return true;
 }
 
 uint32_t SelectEndpointRouteSqDepth()
@@ -586,11 +718,25 @@ int TileXRCcuDirectRuntime::Init(
     initialized_ = true;
     TileXRCcuDriverAdapter adapter;
     TileXRCcuDriverAdapterReport adapterReport;
+    const uint8_t cleanupDieId = SelectDirectCcuCleanupDieId();
     int cleanupRet = CreateDriverAdapter(&adapter, &adapterReport);
-    if (cleanupRet == TILEXR_SUCCESS) {
-        cleanupRet = adapter.CleanTaskKillState(TILEXR_CCU_DIRECT_DEFAULT_DIE_ID, &adapterReport);
+    if (cleanupRet == TILEXR_SUCCESS && RecoverTaskKillState()) {
+        cleanupRet = adapter.SetTaskKill(cleanupDieId, &adapterReport);
+        TraceTaskKillStep("Set", cleanupDieId, cleanupRet, adapterReport);
+        // hcomm treats SET_TASKKILL as a best-effort trigger and gates recovery
+        // on the following CLEAN_TASKKILL_STATE result.
+        cleanupRet = TILEXR_SUCCESS;
     }
-    TraceTaskKillCleanup(TILEXR_CCU_DIRECT_DEFAULT_DIE_ID, cleanupRet, adapterReport);
+    if (cleanupRet == TILEXR_SUCCESS) {
+        cleanupRet = adapter.CleanTaskKillState(cleanupDieId, &adapterReport);
+    }
+    TraceTaskKillStep("Cleanup", cleanupDieId, cleanupRet, adapterReport);
+    if (RecoverTaskKillState() && cleanupRet != TILEXR_SUCCESS) {
+        const std::string message = "failed to clean direct CCU task-kill state after explicit recovery: " +
+            adapterReport.message;
+        Shutdown();
+        return Fail(report, message, cleanupRet);
+    }
     if (report != nullptr) {
         report->initialized = true;
         report->raInitialized = true;
@@ -899,27 +1045,64 @@ int TileXRCcuDirectRuntime::RegisterCcuResourceRmaBufferWithRaCtx(
     if (ret != 0 || queriedEidNum == 0) {
         return ret == 0 ? TILEXR_ERROR_NOT_FOUND : TILEXR_ERROR_MKIRT;
     }
+    eidInfos.resize(queriedEidNum);
 
     void* ctxHandle = nullptr;
     void* tokenIdHandle = nullptr;
     void* lmemHandle = nullptr;
 
-    TileXRCcuHccpDevEidInfo selectedEid {};
-    if (!SelectRaCtxResourceWindowEidInfo(options_.rank, eidInfos, &selectedEid)) {
+    std::vector<TileXRCcuHccpDevEidInfo> eidCandidates;
+    if (!BuildRaCtxResourceWindowEidCandidates(
+            options_.rank,
+            SelectDirectCcuCleanupDieId(),
+            eidInfos,
+            &eidCandidates)) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     TileXRCcuHccpCtxInitCfg ctxCfg {};
     ctxCfg.mode = TILEXR_CCU_NETWORK_OFFLINE;
     ctxCfg.rdma.disabledLiteThread = false;
-    TileXRCcuHccpCtxInitAttr ctxAttr {};
-    ctxAttr.phyId = devicePhyId_;
-    ctxAttr.ub.eidIndex = selectedEid.eidIndex;
-    ctxAttr.ub.eid = selectedEid.eid;
-
-    ret = loader_.RaCtxInit(&ctxCfg, &ctxAttr, &ctxHandle);
-    if (ret != 0 || ctxHandle == nullptr) {
-        return TILEXR_ERROR_MKIRT;
+    TileXRCcuHccpDevEidInfo selectedEid {};
+    const bool explicitEid =
+        HasRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_ENV, options_.rank) ||
+        HasRankedEnv(TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX_ENV, options_.rank);
+    const bool canProbeLoopTp = !explicitEid &&
+        loader_.RaGetTpInfoListAsync != nullptr && loader_.RaGetAsyncReqResult != nullptr;
+    for (const auto& candidate : eidCandidates) {
+        TileXRCcuHccpCtxInitAttr ctxAttr {};
+        ctxAttr.phyId = devicePhyId_;
+        ctxAttr.ub.eidIndex = candidate.eidIndex;
+        ctxAttr.ub.eid = candidate.eid;
+        ret = loader_.RaCtxInit(&ctxCfg, &ctxAttr, &ctxHandle);
+        if (ret != 0 || ctxHandle == nullptr) {
+            ctxHandle = nullptr;
+            continue;
+        }
+        uint64_t loopTpHandle = 0;
+        const auto candidateEid = CopyRawEid(candidate.eid);
+        const int probeRet = canProbeLoopTp ?
+            QueryTpHandleForPeer(ctxHandle, candidateEid, candidateEid, &loopTpHandle) :
+            TILEXR_SUCCESS;
+        if (TraceEndpointRoute()) {
+            std::cerr << "TileXRDirectCcuTrace endpointRoute loopEidCandidate"
+                      << " eidIndex=" << candidate.eidIndex
+                      << " dieId=" << candidate.dieId
+                      << " funcId=" << candidate.funcId
+                      << " eid=" << FormatEndpointEid(candidateEid)
+                      << " probeRet=" << probeRet
+                      << " tpHandle=0x" << std::hex << loopTpHandle << std::dec
+                      << std::endl;
+        }
+        if (probeRet == TILEXR_SUCCESS) {
+            selectedEid = candidate;
+            break;
+        }
+        (void)loader_.RaCtxDeinit(ctxHandle);
+        ctxHandle = nullptr;
+    }
+    if (ctxHandle == nullptr) {
+        return TILEXR_ERROR_NOT_FOUND;
     }
 
     TileXRCcuHccpTokenId allocatedToken {};
@@ -1060,8 +1243,51 @@ void TileXRCcuDirectRuntime::ReleasePeerEndpointImports()
     endpointPeerRemoteQpHandles_.clear();
 }
 
+void TileXRCcuDirectRuntime::ReleasePeerEndpointState(TileXRCcuPeerEndpointState* state)
+{
+    if (state == nullptr) {
+        return;
+    }
+    if (state->remoteQpHandle != nullptr && state->resourceWindow.raCtxHandle != nullptr &&
+        loader_.RaCtxQpUnimport != nullptr) {
+        (void)loader_.RaCtxQpUnimport(state->resourceWindow.raCtxHandle, state->remoteQpHandle);
+    }
+    if (state->qpHandle != nullptr && loader_.RaCtxQpDestroy != nullptr) {
+        (void)loader_.RaCtxQpDestroy(state->qpHandle);
+    }
+    if (state->cqHandle != nullptr && state->resourceWindow.raCtxHandle != nullptr &&
+        loader_.RaCtxCqDestroy != nullptr) {
+        (void)loader_.RaCtxCqDestroy(state->resourceWindow.raCtxHandle, state->cqHandle);
+    }
+    if (state->resourceWindow.lmemHandle != nullptr && state->resourceWindow.raCtxHandle != nullptr &&
+        loader_.RaCtxLmemUnregister != nullptr) {
+        (void)loader_.RaCtxLmemUnregister(
+            state->resourceWindow.raCtxHandle,
+            state->resourceWindow.lmemHandle);
+    }
+    if (state->resourceWindow.tokenIdHandle != nullptr && state->resourceWindow.raCtxHandle != nullptr &&
+        loader_.RaCtxTokenIdFree != nullptr) {
+        (void)loader_.RaCtxTokenIdFree(
+            state->resourceWindow.raCtxHandle,
+            state->resourceWindow.tokenIdHandle);
+    }
+    if (state->resourceWindow.raCtxHandle != nullptr && loader_.RaCtxDeinit != nullptr) {
+        (void)loader_.RaCtxDeinit(state->resourceWindow.raCtxHandle);
+    }
+    *state = TileXRCcuPeerEndpointState {};
+}
+
+void TileXRCcuDirectRuntime::ReleasePeerEndpointRoutes()
+{
+    for (auto it = peerEndpointStates_.rbegin(); it != peerEndpointStates_.rend(); ++it) {
+        ReleasePeerEndpointState(&*it);
+    }
+    peerEndpointStates_.clear();
+}
+
 void TileXRCcuDirectRuntime::ReleaseLocalEndpointRoute()
 {
+    ReleasePeerEndpointRoutes();
     ReleasePeerEndpointImports();
     if (endpointRouteBound_ && endpointQpHandle_ != nullptr && loader_.RaCtxQpUnbind != nullptr) {
         (void)loader_.RaCtxQpUnbind(endpointQpHandle_);
@@ -1189,6 +1415,7 @@ int TileXRCcuDirectRuntime::CollectLocalEndpointRouteWithRaCtxOnce(
     qpAttr.ub.jfsFlag.bs.errorSuspend = 1;
     qpAttr.ub.priority = 2;
     qpAttr.ub.rnrRetry = TILEXR_CCU_HCCP_RNR_RETRY_DEFAULT;
+    qpAttr.ub.errTimeout = TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT;
     qpAttr.ub.extMode.cstmFlag.value = 0;
     qpAttr.ub.extMode.cstmFlag.bs.sqCstm = 1;
     qpAttr.ub.extMode.sq.buffVa = sqVa;
@@ -1322,6 +1549,9 @@ int TileXRCcuDirectRuntime::RefreshLocalVerifiedEndpointRoute(TileXRCcuDirectRun
         return Fail(report, "direct CCU resource window is not registered for endpoint route collection",
             TILEXR_ERROR_NOT_INITIALIZED);
     }
+    if (options_.rankSize > 2) {
+        return PreparePeerEndpointRoutes(report);
+    }
 
     TileXRCcuLowerLayerTransportRoute route;
     int ret = TILEXR_ERROR_NOT_FOUND;
@@ -1413,12 +1643,498 @@ int TileXRCcuDirectRuntime::ExportLocalCcuRmaBuffer(TileXRCcuLocalResourceWindow
     return TILEXR_SUCCESS;
 }
 
+int TileXRCcuDirectRuntime::CreatePeerEndpointState(
+    uint32_t peerRank,
+    uint32_t peerDevicePhyId,
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+    uint32_t peerOrdinal,
+    TileXRCcuPeerEndpointState* state)
+{
+    if (state == nullptr || !resourceWindowRegistered_ || localResourceWindow_.addr == 0 ||
+        !HasRaCtxResourceWindowSymbols(loader_) || !HasRaCtxEndpointRouteSymbols(loader_)) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *state = TileXRCcuPeerEndpointState {};
+    state->peerRank = peerRank;
+    state->peerDevicePhyId = peerDevicePhyId;
+
+    TileXRCcuRaInfo raInfo {};
+    raInfo.mode = TILEXR_CCU_NETWORK_OFFLINE;
+    raInfo.phyId = devicePhyId_;
+    uint32_t eidNum = 0;
+    int ret = loader_.RaGetDevEidInfoNum(raInfo, &eidNum);
+    if (ret != 0 || eidNum == 0) {
+        return TILEXR_ERROR_MKIRT;
+    }
+    std::vector<TileXRCcuHccpDevEidInfo> eidInfos(eidNum);
+    uint32_t queriedEidNum = eidNum;
+    ret = loader_.RaGetDevEidInfoList(raInfo, eidInfos.data(), &queriedEidNum);
+    if (ret != 0 || queriedEidNum == 0) {
+        return TILEXR_ERROR_MKIRT;
+    }
+    const auto eidIt = std::find_if(
+        eidInfos.begin(),
+        eidInfos.begin() + queriedEidNum,
+        [&localEid](const TileXRCcuHccpDevEidInfo& info) {
+            return SameEid(localEid, info.eid);
+        });
+    if (eidIt == eidInfos.begin() + queriedEidNum) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+    state->eidInfo = *eidIt;
+
+    TileXRCcuHccpCtxInitCfg ctxCfg {};
+    ctxCfg.mode = TILEXR_CCU_NETWORK_OFFLINE;
+    ctxCfg.rdma.disabledLiteThread = false;
+    TileXRCcuHccpCtxInitAttr ctxAttr {};
+    ctxAttr.phyId = devicePhyId_;
+    ctxAttr.ub.eidIndex = state->eidInfo.eidIndex;
+    ctxAttr.ub.eid = state->eidInfo.eid;
+    ret = loader_.RaCtxInit(&ctxCfg, &ctxAttr, &state->resourceWindow.raCtxHandle);
+    if (ret != 0 || state->resourceWindow.raCtxHandle == nullptr) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_MKIRT;
+    }
+
+    TileXRCcuHccpTokenId allocatedToken {};
+    ret = loader_.RaCtxTokenIdAlloc(
+        state->resourceWindow.raCtxHandle,
+        &allocatedToken,
+        &state->resourceWindow.tokenIdHandle);
+    if (ret != 0 || state->resourceWindow.tokenIdHandle == nullptr) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_MKIRT;
+    }
+    TileXRCcuRaInfo randomInfo {};
+    randomInfo.mode = TILEXR_CCU_NETWORK_OFFLINE;
+    randomInfo.phyId = devicePhyId_;
+    ret = loader_.RaGetSecRandom(&randomInfo, &state->resourceWindow.tokenValue);
+    if (ret != 0) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_MKIRT;
+    }
+
+    const uint64_t alignedAddr = AlignResourceWindowAddr(localResourceWindow_.addr);
+    TileXRCcuHccpMrRegInfo mr {};
+    mr.in.mem.addr = alignedAddr;
+    mr.in.mem.size = localResourceWindow_.bytes + (localResourceWindow_.addr - alignedAddr);
+    mr.in.ub.flags.value = 0;
+    mr.in.ub.flags.bs.tokenPolicy = TILEXR_CCU_HCCP_TOKEN_POLICY_PLAIN_TEXT;
+    mr.in.ub.flags.bs.tokenIdValid = 1;
+    mr.in.ub.flags.bs.access = TILEXR_CCU_HCCP_MEM_SEG_ACCESS_DEFAULT;
+    mr.in.ub.flags.bs.nonPin = 1;
+    mr.in.ub.tokenValue = state->resourceWindow.tokenValue;
+    mr.in.ub.tokenIdHandle = state->resourceWindow.tokenIdHandle;
+    ret = loader_.RaCtxLmemRegister(
+        state->resourceWindow.raCtxHandle,
+        &mr,
+        &state->resourceWindow.lmemHandle);
+    if (ret != 0 || state->resourceWindow.lmemHandle == nullptr) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_MKIRT;
+    }
+    const uint32_t rawTokenId = mr.out.ub.tokenId != 0 ? mr.out.ub.tokenId : allocatedToken.tokenId;
+    state->resourceWindow.addr = localResourceWindow_.addr;
+    state->resourceWindow.bytes = localResourceWindow_.bytes;
+    state->resourceWindow.rawTokenId = rawTokenId;
+    state->resourceWindow.tokenId = rawTokenId >> TILEXR_CCU_URMA_TOKEN_ID_RIGHT_SHIFT;
+    state->resourceWindow.targetSegHandle = mr.out.ub.targetSegHandle;
+    state->resourceWindow.eid = localEid;
+    state->resourceWindow.eidIndex = state->eidInfo.eidIndex;
+    state->resourceWindow.funcId = state->eidInfo.funcId;
+    state->resourceWindow.funcIdValid = true;
+    state->resourceWindow.raCtxRegistered = true;
+
+    ret = SelectTpRouteForPeer(
+        state->resourceWindow.raCtxHandle,
+        localEid,
+        peerEid,
+        &state->localTpHandle,
+        &state->mappedJettyPriority);
+    if (ret != TILEXR_SUCCESS) {
+        ReleasePeerEndpointState(state);
+        return ret;
+    }
+
+    TileXRCcuHccpCqInfo cqInfo {};
+    cqInfo.in.chanHandle = nullptr;
+    cqInfo.in.depth = TILEXR_CCU_DIRECT_CCU_POLL_CQ_DEPTH;
+    cqInfo.in.ub.userCtx = 0;
+    cqInfo.in.ub.mode = TILEXR_CCU_HCCP_JFC_MODE_CCU_POLL;
+    cqInfo.in.ub.ceqn = 0;
+    cqInfo.in.ub.flag.value = 0;
+    ret = loader_.RaCtxCqCreate(state->resourceWindow.raCtxHandle, &cqInfo, &state->cqHandle);
+    if (ret != 0 || state->cqHandle == nullptr) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_MKIRT;
+    }
+
+    const uint32_t sqDepth = SelectEndpointRouteSqDepth();
+    TileXRCcuHccpQpCreateAttr qpAttr {};
+    qpAttr.scqHandle = state->cqHandle;
+    qpAttr.rcqHandle = state->cqHandle;
+    qpAttr.srqHandle = state->cqHandle;
+    qpAttr.sqDepth = sqDepth;
+    qpAttr.rqDepth = TILEXR_CCU_HCCP_RQ_DEPTH_DEFAULT;
+    qpAttr.transportMode = TILEXR_CCU_HCCP_TRANSPORT_MODE_RM;
+    qpAttr.ub.mode = static_cast<int>(TILEXR_CCU_HCCP_JETTY_MODE_CCU);
+    qpAttr.ub.jettyId = static_cast<uint16_t>(TILEXR_CCU_DIRECT_LOOP_JETTY_ID + peerOrdinal);
+    qpAttr.ub.tokenIdHandle = state->resourceWindow.tokenIdHandle;
+    qpAttr.ub.tokenValue = state->resourceWindow.tokenValue;
+    qpAttr.ub.flag.value = 0;
+    qpAttr.ub.flag.bs.shareJfr = 1;
+    qpAttr.ub.jfsFlag.bs.errorSuspend = 1;
+    qpAttr.ub.priority = state->mappedJettyPriority;
+    qpAttr.ub.rnrRetry = TILEXR_CCU_HCCP_RNR_RETRY_DEFAULT;
+    qpAttr.ub.errTimeout = TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT;
+    qpAttr.ub.extMode.cstmFlag.value = 0;
+    qpAttr.ub.extMode.cstmFlag.bs.sqCstm = 1;
+    qpAttr.ub.extMode.sq.buffVa = SelectEndpointRouteSqVa(localResourceWindow_) +
+        static_cast<uint64_t>(peerOrdinal) * TILEXR_CCU_DIRECT_SQ_BUFFER_BYTES;
+    qpAttr.ub.extMode.sq.buffSize = SelectEndpointRouteSqBytes(sqDepth);
+    qpAttr.ub.extMode.sqebbNum = sqDepth;
+    ret = loader_.RaCtxQpCreate(
+        state->resourceWindow.raCtxHandle,
+        &qpAttr,
+        &state->qpInfo,
+        &state->qpHandle);
+    if (ret != 0 || state->qpHandle == nullptr || state->qpInfo.key.size == 0) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_MKIRT;
+    }
+    state->psn = endpointPsn_++;
+    if (TraceEndpointRoute()) {
+        std::cerr << "TileXRDirectCcuTrace peerEndpoint created"
+                  << " rank=" << options_.rank
+                  << " peerRank=" << peerRank
+                  << " peerDevice=" << peerDevicePhyId
+                  << " localEid=" << FormatEndpointEid(localEid)
+                  << " eidIndex=" << state->eidInfo.eidIndex
+                  << " funcId=" << state->eidInfo.funcId
+                  << " tpHandle=0x" << std::hex << state->localTpHandle << std::dec
+                  << " priority=" << static_cast<uint32_t>(state->mappedJettyPriority)
+                  << " qpId=" << state->qpInfo.ub.id
+                  << " psn=" << state->psn
+                  << std::endl;
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes(TileXRCcuDirectRuntimeReport* report)
+{
+    ReleasePeerEndpointRoutes();
+    std::vector<uint32_t> allDevicePhyIds(static_cast<size_t>(options_.rankSize), 0);
+    int ret = options_.allGather(
+        &devicePhyId_,
+        sizeof(devicePhyId_),
+        allDevicePhyIds.data(),
+        options_.allGatherUserData);
+    if (ret != TILEXR_SUCCESS) {
+        return Fail(report, "failed to exchange physical device ids for CCU endpoint routes", ret);
+    }
+    std::vector<uint32_t> peerDevicePhyIds;
+    std::vector<uint32_t> peerRanks;
+    for (int peer = 0; peer < options_.rankSize; ++peer) {
+        if (peer != options_.rank) {
+            peerRanks.push_back(static_cast<uint32_t>(peer));
+            peerDevicePhyIds.push_back(allDevicePhyIds[static_cast<size_t>(peer)]);
+        }
+    }
+    std::vector<TileXRCcuPeerEidRoute> topologyRoutes;
+    std::string topologyMessage;
+    ret = TileXRCcuResolvePeerEidRoutes(
+        TILEXR_CCU_HCCL_ROOT_INFO_PATH,
+        devicePhyId_,
+        peerDevicePhyIds,
+        &topologyRoutes,
+        &topologyMessage);
+    if (ret != TILEXR_SUCCESS || topologyRoutes.size() != peerRanks.size()) {
+        return Fail(report, topologyMessage.empty() ?
+            "failed to resolve peer-specific CCU EIDs" : topologyMessage, ret);
+    }
+
+    std::vector<std::array<uint8_t, TILEXR_CCU_EID_BYTES>> localEidsByPeer(
+        static_cast<size_t>(options_.rankSize));
+    for (uint32_t ordinal = 0; ordinal < peerRanks.size(); ++ordinal) {
+        localEidsByPeer[peerRanks[ordinal]] = topologyRoutes[ordinal].localEid;
+    }
+    std::vector<std::array<uint8_t, TILEXR_CCU_EID_BYTES>> allLocalEidsByPeer(
+        static_cast<size_t>(options_.rankSize) * static_cast<size_t>(options_.rankSize));
+    ret = options_.allGather(
+        localEidsByPeer.data(),
+        localEidsByPeer.size() * sizeof(localEidsByPeer.front()),
+        allLocalEidsByPeer.data(),
+        options_.allGatherUserData);
+    if (ret != TILEXR_SUCCESS) {
+        return Fail(report, "failed to exchange peer-specific CCU topology EIDs", ret);
+    }
+
+    peerEndpointStates_.reserve(peerRanks.size());
+    for (uint32_t ordinal = 0; ordinal < peerRanks.size(); ++ordinal) {
+        const auto& peerEid = allLocalEidsByPeer[
+            static_cast<size_t>(peerRanks[ordinal]) * static_cast<size_t>(options_.rankSize) +
+            static_cast<size_t>(options_.rank)];
+        if (IsEmptyEid(peerEid)) {
+            ReleasePeerEndpointRoutes();
+            return Fail(report, "missing reciprocal peer-specific CCU topology EID", TILEXR_ERROR_NOT_FOUND);
+        }
+        TileXRCcuPeerEndpointState state;
+        ret = CreatePeerEndpointState(
+            peerRanks[ordinal],
+            peerDevicePhyIds[ordinal],
+            topologyRoutes[ordinal].localEid,
+            peerEid,
+            ordinal,
+            &state);
+        if (ret != TILEXR_SUCCESS) {
+            ReleasePeerEndpointRoutes();
+            return Fail(report, "failed to create peer-specific CCU endpoint", ret);
+        }
+        peerEndpointStates_.push_back(state);
+    }
+
+    std::vector<TileXRCcuPeerEndpointOffer> localOffers(static_cast<size_t>(options_.rankSize));
+    for (const auto& state : peerEndpointStates_) {
+        auto& offer = localOffers[state.peerRank];
+        offer.resourceAddr = state.resourceWindow.addr;
+        offer.resourceTokenId = state.resourceWindow.tokenId;
+        offer.resourceRawTokenId = state.resourceWindow.rawTokenId;
+        offer.resourceTokenValue = state.resourceWindow.tokenValue;
+        offer.jettyTokenValue = state.resourceWindow.tokenValue;
+        offer.eid = state.resourceWindow.eid;
+        offer.qpKey = state.qpInfo.key;
+        if (offer.qpKey.size == 0 || offer.qpKey.size > TILEXR_CCU_HCCP_QP_KEY_BYTES) {
+            ReleasePeerEndpointRoutes();
+            return Fail(report, "peer-specific CCU QP key has an invalid size", TILEXR_ERROR_MKIRT);
+        }
+        offer.psn = state.psn;
+        offer.funcId = state.resourceWindow.funcId;
+        offer.funcIdValid = state.resourceWindow.funcIdValid;
+        offer.valid = true;
+    }
+    std::vector<TileXRCcuPeerEndpointOffer> allOffers(
+        static_cast<size_t>(options_.rankSize) * static_cast<size_t>(options_.rankSize));
+    ret = options_.allGather(
+        localOffers.data(),
+        localOffers.size() * sizeof(TileXRCcuPeerEndpointOffer),
+        allOffers.data(),
+        options_.allGatherUserData);
+    if (ret != TILEXR_SUCCESS) {
+        ReleasePeerEndpointRoutes();
+        return Fail(report, "failed to exchange peer-specific CCU endpoint offers", ret);
+    }
+
+    std::vector<uint64_t> localTpHandles(static_cast<size_t>(options_.rankSize), 0);
+    for (auto& state : peerEndpointStates_) {
+        const auto& peerOffer = allOffers[
+            static_cast<size_t>(state.peerRank) * static_cast<size_t>(options_.rankSize) +
+            static_cast<size_t>(options_.rank)];
+        if (!peerOffer.valid || peerOffer.qpKey.size == 0) {
+            ReleasePeerEndpointRoutes();
+            return Fail(report, "missing reciprocal peer-specific CCU endpoint offer", TILEXR_ERROR_NOT_FOUND);
+        }
+        localTpHandles[state.peerRank] = state.localTpHandle;
+    }
+    std::vector<uint64_t> allTpHandles(
+        static_cast<size_t>(options_.rankSize) * static_cast<size_t>(options_.rankSize), 0);
+    ret = options_.allGather(
+        localTpHandles.data(),
+        localTpHandles.size() * sizeof(uint64_t),
+        allTpHandles.data(),
+        options_.allGatherUserData);
+    if (ret != TILEXR_SUCCESS) {
+        ReleasePeerEndpointRoutes();
+        return Fail(report, "failed to exchange peer-specific CCU TP handles", ret);
+    }
+
+    for (uint32_t ordinal = 0; ordinal < peerEndpointStates_.size(); ++ordinal) {
+        auto& state = peerEndpointStates_[ordinal];
+        const auto& peerOffer = allOffers[
+            static_cast<size_t>(state.peerRank) * static_cast<size_t>(options_.rankSize) +
+            static_cast<size_t>(options_.rank)];
+        const uint64_t localTpHandle = localTpHandles[state.peerRank];
+        const uint64_t peerTpHandle = allTpHandles[
+            static_cast<size_t>(state.peerRank) * static_cast<size_t>(options_.rankSize) +
+            static_cast<size_t>(options_.rank)];
+        TileXRCcuHccpQpImportInfo importInfo {};
+        importInfo.in.key = peerOffer.qpKey;
+        if (importInfo.in.key.size == 0 || importInfo.in.key.size > TILEXR_CCU_HCCP_QP_KEY_BYTES) {
+            ReleasePeerEndpointRoutes();
+            return Fail(report, "peer-specific remote CCU QP key has an invalid size", TILEXR_ERROR_MKIRT);
+        }
+        importInfo.in.ub.mode = TILEXR_CCU_HCCP_JETTY_IMPORT_MODE_EXP;
+        importInfo.in.ub.tokenValue = peerOffer.jettyTokenValue;
+        importInfo.in.ub.policy = TILEXR_CCU_HCCP_JETTY_GRP_POLICY_RR;
+        importInfo.in.ub.type = TILEXR_CCU_HCCP_TARGET_TYPE_JETTY;
+        importInfo.in.ub.flag.value = 0;
+        importInfo.in.ub.flag.bs.tokenPolicy = TILEXR_CCU_HCCP_TOKEN_POLICY_PLAIN_TEXT;
+        importInfo.in.ub.expImportCfg.tpHandle = localTpHandle;
+        importInfo.in.ub.expImportCfg.peerTpHandle = peerTpHandle;
+        importInfo.in.ub.expImportCfg.txPsn = state.psn;
+        importInfo.in.ub.expImportCfg.rxPsn = peerOffer.psn;
+        importInfo.in.ub.tpType = TILEXR_CCU_HCCP_TP_TYPE_RTP;
+        ret = loader_.RaCtxQpImport(
+            state.resourceWindow.raCtxHandle,
+            &importInfo,
+            &state.remoteQpHandle);
+        if (ret != 0 || state.remoteQpHandle == nullptr) {
+            ReleasePeerEndpointRoutes();
+            return Fail(report, "failed to import peer-specific CCU QP", TILEXR_ERROR_MKIRT);
+        }
+        state.route.remoteEid = ReverseEndpointEid(peerOffer.eid);
+        state.route.tpn = importInfo.out.ub.tpn;
+        state.route.doorbellVa = state.qpInfo.ub.dbAddr;
+        state.route.doorbellTokenId =
+            state.qpInfo.ub.dbTokenId >> TILEXR_CCU_URMA_TOKEN_ID_RIGHT_SHIFT;
+        state.route.doorbellTokenValue = state.resourceWindow.tokenValue;
+        state.route.sqDepth = SelectEndpointRouteSqDepth();
+        state.route.startJettyId = static_cast<uint16_t>(state.qpInfo.ub.id);
+        state.route.remoteCcuVa = peerOffer.resourceAddr;
+        state.route.memoryTokenId = peerOffer.resourceTokenId;
+        state.route.memoryTokenValue = peerOffer.resourceTokenValue;
+        state.route.endpointRouteVerified = true;
+        if (TraceEndpointRoute()) {
+            std::cerr << "TileXRDirectCcuTrace peerEndpoint imported"
+                      << " rank=" << options_.rank
+                      << " peerRank=" << state.peerRank
+                      << " localEid=" << FormatEndpointEid(state.resourceWindow.eid)
+                      << " peerEid=" << FormatEndpointEid(peerOffer.eid)
+                      << " localTpHandle=0x" << std::hex << localTpHandle
+                      << " peerTpHandle=0x" << peerTpHandle
+                      << std::dec
+                      << " localMemoryTokenId=0x" << std::hex << state.resourceWindow.tokenId
+                      << " peerMemoryTokenId=0x" << peerOffer.resourceTokenId
+                      << " localCcuResourceTokenId=0x" << state.resourceWindow.tokenId
+                      << std::dec
+                      << " localPsn=" << state.psn
+                      << " peerPsn=" << peerOffer.psn
+                      << " tpn=0x" << std::hex << state.route.tpn
+                      << " doorbellVa=0x" << state.route.doorbellVa
+                      << " remoteCcuVa=0x" << state.route.remoteCcuVa
+                      << std::dec
+                      << " taJettyId=" << state.route.startJettyId
+                      << std::endl;
+        }
+    }
+    localVerifiedEndpointRoute_ = peerEndpointStates_.front().route;
+    localVerifiedEndpointRouteValid_ = true;
+    if (report != nullptr) {
+        report->initialized = initialized_;
+        report->message = "peer-specific direct CCU endpoint routes prepared";
+    }
+    return TILEXR_SUCCESS;
+}
+
 int TileXRCcuDirectRuntime::QueryTpHandleForPeer(
     const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
     uint64_t* tpHandle)
 {
-    if (tpHandle == nullptr || IsEmptyEid(localResourceWindow_.eid) || IsEmptyEid(peerEid) ||
-        localResourceWindow_.raCtxHandle == nullptr || loader_.RaGetTpInfoListAsync == nullptr ||
+    return QueryTpHandleForPeer(
+        localResourceWindow_.raCtxHandle,
+        localResourceWindow_.eid,
+        peerEid,
+        tpHandle);
+}
+
+int TileXRCcuDirectRuntime::SelectTpRouteForPeer(
+    void* ctxHandle,
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+    uint64_t* tpHandle,
+    uint8_t* mappedJettyPriority)
+{
+    if (ctxHandle == nullptr || tpHandle == nullptr || mappedJettyPriority == nullptr ||
+        IsEmptyEid(localEid) || IsEmptyEid(peerEid) ||
+        loader_.RaGetTpInfoListAsync == nullptr || loader_.RaGetTpAttrAsync == nullptr ||
+        loader_.RaSetTpAttrAsync == nullptr || loader_.RaGetAsyncReqResult == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *tpHandle = 0;
+    *mappedJettyPriority = 0;
+
+    TileXRCcuHccpGetTpCfg tpCfg {};
+    tpCfg.flag.bs.rtp = 1;
+    tpCfg.transMode = TILEXR_CCU_HCCP_TRANSPORT_MODE_RM;
+    std::copy(localEid.begin(), localEid.end(), tpCfg.localEid.raw);
+    std::copy(peerEid.begin(), peerEid.end(), tpCfg.peerEid.raw);
+
+    std::array<TileXRCcuHccpTpInfo, TILEXR_CCU_TP_HANDLE_REQUEST_NUM> tpInfos {};
+    uint32_t tpInfoNum = static_cast<uint32_t>(tpInfos.size());
+    void* reqHandle = nullptr;
+    int ret = loader_.RaGetTpInfoListAsync(
+        ctxHandle, &tpCfg, tpInfos.data(), &tpInfoNum, &reqHandle);
+    if (ret != 0 || reqHandle == nullptr) {
+        return TILEXR_ERROR_MKIRT;
+    }
+    ret = WaitRaCtxAsyncRequest(loader_, reqHandle);
+    if (ret != TILEXR_SUCCESS || tpInfoNum == 0 || tpInfoNum > tpInfos.size()) {
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_NOT_FOUND : ret;
+    }
+
+    TileXRCcuHccpTpAttr attr {};
+    uint32_t attrBitmap = TILEXR_CCU_TP_ATTR_BITMAP_SL_AVAILABLE |
+        TILEXR_CCU_TP_ATTR_BITMAP_SL;
+    reqHandle = nullptr;
+    ret = loader_.RaGetTpAttrAsync(
+        ctxHandle, tpInfos[0].tpHandle, &attrBitmap, &attr, &reqHandle);
+    if (ret != 0 || reqHandle == nullptr) {
+        return TILEXR_ERROR_MKIRT;
+    }
+    ret = WaitRaCtxAsyncRequest(loader_, reqHandle);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    uint32_t tpIndex = 0;
+    uint8_t mappedSl = 0;
+    if (!MapQosToTpAndSl(
+            TILEXR_CCU_DEFAULT_HCCL_QOS, tpInfoNum, attr.slBitmap, &tpIndex, &mappedSl) ||
+        tpInfos[tpIndex].tpHandle == 0) {
+        return TILEXR_ERROR_NOT_FOUND;
+    }
+
+    TileXRCcuHccpTpAttr setAttr {};
+    setAttr.sl = mappedSl;
+    reqHandle = nullptr;
+    ret = loader_.RaSetTpAttrAsync(
+        ctxHandle,
+        tpInfos[tpIndex].tpHandle,
+        TILEXR_CCU_TP_ATTR_BITMAP_SL,
+        &setAttr,
+        &reqHandle);
+    if (ret != 0 || reqHandle == nullptr) {
+        return TILEXR_ERROR_MKIRT;
+    }
+    ret = WaitRaCtxAsyncRequest(loader_, reqHandle);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    if (TraceEndpointRoute()) {
+        std::cerr << "TileXRDirectCcuTrace endpointRoute selectedTp"
+                  << " localEid=" << FormatEndpointEid(localEid)
+                  << " peerEid=" << FormatEndpointEid(peerEid)
+                  << " tpCount=" << tpInfoNum
+                  << " slBitmap=0x" << std::hex << attr.slBitmap
+                  << " tpIndex=" << std::dec << tpIndex
+                  << " tpHandle=0x" << std::hex << tpInfos[tpIndex].tpHandle
+                  << std::dec << " mappedSl=" << static_cast<uint32_t>(mappedSl)
+                  << std::endl;
+    }
+    *tpHandle = tpInfos[tpIndex].tpHandle;
+    *mappedJettyPriority = mappedSl;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuDirectRuntime::QueryTpHandleForPeer(
+    void* ctxHandle,
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
+    const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+    uint64_t* tpHandle)
+{
+    if (tpHandle == nullptr || IsEmptyEid(localEid) || IsEmptyEid(peerEid) ||
+        ctxHandle == nullptr || loader_.RaGetTpInfoListAsync == nullptr ||
         loader_.RaGetAsyncReqResult == nullptr) {
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -1429,7 +2145,7 @@ int TileXRCcuDirectRuntime::QueryTpHandleForPeer(
     tpCfg.flag.bs.rtp = 1;
     tpCfg.transMode = TILEXR_CCU_HCCP_TRANSPORT_MODE_RM;
     for (uint32_t i = 0; i < TILEXR_CCU_EID_BYTES; ++i) {
-        tpCfg.localEid.raw[i] = localResourceWindow_.eid[i];
+        tpCfg.localEid.raw[i] = localEid[i];
         tpCfg.peerEid.raw[i] = peerEid[i];
     }
 
@@ -1437,7 +2153,7 @@ int TileXRCcuDirectRuntime::QueryTpHandleForPeer(
     uint32_t tpInfoNum = 1;
     void* reqHandle = nullptr;
     const int ret = loader_.RaGetTpInfoListAsync(
-        localResourceWindow_.raCtxHandle,
+        ctxHandle,
         &tpCfg,
         &tpInfo,
         &tpInfoNum,
@@ -1459,6 +2175,13 @@ int TileXRCcuDirectRuntime::QueryTpHandleForPeer(
     }
     if (tpInfo.tpHandle == 0) {
         return TILEXR_ERROR_NOT_FOUND;
+    }
+    if (TraceEndpointRoute()) {
+        std::cerr << "TileXRDirectCcuTrace endpointRoute peerTpInfoReady"
+                  << " localEid=" << FormatEndpointEid(localEid)
+                  << " peerEid=" << FormatEndpointEid(peerEid)
+                  << " tpHandle=0x" << std::hex << tpInfo.tpHandle
+                  << std::dec << std::endl;
     }
     *tpHandle = tpInfo.tpHandle;
     return TILEXR_SUCCESS;
@@ -1533,6 +2256,33 @@ int TileXRCcuDirectRuntime::ExportRemoteCcuRmaBuffers(std::vector<TileXRCcuRemot
     buffers->clear();
     if (!resourceWindowRegistered_) {
         return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    if (!peerEndpointStates_.empty()) {
+        buffers->reserve(peerEndpointStates_.size());
+        for (const auto& state : peerEndpointStates_) {
+            TileXRCcuRemoteCcuBufferInfo remote;
+            remote.remoteCcuVa = state.route.remoteCcuVa;
+            remote.peerRank = state.peerRank;
+            remote.memoryTokenId = state.route.memoryTokenId;
+            remote.rawMemoryTokenId = state.route.memoryTokenId << TILEXR_CCU_URMA_TOKEN_ID_RIGHT_SHIFT;
+            remote.memoryTokenValue = state.route.memoryTokenValue;
+            remote.localPfeId = state.resourceWindow.funcId;
+            remote.localPfeIdValid = state.resourceWindow.funcIdValid;
+            remote.remoteEid = state.route.remoteEid;
+            remote.tpn = state.route.tpn;
+            remote.doorbellVa = state.route.doorbellVa;
+            remote.doorbellTokenId = state.route.doorbellTokenId;
+            remote.doorbellTokenValue = state.route.doorbellTokenValue;
+            remote.sqDepth = state.route.sqDepth;
+            remote.startJettyId = state.route.startJettyId;
+            remote.localDoorbellVa = state.route.doorbellVa;
+            remote.localDoorbellTokenId = state.route.doorbellTokenId;
+            remote.localDoorbellTokenValue = state.route.doorbellTokenValue;
+            remote.localSqDepth = state.route.sqDepth;
+            remote.endpointRouteVerified = true;
+            buffers->push_back(remote);
+        }
+        return TILEXR_SUCCESS;
     }
     if (options_.rankSize <= 1) {
         return TILEXR_SUCCESS;

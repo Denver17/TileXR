@@ -79,12 +79,14 @@ constexpr const char* kP2pCcuCopyDirectionEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU
 constexpr const char* kP2pCcuCopyResourceWindowEnv = "TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_RESOURCE_WINDOW";
 constexpr const char* kAllToAllEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL";
 constexpr const char* kAllToAllLongMissionEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION";
+constexpr const char* kAllToAllMeshEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH";
 constexpr const char* kAllToAllSingleRouteBidirectionalEnv =
     "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL";
 constexpr const char* kAllToAllBytesEnv = "TILEXR_CCU_ALLTOALL_BYTES";
 constexpr const char* kAllToAllMemSlicePerLoopEnv = "TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP";
 constexpr const char* kAllToAllLoopCountEnv = "TILEXR_CCU_ALLTOALL_LOOP_COUNT";
 constexpr const char* kSyncXnPingEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING";
+constexpr const char* kSyncXnPingPeerXorEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR";
 constexpr const char* kSignalWaitEnv = "TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT";
 constexpr const char* kSignalWaitSignalRankEnv = "TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK";
 constexpr const char* kSignalWaitBarrierEnv = "TILEXR_CCU_DIRECT_SMOKE_BARRIER";
@@ -141,6 +143,8 @@ struct AllToAllState {
     std::vector<uint8_t> expected;
     std::vector<uint8_t> observed;
     size_t bytes = 0;
+    size_t chunkBytes = 0;
+    int rankSize = 0;
     int initRet = ACL_SUCCESS;
     int readRet = ACL_SUCCESS;
     uint32_t mismatchCount = 0;
@@ -177,6 +181,11 @@ bool AllToAllSmokeEnabled()
 bool AllToAllLongMissionEnabled()
 {
     return EnvFlag(kAllToAllLongMissionEnv);
+}
+
+bool AllToAllMeshSmokeEnabled()
+{
+    return EnvFlag(kAllToAllMeshEnv);
 }
 
 bool AllToAllSingleRouteBidirectionalEnabled()
@@ -606,6 +615,99 @@ std::vector<uint8_t> BuildAllToAllLoopPattern(int rank, int loopIndex, size_t by
                 static_cast<uint32_t>(loopIndex + 1) * 29U + i * 13U) & 0xffU);
     }
     return pattern;
+}
+
+uint8_t BuildAllToAllMeshByte(
+    uint32_t sourceRank,
+    uint32_t targetRank,
+    uint32_t loopIndex,
+    size_t chunkOffset)
+{
+    return static_cast<uint8_t>(
+        ((sourceRank + 1U) * 67U + (targetRank + 1U) * 29U +
+            (loopIndex + 1U) * 17U + chunkOffset * 13U) & 0xffU);
+}
+
+int InitAllToAllMeshState(int rank, int rankSize, AllToAllState* state)
+{
+    if (state == nullptr || rank < 0 || rank >= rankSize || rankSize != 4) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    state->chunkBytes = AllToAllBytesFromEnv();
+    state->rankSize = rankSize;
+    state->bytes = static_cast<size_t>(rankSize) * state->chunkBytes;
+    const bool supportedChunkBytes =
+        state->chunkBytes == 128U * 1024U || state->chunkBytes == 2U * 1024U * 1024U;
+    if (!supportedChunkBytes ||
+        state->bytes / state->chunkBytes != static_cast<size_t>(rankSize) ||
+        AllToAllMemSlicePerLoopFromEnv() != 8) {
+        state->initRet = TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        return state->initRet;
+    }
+    state->expected.assign(state->bytes, 0);
+    state->observed.assign(state->bytes, 0);
+    std::vector<uint8_t> initial(state->bytes, 0xa5U);
+    int ret = state->source.Allocate(state->bytes);
+    if (ret == ACL_SUCCESS) {
+        ret = state->destination.Allocate(state->bytes);
+    }
+    if (ret == ACL_SUCCESS) {
+        ret = aclrtMemcpy(
+            state->source.ptr, state->bytes, initial.data(), initial.size(), ACL_MEMCPY_HOST_TO_DEVICE);
+    }
+    if (ret == ACL_SUCCESS) {
+        ret = aclrtMemcpy(
+            state->destination.ptr, state->bytes, initial.data(), initial.size(), ACL_MEMCPY_HOST_TO_DEVICE);
+    }
+    state->initRet = ret;
+    return ret;
+}
+
+int ResetAllToAllMeshStateForLoop(int rank, int loopIndex, AllToAllState* state)
+{
+    if (state == nullptr || state->source.ptr == nullptr || state->destination.ptr == nullptr ||
+        state->rankSize != 4 || state->bytes != static_cast<size_t>(state->rankSize) * state->chunkBytes ||
+        loopIndex < 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    std::vector<uint8_t> source(state->bytes);
+    state->expected.assign(state->bytes, 0);
+    for (int targetRank = 0; targetRank < state->rankSize; ++targetRank) {
+        for (size_t chunkOffset = 0; chunkOffset < state->chunkBytes; ++chunkOffset) {
+            source[static_cast<size_t>(targetRank) * state->chunkBytes + chunkOffset] =
+                BuildAllToAllMeshByte(rank, targetRank, loopIndex, chunkOffset);
+        }
+    }
+    for (int sourceRank = 0; sourceRank < state->rankSize; ++sourceRank) {
+        for (size_t chunkOffset = 0; chunkOffset < state->chunkBytes; ++chunkOffset) {
+            state->expected[static_cast<size_t>(sourceRank) * state->chunkBytes + chunkOffset] =
+                BuildAllToAllMeshByte(sourceRank, rank, loopIndex, chunkOffset);
+        }
+    }
+    state->observed.assign(state->bytes, 0);
+    state->readRet = ACL_SUCCESS;
+    state->mismatchCount = 0;
+    state->firstMismatchOffset = 0;
+    state->lastMismatchOffset = 0;
+    state->firstMismatchObserved = 0;
+    state->firstMismatchExpected = 0;
+    state->mismatchedBlockCount = 0;
+    state->firstMismatchedBlock = 0;
+    state->lastMismatchedBlock = 0;
+    state->passed = false;
+    std::vector<uint8_t> destination(
+        state->bytes, static_cast<uint8_t>(0xa5U ^ static_cast<uint8_t>(loopIndex)));
+    int ret = aclrtMemcpy(
+        state->source.ptr, state->bytes, source.data(), source.size(), ACL_MEMCPY_HOST_TO_DEVICE);
+    if (ret != ACL_SUCCESS) {
+        return ret;
+    }
+    return aclrtMemcpy(
+        state->destination.ptr,
+        state->bytes,
+        destination.data(),
+        destination.size(),
+        ACL_MEMCPY_HOST_TO_DEVICE);
 }
 
 int InitAllToAllState(int rank, int peer, AllToAllState* state)
@@ -1365,9 +1467,10 @@ void PrintCcuResourceState(
     DirectCcuSmokeContext* context,
     uint8_t dieId,
     const TileXRDirectCcuPrepareOptions& options,
-    const char* label)
+    const char* label,
+    uint32_t resourceCount = 3U)
 {
-    if (context == nullptr || label == nullptr) {
+    if (context == nullptr || label == nullptr || resourceCount == 0) {
         return;
     }
     TileXR::TileXRCcuDriverAdapter adapter;
@@ -1379,38 +1482,49 @@ void PrintCcuResourceState(
         return;
     }
 
-    uint64_t localXn[3] {};
-    uint64_t remoteXn[3] {};
-    uint64_t localWaitCke[3] {};
-    uint64_t remoteNotifyCke[3] {};
+    std::vector<uint64_t> localXn(resourceCount, 0);
+    std::vector<uint64_t> remoteXn(resourceCount, 0);
+    std::vector<uint64_t> localWaitCke(resourceCount, 0);
+    std::vector<uint64_t> remoteNotifyCke(resourceCount, 0);
     const uint32_t localXnStartId = options.xnStartId;
     const uint32_t remoteXnStartId = options.remoteXnStartId;
     const uint32_t localWaitCkeStartId = options.localWaitCkeStartId;
     const uint32_t remoteNotifyCkeStartId = options.remoteNotifyCkeStartId;
-    const int localXnRet = adapter.ReadXnRange(dieId, localXnStartId, localXn, 3, &report);
-    const int remoteXnRet = adapter.ReadXnRange(dieId, remoteXnStartId, remoteXn, 3, &report);
+    const int localXnRet = adapter.ReadXnRange(
+        dieId, localXnStartId, localXn.data(), resourceCount, &report);
+    const int remoteXnRet = adapter.ReadXnRange(
+        dieId, remoteXnStartId, remoteXn.data(), resourceCount, &report);
     const int localCkeRet = adapter.ReadCkeRange(
-        dieId, localWaitCkeStartId, localWaitCke, 3, &report);
+        dieId, localWaitCkeStartId, localWaitCke.data(), resourceCount, &report);
     const int remoteCkeRet = adapter.ReadCkeRange(
-        dieId, remoteNotifyCkeStartId, remoteNotifyCke, 3, &report);
+        dieId, remoteNotifyCkeStartId, remoteNotifyCke.data(), resourceCount, &report);
+
+    const auto values = [](const std::vector<uint64_t>& data) {
+        std::ostringstream out;
+        for (size_t i = 0; i < data.size(); ++i) {
+            if (i != 0) {
+                out << ",";
+            }
+            out << "0x" << std::hex << data[i];
+        }
+        return out.str();
+    };
 
     std::cerr << label << " resourceState"
+              << " resourceCount=" << resourceCount
               << " localXnStartId=" << localXnStartId
               << " localXnRet=" << localXnRet
-              << " localXn=0x" << std::hex << localXn[0] << ",0x" << localXn[1] << ",0x" << localXn[2]
-              << std::dec
+              << " localXn=" << values(localXn)
               << " remoteXnStartId=" << remoteXnStartId
               << " remoteXnRet=" << remoteXnRet
-              << " remoteXn=0x" << std::hex << remoteXn[0] << ",0x" << remoteXn[1] << ",0x" << remoteXn[2]
-              << std::dec
+              << " remoteXn=" << values(remoteXn)
               << " localWaitCkeStartId=" << localWaitCkeStartId
               << " localCkeRet=" << localCkeRet
-              << " localCke=0x" << std::hex << localWaitCke[0] << ",0x" << localWaitCke[1] << ",0x" << localWaitCke[2]
-              << std::dec
+              << " localCke=" << values(localWaitCke)
               << " remoteNotifyCkeStartId=" << remoteNotifyCkeStartId
               << " remoteCkeRet=" << remoteCkeRet
-              << " remoteCke=0x" << std::hex << remoteNotifyCke[0] << ",0x" << remoteNotifyCke[1] << ",0x" << remoteNotifyCke[2]
-              << std::dec << std::endl;
+              << " remoteCke=" << values(remoteNotifyCke)
+              << std::endl;
 }
 
 int ReadAndValidatePeerLoopMarker(
@@ -1418,7 +1532,11 @@ int ReadAndValidatePeerLoopMarker(
     uint8_t dieId,
     uint32_t markerXnId,
     int rank,
+    int peerRank,
     int loopIndex,
+    uint32_t routeIndex,
+    uint32_t channelId,
+    uint32_t ckeId,
     uint64_t expectedPeerLoopMarker)
 {
     if (context == nullptr) {
@@ -1435,7 +1553,11 @@ int ReadAndValidatePeerLoopMarker(
         peerLoopMarker == expectedPeerLoopMarker;
     std::cout << "tilexr_ccu_alltoall peerLoopMarker"
               << " rank=" << rank
+              << " peerRank=" << peerRank
               << " loopIndex=" << loopIndex
+              << " route=" << routeIndex
+              << " channel=" << channelId
+              << " cke=" << ckeId
               << " xnId=" << markerXnId
               << " readRet=" << readRet
               << " observed=0x" << std::hex << peerLoopMarker
@@ -1688,7 +1810,7 @@ bool WaitForCollectiveSubmitDone(int rank, int rankSize, int localResult, int ph
                       << " allRanksDone=1"
                       << " allRanksSucceeded=" << (allSucceeded ? 1 : 0)
                       << std::endl;
-            return true;
+            return allSucceeded;
         }
         const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start).count();
@@ -1897,12 +2019,18 @@ void PrintAllToAllResult(int rank, int loopIndex, int finalRet, const AllToAllSt
                   << " mismatches=" << alltoall.mismatchCount
                   << std::endl;
     } else {
+        const size_t chunkBytes = alltoall.chunkBytes == 0 ? alltoall.bytes : alltoall.chunkBytes;
+        const size_t sourceRank = chunkBytes == 0 ? 0 : alltoall.firstMismatchOffset / chunkBytes;
+        const size_t chunkOffset = chunkBytes == 0 ? 0 : alltoall.firstMismatchOffset % chunkBytes;
         std::cout << "tilexr_ccu_alltoall result passed=0"
                   << " rank=" << rank
                   << " loopIndex=" << loopIndex
                   << " ret=" << finalRet
                   << " readRet=" << alltoall.readRet
                   << " mismatches=" << alltoall.mismatchCount
+                  << " sourceRank=" << sourceRank
+                  << " chunkOffset=" << chunkOffset
+                  << " globalOffset=" << alltoall.firstMismatchOffset
                   << " firstMismatchOffset=" << alltoall.firstMismatchOffset
                   << " lastMismatchOffset=" << alltoall.lastMismatchOffset
                   << " firstMismatchObserved=0x" << std::hex << alltoall.firstMismatchObserved
@@ -1928,10 +2056,206 @@ void MaybeFastExitAfterAllToAllRun(int finalRet)
     }
 }
 
+bool MeshPreparedIdentityMatches(
+    const TileXR::TileXRCcuDirectInstallAttempt& attempt,
+    const TileXR::TileXRCcuTask& stableTask,
+    const std::vector<TileXR::TileXRCcuSyncResource>& stableResources)
+{
+    if (attempt.submitTasks.size() != 1U || attempt.plan.syncResources.size() != stableResources.size()) {
+        return false;
+    }
+    const auto& task = attempt.submitTasks.front();
+    if (task.dieId != stableTask.dieId || task.missionId != stableTask.missionId ||
+        task.key != stableTask.key || task.instStartId != stableTask.instStartId ||
+        task.instCnt != stableTask.instCnt || task.argSize != stableTask.argSize) {
+        return false;
+    }
+    for (size_t i = 0; i < stableResources.size(); ++i) {
+        const auto& current = attempt.plan.syncResources[i];
+        const auto& stable = stableResources[i];
+        if (current.localXn != stable.localXn || current.remoteXn != stable.remoteXn ||
+            current.notifyCke != stable.notifyCke || current.localWaitCke != stable.localWaitCke ||
+            current.sourceCke != stable.sourceCke || current.channelId != stable.channelId) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int RunAllToAllMeshLongMissionSmokeForRank(
+    DirectCcuSmokeContext* context,
+    int rank,
+    int rankSize,
+    int device)
+{
+    if (context == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (rankSize != 4) {
+        std::cout << "tilexr_ccu_alltoall skipped rankSize=" << rankSize
+                  << " reason=\"direct CCU alltoall mesh requires four ranks\"" << std::endl;
+        return 0;
+    }
+
+    const int loopCount = AllToAllLoopCountFromEnv();
+    AllToAllState alltoall;
+    alltoall.initRet = InitAllToAllMeshState(rank, rankSize, &alltoall);
+    if (loopCount == 0 && alltoall.initRet == ACL_SUCCESS) {
+        alltoall.initRet = TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
+    options.syncResourceCount = 3U;
+    options.sqeArgCount = TILEXR_DIRECT_CCU_SQE_ARGS_LEN;
+    if (std::getenv("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT") == nullptr) {
+        options.syncInstructionCount = 131U;
+    }
+    if (options.gsaStartId == 0) {
+        options.gsaStartId = 1;
+    }
+    std::cout << "tilexr_ccu_alltoall config"
+              << " rank=" << rank
+              << " rankSize=" << rankSize
+              << " chunkBytes=" << alltoall.chunkBytes
+              << " bytes=" << alltoall.bytes
+              << " loopCount=" << loopCount
+              << " resourceCount=3"
+              << " mesh=1"
+              << " longMission=1"
+              << std::endl;
+    PrintConfig(options, rankSize);
+
+    TileXR::TileXRCcuDirectInstallAttempt attempt;
+    TileXRDirectCcuPreparedTasksPtr prepared = &attempt;
+    TileXRDirectCcuPrepareReport installReport;
+    const int prepareRet = alltoall.initRet != ACL_SUCCESS ?
+        alltoall.initRet :
+        context->planner.PrepareDirectCcuAllToAllMeshInstallAttempt(
+            context->session,
+            options,
+            reinterpret_cast<uint64_t>(alltoall.source.ptr),
+            reinterpret_cast<uint64_t>(alltoall.destination.ptr),
+            alltoall.chunkBytes,
+            prepared,
+            &installReport);
+    PrintInstallReport("tilexr_ccu_alltoall prepare", prepareRet, installReport);
+    PrintPreparedTasks(prepared, installReport.submitTaskCount);
+    PrintInstructionReadback(context, prepared, installReport.submitTaskCount);
+
+    int finalRet = 0;
+    const bool submitRequested = EnvFlag(kSubmitEnv);
+    if (prepareRet != TileXR::TILEXR_SUCCESS) {
+        finalRet = 6;
+    } else if (attempt.submitTasks.size() != 1U || attempt.submitTasks.front().argSize !=
+        TILEXR_DIRECT_CCU_SQE_ARGS_LEN || attempt.plan.syncResources.size() != 3U) {
+        std::cerr << "tilexr_ccu_alltoall invalidMeshPreparedTask"
+                  << " rank=" << rank
+                  << " taskCount=" << attempt.submitTasks.size()
+                  << " resourceCount=" << attempt.plan.syncResources.size()
+                  << std::endl;
+        finalRet = 6;
+    } else if (submitRequested && !installReport.submitReady) {
+        std::cout << "tilexr_ccu_alltoall submit skipped reason=\"prepare did not reach submitReady\""
+                  << std::endl;
+    } else if (submitRequested) {
+        const TileXR::TileXRCcuTask stableTask = attempt.submitTasks.front();
+        const auto stableResources = attempt.plan.syncResources;
+        aclrtStream stream = nullptr;
+        const int streamRet = aclrtCreateStream(&stream);
+        if (streamRet != ACL_SUCCESS) {
+            std::cerr << "tilexr_ccu_alltoall aclrtCreateStream ret=" << streamRet << std::endl;
+            finalRet = 7;
+        } else {
+            bool skipStreamDestroy = false;
+            const int syncTimeoutMs = std::max(1, EnvInt("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", 6000));
+            for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex) {
+                const int resetRet = ResetAllToAllMeshStateForLoop(rank, loopIndex, &alltoall);
+                const bool ready = WaitForCollectiveSubmitReadiness(
+                    rank,
+                    rankSize,
+                    resetRet == ACL_SUCCESS && installReport.submitReady,
+                    loopIndex);
+                if (resetRet != ACL_SUCCESS) {
+                    finalRet = 14;
+                } else if (!ready) {
+                    finalRet = 13;
+                }
+
+                if (finalRet == 0) {
+                    TileXRDirectCcuSubmitReport submitReport;
+                    const int submitRet = TileXRDirectCcuSubmitPrepared(prepared, stream, &submitReport);
+                    PrintSubmitReport("tilexr_ccu_alltoall submit", submitRet, submitReport);
+                    const int syncRet = aclrtSynchronizeStreamWithTimeout(stream, syncTimeoutMs);
+                    std::cout << "tilexr_ccu_alltoall timing"
+                              << " rank=" << rank
+                              << " loopIndex=" << loopIndex
+                              << " mesh=1"
+                              << " submitRet=" << submitRet
+                              << " syncRet=" << syncRet
+                              << " syncTimeoutMs=" << syncTimeoutMs
+                              << std::endl;
+                    if (submitRet != TileXR::TILEXR_SUCCESS) {
+                        finalRet = 9;
+                    } else if (syncRet != ACL_SUCCESS) {
+                        finalRet = 8;
+                        skipStreamDestroy = true;
+                    }
+                }
+
+                if (finalRet == 0 && CheckAllToAllState(&alltoall) != ACL_SUCCESS) {
+                    finalRet = 14;
+                }
+                if (finalRet == 0 && !MeshPreparedIdentityMatches(attempt, stableTask, stableResources)) {
+                    finalRet = 16;
+                }
+                if (!WaitForCollectiveSubmitDone(rank, rankSize, finalRet, loopIndex) && finalRet == 0) {
+                    finalRet = 13;
+                }
+                PrintAllToAllResult(rank, loopIndex, finalRet, alltoall);
+                if (finalRet != 0) {
+                    std::cerr << "tilexr_ccu_alltoall loopFailure"
+                              << " rank=" << rank
+                              << " loopIndex=" << loopIndex
+                              << " ret=" << finalRet
+                              << " resourceCount=3"
+                              << " selfCopyCompletionCke=" << attempt.plan.syncResources[0].localWaitCke
+                              << std::endl;
+                    PrintMissionContext(context, attempt.submitTasks.front(), "tilexr_ccu_alltoall");
+                    PrintCcuResourceState(
+                        context,
+                        attempt.submitTasks.front().dieId,
+                        options,
+                        "tilexr_ccu_alltoall",
+                        3U);
+                    break;
+                }
+                std::cout << "tilexr_ccu_alltoall stableResources=1"
+                          << " rank=" << rank
+                          << " loopIndex=" << loopIndex
+                          << " missionId=" << static_cast<uint32_t>(stableTask.missionId)
+                          << " instStartId=" << stableTask.instStartId
+                          << " instCnt=" << stableTask.instCnt
+                          << std::endl;
+            }
+            if (skipStreamDestroy) {
+                std::cout << "tilexr_ccu_alltoall skipDestroyStream=1 rank=" << rank << std::endl;
+            } else {
+                aclrtDestroyStream(stream);
+            }
+        }
+    }
+
+    MaybeFastExitAfterAllToAllRun(finalRet);
+    const int destroyRet = TileXRDirectCcuDestroyPrepared(prepared);
+    return destroyRet != TileXR::TILEXR_SUCCESS && finalRet == 0 ? 11 : finalRet;
+}
+
 int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSize, int device)
 {
     if (context == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (AllToAllMeshSmokeEnabled()) {
+        return RunAllToAllMeshLongMissionSmokeForRank(context, rank, rankSize, device);
     }
     if (rankSize != 2) {
         std::cout << "tilexr_ccu_alltoall skipped rankSize=" << rankSize
@@ -2067,9 +2391,13 @@ int RunAllToAllLongMissionSmokeForRank(DirectCcuSmokeContext* context, int rank,
                     const int markerRet = ReadAndValidatePeerLoopMarker(
                         context,
                         attempt.submitTasks.front().dieId,
-                        options.remoteXnStartId,
+                        attempt.plan.syncResources[0].remoteXn,
                         rank,
+                        peer,
                         loopIndex,
+                        0U,
+                        attempt.plan.syncResources[0].channelId,
+                        attempt.plan.syncResources[0].localWaitCke,
                         BuildAllToAllLoopMarker(peer, loopIndex));
                     if (markerRet != TileXR::TILEXR_SUCCESS) {
                         finalRet = 15;
@@ -2124,7 +2452,7 @@ int RunAllToAllSmokeForRank(DirectCcuSmokeContext* context, int rank, int rankSi
     if (context == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (AllToAllLongMissionEnabled()) {
+    if (AllToAllMeshSmokeEnabled() || AllToAllLongMissionEnabled()) {
         return RunAllToAllLongMissionSmokeForRank(context, rank, rankSize, device);
     }
     if (rankSize != 2) {
@@ -2177,23 +2505,30 @@ int RunSyncXnPingSmokeForRank(DirectCcuSmokeContext* context, int rank, int rank
     if (context == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (rankSize != 2) {
+    if (rankSize != 2 && rankSize != 4) {
         std::cout << "tilexr_ccu_sync_xn_ping skipped rankSize=" << rankSize
-                  << " reason=\"direct CCU SyncXn ping requires two ranks\"" << std::endl;
+                  << " reason=\"direct CCU SyncXn ping requires two or four ranks\"" << std::endl;
         return 0;
     }
 
-    const int peer = 1 - rank;
+    const int peerXor = EnvInt(kSyncXnPingPeerXorEnv, 1);
+    if (peerXor < 1 || peerXor >= rankSize) {
+        std::cerr << "tilexr_ccu_sync_xn_ping invalid peerXor=" << peerXor
+                  << " rankSize=" << rankSize << std::endl;
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const int peer = rank ^ peerXor;
     AllToAllState routeState;
     routeState.initRet = InitAllToAllState(rank, peer, &routeState);
     TileXRDirectCcuPrepareOptions options = MakePrepareOptions(rank, rankSize, device);
     options.syncResourceCount = 1;
     options.sqeArgCount = 0;
-    options.syncInstructionCount = 3;
+    options.syncInstructionCount = 2;
 
     std::cout << "tilexr_ccu_sync_xn_ping config"
               << " rank=" << rank
               << " peer=" << peer
+              << " peerXor=" << peerXor
               << std::endl;
     PrintConfig(options, rankSize);
 
@@ -2265,6 +2600,12 @@ int RunSyncXnPingSmokeForRank(DirectCcuSmokeContext* context, int rank, int rank
                 if (!attempt.submitTasks.empty()) {
                     PrintMissionContext(context, attempt.submitTasks.front(), "tilexr_ccu_sync_xn_ping");
                 }
+                PrintCcuResourceState(
+                    context,
+                    attempt.submitTasks.empty() ? 0 : attempt.submitTasks.front().dieId,
+                    options,
+                    "tilexr_ccu_sync_xn_ping",
+                    1U);
                 finalRet = 8;
             } else if (submitRet != TileXR::TILEXR_SUCCESS) {
                 finalRet = 9;

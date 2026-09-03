@@ -17,10 +17,103 @@ BUSY_GUARD = REPO_ROOT / "tests" / "ccu" / "ccu_npu_smi_busy_guard.py"
 
 
 class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
+    def run_fake_mesh_runner(self, devices="4,5,6,7", rank_size="4", loop_count="10"):
+        temp_dir = tempfile.TemporaryDirectory()
+        temp_path = Path(temp_dir.name)
+        fake_bin = temp_path / "bin"
+        fake_bin.mkdir()
+        fake_cxx = fake_bin / "c++"
+        fake_cxx.write_text(
+            "#!/usr/bin/env bash\n"
+            "out=''\n"
+            "while [ $# -gt 0 ]; do\n"
+            "  if [ \"$1\" = -o ]; then out=$2; shift 2; else shift; fi\n"
+            "done\n"
+            "cat > \"$out\" <<'PROBE'\n"
+            "#!/usr/bin/env bash\n"
+            "rank=${TILEXR_CCU_PROBE_RANK}\n"
+            "rank_size=${TILEXR_CCU_PROBE_RANK_SIZE}\n"
+            "loops=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}\n"
+            "echo \"tilexr_ccu_alltoall prepare ret=0 installSucceeded=1 submitReady=1\"\n"
+            "for ((loop=0; loop<loops; ++loop)); do\n"
+            "  echo \"tilexr_ccu_alltoall submit ret=0 loopIndex=$loop\"\n"
+            "  echo \"tilexr_ccu_alltoall timing rank=$rank loopIndex=$loop syncMs=1\"\n"
+            "  for ((peer=0; peer<rank_size; ++peer)); do\n"
+            "    if [ $peer -ne $rank ]; then\n"
+            "      echo \"tilexr_ccu_alltoall peerLoopMarker rank=$rank peerRank=$peer loopIndex=$loop matched=1\"\n"
+            "    fi\n"
+            "  done\n"
+            "  echo \"tilexr_ccu_alltoall result passed=1 rank=$rank loopIndex=$loop mismatches=0\"\n"
+            "done\n"
+            "PROBE\n"
+            "chmod +x \"$out\"\n",
+            encoding="utf-8",
+        )
+        fake_cxx.chmod(0o755)
+        fake_timeout = fake_bin / "timeout"
+        fake_timeout.write_text(
+            "#!/usr/bin/env bash\n"
+            "shift\n"
+            "exec \"$@\"\n",
+            encoding="utf-8",
+        )
+        fake_timeout.chmod(0o755)
+        tile_comm = temp_path / "libtile-comm.so"
+        tile_comm.touch()
+        env = os.environ.copy()
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env.update({
+            "TILEXR_RUN_CCU_DIRECT_SMOKE_PROBE": "1",
+            "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL": "1",
+            "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH": "1",
+            "TILEXR_CCU_DIRECT_SMOKE_SUBMIT": "1",
+            "TILEXR_CCU_RANK_SIZE": rank_size,
+            "TILEXR_CCU_SMOKE_DEVICES": devices,
+            "TILEXR_CCU_ALLTOALL_LOOP_COUNT": loop_count,
+            "TILEXR_CCU_SMOKE_ALLOW_BUSY_NPU": "1",
+            "TILEXR_TILE_COMM_LIB": str(tile_comm),
+            "TILEXR_CCU_SMOKE_WORK_DIR": str(temp_path / "work"),
+        })
+        result = subprocess.run(
+            ["bash", str(RUNNER)], cwd=REPO_ROOT, check=False, text=True,
+            capture_output=True, env=env,
+        )
+        temp_dir.cleanup()
+        return result
+
+    def test_runner_executes_four_rank_mesh_loop10_with_exact_counts(self):
+        result = self.run_fake_mesh_runner()
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("rank=3 device=7", result.stdout)
+        self.assertIn("expectedResults=40 actualResults=40", result.stdout)
+        self.assertNotIn("expectedMarkerMatches", result.stdout)
+
+    def test_runner_mesh_defaults_cover_every_rank_resource_range(self):
+        source = RUNNER.read_text(encoding="utf-8")
+        mesh_defaults = source[source.index("if alltoall_mesh_mode_enabled;"):]
+        mesh_defaults = mesh_defaults[:mesh_defaults.index("elif")]
+
+        self.assertIn('TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"', mesh_defaults)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"', mesh_defaults)
+        self.assertIn('TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"', mesh_defaults)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"', mesh_defaults)
+
+    def test_runner_rejects_mesh_device_count_mismatch_and_duplicates(self):
+        missing = self.run_fake_mesh_runner(devices="4,5,6")
+        duplicate = self.run_fake_mesh_runner(devices="4,5,5,7")
+
+        self.assertNotEqual(0, missing.returncode)
+        self.assertIn("device count", missing.stdout + missing.stderr)
+        self.assertNotEqual(0, duplicate.returncode)
+        self.assertIn("duplicate device", duplicate.stdout + duplicate.stderr)
+
     def test_runner_is_default_safe_and_documents_hardware_gate(self):
         source = RUNNER.read_text(encoding="utf-8")
 
         self.assertIn("TILEXR_RUN_CCU_DIRECT_SMOKE_PROBE", source)
+        self.assertIn("TILEXR_CCU_SMOKE_REUSE_PROBE", source)
+        self.assertIn('[ ! -x "${probe_bin}" ]', source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ENABLE=1", source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE", source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE=1", source)
@@ -69,33 +162,22 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
             with self.subTest(endpoint_suffix=suffix):
                 self.assertIn(f"    {suffix}", source)
         self.assertIn('endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}"', source)
-        self.assertIn('rank0_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK0"', source)
-        self.assertIn('rank1_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK1"', source)
-        self.assertIn('rank0_env+=("TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank0_endpoint_value}")', source)
-        self.assertIn('rank1_env+=("TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank1_endpoint_value}")', source)
-        self.assertIn("rank0_env", source)
-        self.assertIn("rank1_env", source)
+        self.assertIn('rank_var="${generic}_RANK${rank}"', source)
+        self.assertIn('rank_env+=("${generic}=${rank_value}")', source)
+        self.assertIn("build_rank_env", source)
+        self.assertIn("rank_env", source)
         self.assertIn("TILEXR_COMM_ID", source)
-        self.assertIn("TILEXR_CCU_PROBE_RANK_SIZE=2", source)
-        self.assertIn("TILEXR_CCU_PROBE_RANK=0", source)
-        self.assertIn("TILEXR_CCU_PROBE_RANK=1", source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK_SIZE=${rank_size}', source)
+        self.assertIn('TILEXR_CCU_PROBE_RANK="${rank}"', source)
         self.assertIn('if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]', source)
         self.assertIn('"${probe_bin}" > "${thread_log}" 2>&1', source)
         self.assertIn("ccu_thread.log", source)
-        self.assertIn("ccu_rank0.log", source)
-        self.assertIn("ccu_rank1.log", source)
+        self.assertIn('ccu_rank${rank}.log', source)
         self.assertIn("installSucceeded=1", source)
         self.assertIn("submitReady=1", source)
         self.assertLess(source.index("installSucceeded=1"), source.index("submitReady=1"))
         self.assertIn("${repo_root}/install/lib64/libtile-comm.so", source)
-        self.assertIn(
-            'timeout "${timeout_s}s" env "${common_env[@]}" "${rank0_env[@]}" TILEXR_CCU_PROBE_RANK=0',
-            source,
-        )
-        self.assertIn(
-            'timeout "${timeout_s}s" env "${common_env[@]}" "${rank1_env[@]}" TILEXR_CCU_PROBE_RANK=1',
-            source,
-        )
+        self.assertIn('timeout "${timeout_s}s" env "${common_env[@]}" "${rank_env[@]}"', source)
         self.assertNotIn('bash -c "wait', source)
         self.assertIn("npu-smi rc=", source)
         self.assertIn("TILEXR_CCU_SMOKE_ALLOW_BUSY_NPU", source)
@@ -104,10 +186,8 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_SMOKE_REQUIRE_NPU_SMI", source)
         self.assertIn("ccu_npu_smi_busy_guard.py", source)
         self.assertIn("tilexr_ccu_direct_smoke_runner summary", source)
-        self.assertIn("rank0Status=", source)
-        self.assertIn("rank1Status=", source)
-        self.assertIn("rank0Log=", source)
-        self.assertIn("rank1Log=", source)
+        self.assertIn('rank${rank}Status=', source)
+        self.assertIn('rank${rank}Log=', source)
         self.assertIn("submitTiming", source)
         self.assertIn("syncMs=", source)
         self.assertIn("p2pCcuCopy", source)
@@ -119,8 +199,7 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
             "npu-smi info",
             '"${probe_bin}"',
             "TILEXR_CCU_DIRECT_SMOKE_ENABLE=1",
-            "TILEXR_CCU_PROBE_RANK=0",
-            "TILEXR_CCU_PROBE_RANK=1",
+            'TILEXR_CCU_PROBE_RANK="${rank}"',
         ]:
             with self.subTest(needle=needle):
                 self.assertLess(gate, source.index(needle))
@@ -177,19 +256,24 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn("sync_xn_ping_mode_enabled", source)
         self.assertIn("apply_sync_xn_ping_defaults", source)
         self.assertIn('TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-0', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR}")', source)
         self.assertIn('TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"', source)
         self.assertIn('TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"', source)
         self.assertIn('common_env+=("TILEXR_CCU_ALLTOALL_LOOP_COUNT=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}")', source)
         self.assertIn('TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"', source)
-        self.assertIn('TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-2}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"', source)
         self.assertLess(source.index("apply_sync_xn_ping_defaults"), source.index("apply_alltoall_defaults"))
 
     def test_runner_allows_inactive_p2p_rank_to_skip_submit(self):
         source = RUNNER.read_text(encoding="utf-8")
         submit_check = source[
-            source.index('if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]', source.index('if [ "${rank0_status}"')):
+            source.index('if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]', source.index("any_rank_failed=0")):
             source.index('if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_BARRIER_WAIT:-0}" = "1" ]')
         ]
 
@@ -287,10 +371,8 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         source = RUNNER.read_text(encoding="utf-8")
 
         self.assertIn("EID_INDEX", source[source.index("resource_window_token_fields=("):])
-        self.assertIn('rank0_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK0"', source)
-        self.assertIn('rank1_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK1"', source)
-        self.assertIn('echo "dryRun rank0 TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank0_token_value}"', source)
-        self.assertIn('echo "dryRun rank1 TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank1_token_value}"', source)
+        self.assertIn('rank_var="${generic}_RANK${rank}"', source)
+        self.assertIn('echo "dryRun rank${rank} TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank_token_value}"', source)
 
     def test_runner_dry_run_shows_repository_install_diagnostic_variants(self):
         with tempfile.TemporaryDirectory() as temp_dir:

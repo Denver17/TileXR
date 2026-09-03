@@ -485,6 +485,19 @@ class TileXRCcuMicrocodeTest(unittest.TestCase):
                     return 4;
                 }
 
+                TileXRCcuInstr local;
+                if (TileXRCcuEncodeTransLocMemToLocMem(spec, &local) != TILEXR_SUCCESS) {
+                    std::cerr << "trans loc->loc encode failed\n";
+                    return 5;
+                }
+                if (local.words[0] != 0x010102020201100aULL ||
+                    local.words[1] != 0x5a00001203010102ULL ||
+                    local.words[2] != 0x0007000000000000ULL ||
+                    local.words[3] != 0x0003040200020401ULL) {
+                    std::cerr << "unexpected trans loc->loc words\n";
+                    return 6;
+                }
+
                 return 0;
             }
             '''
@@ -509,7 +522,8 @@ class TileXRCcuMicrocodeTest(unittest.TestCase):
                 TileXRCcuInstr instr;
                 TileXRCcuMemTransferSpec empty;
                 if (TileXRCcuEncodeTransRmtMemToLocMem(empty, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
-                    TileXRCcuEncodeTransLocMemToRmtMem(empty, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    TileXRCcuEncodeTransLocMemToRmtMem(empty, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    TileXRCcuEncodeTransLocMemToLocMem(empty, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
                     std::cerr << "empty transfer accepted\n";
                     return 1;
                 }
@@ -525,7 +539,8 @@ class TileXRCcuMicrocodeTest(unittest.TestCase):
                 spec.setCkeMask = 8;
 
                 if (TileXRCcuEncodeTransRmtMemToLocMem(spec, nullptr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
-                    TileXRCcuEncodeTransLocMemToRmtMem(spec, nullptr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                    TileXRCcuEncodeTransLocMemToRmtMem(spec, nullptr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    TileXRCcuEncodeTransLocMemToLocMem(spec, nullptr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
                     std::cerr << "null output accepted\n";
                     return 2;
                 }
@@ -538,7 +553,8 @@ class TileXRCcuMicrocodeTest(unittest.TestCase):
 
                 spec.reduceDataType = 0;
                 spec.reduceOpCode = 0x10;
-                if (TileXRCcuEncodeTransLocMemToRmtMem(spec, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
+                if (TileXRCcuEncodeTransLocMemToRmtMem(spec, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    TileXRCcuEncodeTransLocMemToLocMem(spec, &instr) != TILEXR_ERROR_PARA_CHECK_FAIL) {
                     std::cerr << "out-of-range reduce op code accepted\n";
                     return 4;
                 }
@@ -572,12 +588,14 @@ class TileXRCcuMicrocodeTest(unittest.TestCase):
         self.assertIn("struct TileXRCcuMemTransferSpec", header)
         self.assertIn("TileXRCcuEncodeTransRmtMemToLocMem", header)
         self.assertIn("TileXRCcuEncodeTransLocMemToRmtMem", header)
+        self.assertIn("TileXRCcuEncodeTransLocMemToLocMem", header)
         self.assertIn("0x0001U", source)
         self.assertIn("0x0002U", source)
         self.assertIn("0x0003U", source)
         self.assertIn("0x0802U", source)
         self.assertIn("0x0804U", source)
         self.assertIn("0x1008U", source)
+        self.assertIn("0x100aU", source)
         self.assertIn("0x1009U", source)
         self.assertIn("0x100bU", source)
         self.assertIn("0x100dU", source)

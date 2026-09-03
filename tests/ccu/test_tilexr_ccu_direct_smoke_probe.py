@@ -703,16 +703,73 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("WaitForCollectiveSubmitDone(rank, rankSize, finalRet, loopIndex)", body)
         self.assertIn("adapter.ReadXnRange", source)
         self.assertIn("peerLoopMarker", source)
+        self.assertIn("attempt.plan.syncResources[0].remoteXn", body)
+        self.assertNotIn("attempt.plan.syncResources[0].localXn,", body)
         self.assertIn("loopIndex=", body)
         self.assertLess(
             body.index("PrepareDirectCcuAllToAll2RankInstallAttempt"),
             body.index("for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"),
         )
 
+    def test_four_rank_mesh_reuses_one_prepare_and_validates_full_matrix_each_loop(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn(
+            'kAllToAllMeshEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH"', source
+        )
+        self.assertIn("AllToAllMeshSmokeEnabled", source)
+        self.assertIn("InitAllToAllMeshState", source)
+        self.assertIn("ResetAllToAllMeshStateForLoop", source)
+        self.assertIn("BuildAllToAllMeshByte", source)
+        mesh_body = source[
+            source.index("int RunAllToAllMeshLongMissionSmokeForRank"):
+            source.index("int RunAllToAllLongMissionSmokeForRank")
+        ]
+        self.assertNotIn("const uint32_t routeIndex = peerOrdinal * 3U", mesh_body)
+        self.assertNotIn("markerResource.remoteXn", mesh_body)
+        self.assertIn("RunAllToAllMeshLongMissionSmokeForRank", source)
+        mesh_dispatch = source[source.index("int RunAllToAllSmokeForRank"):]
+        self.assertLess(
+            mesh_dispatch.index("AllToAllMeshSmokeEnabled()"),
+            mesh_dispatch.index("rankSize != 2"),
+        )
+        body = source[
+            source.index("int RunAllToAllMeshLongMissionSmokeForRank"):
+            source.index("int RunAllToAllLongMissionSmokeForRank")
+        ]
+        loop = "for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"
+        self.assertIn("rankSize != 4", body)
+        self.assertIn("PrepareDirectCcuAllToAllMeshInstallAttempt", body)
+        self.assertIn("aclrtCreateStream", body)
+        self.assertIn(loop, body)
+        self.assertLess(body.index("PrepareDirectCcuAllToAllMeshInstallAttempt"), body.index(loop))
+        self.assertLess(body.index("aclrtCreateStream"), body.index(loop))
+        self.assertNotIn("attempt.submitTasks.front().args[0] = localLoopMarker", body)
+        self.assertIn("WaitForCollectiveSubmitReadiness", body)
+        self.assertIn("WaitForCollectiveSubmitDone", body)
+        self.assertNotIn("peerOrdinal * 3U", body)
+        self.assertNotIn("ReadAndValidatePeerLoopMarker", body)
+        self.assertIn("CheckAllToAllState(&alltoall)", body)
+        self.assertIn("PrintCcuResourceState", body)
+        self.assertIn("resourceCount=3", body)
+
+        pattern = source[
+            source.index("uint8_t BuildAllToAllMeshByte"):
+            source.index("int InitAllToAllMeshState")
+        ]
+        for field in ["sourceRank", "targetRank", "loopIndex", "chunkOffset"]:
+            with self.subTest(field=field):
+                self.assertIn(field, pattern)
+        self.assertIn("static_cast<size_t>(rankSize) * state->chunkBytes", source)
+        self.assertIn("sourceRank=", source)
+        self.assertIn("chunkOffset=", source)
+        self.assertIn("globalOffset=", source)
+
     def test_sync_xn_ping_smoke_mode_is_opt_in_and_uses_bounded_sync(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn('kSyncXnPingEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING"', source)
+        self.assertIn('kSyncXnPingPeerXorEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR"', source)
         self.assertIn("SyncXnPingSmokeEnabled", source)
         self.assertIn("RunSyncXnPingSmokeForRank", source)
         self.assertIn("PrepareDirectCcuSyncXnPingInstallAttempt", source)
@@ -722,10 +779,41 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         ]
         self.assertIn("AllToAllState routeState", sync_ping_body)
         self.assertIn("InitAllToAllState(rank, peer, &routeState)", sync_ping_body)
+        self.assertIn("const int peer = rank ^ peerXor", sync_ping_body)
+        self.assertIn("peerXor < 1 || peerXor >= rankSize", sync_ping_body)
+        self.assertIn("options.syncInstructionCount = 2", sync_ping_body)
+        planner = (REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_collective_planner.cpp").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("selectedDiagnosticPeer", planner)
+        self.assertIn("override.syncRouteIndex == 0U", planner)
+        self.assertIn("peerRanks.push_back(selectedDiagnosticPeer)", planner)
+        self.assertIn("selectedDiagnosticPeer >= 0 ?", planner)
+        runtime = (REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_runtime.cpp").read_text(
+            encoding="utf-8"
+        )
+        peer_route_body = runtime[
+            runtime.index("int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes("):
+            runtime.index("int TileXRCcuDirectRuntime::QueryTpHandleForPeer(",
+                          runtime.index("int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes("))
+        ]
+        self.assertIn("offer.qpKey = state.qpInfo.key", peer_route_body)
+        self.assertIn("importInfo.in.key = peerOffer.qpKey", peer_route_body)
+        self.assertNotIn("std::copy(offer.eid.begin(), offer.eid.end(), offer.qpKey.value)", runtime)
+        self.assertIn(
+            "offer.eid = state.resourceWindow.eid",
+            runtime,
+        )
+        self.assertNotIn(
+            "std::copy(peerOffer.eid.begin(), peerOffer.eid.end(), importInfo.in.key.value)",
+            runtime,
+        )
         self.assertIn("tilexr_ccu_sync_xn_ping prepare", source)
         self.assertIn("tilexr_ccu_sync_xn_ping submit", source)
         self.assertIn("tilexr_ccu_sync_xn_ping timing", source)
         self.assertIn("aclrtSynchronizeStreamWithTimeout", source)
+        self.assertIn('PrintCcuResourceState(\n                    context,', sync_ping_body)
+        self.assertIn('"tilexr_ccu_sync_xn_ping",\n                    1U', sync_ping_body)
 
     def test_alltoall_timeout_prints_xn_and_cke_readback(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")

@@ -2,7 +2,7 @@
 #
 # Copyright (c) 2026 TileXR Project
 #
-# Two-rank runner for the private TileXR direct CCU smoke probe.
+# Multi-rank runner for the private TileXR direct CCU smoke probe.
 # Default execution is safe and does not touch ACL/NPU runtime.
 
 set -euo pipefail
@@ -37,6 +37,7 @@ endpoint_fields=(
 )
 
 resource_window_token_fields=(
+    EID
     EID_INDEX
     TOKEN_ID
     RAW_TOKEN_ID
@@ -90,6 +91,11 @@ signal_wait_mode_enabled()
 alltoall_mode_enabled()
 {
     [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL:-0}" = "1" ]
+}
+
+alltoall_mesh_mode_enabled()
+{
+    [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH:-0}" = "1" ]
 }
 
 alltoall_long_mission_enabled()
@@ -183,11 +189,17 @@ apply_sync_xn_ping_defaults()
     export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
     export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
     export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"
-    export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"
+    export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-2}"
     export TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW="${TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW:-full_repository}"
     export TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-instruction_bytes}"
     export TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-acl}"
     export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE:-hcomm_die}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION:-hcomm}"
+    export TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"
     export TILEXR_CCU_PROBE_RANK0_XN_START="${TILEXR_CCU_PROBE_RANK0_XN_START:-1961}"
     export TILEXR_CCU_PROBE_RANK1_XN_START="${TILEXR_CCU_PROBE_RANK1_XN_START:-1961}"
     export TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"
@@ -211,13 +223,31 @@ apply_alltoall_defaults()
     fi
 
     export TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"
-    export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"
+    if alltoall_mesh_mode_enabled; then
+        export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-131072}"
+    else
+        export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"
+    fi
     export TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"
     export TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"
     export TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"
     export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
     export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
-    if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then
+    if alltoall_mesh_mode_enabled; then
+        export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE:-hcomm_die}"
+        export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION:-hcomm}"
+        export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
+        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-3}"
+        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-131}"
+        export TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"
+        export TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"
+        export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-16}"
+        export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"
+        export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-16}"
+        export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"
+        export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-16}"
+        export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX:-3}"
+    elif [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then
         export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-13}"
         export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-3}"
         export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-453}"
@@ -253,6 +283,30 @@ apply_signal_wait_defaults
 apply_sync_xn_ping_defaults
 apply_alltoall_defaults
 
+rank_size="$(parse_int "${TILEXR_CCU_RANK_SIZE:-${TILEXR_CCU_PROBE_RANK_SIZE:-2}}" 2)"
+if [ "${rank_size}" -lt 1 ]; then
+    echo "ERROR: rank size must be positive: ${rank_size}" >&2
+    exit 2
+fi
+devices="${TILEXR_CCU_SMOKE_DEVICES:-${TILEXR_TEST_DEVICES:-0,1}}"
+IFS=',' read -r -a device_list <<< "${devices}"
+if [ "${#device_list[@]}" -ne "${rank_size}" ]; then
+    echo "ERROR: device count ${#device_list[@]} does not match rank size ${rank_size}: ${devices}" >&2
+    exit 2
+fi
+declare -A seen_devices=()
+for device in "${device_list[@]}"; do
+    if [ -z "${device}" ]; then
+        echo "ERROR: empty device in list: ${devices}" >&2
+        exit 2
+    fi
+    if [ "${seen_devices[${device}]+set}" = "set" ]; then
+        echo "ERROR: duplicate device ${device} in list: ${devices}" >&2
+        exit 2
+    fi
+    seen_devices["${device}"]=1
+done
+
 if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
     echo "tilexr_ccu_direct_smoke_runner dryRun=1 workDir=${work_dir}"
     for diagnostic_var in \
@@ -268,6 +322,7 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
         TILEXR_CCU_DIRECT_SMOKE_BARRIER \
         TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING \
         TILEXR_CCU_DIRECT_SMOKE_ALLTOALL \
+        TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH \
         TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION \
         TILEXR_CCU_ALLTOALL_BYTES \
         TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP \
@@ -279,6 +334,7 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
             echo "dryRun ${diagnostic_var}=${diagnostic_value}"
         fi
     done
+    echo "dryRun TILEXR_CCU_PROBE_RANK_SIZE=${rank_size} devices=${devices}"
     sqe_arg_count="$(parse_int "${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-13}" 13)"
     sync_resource_count="$(parse_int "${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}" 1)"
     default_sync_instruction_count_value="$(default_sync_instruction_count "${sync_resource_count}")"
@@ -324,30 +380,24 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
     for endpoint_field in "${endpoint_fields[@]}"; do
         endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}"
         common_endpoint_value="${!endpoint_var:-}"
-        rank0_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK0"
-        rank0_endpoint_value="${!rank0_endpoint_var:-${common_endpoint_value}}"
-        rank1_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK1"
-        rank1_endpoint_value="${!rank1_endpoint_var:-${common_endpoint_value}}"
-        if [ "${rank0_endpoint_value}" != "" ]; then
-            echo "dryRun rank0 TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank0_endpoint_value}"
-        fi
-        if [ "${rank1_endpoint_value}" != "" ]; then
-            echo "dryRun rank1 TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank1_endpoint_value}"
-        fi
+        for ((rank=0; rank<rank_size; ++rank)); do
+            rank_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK${rank}"
+            rank_endpoint_value="${!rank_endpoint_var:-${common_endpoint_value}}"
+            if [ "${rank_endpoint_value}" != "" ]; then
+                echo "dryRun rank${rank} TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank_endpoint_value}"
+            fi
+        done
     done
     for token_field in "${resource_window_token_fields[@]}"; do
         token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}"
         common_token_value="${!token_var:-}"
-        rank0_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK0"
-        rank0_token_value="${!rank0_token_var:-${common_token_value}}"
-        rank1_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK1"
-        rank1_token_value="${!rank1_token_var:-${common_token_value}}"
-        if [ "${rank0_token_value}" != "" ]; then
-            echo "dryRun rank0 TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank0_token_value}"
-        fi
-        if [ "${rank1_token_value}" != "" ]; then
-            echo "dryRun rank1 TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank1_token_value}"
-        fi
+        for ((rank=0; rank<rank_size; ++rank)); do
+            rank_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK${rank}"
+            rank_token_value="${!rank_token_var:-${common_token_value}}"
+            if [ "${rank_token_value}" != "" ]; then
+                echo "dryRun rank${rank} TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank_token_value}"
+            fi
+        done
     done
     exit 0
 fi
@@ -376,24 +426,24 @@ cann_lib_dir="${cann_root}/lib64"
 driver_lib_dir="${ASCEND_DRIVER_PATH}/lib64/driver"
 probe_bin="${work_dir}/ccu_tilexr_direct_smoke_probe"
 
-c++ -std=c++14 \
-    -DTILEXR_CCU_TESTING=1 \
-    -I "${repo_root}/src/include" \
-    -I "${repo_root}/src/comm" \
-    -I "${cann_root}/pkg_inc" \
-    -I "${cann_root}/pkg_inc/runtime" \
-    -I "${cann_root}/include" \
-    "${repo_root}/tests/ccu/ccu_tilexr_direct_smoke_probe.cpp" \
-    -L "${tile_comm_dir}" \
-    -L "${cann_lib_dir}" \
-    -L "${driver_lib_dir}" \
-    -Wl,-rpath-link,"${tile_comm_dir}" \
-    -Wl,-rpath-link,"${cann_lib_dir}" \
-    -Wl,-rpath-link,"${driver_lib_dir}" \
-    -ltile-comm -lascendcl -lruntime -ldl -pthread \
-    -o "${probe_bin}"
-
-devices="${TILEXR_CCU_SMOKE_DEVICES:-${TILEXR_TEST_DEVICES:-0,1}}"
+if [ "${TILEXR_CCU_SMOKE_REUSE_PROBE:-0}" != "1" ] || [ ! -x "${probe_bin}" ]; then
+    c++ -std=c++14 \
+        -DTILEXR_CCU_TESTING=1 \
+        -I "${repo_root}/src/include" \
+        -I "${repo_root}/src/comm" \
+        -I "${cann_root}/pkg_inc" \
+        -I "${cann_root}/pkg_inc/runtime" \
+        -I "${cann_root}/include" \
+        "${repo_root}/tests/ccu/ccu_tilexr_direct_smoke_probe.cpp" \
+        -L "${tile_comm_dir}" \
+        -L "${cann_lib_dir}" \
+        -L "${driver_lib_dir}" \
+        -Wl,-rpath-link,"${tile_comm_dir}" \
+        -Wl,-rpath-link,"${cann_lib_dir}" \
+        -Wl,-rpath-link,"${driver_lib_dir}" \
+        -ltile-comm -lascendcl -lruntime -ldl -pthread \
+        -o "${probe_bin}"
+fi
 
 if command -v npu-smi >/dev/null 2>&1; then
     npu_smi_rc=0
@@ -435,11 +485,13 @@ comm_domain="${TILEXR_CCU_PROBE_COMM_DOMAIN:-0}"
 timeout_s="${TILEXR_CCU_SMOKE_TIMEOUT:-180}"
 ready_dir="${work_dir}/submit_ready_${comm_port}"
 done_dir="${work_dir}/submit_done_${comm_port}"
-rank0_log="${work_dir}/ccu_rank0.log"
-rank1_log="${work_dir}/ccu_rank1.log"
 rm -rf "${ready_dir}" "${done_dir}"
 mkdir -p "${ready_dir}" "${done_dir}"
-rm -f "${rank0_log}" "${rank1_log}"
+rank_logs=()
+for ((rank=0; rank<rank_size; ++rank)); do
+    rank_logs+=("${work_dir}/ccu_rank${rank}.log")
+done
+rm -f "${rank_logs[@]}"
 
 common_env=(
     "LD_LIBRARY_PATH=${tile_comm_dir}:${cann_lib_dir}:${driver_lib_dir}:${LD_LIBRARY_PATH:-}"
@@ -449,13 +501,17 @@ common_env=(
     "TILEXR_CCU_DIRECT_SMOKE_READY_DIR=${ready_dir}"
     "TILEXR_CCU_DIRECT_SMOKE_DONE_DIR=${done_dir}"
     "TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_ON_PREPARE_FAILURE=${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_ON_PREPARE_FAILURE:-1}"
-    "TILEXR_CCU_PROBE_RANK_SIZE=2"
+    "TILEXR_CCU_PROBE_RANK_SIZE=${rank_size}"
     "TILEXR_CCU_PROBE_COMM_DOMAIN=${comm_domain}"
 )
 if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_SUBMIT=1")
 fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]; then
+    if [ "${rank_size}" -ne 2 ]; then
+        echo "ERROR: direct CCU thread mode currently requires rank size 2" >&2
+        exit 2
+    fi
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE=1")
 fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-0}" = "1" ]; then
@@ -539,8 +595,14 @@ fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL}")
 fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH}")
+fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_PEER_XOR}")
 fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION}")
@@ -612,90 +674,45 @@ for token_field in "${resource_window_token_fields[@]}"; do
     if [ "${token_value}" != "" ]; then
         common_env+=("${token_var}=${token_value}")
     fi
-    rank0_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK0"
-    rank0_token_value="${!rank0_token_var:-}"
-    if [ "${rank0_token_value}" != "" ]; then
-        common_env+=("${rank0_token_var}=${rank0_token_value}")
-    fi
-    rank1_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK1"
-    rank1_token_value="${!rank1_token_var:-}"
-    if [ "${rank1_token_value}" != "" ]; then
-        common_env+=("${rank1_token_var}=${rank1_token_value}")
-    fi
 done
 
-rank0_env=()
-rank1_env=()
-if [ "${TILEXR_CCU_PROBE_RANK0_XN_START:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_XN_START=${TILEXR_CCU_PROBE_RANK0_XN_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_XN_START:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_XN_START=${TILEXR_CCU_PROBE_RANK1_XN_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_REMOTE_XN_START=${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_REMOTE_XN_START=${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_COUNT:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_REMOTE_XN_COUNT=${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_COUNT}")
-elif [ "${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_REMOTE_XN_COUNT=${TILEXR_CCU_PROBE_REMOTE_XN_COUNT}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_COUNT:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_REMOTE_XN_COUNT=${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_COUNT}")
-elif [ "${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_REMOTE_XN_COUNT=${TILEXR_CCU_PROBE_REMOTE_XN_COUNT}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START=${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START=${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_COUNT:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT=${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_COUNT}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_COUNT:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT=${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_COUNT}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START=${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START=${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_COUNT:-}" != "" ]; then
-    rank0_env+=("TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT=${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_COUNT}")
-fi
-if [ "${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_COUNT:-}" != "" ]; then
-    rank1_env+=("TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT=${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_COUNT}")
-fi
-for endpoint_field in "${endpoint_fields[@]}"; do
-    rank0_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK0"
-    rank0_endpoint_value="${!rank0_endpoint_var:-}"
-    if [ "${rank0_endpoint_value}" != "" ]; then
-        rank0_env+=("TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank0_endpoint_value}")
-    fi
-    rank1_endpoint_var="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}_RANK1"
-    rank1_endpoint_value="${!rank1_endpoint_var:-}"
-    if [ "${rank1_endpoint_value}" != "" ]; then
-        rank1_env+=("TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}=${rank1_endpoint_value}")
-    fi
-done
-for token_field in "${resource_window_token_fields[@]}"; do
-    rank0_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK0"
-    rank0_token_value="${!rank0_token_var:-}"
-    if [ "${rank0_token_value}" != "" ]; then
-        rank0_env+=("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank0_token_value}")
-    fi
-    rank1_token_var="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}_RANK1"
-    rank1_token_value="${!rank1_token_var:-}"
-    if [ "${rank1_token_value}" != "" ]; then
-        rank1_env+=("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}=${rank1_token_value}")
-    fi
-done
+build_rank_env()
+{
+    local rank="$1"
+    rank_env=()
+    local mapping generic rank_var rank_value
+    for mapping in \
+        XN_START \
+        REMOTE_XN_START \
+        REMOTE_XN_COUNT \
+        LOCAL_WAIT_CKE_START \
+        LOCAL_WAIT_CKE_COUNT \
+        REMOTE_NOTIFY_CKE_START \
+        REMOTE_NOTIFY_CKE_COUNT; do
+        generic="TILEXR_CCU_PROBE_${mapping}"
+        rank_var="TILEXR_CCU_PROBE_RANK${rank}_${mapping}"
+        rank_value="${!rank_var:-${!generic:-}}"
+        if [ -n "${rank_value}" ]; then
+            rank_env+=("${generic}=${rank_value}")
+        fi
+    done
+    for endpoint_field in "${endpoint_fields[@]}"; do
+        generic="TILEXR_CCU_DIRECT_LOCAL_ENDPOINT_${endpoint_field}"
+        rank_var="${generic}_RANK${rank}"
+        rank_value="${!rank_var:-${!generic:-}}"
+        if [ -n "${rank_value}" ]; then
+            rank_env+=("${generic}=${rank_value}")
+        fi
+    done
+    for token_field in "${resource_window_token_fields[@]}"; do
+        generic="TILEXR_CCU_DIRECT_RESOURCE_WINDOW_${token_field}"
+        rank_var="${generic}_RANK${rank}"
+        rank_value="${!rank_var:-${!generic:-}}"
+        if [ -n "${rank_value}" ]; then
+            rank_env+=("${generic}=${rank_value}")
+        fi
+    done
+}
 
 echo "tilexr_ccu_direct_smoke_runner begin workDir=${work_dir} devices=${devices} commId=${comm_id} threadMode=${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0} submit=${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0} barrierMode=${TILEXR_CCU_DIRECT_BARRIER_MODE:-} p2pCcuCopy=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0} syncXnPing=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-0} alltoall=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL:-0} alltoallLongMission=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0} signalWait=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT:-0} signalRank=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK:-0} ccuBarrier=${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-0} timeout=${timeout_s} npuSmiTimeout=${TILEXR_CCU_SMOKE_NPU_SMI_TIMEOUT:-20}"
 
@@ -808,31 +825,43 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]; then
     exit 0
 fi
 
-timeout "${timeout_s}s" env "${common_env[@]}" "${rank0_env[@]}" TILEXR_CCU_PROBE_RANK=0 "${probe_bin}" > "${rank0_log}" 2>&1 &
-rank0_pid=$!
-sleep "${TILEXR_CCU_SMOKE_RANK1_DELAY:-1}"
-timeout "${timeout_s}s" env "${common_env[@]}" "${rank1_env[@]}" TILEXR_CCU_PROBE_RANK=1 "${probe_bin}" > "${rank1_log}" 2>&1 &
-rank1_pid=$!
+rank_pids=()
+rank_statuses=()
+for ((rank=0; rank<rank_size; ++rank)); do
+    build_rank_env "${rank}"
+    echo "tilexr_ccu_direct_smoke_runner launch rank=${rank} device=${device_list[${rank}]} log=${rank_logs[${rank}]}"
+    timeout "${timeout_s}s" env "${common_env[@]}" "${rank_env[@]}" \
+        TILEXR_CCU_PROBE_RANK="${rank}" "${probe_bin}" > "${rank_logs[${rank}]}" 2>&1 &
+    rank_pids+=("$!")
+    if [ "${rank}" -eq 0 ] && [ "${rank_size}" -gt 1 ]; then
+        sleep "${TILEXR_CCU_SMOKE_RANK1_DELAY:-1}"
+    fi
+done
 
-rank0_status=0
-rank1_status=0
-wait "${rank0_pid}" || rank0_status=$?
-wait "${rank1_pid}" || rank1_status=$?
+any_rank_failed=0
+for ((rank=0; rank<rank_size; ++rank)); do
+    status=0
+    wait "${rank_pids[${rank}]}" || status=$?
+    rank_statuses+=("${status}")
+    if [ "${status}" -ne 0 ]; then
+        any_rank_failed=1
+    fi
+done
 
-cat "${rank0_log}"
-cat "${rank1_log}"
+summary="tilexr_ccu_direct_smoke_runner summary"
+for ((rank=0; rank<rank_size; ++rank)); do
+    cat "${rank_logs[${rank}]}"
+    summary+=" rank${rank}Status=${rank_statuses[${rank}]} rank${rank}Log=${rank_logs[${rank}]}"
+done
+echo "${summary}"
 
-echo "tilexr_ccu_direct_smoke_runner summary rank0Status=${rank0_status} rank1Status=${rank1_status} rank0Log=${rank0_log} rank1Log=${rank1_log}"
-
-if [ "${rank0_status}" -ne 0 ] || [ "${rank1_status}" -ne 0 ]; then
-    echo "ERROR: direct CCU smoke rank process failed rank0=${rank0_status} rank1=${rank1_status}" >&2
-    echo "rank0 log: ${rank0_log}" >&2
-    echo "rank1 log: ${rank1_log}" >&2
+if [ "${any_rank_failed}" -ne 0 ]; then
+    echo "ERROR: direct CCU smoke rank process failed statuses=${rank_statuses[*]}" >&2
     exit 4
 fi
 
 if alltoall_mode_enabled; then
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if ! grep -q "tilexr_ccu_alltoall prepare ret=0" "${log}"; then
             echo "ERROR: direct CCU alltoall prepare did not return success in ${log}" >&2
             exit 5
@@ -843,7 +872,7 @@ if alltoall_mode_enabled; then
         fi
     done
 elif signal_wait_mode_enabled; then
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if ! grep -q "tilexr_ccu_signal_wait prepare ret=0" "${log}"; then
             echo "ERROR: direct CCU signal/wait prepare did not return success in ${log}" >&2
             exit 5
@@ -854,7 +883,7 @@ elif signal_wait_mode_enabled; then
         fi
     done
 else
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if ! grep -q "tilexr_ccu_direct_smoke prepare ret=0" "${log}"; then
             echo "ERROR: direct CCU prepare did not return success in ${log}" >&2
             exit 5
@@ -874,13 +903,13 @@ rank_skipped_p2p_ccu_copy_submit()
 }
 
 if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if ! grep -q "submitReady=1" "${log}"; then
             echo "ERROR: direct CCU submit requested but prepare did not reach submitReady=1 in ${log}" >&2
             exit 6
         fi
     done
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if alltoall_mode_enabled; then
             if ! grep -q "tilexr_ccu_alltoall submit ret=0" "${log}"; then
                 echo "ERROR: direct CCU alltoall submit did not return success in ${log}" >&2
@@ -921,14 +950,16 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
 fi
 
 if alltoall_mode_enabled; then
-    for log in "${rank0_log}" "${rank1_log}"; do
-        if ! grep -q "tilexr_ccu_alltoall result passed=1" "${log}"; then
-            echo "ERROR: direct CCU alltoall result did not pass in ${log}" >&2
-            exit 9
-        fi
-    done
+    loop_count="$(parse_int "${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}" 1)"
+    expected_results=$((rank_size * loop_count))
+    actual_results="$(grep -h -c "tilexr_ccu_alltoall result passed=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
+    echo "tilexr_ccu_direct_smoke_runner alltoallCounts expectedResults=${expected_results} actualResults=${actual_results}"
+    if [ "${actual_results}" -ne "${expected_results}" ]; then
+        echo "ERROR: direct CCU alltoall result count mismatch expected=${expected_results} actual=${actual_results}" >&2
+        exit 9
+    fi
 elif signal_wait_mode_enabled; then
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if ! grep -q "tilexr_ccu_signal_wait result passed=1" "${log}"; then
             echo "ERROR: direct CCU signal/wait result did not pass in ${log}" >&2
             exit 9
@@ -944,9 +975,9 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_BARRIER_WAIT:-0}" = "1" ]; then
     delay_rank="${TILEXR_CCU_DIRECT_SMOKE_DELAY_RANK:-0}"
     min_sync_ms="${TILEXR_CCU_DIRECT_SMOKE_MIN_SYNC_MS:-100}"
     if [ "${delay_rank}" = "0" ]; then
-        wait_log="${rank1_log}"
+        wait_log="${rank_logs[1]}"
     else
-        wait_log="${rank0_log}"
+        wait_log="${rank_logs[0]}"
     fi
     wait_sync_ms="$(
         awk '
@@ -976,7 +1007,7 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_EXPECT_P2P_CCU_COPY:-0}" = "1" ]; then
         exit 11
     fi
     p2p_passed_count=0
-    for log in "${rank0_log}" "${rank1_log}"; do
+    for log in "${rank_logs[@]}"; do
         if ! grep -q "tilexr_ccu_direct_smoke p2pCcuCopy" "${log}"; then
             echo "ERROR: direct CCU P2P CCU-copy result missing in ${log}" >&2
             exit 12

@@ -120,6 +120,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.preSyncMarkerArgIndex = 0;
                 spec.preSyncMarkerEnabled = true;
                 spec.channelId = 0x12;
+                spec.preSyncMarkerChannelId = 0x14;
                 spec.preSyncChannelId = 0x13;
                 spec.preSyncTokenChannelId = 0x13;
                 spec.copyCompletionCke = 0x301;
@@ -178,7 +179,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     Slot(program[1], 0) != kSyncXnHeader ||
                     Slot(program[1], 1) != spec.preSyncRemoteMarkerXn ||
                     Slot(program[1], 2) != spec.preSyncLocalMarkerXn ||
-                    Slot(program[1], 4) != spec.preSyncChannelId ||
+                    Slot(program[1], 4) != spec.preSyncMarkerChannelId ||
                     Slot(program[1], 5) != spec.preSyncRemoteNotifyCke ||
                     Slot(program[1], 6) != markerMask ||
                     Slot(program[2], 0) != kLoadImdToXnHeader ||
@@ -310,6 +311,7 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.preSyncMarkerArgIndex = 0;
                 spec.preSyncMarkerEnabled = true;
                 spec.channelId = 0x12;
+                spec.preSyncMarkerChannelId = spec.channelId;
                 spec.copyCompletionCke = 0x301;
                 spec.preSyncRemoteAddrXn = 0x211;
                 spec.preSyncRemoteTokenXn = 0x212;
@@ -525,6 +527,221 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
         self.assertNotIn("for (uint32_t phase = 0; phase < 2U; ++phase)", source)
         self.assertIn("alltoallSpec.localRank = alltoall.localRank", orchestrator)
         self.assertIn("alltoall.localRank = static_cast<uint32_t>(rank)", planner)
+
+    def test_four_rank_mesh_posts_all_peers_then_copies_remote_and_self_chunks(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_alltoall_program.h"
+
+            #include <cstdint>
+            #include <iostream>
+            #include <vector>
+
+            using namespace TileXR;
+
+            uint16_t Slot(const TileXRCcuInstr& instr, uint32_t slot)
+            {
+                return static_cast<uint16_t>((instr.words[slot / 4U] >> ((slot % 4U) * 16U)) & 0xffffU);
+            }
+
+            uint64_t Immediate(const TileXRCcuInstr& instr)
+            {
+                return (instr.words[0] >> 32U) | (instr.words[1] << 32U);
+            }
+
+            TileXRCcuAllToAllMeshPeerSpec Peer(uint32_t localRank, uint32_t peerRank, uint16_t ordinal)
+            {
+                TileXRCcuAllToAllMeshPeerSpec peer;
+                peer.peerRank = peerRank;
+                auto& route = peer.route;
+                route.localRank = localRank;
+                route.localSendAddr = 0x10000000ULL;
+                route.localSendToken = TileXRCcuPackMemoryToken(1, 2, true);
+                route.localRecvAddr = 0x20000000ULL;
+                route.localRecvToken = TileXRCcuPackMemoryToken(2, 3, true);
+                route.remoteRecvAddr = 0x30000000ULL + static_cast<uint64_t>(peerRank) * 0x1000000ULL;
+                route.remoteRecvToken = TileXRCcuPackMemoryToken(10 + peerRank, 20 + peerRank, true);
+                route.bytes = 2ULL * 1024ULL * 1024ULL;
+                route.localGsa = 0x100;
+                route.remoteGsa = 0x101;
+                route.localXn = 0x200;
+                route.remoteXn = 0x301;
+                route.lengthXn = 0x202;
+                route.preSyncLocalAddrXn = 0x200;
+                route.preSyncLocalTokenXn = 0x201;
+                route.preSyncRemoteAddrXn = 0x300;
+                route.preSyncRemoteTokenXn = 0x301;
+                route.preSyncMarkerEnabled = false;
+                route.preSyncChannelId = static_cast<uint16_t>(0x10 + ordinal);
+                route.preSyncTokenChannelId = route.preSyncChannelId;
+                route.copyChannelId = route.preSyncChannelId;
+                route.postSyncChannelId = route.preSyncChannelId;
+                route.copyCompletionCke = 0x491;
+                route.preSyncLocalWaitCke = static_cast<uint16_t>(0x401 + ordinal);
+                route.preSyncTokenLocalWaitCke = route.preSyncLocalWaitCke;
+                route.preSyncRemoteNotifyCke = static_cast<uint16_t>(0x500 + ordinal);
+                route.preSyncRemoteTokenNotifyCke = route.preSyncRemoteNotifyCke;
+                route.postSyncLocalWaitCke = route.preSyncLocalWaitCke;
+                route.postSyncRemoteNotifyCke = route.preSyncRemoteNotifyCke;
+                route.sourceCke = 0x490;
+                route.ckeMask = 0x8;
+                return peer;
+            }
+
+            int main()
+            {
+                TileXRCcuAllToAllMeshProgramSpec spec;
+                spec.rankSize = 4;
+                spec.localRank = 2;
+                spec.localSendAddr = 0x10000000ULL;
+                spec.localSendToken = TileXRCcuPackMemoryToken(1, 2, true);
+                spec.localRecvAddr = 0x20000000ULL;
+                spec.localRecvToken = TileXRCcuPackMemoryToken(2, 3, true);
+                spec.chunkBytes = 2ULL * 1024ULL * 1024ULL;
+                spec.selfSourceGsa = 0x180;
+                spec.selfDestinationGsa = 0x181;
+                spec.selfSourceXn = 0x280;
+                spec.selfDestinationXn = 0x281;
+                spec.selfLengthXn = 0x282;
+                spec.selfChannelId = 0;
+                spec.selfCompletionCke = 0x480;
+                spec.remoteCompletionCke = 0x491;
+                spec.peers = {Peer(2, 3, 2), Peer(2, 0, 0), Peer(2, 1, 1)};
+
+                std::vector<TileXRCcuInstr> program;
+                TileXRCcuAllToAllProgramReport report;
+                const int ret = TileXRCcuBuildAllToAllMeshProgram(spec, &program, &report);
+                if (ret != TILEXR_SUCCESS) {
+                    std::cerr << report.message << "\n";
+                    return 1;
+                }
+                if (report.peerCount != 3 || report.syncResourceCount != 3 ||
+                    report.remoteBlockCount != 192 || report.selfBlockCount != 64 ||
+                    report.preSyncInstructionCount != 12 || report.copyInstructionCount != 1792 ||
+                    report.postSyncInstructionCount != 6 || report.finishInstructionCount != 1 ||
+                    report.totalInstructionCount != 1811 || program.size() != 1811) {
+                    std::cerr << "unexpected mesh counts total=" << program.size() << "\n";
+                    return 2;
+                }
+                // Match HCCL: load both values, initialize source CKE, then post output/token per channel.
+                if (Slot(program[0], 1) != 0x200U || Slot(program[1], 1) != 0x201U ||
+                    Slot(program[2], 0) != 0x0802U || Slot(program[2], 2) != 0x490U ||
+                    Slot(program[2], 3) != 0xffffU) {
+                    std::cerr << "unexpected HCCL-style presync prelude\n";
+                    return 3;
+                }
+                for (uint32_t ordinal = 0; ordinal < 3; ++ordinal) {
+                    const uint32_t output = 3 + ordinal * 2;
+                    const uint32_t token = output + 1;
+                    if (Slot(program[output], 0) != 0x100dU || Slot(program[output], 6) != 0x2U ||
+                        Slot(program[token], 0) != 0x100dU || Slot(program[token], 6) != 0x4U ||
+                        Slot(program[output], 4) != Slot(program[token], 4)) {
+                        std::cerr << "presync output/token are not paired by channel\n";
+                        return 4;
+                    }
+                }
+                for (uint32_t i = 9; i < 12; ++i) {
+                    if (Slot(program[i], 0) != 0x0802U || Slot(program[i], 5) != 0x6U) {
+                        std::cerr << "missing presync wait mask\n";
+                        return 5;
+                    }
+                }
+                // Sorted peer 0 copy: send[target=0] -> recv_peer0[source=2].
+                if (Immediate(program[12]) != spec.localSendAddr ||
+                    Immediate(program[14]) != 0x30000000ULL + 2ULL * spec.chunkBytes ||
+                    Slot(program[17], 0) != 0x1009U) {
+                    std::cerr << "unexpected first remote copy offsets\n";
+                    return 6;
+                }
+                const uint32_t selfStart = 30;
+                const uint64_t selfOffset = 2ULL * spec.chunkBytes;
+                if (Immediate(program[selfStart]) != spec.localSendAddr + selfOffset ||
+                    Immediate(program[selfStart + 2]) != spec.localRecvAddr + selfOffset ||
+                    Slot(program[selfStart + 5], 0) != 0x1000U ||
+                    Slot(program[selfStart + 5], 1) != 0U ||
+                    Slot(program[selfStart + 5], 5) != 0U ||
+                    Slot(program[selfStart + 7], 0) != 0x1002U ||
+                    Slot(program[selfStart + 7], 3) != 0U ||
+                    Slot(program[selfStart + 7], 5) != 0U) {
+                    std::cerr << "unexpected CCU self copy offsets\n";
+                    return 7;
+                }
+                auto corrupted = program;
+                corrupted[3].words[1] ^= 1ULL;
+                if (TileXRCcuValidateAllToAllMeshProgramBindings(spec, corrupted, &report) !=
+                        TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("output SyncXn") == std::string::npos) {
+                    std::cerr << "corrupted output channel accepted: " << report.message << "\n";
+                    return 8;
+                }
+                auto sharedRemoteIds = spec;
+                for (uint32_t ordinal = 1; ordinal < sharedRemoteIds.peers.size(); ++ordinal) {
+                    sharedRemoteIds.peers[ordinal].route.remoteXn = sharedRemoteIds.peers[0].route.remoteXn;
+                    sharedRemoteIds.peers[ordinal].route.preSyncRemoteAddrXn =
+                        sharedRemoteIds.peers[0].route.preSyncRemoteAddrXn;
+                    sharedRemoteIds.peers[ordinal].route.preSyncRemoteTokenXn =
+                        sharedRemoteIds.peers[0].route.preSyncRemoteTokenXn;
+                    sharedRemoteIds.peers[ordinal].route.preSyncRemoteNotifyCke =
+                        sharedRemoteIds.peers[0].route.preSyncRemoteNotifyCke;
+                    sharedRemoteIds.peers[ordinal].route.preSyncRemoteTokenNotifyCke =
+                        sharedRemoteIds.peers[0].route.preSyncRemoteTokenNotifyCke;
+                    sharedRemoteIds.peers[ordinal].route.postSyncRemoteNotifyCke =
+                        sharedRemoteIds.peers[0].route.postSyncRemoteNotifyCke;
+                }
+                if (TileXRCcuBuildAllToAllMeshProgram(sharedRemoteIds, &program, &report) != TILEXR_SUCCESS) {
+                    std::cerr << "per-peer remote resource IDs rejected: " << report.message << "\n";
+                    return 7;
+                }
+                auto overlappingCke = spec;
+                overlappingCke.remoteCompletionCke = overlappingCke.peers[0].route.sourceCke;
+                for (auto& peer : overlappingCke.peers) {
+                    peer.route.copyCompletionCke = overlappingCke.remoteCompletionCke;
+                }
+                if (TileXRCcuBuildAllToAllMeshProgram(overlappingCke, &program, &report) !=
+                        TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("overlaps source CKE") == std::string::npos) {
+                    std::cerr << "overlapping source/completion CKE accepted: " << report.message << "\n";
+                    return 8;
+                }
+                auto duplicate = spec;
+                duplicate.peers[1].route.copyChannelId = duplicate.peers[0].route.copyChannelId;
+                if (TileXRCcuBuildAllToAllMeshProgram(duplicate, &program, &report) !=
+                        TILEXR_ERROR_PARA_CHECK_FAIL ||
+                    report.message.find("duplicate") == std::string::npos) {
+                    std::cerr << "duplicate peer resource accepted: " << report.message << "\n";
+                    return 8;
+                }
+                for (uint32_t localRank = 0; localRank < 4; ++localRank) {
+                    auto rankSpec = spec;
+                    rankSpec.localRank = localRank;
+                    rankSpec.peers.clear();
+                    uint16_t ordinal = 0;
+                    for (uint32_t peerRank = 0; peerRank < 4; ++peerRank) {
+                        if (peerRank != localRank) {
+                            rankSpec.peers.push_back(Peer(localRank, peerRank, ordinal++));
+                        }
+                    }
+                    if (TileXRCcuBuildAllToAllMeshProgram(rankSpec, &program, &report) != TILEXR_SUCCESS) {
+                        std::cerr << "rank " << localRank << " rejected: " << report.message << "\n";
+                        return 9;
+                    }
+                    const uint64_t rankOffset = static_cast<uint64_t>(localRank) * rankSpec.chunkBytes;
+                    if (program.size() != 1811 ||
+                        Immediate(program[selfStart]) != rankSpec.localSendAddr + rankOffset ||
+                        Immediate(program[selfStart + 2]) != rankSpec.localRecvAddr + rankOffset) {
+                        std::cerr << "rank " << localRank << " self offset mismatch\n";
+                        return 9;
+                    }
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

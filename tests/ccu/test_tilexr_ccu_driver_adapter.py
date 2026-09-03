@@ -1031,7 +1031,9 @@ class TileXRCcuDriverAdapterTest(unittest.TestCase):
         self.assertIn("GetDieEnabled", header)
         self.assertIn("InstallInstructions", header)
         self.assertIn("InstallMsidToken", header)
+        self.assertIn("SetTaskKill", header)
         self.assertIn("CleanTaskKillState", header)
+        self.assertIn("TILEXR_CCU_U_OP_SET_TASKKILL, &out, report", source)
         self.assertIn("TILEXR_CCU_U_OP_CLEAN_TASKKILL_STATE, &out, report", source)
         self.assertIn("InstallPfeCtx", header)
         self.assertIn("InstallJettyCtx", header)
@@ -1057,6 +1059,17 @@ class TileXRCcuDriverAdapterTest(unittest.TestCase):
         ]:
             with self.subTest(needle=needle):
                 self.assertNotIn(needle, combined)
+
+
+    def test_jetty_install_batches_payloads_larger_than_custom_channel_array(self):
+        source = DRIVER_SOURCE.read_text(encoding="utf-8")
+        install = source[source.index("int TileXRCcuDriverAdapter::InstallJettyCtx"):]
+        install = install[:install.index("int TileXRCcuDriverAdapter::InstallChannelCtxV1")]
+
+        self.assertIn("while (remaining > 0)", install)
+        self.assertIn("std::min(remaining, TILEXR_CCU_MAX_DATA_ARRAY_SIZE)", install)
+        self.assertIn("offset += batch", install)
+        self.assertIn("inputOffset += batch", install)
 
 
 if __name__ == "__main__":

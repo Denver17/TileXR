@@ -155,6 +155,8 @@ int TileXRCcuHccpLoader::Load(TileXRCcuHccpLoaderReport* report)
     LoadOptionalSymbol(raHandle_, RaCtxQpBind, "RaCtxQpBind", "ra_ctx_qp_bind");
     LoadOptionalSymbol(raHandle_, RaCtxQpUnbind, "RaCtxQpUnbind", "ra_ctx_qp_unbind");
     LoadOptionalSymbol(raHandle_, RaGetTpInfoListAsync, "RaGetTpInfoListAsync", "ra_get_tp_info_list_async");
+    LoadOptionalSymbol(raHandle_, RaGetTpAttrAsync, "RaGetTpAttrAsync", "ra_get_tp_attr_async");
+    LoadOptionalSymbol(raHandle_, RaSetTpAttrAsync, "RaSetTpAttrAsync", "ra_set_tp_attr_async");
     LoadOptionalSymbol(raHandle_, RaGetAsyncReqResult, "RaGetAsyncReqResult", "ra_get_async_req_result");
 
     runtimeHandle_ = dlopen("libruntime.so", RTLD_NOW);
@@ -246,6 +248,8 @@ void TileXRCcuHccpLoader::Unload()
     RaCtxQpBind = nullptr;
     RaCtxQpUnbind = nullptr;
     RaGetTpInfoListAsync = nullptr;
+    RaGetTpAttrAsync = nullptr;
+    RaSetTpAttrAsync = nullptr;
     RaGetAsyncReqResult = nullptr;
     CollectLocalEndpointRoute = nullptr;
     loaded_ = false;
