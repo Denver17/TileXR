@@ -110,6 +110,10 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ccu/tilexr_ccu_abi_constants.h
         ccu/tilexr_ccu_barrier_program.h
         ccu/tilexr_ccu_barrier_program.cpp
+        ccu/tilexr_ccu_direct_orchestrator.h
+        ccu/tilexr_ccu_direct_orchestrator.cpp
+        ccu/tilexr_ccu_direct_runtime.h
+        ccu/tilexr_ccu_direct_runtime.cpp
         ccu/tilexr_ccu_driver_adapter.h
         ccu/tilexr_ccu_driver_adapter.cpp
         ccu/tilexr_ccu_hccp_types.h
