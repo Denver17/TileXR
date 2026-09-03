@@ -223,6 +223,61 @@ void TestSharedQpDomainConfig()
     invalidWire.routeRules[16].selectorValue =
         TileXR::TILEXR_UDMA_SHARED_QP_SIX_PORT_VALUE;
     CHECK_TRUE(!TileXR::ValidateUDMAQpConfigWireDescriptor(invalidWire));
+
+    auto grouped = TileXR::BuildUDMASharedQpConfig(
+        TileXR::TILEXR_UDMA_GROUPED_SHARED_QP_COUNT);
+    CHECK_TRUE(TileXR::ValidateUDMASharedQpConfig(grouped));
+    CHECK_TRUE(TileXR::IsUDMAGroupedQpProfile(grouped));
+    CHECK_EQ(grouped.routes.size(),
+             static_cast<size_t>(TileXR::TILEXR_UDMA_GROUPED_SHARED_QP_COUNT));
+    const auto groupedWire = TileXR::BuildUDMAQpConfigWireDescriptor(
+        grouped, TileXR::UDMAQpConfigParseStatus::SUCCESS);
+    CHECK_EQ(groupedWire.qpCount, TileXR::TILEXR_UDMA_GROUPED_SHARED_QP_COUNT);
+    CHECK_TRUE(TileXR::ValidateUDMAQpConfigWireDescriptor(groupedWire));
+    CHECK_TRUE(TileXR::UDMAQpConfigFromWireDescriptor(groupedWire, roundTrip));
+    CHECK_EQ(roundTrip.routes.size(), grouped.routes.size());
+    for (uint32_t qp = 0U;
+         qp < TileXR::TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT; ++qp) {
+        CHECK_EQ(grouped.routes[qp].selector,
+                 TileXR::UDMAQpRouteSelector::PORT_COUNT);
+    }
+    for (uint32_t slot = 0U;
+         slot < TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT; ++slot) {
+        const auto& route = grouped.routes[
+            TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_BASE + slot];
+        CHECK_EQ(route.selector, TileXR::UDMAQpRouteSelector::LOCAL_PEER_SLOT);
+        CHECK_EQ(route.value, slot);
+    }
+    auto invalidGrouped = grouped;
+    invalidGrouped.routes[TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_BASE].selector =
+        TileXR::UDMAQpRouteSelector::PORT_COUNT;
+    CHECK_TRUE(!TileXR::IsUDMAGroupedQpProfile(invalidGrouped));
+    CHECK_TRUE(!TileXR::IsUDMAGroupedQpProfile(
+        TileXR::BuildUDMASharedQpConfig(
+            TileXR::TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT)));
+    CHECK_TRUE(!TileXR::IsUDMAGroupedQpProfile(
+        TileXR::BuildUDMASharedQpConfig(TileXR::TILEXR_UDMA_MAX_QP_COUNT)));
+
+    CHECK_EQ(setenv(TileXR::TILEXR_UDMA_SHARED_QP_COUNT_ENV, "32", 1), 0);
+    CHECK_EQ(TileXR::LoadUDMASharedQpConfigFromEnv(grouped, nullptr),
+             TileXR::UDMAQpConfigParseStatus::SUCCESS);
+    CHECK_EQ(grouped.routes.size(),
+             static_cast<size_t>(TileXR::TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT));
+    CHECK_EQ(setenv(TileXR::TILEXR_UDMA_SHARED_QP_COUNT_ENV, "39", 1), 0);
+    CHECK_EQ(TileXR::LoadUDMASharedQpConfigFromEnv(grouped, nullptr),
+             TileXR::UDMAQpConfigParseStatus::SUCCESS);
+    CHECK_EQ(grouped.routes.size(),
+             static_cast<size_t>(TileXR::TILEXR_UDMA_GROUPED_SHARED_QP_COUNT));
+    CHECK_EQ(setenv(TileXR::TILEXR_UDMA_SHARED_QP_COUNT_ENV, "31", 1), 0);
+    std::string error;
+    CHECK_EQ(TileXR::LoadUDMASharedQpConfigFromEnv(grouped, &error),
+             TileXR::UDMAQpConfigParseStatus::INVALID);
+    CHECK_TRUE(!error.empty());
+    CHECK_EQ(unsetenv(TileXR::TILEXR_UDMA_SHARED_QP_COUNT_ENV), 0);
+    CHECK_EQ(TileXR::LoadUDMASharedQpConfigFromEnv(grouped, nullptr),
+             TileXR::UDMAQpConfigParseStatus::SUCCESS);
+    CHECK_EQ(grouped.routes.size(),
+             static_cast<size_t>(TileXR::TILEXR_UDMA_MAX_QP_COUNT));
 }
 
 } // namespace

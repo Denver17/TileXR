@@ -29,6 +29,15 @@ uint32_t ReadU32(const std::vector<uint8_t>& bytes, std::size_t offset)
         (static_cast<uint32_t>(bytes[offset + 3U]) << 24U);
 }
 
+uint64_t ReadU64(const std::vector<uint8_t>& bytes, std::size_t offset)
+{
+    uint64_t value = 0U;
+    for (uint32_t index = 0U; index < 8U; ++index) {
+        value |= static_cast<uint64_t>(bytes[offset + index]) << (index * 8U);
+    }
+    return value;
+}
+
 } // namespace
 
 int main()
@@ -44,14 +53,14 @@ int main()
         0xadU, 0xd4U, 0x00U, 0x00U, 0x00U, 0x00U, 0x40U, 0x00U,
         0x80U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x00U, 0x01U,
     }};
-    const std::vector<uint32_t> occupied {8U, 0U};
+    const std::vector<uint32_t> occupied {0U, 0U};
     const std::vector<uint32_t> dropped {0U, 0U};
     std::vector<uint64_t> timestamps(16U, 0U);
     std::vector<uint32_t> eventIds(16U, 0U);
-    timestamps[0] = 100U;
-    timestamps[1] = 200U;
-    eventIds[0] = 1U;
-    eventIds[1] = 2U;
+    timestamps[6] = 200U;
+    timestamps[7] = 100U;
+    eventIds[6] = 2U;
+    eventIds[7] = 1U;
 
     std::string error;
     Check(TileXR::WriteTileXRProfilingRecords(config, 0, occupied, dropped,
@@ -68,6 +77,10 @@ int main()
         "records.v1 stream ID mismatch");
     Check(bytes.size() >= 60U && ReadU32(bytes, 52U) == 2U,
         "records.v1 record count must exclude aligned padding");
+    Check(bytes.size() >= 104U && ReadU64(bytes, 72U) == 100U &&
+        ReadU32(bytes, 80U) == 1U && ReadU64(bytes, 88U) == 200U &&
+        ReadU32(bytes, 96U) == 2U,
+        "records exporter must sort direct-writer timestamps");
     input.close();
     Check(!TileXR::WriteTileXRProfilingRecords(config, 0, occupied, dropped,
         timestamps, eventIds, &error), "records exporter must not overwrite an existing capture");

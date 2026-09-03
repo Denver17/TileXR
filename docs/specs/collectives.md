@@ -18,7 +18,11 @@ library accepts a TileXR communicator and an ACL stream; it does not own either.
   registered with the runtime, and launched through the registered signature.
 - Host dispatch validates datatype, count, topology, rank size, buffer contract,
   and algorithm support before launching.
-- Multi-rank AllToAll is supported only on `TOPO_910_93`.
+- Multi-rank AllToAll retains the generic `TOPO_910_93` implementation. On
+  Ascend950/A5, `TileXRAllToAll` may internally select the grouped kernel for
+  `int32`, rank sizes 8/16/32/64/128, and eight local ranks. Both generic and
+  A5 binaries are embedded in `libtilexr-collectives.so`; there is no separate
+  grouped public API or library.
 - Sources under `reference/` are comparison-only and are never linked into the
   active target.
 
@@ -32,6 +36,22 @@ instead of silently selecting an incompatible kernel.
 Synchronization uses the communicator's reusable magic-tagged flags. A new
 round obtains a new value through `TileXRCommNextMagic`; shared flag memory is
 not reset between operations.
+
+The A5 path requires UDMA shared-QP, SDMA, and Credit readiness plus the exact
+validated 39-QP grouped route descriptor. A raw QP count is not an algorithm
+selector. Its registered workspace profile is explicitly classified as the A5
+grouped AllToAll profile and binds all 39 QPs to the single workspace region.
+
+The communicator owns the private A5 runtime. The first launch allocates and
+registers its workspace; equal or smaller calls reuse it without Host
+synchronization or re-registration. Growth installs a new profile
+transactionally, synchronizes the bound stream on that rare path, and retires
+the old profile/workspace through rank-agreed, retryable cleanup. Current send
+and receive addresses are always per-call. Host mutation is serialized and the
+runtime rejects a stream different from the one used on first launch.
+Communicator destruction runs this cleanup before UDMA and SDMA shutdown.
+If internal cleanup fails, `TileXRCommDestroy` returns that error without
+tearing down the communicator so the caller can retry destruction.
 
 ## Profiling
 
@@ -55,6 +75,10 @@ declaration-free compatibility headers. Keep the filenames in the install
 manifest for existing consumers and the sealed v4 CI controller, but do not
 restore the removed session API or trace schema in them.
 
+The A5 writer derives every record address from a fixed invocation slot. It
+does not append through a GM counter shared across kernels. A launch that would
+exceed the configured records-per-core capacity fails before kernel launch.
+
 ## Failure and Compatibility
 
 - Missing optional profiling configuration leaves normal execution unchanged.
@@ -64,7 +88,8 @@ restore the removed session API or trace schema in them.
 
 ## Verification Boundary
 
-Source and Host tests cover argument validation and algorithm selection. A Host or simulator pass does
+Source and Host tests cover argument validation, algorithm selection, profile
+classification, workspace layout, resource teardown, and record parsing. A Host or simulator pass does
 not prove AICore execution, multi-rank correctness, topology behavior, or device
 timing. Build and hardware commands are maintained in
 `docs/BUILD_VERIFICATION.md`. A real hardware profiling check must retain the

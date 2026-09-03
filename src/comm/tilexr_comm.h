@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <memory>
+#include <mutex>
 #include <vector>
 #include <string>
 #include "../include/tilexr_sdma_types.h"
@@ -22,6 +23,7 @@
 #include "../include/tilexr_api.h"
 #include "../include/comm_args.h"
 #include "tilexr_profiling_runtime.h"
+#include "tilexr_internal.h"
 
 namespace TileXR {
 constexpr int IPC_NAME_SIZE = 65;
@@ -68,6 +70,7 @@ public:
     int UnregisterUDMAProfile(TileXRUDMAProfileHandle handle);
     int QueryUDMAProfile(TileXRUDMAProfileHandle handle, TileXRUDMAProfileView *view) const;
     int GetUDMAQpCount(uint32_t *qpCount) const;
+    bool HasUDMAGroupedQpProfile() const;
     int QueryUDMAFullmesh(TileXRUDMAFullmeshHostView *view) const;
     GM_ADDR GetUDMARegistryPtr() const;
     const TileXRUDMARegistry* GetUDMARegistryHost() const;
@@ -81,6 +84,15 @@ public:
     SDMAInitStatus GetSDMAInitStatus() const;
     std::string PrintDFX();
     int FinalizeProfiling();
+    int GetInternalResource(void **resource) const;
+    int AttachInternalResource(void *resource,
+        TileXRInternalResourceDestroyFn destroy);
+    int DetachInternalResource(void *resource);
+    int FinalizeInternalResource();
+    int FinalizeUDMA();
+    int AgreeInternalStatus(int localStatus) const;
+    void LockInternalResource();
+    void UnlockInternalResource();
     friend class Lccl;
     friend class Lcoc;
     friend class LcclTest;
@@ -157,6 +169,9 @@ private:
     GM_ADDR profilingRecordCountsDev_ = nullptr;
     GM_ADDR profilingDroppedCountsDev_ = nullptr;
     bool profilingFinalized_ = false;
+    void *internalResource_ = nullptr;
+    TileXRInternalResourceDestroyFn internalResourceDestroy_ = nullptr;
+    std::mutex internalResourceMutex_;
 };
 } // TileXR
 

@@ -7,6 +7,8 @@
 #include <vector>
 
 #include "udma/tilexr_udma_layout.h"
+#include "udma/tilexr_udma_config.h"
+#include "alltoall_a5_common.h"
 
 namespace {
 
@@ -180,6 +182,119 @@ void TestRejectsDeviceAddressOverflow()
     CheckInvalidBuild(1, 1, overflowingBase);
 }
 
+void TestGroupedSharedQpLaneMatchesPeerSchedule(uint32_t rankSize)
+{
+    constexpr uint32_t laneCount = TileXRGrouped::kGroupWidth;
+    const uint32_t groupCount = TileXRGrouped::GroupCount(rankSize);
+    for (uint32_t rank = 0U; rank < rankSize; ++rank) {
+        for (uint32_t group = 0U; group < groupCount; ++group) {
+            for (uint32_t lane = 0U; lane < laneCount; ++lane) {
+                const int32_t peer = TileXRGrouped::Peer(
+                    rank, rankSize, group, lane);
+                if (peer < 0) {
+                    continue;
+                }
+                CHECK_EQ(TileXR::UDMAGroupedSharedQpLane(
+                    static_cast<int>(rank), peer,
+                    static_cast<int>(rankSize), laneCount), lane);
+            }
+        }
+    }
+}
+
+void TestGroupedRemoteQpMappingIsPermutation(uint32_t rankSize)
+{
+    constexpr uint32_t laneCount = TileXRGrouped::kGroupWidth;
+    constexpr uint32_t qpCount = laneCount * TileXRGrouped::kRouteCount;
+    for (uint32_t rank = 0U; rank < rankSize; ++rank) {
+        for (uint32_t peer = 0U; peer < rankSize; ++peer) {
+            if (peer == rank) {
+                continue;
+            }
+            bool used[qpCount] = {};
+            for (uint32_t qpIdx = 0U; qpIdx < qpCount; ++qpIdx) {
+                const uint32_t remoteQp = TileXR::UDMAGroupedRemoteQpIndex(
+                    static_cast<int>(rank), static_cast<int>(peer),
+                    static_cast<int>(rankSize), qpIdx, qpCount, laneCount);
+                CHECK_TRUE(remoteQp < qpCount);
+                CHECK_TRUE(!used[remoteQp]);
+                used[remoteQp] = true;
+            }
+            const uint32_t localLane = TileXR::UDMAGroupedSharedQpLane(
+                static_cast<int>(rank), static_cast<int>(peer),
+                static_cast<int>(rankSize), laneCount);
+            const uint32_t remoteLane = TileXR::UDMAGroupedSharedQpLane(
+                static_cast<int>(peer), static_cast<int>(rank),
+                static_cast<int>(rankSize), laneCount);
+            CHECK_EQ(TileXR::UDMAGroupedRemoteQpIndex(
+                static_cast<int>(rank), static_cast<int>(peer),
+                static_cast<int>(rankSize), localLane,
+                qpCount, laneCount), remoteLane);
+            CHECK_EQ(TileXR::UDMAGroupedRemoteQpIndex(
+                static_cast<int>(rank), static_cast<int>(peer),
+                static_cast<int>(rankSize), laneCount + localLane,
+                qpCount, laneCount), laneCount + remoteLane);
+        }
+    }
+}
+
+void TestGroupedDirectQpMapping(uint32_t rankSize)
+{
+    constexpr uint32_t qpCount = TileXR::TILEXR_UDMA_GROUPED_SHARED_QP_COUNT;
+    constexpr uint32_t localRankSize = 8U;
+    for (uint32_t rank = 0U; rank < rankSize; ++rank) {
+        bool used[TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT] = {};
+        for (uint32_t slot = 0U;
+             slot < TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT; ++slot) {
+            const int peer = TileXR::UDMAGroupedLocalPeerFromSlot(
+                static_cast<int>(rank), static_cast<int>(rankSize),
+                slot, localRankSize);
+            CHECK_TRUE(peer >= 0);
+            const uint32_t localQp = TileXR::UDMAGroupedDirectQpIndex(
+                static_cast<int>(rank), peer, static_cast<int>(rankSize),
+                qpCount, localRankSize);
+            CHECK_EQ(localQp, TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_BASE + slot);
+            CHECK_TRUE(!used[localQp - TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_BASE]);
+            used[localQp - TileXR::TILEXR_UDMA_GROUPED_DIRECT_QP_BASE] = true;
+            const uint32_t remoteQp = TileXR::UDMAGroupedRemoteQpIndex(
+                static_cast<int>(rank), peer, static_cast<int>(rankSize),
+                localQp, qpCount, TileXRGrouped::kGroupWidth, localRankSize);
+            CHECK_EQ(remoteQp, TileXR::UDMAGroupedDirectQpIndex(
+                peer, static_cast<int>(rank), static_cast<int>(rankSize),
+                qpCount, localRankSize));
+        }
+        const uint32_t crossNodePeer = (rank + localRankSize) % rankSize;
+        CHECK_EQ(TileXR::UDMAGroupedDirectQpIndex(
+            static_cast<int>(rank), static_cast<int>(crossNodePeer),
+            static_cast<int>(rankSize), qpCount, localRankSize), qpCount);
+    }
+}
+
+void TestProfileControlledRemoteQpMapping()
+{
+    constexpr int rank = 0;
+    constexpr int peer = 1;
+    constexpr int rankSize = 16;
+    constexpr uint32_t laneCount = TileXRGrouped::kGroupWidth;
+    for (uint32_t qpCount : {32U, 48U}) {
+        for (uint32_t qp = 0U; qp < qpCount; ++qp) {
+            CHECK_EQ(TileXR::UDMARemoteQpIndex(false, rank, peer, rankSize,
+                qp, qpCount, laneCount), qp);
+        }
+    }
+    bool changed = false;
+    constexpr uint32_t groupedQpCount =
+        TileXR::TILEXR_UDMA_GROUPED_SHARED_QP_COUNT;
+    for (uint32_t qp = 0U;
+         qp < TileXR::TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT; ++qp) {
+        const uint32_t remote = TileXR::UDMARemoteQpIndex(true,
+            rank, peer, rankSize, qp, groupedQpCount, laneCount);
+        CHECK_TRUE(remote < groupedQpCount);
+        changed = changed || remote != qp;
+    }
+    CHECK_TRUE(changed);
+}
+
 } // namespace
 
 int main()
@@ -189,6 +304,12 @@ int main()
     TestRankMajorQpMinorLayout(3);
     TestRejectsInvalidLayouts();
     TestRejectsDeviceAddressOverflow();
+    TestProfileControlledRemoteQpMapping();
+    for (uint32_t rankSize : {16U, 32U, 64U, 128U}) {
+        TestGroupedSharedQpLaneMatchesPeerSchedule(rankSize);
+        TestGroupedRemoteQpMappingIsPermutation(rankSize);
+        TestGroupedDirectQpMapping(rankSize);
+    }
     if (g_failures != 0) {
         std::cerr << g_failures << " UDMA transport layout checks failed" << std::endl;
         return 1;

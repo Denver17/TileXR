@@ -19,7 +19,18 @@
 #define TILEXR_HAVE_PTO_SDMA 0
 #endif
 
-#if TILEXR_ASCENDC_AICORE_COMPILE && defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
+#if TILEXR_ASCENDC_AICORE_COMPILE && \
+    (((defined(__NPU_ARCH__) && (__NPU_ARCH__ == 3510)) || \
+      (defined(CATLASS_ARCH) && (CATLASS_ARCH == 3510))) || \
+     defined(TILEXR_SDMA_FORCE_A5))
+#define TILEXR_SDMA_A5_AICORE_COMPILE 1
+#include "tilexr_sdma_a5.h"
+#else
+#define TILEXR_SDMA_A5_AICORE_COMPILE 0
+#endif
+
+#if TILEXR_ASCENDC_AICORE_COMPILE && !TILEXR_SDMA_A5_AICORE_COMPILE && \
+    defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
 #include "tilexr_sdma_compat.h"
 #endif
 
@@ -40,14 +51,40 @@ __aicore__ inline uint32_t SDMAResolveChannelGroup(uint32_t channelGroupIdx)
     return channelGroupIdx;
 }
 
+__aicore__ inline bool SDMAPrewarmSqPages(
+    const __gm__ CommArgs* args, uint32_t channelCount,
+    AscendC::LocalTensor<uint8_t> scratch)
+{
+#if TILEXR_SDMA_A5_AICORE_COMPILE
+    return SDMAEnabled(args) && detail::A5SdmaPrewarmSqPages(
+        reinterpret_cast<__gm__ uint8_t*>(args->sdmaWorkspacePtr),
+        channelCount, scratch);
+#else
+    (void)args;
+    (void)channelCount;
+    (void)scratch;
+    return false;
+#endif
+}
+
 __aicore__ inline uint64_t SDMACopyNbi(
     const __gm__ CommArgs* args,
     __gm__ uint8_t* dst,
     __gm__ uint8_t* src,
     uint64_t bytes,
-    uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP)
+    uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP,
+    SDMASubmitTrace* submitTrace = nullptr)
 {
-#if defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
+#if TILEXR_SDMA_A5_AICORE_COMPILE
+    if (!SDMAEnabled(args) || dst == nullptr || src == nullptr || bytes == 0) {
+        return 0;
+    }
+    const uint32_t resolvedGroup = SDMAResolveChannelGroup(channelGroupIdx);
+    return detail::A5SdmaCopyNbi(
+        reinterpret_cast<__gm__ uint8_t*>(args->sdmaWorkspacePtr),
+        dst, src, bytes, resolvedGroup, submitTrace);
+#elif defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
+    (void)submitTrace;
     if (!SDMAEnabled(args) || dst == nullptr || src == nullptr || bytes == 0) {
         return 0;
     }
@@ -66,6 +103,7 @@ __aicore__ inline uint64_t SDMACopyNbi(
     (void)src;
     (void)bytes;
     (void)channelGroupIdx;
+    (void)submitTrace;
     return 0;
 #endif
 }
@@ -75,7 +113,18 @@ __aicore__ inline bool SDMAWait(
     uint64_t eventHandle,
     uint32_t channelGroupIdx = TILEXR_SDMA_AUTO_CHANNEL_GROUP)
 {
-#if defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
+#if TILEXR_SDMA_A5_AICORE_COMPILE
+    if (eventHandle == 0) {
+        return true;
+    }
+    if (!SDMAEnabled(args)) {
+        return false;
+    }
+    const uint32_t resolvedGroup = SDMAResolveChannelGroup(channelGroupIdx);
+    return detail::A5SdmaWaitEvent(
+        reinterpret_cast<__gm__ uint8_t*>(args->sdmaWorkspacePtr),
+        eventHandle, resolvedGroup);
+#elif defined(TILEXR_HAVE_PTO_SDMA) && TILEXR_HAVE_PTO_SDMA
     if (eventHandle == 0) {
         return true;
     }

@@ -47,6 +47,35 @@ bindings. Every rank must agree on the profile contract. Queries return a
 read-only view whose lifetime ends at profile unregister or communicator
 destruction. Profile users have the same caller-managed quiescence requirement.
 
+## Teardown Contract
+
+Communicator destruction is collective and retryable. The grouped AllToAll
+resource callback first synchronizes its bound stream and agrees that result on
+all ranks. It does not unregister profiles or free workspaces after a stream
+synchronization failure.
+
+UDMA teardown advances through fixed Host socket-exchange phases: hide device
+state, unimport remote memory, release local memory registrations, unimport all
+remote QPs, destroy local QP/CQ/channel resources, release tokens and contexts,
+and finally deinitialize RA/TSD and unload HCCP. No local queue is destroyed
+until every rank has completed remote-QP unimport. Empty local state still
+participates in every agreement.
+
+The internal status-agreement helper uses the socket exchange when one exists.
+For a valid communicator without a socket exchange, including `InitThread` and
+allocation-only `TileXRCommInit` paths, it preserves the local status. UDMA is
+unavailable on those paths, so communicator destruction must not fail merely
+because there is no cross-process agreement channel.
+
+An HCCP result clears a remote-QP Host handle only when ownership is known to
+have been consumed. This includes success and the b131-specific return `228104`:
+the service rejects the explicit unimport opcode with `-EPROTONOSUPPORT`, but
+the client still frees `rem_qp_handle`. TileXR clears every cached alias, emits
+one bounded warning, and continues teardown through RA context destruction. It
+does not describe this as a successful server-side unimport. Any other nonzero
+result preserves the handle and returns from `TileXRCommDestroy()` without
+deleting the communicator or clearing state needed by a retry.
+
 ## QP and Routing Contract
 
 The default configuration preserves the single-QP path. An explicit
@@ -106,8 +135,8 @@ runtime capability, and registration readiness, not topology alone.
 ## Verification Boundary
 
 Host tests cover configuration, registration, registry layout, QP selection,
-frontier accounting, and teardown. Source guards cover UB/MTE3 publication and
-doorbell constraints. A5/Ascend950 multi-rank demos are required to prove the
-data plane. Simulator, Host, and 910B fallback tests do not prove UDMA transfer.
+frontier accounting, and teardown. A5/Ascend950 multi-rank demos are required to
+prove the data plane. Simulator, Host, and 910B fallback tests do not prove UDMA
+transfer.
 Current commands and evidence are maintained in `docs/UDMA_TEST_STATUS.md`,
 `docs/UDMA_INTEGRATION_SUMMARY.md`, and `docs/BUILD_VERIFICATION.md`.

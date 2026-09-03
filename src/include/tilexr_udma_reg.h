@@ -22,6 +22,11 @@ constexpr uint32_t TILEXR_UDMA_PROFILE_VERSION = 2U;
 constexpr uint32_t TILEXR_UDMA_PROFILE_MAX_REGIONS = 8U;
 constexpr uint32_t TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS = 48U;
 
+enum class TileXRUDMAProfileKind : uint32_t {
+    GENERIC = 0U,
+    A5_GROUPED_ALLTOALL = 1U,
+};
+
 struct TileXRUDMARegionDesc {
     GM_ADDR base = nullptr;
     uint64_t bytes = 0;
@@ -117,10 +122,16 @@ inline uint64_t UDMAProfileRegistrationBytes(const TileXRUDMAProfileRegionDesc& 
 
 inline bool UDMAProfileDescValid(const TileXRUDMAProfileDesc* desc, uint32_t expectedQpCount)
 {
+    const auto kind = desc == nullptr ? TileXRUDMAProfileKind::GENERIC :
+        static_cast<TileXRUDMAProfileKind>(desc->reserved);
     if (desc == nullptr || desc->version != TILEXR_UDMA_PROFILE_VERSION ||
         desc->regionCount == 0 || desc->regionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS ||
         expectedQpCount == 0 || expectedQpCount > TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS ||
-        desc->qpBindingCount != expectedQpCount) {
+        desc->qpBindingCount != expectedQpCount ||
+        (kind != TileXRUDMAProfileKind::GENERIC &&
+         kind != TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL) ||
+        (kind == TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL &&
+         (expectedQpCount != 39U || desc->regionCount != 1U))) {
         return false;
     }
     for (uint32_t region = 0; region < desc->regionCount; ++region) {
@@ -140,7 +151,8 @@ inline bool UDMAProfileDescValid(const TileXRUDMAProfileDesc* desc, uint32_t exp
 inline bool UDMAProfileContractsEqual(
     const TileXRUDMAProfileDesc& lhs, const TileXRUDMAProfileDesc& rhs)
 {
-    if (lhs.version != rhs.version || lhs.regionCount != rhs.regionCount ||
+    if (lhs.version != rhs.version || lhs.reserved != rhs.reserved ||
+        lhs.regionCount != rhs.regionCount ||
         lhs.qpBindingCount != rhs.qpBindingCount) {
         return false;
     }
@@ -163,12 +175,32 @@ inline bool UDMAProfileRegistryValid(const TileXRUDMAProfileRegistry* registry,
         expectedRegionCount == 0 || expectedRegionCount > TILEXR_UDMA_PROFILE_MAX_REGIONS ||
         registry->regionCount != expectedRegionCount || registry->qpCount == 0 ||
         registry->qpCount > TILEXR_UDMA_PROFILE_MAX_QP_BINDINGS ||
+        (registry->reserved != static_cast<uint32_t>(TileXRUDMAProfileKind::GENERIC) &&
+         registry->reserved != static_cast<uint32_t>(
+             TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL)) ||
         (expectedQpCount != 0 && registry->qpCount != expectedQpCount)) {
         return false;
     }
     for (uint32_t qp = 0; qp < registry->qpCount; ++qp) {
         if (registry->qpBindings[qp].localRegion >= registry->regionCount ||
             registry->qpBindings[qp].remoteRegion >= registry->regionCount) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline bool UDMAGroupedAllToAllProfileValid(
+    const TileXRUDMAProfileRegistry* registry, int expectedRankSize)
+{
+    if (!UDMAProfileRegistryValid(registry, expectedRankSize, 1U, 39U) ||
+        registry->reserved != static_cast<uint32_t>(
+            TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL)) {
+        return false;
+    }
+    for (uint32_t qp = 0U; qp < registry->qpCount; ++qp) {
+        if (registry->qpBindings[qp].localRegion != 0U ||
+            registry->qpBindings[qp].remoteRegion != 0U) {
             return false;
         }
     }

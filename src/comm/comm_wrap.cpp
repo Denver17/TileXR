@@ -424,7 +424,78 @@ int TileXRCommDestroy(TileXRCommPtr comm)
         return TILEXR_INVALID_VALUE;
     }
     auto *c = static_cast<TileXRComm *>(comm);
-    const int profilingRet = c->FinalizeProfiling();
+    const int resourceRet = c->FinalizeInternalResource();
+    if (resourceRet != TILEXR_SUCCESS) {
+        return resourceRet;
+    }
+    const int profilingRet = c->AgreeInternalStatus(c->FinalizeProfiling());
+    if (profilingRet != TILEXR_SUCCESS) {
+        return profilingRet;
+    }
+    const int udmaRet = c->FinalizeUDMA();
+    if (udmaRet != TILEXR_SUCCESS) {
+        return udmaRet;
+    }
     delete c;
-    return profilingRet;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCommGetInternalResource(TileXRCommPtr comm, void **resource)
+{
+    if (comm == nullptr || resource == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return static_cast<TileXRComm *>(comm)->GetInternalResource(resource);
+}
+
+int TileXRCommAttachInternalResource(TileXRCommPtr comm, void *resource,
+    TileXRInternalResourceDestroyFn destroy)
+{
+    if (comm == nullptr || resource == nullptr || destroy == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return static_cast<TileXRComm *>(comm)->AttachInternalResource(resource, destroy);
+}
+
+int TileXRCommDetachInternalResource(TileXRCommPtr comm, void *resource)
+{
+    if (comm == nullptr || resource == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return static_cast<TileXRComm *>(comm)->DetachInternalResource(resource);
+}
+
+int TileXRCommAgreeInternalStatus(TileXRCommPtr comm, int localStatus)
+{
+    if (comm == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return static_cast<TileXRComm *>(comm)->AgreeInternalStatus(localStatus);
+}
+
+int TileXRCommHasA5GroupedQpProfile(TileXRCommPtr comm, bool *available)
+{
+    if (comm == nullptr || available == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *available = static_cast<TileXRComm *>(comm)->HasUDMAGroupedQpProfile();
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCommLockInternalResource(TileXRCommPtr comm)
+{
+    if (comm == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    static_cast<TileXRComm *>(comm)->LockInternalResource();
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCommUnlockInternalResource(TileXRCommPtr comm)
+{
+    if (comm == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    static_cast<TileXRComm *>(comm)->UnlockInternalResource();
+    return TILEXR_SUCCESS;
 }

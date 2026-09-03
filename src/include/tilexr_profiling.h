@@ -33,34 +33,6 @@ constexpr uint32_t TileXRProfilingStreamId(uint32_t rank, uint32_t core)
 
 #if TILEXR_PROFILING_AICORE && defined(TILEXR_ENABLE_PROFILING)
 
-template <int32_t HardwareEventId>
-__attribute__((always_inline)) inline __aicore__ void TileXRProfilingPrepareMte3()
-{
-    AscendC::SetFlag<AscendC::HardEvent::S_MTE3>(HardwareEventId);
-    AscendC::WaitFlag<AscendC::HardEvent::S_MTE3>(HardwareEventId);
-}
-
-template <int32_t HardwareEventId>
-__attribute__((always_inline)) inline __aicore__ void TileXRProfilingWaitMte3()
-{
-    AscendC::SetFlag<AscendC::HardEvent::MTE3_S>(HardwareEventId);
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_S>(HardwareEventId);
-}
-
-template <int32_t HardwareEventId>
-__attribute__((always_inline)) inline __aicore__ void TileXRProfilingWriteCounterLine(
-    AscendC::GlobalTensor<uint32_t> destination,
-    AscendC::LocalTensor<uint32_t> scratch, uint32_t value)
-{
-    for (uint32_t index = 0U; index < TILEXR_PROFILING_COUNT_STRIDE; ++index) {
-        scratch.SetValue(index, 0U);
-    }
-    scratch.SetValue(0U, value);
-    TileXRProfilingPrepareMte3<HardwareEventId>();
-    AscendC::DataCopy(destination, scratch, TILEXR_PROFILING_COUNT_STRIDE);
-    TileXRProfilingWaitMte3<HardwareEventId>();
-}
-
 template <uint32_t RecordCapacity>
 class ProfilingRecorder {
     static_assert(RecordCapacity > 0U,
@@ -81,9 +53,7 @@ public:
         tilexrProfilingEventIds_[Slot] = EventId;
     }
 
-    template <int32_t HardwareEventId = EVENT_ID0>
-    __attribute__((always_inline)) inline __aicore__ void Flush(
-        GM_ADDR commArgsGM, AscendC::LocalTensor<uint64_t> scratch)
+    __attribute__((always_inline)) inline __aicore__ void Flush(GM_ADDR commArgsGM)
     {
         constexpr uint32_t occupiedSlots =
             ((RecordCapacity + TILEXR_PROFILING_GM_ALIGNMENT_RECORDS - 1U) /
@@ -110,68 +80,143 @@ public:
             return;
         }
 
-        AscendC::GlobalTensor<uint32_t> recordCountOut;
-        recordCountOut.SetGlobalBuffer(
+        __gm__ uint32_t *recordCountOut =
             reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingRecordCountsGM) +
-            static_cast<uint64_t>(core) * TILEXR_PROFILING_COUNT_STRIDE,
-            TILEXR_PROFILING_COUNT_STRIDE);
-        const uint32_t occupiedBefore = recordCountOut.GetValue(0U);
+            static_cast<uint64_t>(core) * TILEXR_PROFILING_COUNT_STRIDE;
+        const uint32_t occupiedBefore = recordCountOut[0];
         if (occupiedBefore > recordsPerCore ||
             occupiedBefore % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U ||
             occupiedSlots > recordsPerCore - occupiedBefore) {
-            AscendC::GlobalTensor<uint32_t> droppedCountOut;
-            droppedCountOut.SetGlobalBuffer(
+            __gm__ uint32_t *droppedCountOut =
                 reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingDroppedCountsGM) +
-                static_cast<uint64_t>(core) * TILEXR_PROFILING_COUNT_STRIDE,
-                TILEXR_PROFILING_COUNT_STRIDE);
-            const uint32_t oldDropped = droppedCountOut.GetValue(0U);
+                static_cast<uint64_t>(core) * TILEXR_PROFILING_COUNT_STRIDE;
+            const uint32_t oldDropped = droppedCountOut[0];
             const uint32_t maxValue = static_cast<uint32_t>(-1);
             const uint32_t nextDropped = oldDropped > maxValue - RecordCapacity ?
                 maxValue : oldDropped + RecordCapacity;
-            TileXRProfilingWriteCounterLine<HardwareEventId>(
-                droppedCountOut, scratch.ReinterpretCast<uint32_t>(), nextDropped);
+            droppedCountOut[0] = nextDropped;
             return;
         }
 
-        for (uint32_t slot = 0U; slot < RecordCapacity; ++slot) {
-            scratch.SetValue(slot, tilexrProfilingEventStamps_[slot]);
-        }
-        for (uint32_t slot = RecordCapacity; slot < occupiedSlots; ++slot) {
-            scratch.SetValue(slot, 0U);
-        }
-        AscendC::GlobalTensor<uint64_t> timestampsOut;
-        timestampsOut.SetGlobalBuffer(
+        __gm__ uint64_t *timestampsOut =
             reinterpret_cast<__gm__ uint64_t *>(args->tilexrProfilingTimestampsGM) +
-            static_cast<uint64_t>(core) * recordsPerCore + occupiedBefore,
-            occupiedSlots);
-        TileXRProfilingPrepareMte3<HardwareEventId>();
-        AscendC::DataCopy(timestampsOut, scratch, occupiedSlots);
-        TileXRProfilingWaitMte3<HardwareEventId>();
-
-        AscendC::LocalTensor<uint32_t> eventIdScratch =
-            scratch.ReinterpretCast<uint32_t>();
+            static_cast<uint64_t>(core) * recordsPerCore + occupiedBefore;
+        __gm__ uint32_t *eventIdsOut =
+            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingEventIdsGM) +
+            static_cast<uint64_t>(core) * recordsPerCore + occupiedBefore;
         for (uint32_t slot = 0U; slot < RecordCapacity; ++slot) {
-            eventIdScratch.SetValue(slot, tilexrProfilingEventIds_[slot]);
+            timestampsOut[slot] = tilexrProfilingEventStamps_[slot];
+            eventIdsOut[slot] = tilexrProfilingEventIds_[slot];
         }
         for (uint32_t slot = RecordCapacity; slot < occupiedSlots; ++slot) {
-            eventIdScratch.SetValue(slot, 0U);
+            timestampsOut[slot] = 0U;
+            eventIdsOut[slot] = 0U;
         }
-        AscendC::GlobalTensor<uint32_t> eventIdsOut;
-        eventIdsOut.SetGlobalBuffer(
-            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingEventIdsGM) +
-            static_cast<uint64_t>(core) * recordsPerCore + occupiedBefore,
-            occupiedSlots);
-        TileXRProfilingPrepareMte3<HardwareEventId>();
-        AscendC::DataCopy(eventIdsOut, eventIdScratch, occupiedSlots);
-        TileXRProfilingWaitMte3<HardwareEventId>();
-
-        TileXRProfilingWriteCounterLine<HardwareEventId>(
-            recordCountOut, eventIdScratch, occupiedBefore + occupiedSlots);
+        recordCountOut[0] = occupiedBefore + occupiedSlots;
     }
 
 private:
     uint64_t tilexrProfilingEventStamps_[RecordCapacity];
     uint32_t tilexrProfilingEventIds_[RecordCapacity];
+};
+
+class DirectProfilingWriter {
+public:
+    __attribute__((always_inline)) inline __aicore__ void Initialize(
+        GM_ADDR commArgsGM, uint32_t logicalCore,
+        uint32_t launchSlot, uint32_t recordsPerLaunch)
+    {
+        if (commArgsGM == nullptr) {
+            return;
+        }
+        __gm__ CommArgs *args = reinterpret_cast<__gm__ CommArgs *>(commArgsGM);
+        if ((args->extraFlag & ExtraFlag::PROFILING) == 0U ||
+            args->tilexrProfilingTimestampsGM == nullptr ||
+            args->tilexrProfilingEventIdsGM == nullptr ||
+            args->tilexrProfilingRecordCountsGM == nullptr ||
+            args->tilexrProfilingDroppedCountsGM == nullptr ||
+            logicalCore >= args->tilexrProfilingCoreCapacity ||
+            args->tilexrProfilingRecordsPerCore == 0U ||
+            args->tilexrProfilingRecordsPerCore %
+                TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U ||
+            recordsPerLaunch == 0U ||
+            recordsPerLaunch % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U) {
+            return;
+        }
+
+        const uint32_t recordsPerCore = args->tilexrProfilingRecordsPerCore;
+        if (launchSlot >= recordsPerCore / recordsPerLaunch) {
+            return;
+        }
+        const uint32_t launchBase = launchSlot * recordsPerLaunch;
+        __gm__ uint32_t *recordCount =
+            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingRecordCountsGM) +
+            static_cast<uint64_t>(logicalCore) * TILEXR_PROFILING_COUNT_STRIDE;
+
+        timestamps_ =
+            reinterpret_cast<__gm__ uint64_t *>(args->tilexrProfilingTimestampsGM) +
+            static_cast<uint64_t>(logicalCore) * recordsPerCore + launchBase;
+        eventIds_ =
+            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingEventIdsGM) +
+            static_cast<uint64_t>(logicalCore) * recordsPerCore + launchBase;
+        recordCount_ = recordCount;
+        droppedCount_ =
+            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingDroppedCountsGM) +
+            static_cast<uint64_t>(logicalCore) * TILEXR_PROFILING_COUNT_STRIDE;
+        launchBase_ = launchBase;
+        capacity_ = recordsPerLaunch;
+        enabled_ = true;
+    }
+
+    __attribute__((always_inline)) inline __aicore__ void RecordAt(
+        uint32_t eventId, uint64_t timestamp)
+    {
+        if (!enabled_ || eventId == 0U || timestamp == 0U) {
+            return;
+        }
+        if (cursor_ < capacity_) {
+            timestamps_[cursor_] = timestamp;
+            eventIds_[cursor_] = eventId;
+            ++cursor_;
+            return;
+        }
+        if (dropped_ != static_cast<uint32_t>(-1)) {
+            ++dropped_;
+        }
+    }
+
+    __attribute__((always_inline)) inline __aicore__ void Publish()
+    {
+        if (!enabled_) {
+            return;
+        }
+        const uint32_t aligned =
+            (cursor_ + TILEXR_PROFILING_GM_ALIGNMENT_RECORDS - 1U) /
+            TILEXR_PROFILING_GM_ALIGNMENT_RECORDS *
+            TILEXR_PROFILING_GM_ALIGNMENT_RECORDS;
+        if (aligned <= capacity_) {
+            for (uint32_t slot = cursor_; slot < aligned; ++slot) {
+                timestamps_[slot] = 0U;
+                eventIds_[slot] = 0U;
+            }
+            cursor_ = aligned;
+        }
+        if (dropped_ != 0U) {
+            droppedCount_[0] = dropped_;
+        }
+        recordCount_[0] = launchBase_ + cursor_;
+    }
+
+private:
+    __gm__ uint64_t *timestamps_ = nullptr;
+    __gm__ uint32_t *eventIds_ = nullptr;
+    __gm__ uint32_t *recordCount_ = nullptr;
+    __gm__ uint32_t *droppedCount_ = nullptr;
+    uint32_t launchBase_ = 0U;
+    uint32_t capacity_ = 0U;
+    uint32_t cursor_ = 0U;
+    uint32_t dropped_ = 0U;
+    bool enabled_ = false;
 };
 
 #else
@@ -198,9 +243,25 @@ public:
     }
 
 #if TILEXR_PROFILING_AICORE
-    template <int32_t HardwareEventId = EVENT_ID0>
-    __attribute__((always_inline)) inline __aicore__ void Flush(
-        GM_ADDR, AscendC::LocalTensor<uint64_t>)
+    __attribute__((always_inline)) inline __aicore__ void Flush(GM_ADDR)
+    {
+    }
+#endif
+};
+
+class DirectProfilingWriter {
+public:
+#if TILEXR_PROFILING_AICORE
+    __attribute__((always_inline)) inline __aicore__ void Initialize(
+        GM_ADDR, uint32_t, uint32_t, uint32_t)
+    {
+    }
+
+    __attribute__((always_inline)) inline __aicore__ void RecordAt(uint32_t, uint64_t)
+    {
+    }
+
+    __attribute__((always_inline)) inline __aicore__ void Publish()
     {
     }
 #endif

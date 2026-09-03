@@ -5,6 +5,7 @@
 
 #include "tilexr_profiling_runtime.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
@@ -191,23 +192,18 @@ bool BuildExportStreams(const TileXRProfilingRuntimeConfig &config, int rank,
         stream.droppedCount = droppedCounts[core];
         stream.records.reserve(occupied);
         const uint64_t base = static_cast<uint64_t>(core) * config.recordsPerCore;
-        uint64_t previousTimestamp = 0U;
-        bool hasTimestamp = false;
-        for (uint32_t slot = 0U; slot < occupied; ++slot) {
+        for (uint32_t slot = 0U; slot < config.recordsPerCore; ++slot) {
             const uint32_t eventId = eventIds[base + slot];
             if (eventId == 0U) {
                 continue;
             }
             const uint64_t timestamp = timestamps[base + slot];
-            if (hasTimestamp && timestamp < previousTimestamp) {
-                SetError(error, "profiling timestamps are not monotonic for core " +
-                    std::to_string(core));
-                return false;
-            }
-            previousTimestamp = timestamp;
-            hasTimestamp = true;
             stream.records.push_back(ExportRecord {timestamp, eventId});
         }
+        std::stable_sort(stream.records.begin(), stream.records.end(),
+            [](const ExportRecord &left, const ExportRecord &right) {
+                return left.timestamp < right.timestamp;
+            });
         if (!stream.records.empty() || stream.droppedCount != 0U) {
             streams->push_back(std::move(stream));
         }

@@ -18,6 +18,12 @@ cmake --build build --target test_tilexr_collectives_correctness tilexr_collecti
 CTest source and CLI smoke checks are hardware-free. They verify headers, split ownership, scripts, docs, and
 tool wiring. Physical multi-NPU execution is manual.
 
+Operator-specific profiling metadata is validated in this module. The A5
+AllToAll mapping test parses the JSON through the production profiling loader;
+fixed-slot capacity is covered separately by the A5 layout unit test. Do not
+couple these checks to the profiled Add4 demo or enforce them by matching
+production source text.
+
 ## Correctness Run
 
 The correctness runner starts one process per rank through the helper script:
@@ -63,6 +69,16 @@ Main options are `--op allgather|alltoall|allreduce|reducescatter|broadcast|noop
 `--first-npu`, `--check 0|1`, and `--csv <path>`. Optional thresholds `--min-algbw` and
 `--max-latency-us` are available but are not set by default.
 
+Use `--comm-mode shared-qp --comm-domain N` to initialize the shared-QP
+communicator required by the A5 grouped AllToAll path.
+
+Use `--batch-timing 1` to enqueue all measured iterations after warmup and
+synchronize the stream once at the end. The reported average is the batch Host
+wall time divided by the iteration count. Batch timing is rejected when
+`TILEXR_PROFILING_RECORDS_PATH` enables profiling; because it has no
+per-iteration samples, text and CSV output show `N/A` for `min(us)` and
+`max(us)`.
+
 Output fields:
 
 ```text
@@ -73,6 +89,9 @@ The `bytes` column is the actual send bytes per rank for that operation and size
 `output_bytes_per_rank / avg_us / 1000`, where `output_bytes_per_rank` is the bytes received by one rank for
 the measured message size. `busbw(GB/s)` is `algbw * (rank_size - 1) / rank_size` for the measured operation.
 CSV output uses the same fields.
+
+The process exits nonzero if communicator destruction or subsequent ACL cleanup
+fails, even when collective correctness and timing completed successfully.
 
 `--check=1` validates outputs. INT32 is checked element-by-element with operation-specific expected values;
 other dtypes use deterministic byte-pattern checks for allgather, alltoall, and broadcast. Checked

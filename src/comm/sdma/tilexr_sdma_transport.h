@@ -6,12 +6,42 @@
 #ifndef TILEXR_SDMA_TRANSPORT_H
 #define TILEXR_SDMA_TRANSPORT_H
 
+#include <cstring>
 #include <memory>
 
 #include "comm_args.h"
 #include "tilexr_sdma_types.h"
 
 namespace TileXR {
+
+namespace detail {
+
+enum class SDMABackendKind : uint32_t {
+    UNSUPPORTED = 0U,
+    PTO = 1U,
+    A5_DIRECT = 2U,
+};
+
+inline bool SDMASocHasPrefix(const char *socName, const char *prefix)
+{
+    return socName != nullptr &&
+        std::strncmp(socName, prefix, std::strlen(prefix)) == 0;
+}
+
+inline SDMABackendKind ClassifySDMABackend(const char *socName)
+{
+    if (SDMASocHasPrefix(socName, "Ascend950")) {
+        return SDMABackendKind::A5_DIRECT;
+    }
+    if (SDMASocHasPrefix(socName, "Ascend910B") ||
+        SDMASocHasPrefix(socName, "Ascend910A") ||
+        SDMASocHasPrefix(socName, "Ascend910_93")) {
+        return SDMABackendKind::PTO;
+    }
+    return SDMABackendKind::UNSUPPORTED;
+}
+
+} // namespace detail
 
 struct TileXRSDMATransportOptions {
     int devId = 0;

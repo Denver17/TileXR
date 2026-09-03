@@ -170,6 +170,32 @@ class ProfilingRendererTests(unittest.TestCase):
         self.assertEqual(len(threads), 2)
         self.assertEqual({event["tid"] for event in threads}, {0, 1})
 
+    def test_perfetto_aligns_same_rank_cores_on_system_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            mapping_path, records_path = write_capture(
+                Path(tmp),
+                blocks=[
+                    record_block(stream_id(0, 0), records=[(1000, 1), (2000, 6)]),
+                    record_block(stream_id(0, 1), records=[(1500, 1), (2500, 6)]),
+                ],
+            )
+            run = load_profile_run(mapping_path, [records_path])
+        trace = render_perfetto(run, analyze_run(run))
+
+        kernels = sorted(
+            (
+                event
+                for event in trace["traceEvents"]
+                if event.get("name") == "kernel_total"
+            ),
+            key=lambda event: event["args"]["core"],
+        )
+        self.assertEqual([event["ts"] for event in kernels], [0.0, 0.5])
+        self.assertEqual(
+            kernels[1]["args"]["raw_start"] - kernels[0]["args"]["raw_start"],
+            500,
+        )
+
     def test_perfetto_preserves_parent_and_overlapping_instance_identity(self):
         mapping, records = overlapping_child_capture()
         with tempfile.TemporaryDirectory() as tmp:
@@ -205,6 +231,34 @@ class ProfilingRendererTests(unittest.TestCase):
         self.assertIn("core0/stream0", thread_names[0])
         self.assertIn("core0/payload_transfer[0]", thread_names[children[0]["tid"]])
         self.assertIn("core0/payload_transfer[1]", thread_names[children[1]["tid"]])
+
+    def test_perfetto_places_serial_stages_on_a_shared_mapping_track(self):
+        mapping, records = overlapping_child_capture()
+        mapping["stages"][1]["track"] = "send"
+        mapping["stages"][2]["track"] = "send"
+        with tempfile.TemporaryDirectory() as tmp:
+            mapping_path, records_path = write_capture(
+                Path(tmp),
+                mapping=mapping,
+                blocks=[record_block(stream_id(0), records=records)],
+            )
+            run = load_profile_run(mapping_path, [records_path])
+        trace = render_perfetto(run, analyze_run(run))
+
+        grouped = [
+            event
+            for event in trace["traceEvents"]
+            if event.get("name", "").startswith(("peer_wait", "payload_transfer"))
+        ]
+        self.assertTrue(grouped)
+        self.assertEqual(len({event["tid"] for event in grouped}), 1)
+        grouped_tid = grouped[0]["tid"]
+        thread_name = next(
+            event["args"]["name"]
+            for event in trace["traceEvents"]
+            if event.get("name") == "thread_name" and event["tid"] == grouped_tid
+        )
+        self.assertIn("core0/send", thread_name)
 
     def test_atomic_writers_keep_previous_finite_file_on_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

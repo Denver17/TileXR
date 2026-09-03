@@ -1,6 +1,16 @@
 # TileXR Build Verification
 
-**Updated:** 2026-08-04
+> **A5 grouped AllToAll launch configuration:** The A5 kernel reserves 64 KiB
+> of each vector core's UB for SIMT DCache and passes the remaining UB through
+> `rtTaskCfgInfo_t::localMemorySize`; at least another 64 KiB must remain for
+> dynamic UB. A missing or failed
+> `ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE` query is a launch error; do not fall back
+> to `localMemorySize == 0`. Host-only checks validate the configuration path,
+> but an AIV exception fix still requires the original Ascend950 multi-host
+> reproduction to confirm that device error 259 is absent and correctness
+> passes.
+
+**Updated:** 2026-09-02
 
 This checklist reflects the current TileXR codebase. The core runtime builds `libtile-comm.so` without a compile-time or link-time shmem dependency.
 
@@ -218,6 +228,76 @@ Expected:
 - `TileXR UDMA JSON checks passed`
 - `TileXR UDMA registry checks passed`
 - `test_tilexr_udma` exits with `Failed: 0`
+
+## Verify Integrated A5 AllToAll
+
+Build collectives with the CANN 9.1 A5 compiler environment. This produces one
+Host library containing the generic collective binary and the separately built
+64/128-rank A5 binaries:
+
+```bash
+cmake -S . -B /tmp/tilexr-collectives-a5 \
+  -DTILEXR_BUILD_COLLECTIVES=ON \
+  -DTILEXR_BUILD_TESTS=ON \
+  -DTILEXR_COLLECTIVES_SOC_TYPE=Ascend950 \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build /tmp/tilexr-collectives-a5 -j"$(nproc)"
+ctest --test-dir /tmp/tilexr-collectives-a5 --output-on-failure \
+  -R 'alltoall_a5_layout|comm_next_magic|collectives'
+cmake --install /tmp/tilexr-collectives-a5
+```
+
+When a collectives Host source consumes a private header from another TileXR
+component, declare that component directory as a `PRIVATE` include directory on
+`tilexr-collectives`. Validate from a clean build directory so same-directory or
+stale compiler include paths cannot hide a missing target dependency. Each Host
+header must also include the defining headers for every type in its declarations;
+keep the matching source's own header first in its include list to expose missing
+dependencies during compilation. Test targets that directly consume private Host
+headers must declare the private include directories required by those headers;
+linking `tilexr-collectives` does not propagate its `PRIVATE` include paths.
+
+Expected artifact and removed-surface checks:
+
+```bash
+test -f install/lib/libtilexr-collectives.so
+test ! -e install/lib/libtilexr-grouped-alltoall.so
+test ! -e install/include/tilexr_grouped_alltoall.h
+readelf -d install/lib/libtilexr-collectives.so | grep -E 'RPATH|RUNPATH' || true
+```
+
+No RUNPATH/RPATH entry may contain `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib`.
+Host tests establish layout, exact profile classification, and communicator
+resource teardown only. They do not prove A5 UDMA transfers.
+
+For data-plane qualification, retain the matching one-time HCCL Test baseline,
+then validate 2x8, 4x8, and 8x8 in that order. For every scale cover generic
+AllToAll regression, repeated A5 calls, a larger call that grows the workspace,
+communicator teardown, and profiling with complete fixed-slot rounds for every
+active core. Record correctness and performance per rank; do not claim an
+unrun scale from Host, simulator, 910B, or target-compilation evidence.
+
+The integrated A5 smoke must initialize the communicator with the same
+shared-QP-domain contract as the validated grouped baseline. For the standalone
+performance tool, use `--comm-mode shared-qp --comm-domain 61` and enable both
+`TILEXR_ENABLE_CREDIT_IPC=1` and `TILEXR_ENABLE_SDMA=1` on every rank. Also set
+`TILEXR_UDMA_SHARED_QP_COUNT=39`; the shared-QP initializer otherwise defaults
+to a different profile. A socket communicator created by `TileXRCommInitRank`,
+or a shared-QP communicator without the exact validated 39-QP profile, does not
+satisfy the A5 dispatch predicate. A successful generic fallback is not evidence
+for the grouped path. The multi-host profiling suite applies these settings
+automatically to int32 AllToAll cases while leaving generic cases unchanged.
+
+After changing UDMA teardown, validate lifecycle reuse rather than accepting a
+single clean data transfer. At 16P, 32P, and 64P, run at least 20 consecutive
+`init -> run -> destroy -> init` cycles with the grouped shared-QP profile. Every
+destroy and immediate reinitialization must succeed, logs must contain no TileXR
+`unimport failed`, `cleanup incomplete`, `128103`, double-free, or invalid-pointer
+records, and RA/QP resource counts must remain stable. On b131, lower-level plog
+may still report `RaCtxQpUnimport ... ret(-93)`: the service rejected explicit
+unimport, while the client consumed the Host handle and TileXR continued through
+RA context teardown. Preserve and fail on every other raw RA error. Host-only
+checks do not satisfy this hardware teardown boundary.
 
 ## Run UDMA Data-Plane Demos
 

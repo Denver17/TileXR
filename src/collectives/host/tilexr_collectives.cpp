@@ -167,6 +167,13 @@ int TileXRAllToAllEx(void *sendBuf, void *recvBuf, int64_t sendCount,
     if (kernelBytes < 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    if (TileXRCollectives::Host::IsA5AllToAllCandidate(context, dataType)) {
+        const int a5Ret = TileXRCollectives::Host::LaunchA5AllToAll(
+            comm, context, sendBuf, recvBuf, sendCount, stream);
+        if (a5Ret != TileXR::TILEXR_ERROR_NOT_SUPPORT) {
+            return a5Ret;
+        }
+    }
     const uint32_t blockDim = TileXRCollectives::Host::GetAllToAllBlockNum(*context.hostArgs, kernelBytes);
     if (blockDim == 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;

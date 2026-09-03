@@ -15,8 +15,15 @@
 namespace TileXR {
 
 constexpr char TILEXR_UDMA_QP_ROUTE_SPEC_ENV[] = "TILEXR_UDMA_QP_ROUTE_SPEC";
-constexpr uint32_t TILEXR_UDMA_QP_CONFIG_WIRE_VERSION = 3;
+constexpr char TILEXR_UDMA_SHARED_QP_COUNT_ENV[] = "TILEXR_UDMA_SHARED_QP_COUNT";
+constexpr uint32_t TILEXR_UDMA_QP_CONFIG_WIRE_VERSION = 5;
 constexpr uint32_t TILEXR_UDMA_MAX_QP_COUNT = 48;
+constexpr uint32_t TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT = 32;
+constexpr uint32_t TILEXR_UDMA_GROUPED_DIRECT_QP_BASE =
+    TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT;
+constexpr uint32_t TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT = 7;
+constexpr uint32_t TILEXR_UDMA_GROUPED_SHARED_QP_COUNT =
+    TILEXR_UDMA_GROUPED_DIRECT_QP_BASE + TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT;
 constexpr uint32_t TILEXR_UDMA_SHARED_QP_SIX_PORT_COUNT = 16;
 constexpr uint32_t TILEXR_UDMA_SHARED_QP_SIX_PORT_VALUE = 6;
 constexpr uint32_t TILEXR_UDMA_SHARED_QP_TWO_PORT_VALUE = 2;
@@ -24,6 +31,7 @@ constexpr uint32_t TILEXR_UDMA_SHARED_QP_TWO_PORT_VALUE = 2;
 enum class UDMAQpRouteSelector : uint32_t {
     TOPOLOGY = 1,
     PORT_COUNT = 2,
+    LOCAL_PEER_SLOT = 3,
 };
 
 struct UDMAQpRouteRule {
@@ -67,10 +75,16 @@ UDMAQpConfigParseStatus ParseUDMAQpRouteSpec(
 UDMAQpConfigParseStatus LoadUDMAQpConfigFromEnv(
     UDMAQpConfig& config, std::string* error = nullptr);
 
-UDMAQpConfig BuildUDMASharedQpConfig();
+UDMAQpConfig BuildUDMASharedQpConfig(
+    uint32_t qpCount = TILEXR_UDMA_MAX_QP_COUNT);
+
+UDMAQpConfigParseStatus LoadUDMASharedQpConfigFromEnv(
+    UDMAQpConfig& config, std::string* error = nullptr);
 
 bool ValidateUDMASharedQpConfig(
     const UDMAQpConfig& config, std::string* error = nullptr);
+
+bool IsUDMAGroupedQpProfile(const UDMAQpConfig& config);
 
 uint32_t UDMAQpConfigQpCount(const UDMAQpConfig& config);
 

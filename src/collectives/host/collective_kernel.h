@@ -11,10 +11,12 @@
 #define TILEXR_COLLECTIVES_HOST_COLLECTIVE_KERNEL_H
 
 #include <cstdint>
+#include <limits>
 
 #include "acl/acl_base.h"
 #include "collective_launcher.h"
 #include "tilexr_types.h"
+#include "alltoall_a5_common.h"
 
 namespace TileXRCollectives {
 namespace Host {
@@ -38,11 +40,31 @@ struct CollectiveLaunchAttrs {
     int root = 0;
 };
 
+inline bool ComputeA5SimtLocalMemorySize(int64_t totalUbBytes,
+    uint32_t *localMemorySize)
+{
+    constexpr uint32_t kSimtDCacheBytes = 64U * 1024U;
+    constexpr uint32_t kMinDynamicUbBytes = 64U * 1024U;
+    if (localMemorySize == nullptr ||
+        totalUbBytes <= static_cast<int64_t>(
+            kSimtDCacheBytes + kMinDynamicUbBytes) ||
+        totalUbBytes - kSimtDCacheBytes >
+            static_cast<int64_t>(std::numeric_limits<uint32_t>::max())) {
+        return false;
+    }
+    *localMemorySize =
+        static_cast<uint32_t>(totalUbBytes - kSimtDCacheBytes);
+    return true;
+}
+
 int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
                            void *sendBuf, void *recvBuf, int64_t kernelCount,
                            TileXR::TileXRDataType dataType, uint32_t blockDim,
                            aclrtStream stream,
                            CollectiveLaunchAttrs attrs = CollectiveLaunchAttrs {});
+
+int LaunchA5AllToAllKernel(uint32_t rankSize,
+    const TileXRGrouped::KernelArgs &args, aclrtStream stream);
 
 } // namespace Host
 } // namespace TileXRCollectives

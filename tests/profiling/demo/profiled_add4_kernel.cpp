@@ -5,9 +5,7 @@ namespace {
 
 constexpr uint32_t kElementsPerCore = 2048U;
 constexpr uint32_t kRecordCount = 20U;
-constexpr uint32_t kProfileFlushRecords = 24U;
 constexpr uint32_t kTileBytes = kElementsPerCore * sizeof(float);
-constexpr uint32_t kProfileFlushBytes = kProfileFlushRecords * sizeof(uint64_t);
 
 constexpr uint32_t kEventTotalBegin = 1U;
 constexpr uint32_t kEventTotalEnd = 2U;
@@ -67,13 +65,11 @@ extern "C" __global__ __aicore__ void tilexr_profiled_add4_kernel(
     AscendC::TBuf<AscendC::QuePosition::VECCALC> input2Buf;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> input3Buf;
     AscendC::TBuf<AscendC::QuePosition::VECCALC> outputBuf;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> profileFlushBuf;
     pipe.InitBuffer(input0Buf, kTileBytes);
     pipe.InitBuffer(input1Buf, kTileBytes);
     pipe.InitBuffer(input2Buf, kTileBytes);
     pipe.InitBuffer(input3Buf, kTileBytes);
     pipe.InitBuffer(outputBuf, kTileBytes);
-    pipe.InitBuffer(profileFlushBuf, kProfileFlushBytes);
     auto input0Local = input0Buf.Get<float>();
     auto input1Local = input1Buf.Get<float>();
     auto input2Local = input2Buf.Get<float>();
@@ -129,5 +125,5 @@ extern "C" __global__ __aicore__ void tilexr_profiled_add4_kernel(
     tilexrProfiler.RecordMarker<18U, kEventCopyOutEnd>();
     tilexrProfiler.RecordMarker<19U, kEventTotalEnd>();
 
-    tilexrProfiler.Flush(commArgsGM, profileFlushBuf.Get<uint64_t>());
+    tilexrProfiler.Flush(commArgsGM);
 }

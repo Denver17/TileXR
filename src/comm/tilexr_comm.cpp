@@ -261,7 +261,6 @@ int TileXRComm::FinalizeProfiling()
     if (!profilingConfig_.enabled || profilingFinalized_) {
         return TILEXR_SUCCESS;
     }
-    profilingFinalized_ = true;
     aclError ret = aclrtSynchronizeDevice();
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR profiling device synchronization failed: " << ret;
@@ -317,6 +316,7 @@ int TileXRComm::FinalizeProfiling()
     }
     TILEXR_LOG(INFO) << "TileXR profiling records written to "
                      << profilingConfig_.recordsPath;
+    profilingFinalized_ = true;
     return TILEXR_SUCCESS;
 }
 
@@ -734,6 +734,11 @@ int TileXRComm::GetUDMAQpCount(uint32_t *qpCount) const
     }
     *qpCount = udmaContext_->GetQpCount();
     return *qpCount == 0 ? TILEXR_ERROR_NOT_SUPPORT : TILEXR_SUCCESS;
+}
+
+bool TileXRComm::HasUDMAGroupedQpProfile() const
+{
+    return udmaContext_ != nullptr && udmaContext_->HasGroupedQpProfile();
 }
 
 int TileXRComm::QueryUDMAFullmesh(
@@ -1505,6 +1510,10 @@ int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t 
 
 TileXRComm::~TileXRComm()
 {
+    const int resourceRet = FinalizeInternalResource();
+    if (resourceRet != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR internal resource cleanup failed: " << resourceRet;
+    }
     {
         lock_guard<mutex> lock(g_mtx);
         if (g_localPeerMemAllocationMap.find(uid_) != g_localPeerMemAllocationMap.end()) {
@@ -1512,7 +1521,10 @@ TileXRComm::~TileXRComm()
         }
     }
     if (udmaContext_ != nullptr) {
-        udmaContext_->Shutdown();
+        const int udmaRet = udmaContext_->Shutdown();
+        if (udmaRet != TILEXR_SUCCESS) {
+            TILEXR_LOG(ERROR) << "TileXR UDMA fallback cleanup failed: " << udmaRet;
+        }
         udmaContext_.reset();
     }
     if (ipcMemInited_) {
@@ -1590,6 +1602,99 @@ CommArgs* TileXRComm::GetCommArgs()
 int64_t TileXRComm::NextMagic()
 {
     return magic_.fetch_add(1);
+}
+
+int TileXRComm::GetInternalResource(void **resource) const
+{
+    if (resource == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *resource = internalResource_;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::AttachInternalResource(void *resource,
+    TileXRInternalResourceDestroyFn destroy)
+{
+    if (resource == nullptr || destroy == nullptr || internalResource_ != nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    internalResource_ = resource;
+    internalResourceDestroy_ = destroy;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::DetachInternalResource(void *resource)
+{
+    if (resource == nullptr || resource != internalResource_) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    internalResource_ = nullptr;
+    internalResourceDestroy_ = nullptr;
+    return TILEXR_SUCCESS;
+}
+
+int TileXRComm::FinalizeInternalResource()
+{
+    std::lock_guard<std::mutex> lock(internalResourceMutex_);
+    if (internalResource_ == nullptr) {
+        return TILEXR_SUCCESS;
+    }
+    if (internalResourceDestroy_ == nullptr) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    const int ret = internalResourceDestroy_(this, internalResource_);
+    if (ret == TILEXR_SUCCESS) {
+        internalResource_ = nullptr;
+        internalResourceDestroy_ = nullptr;
+    }
+    return ret;
+}
+
+int TileXRComm::FinalizeUDMA()
+{
+    if (udmaContext_ == nullptr) {
+        return TILEXR_SUCCESS;
+    }
+    const int ret = udmaContext_->Shutdown();
+    if (ret == TILEXR_SUCCESS) {
+        udmaContext_.reset();
+    }
+    return ret;
+}
+
+int TileXRComm::AgreeInternalStatus(int localStatus) const
+{
+    if (rankSize_ <= 0 || rankSize_ > TILEXR_MAX_RANK_SIZE) {
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    if (socketExchange_ == nullptr) {
+        return localStatus;
+    }
+    int32_t local = static_cast<int32_t>(localStatus);
+    std::vector<int32_t> allStatus(static_cast<size_t>(rankSize_),
+        TILEXR_ERROR_INTERNAL);
+    const int exchangeRet = socketExchange_->AllGather(
+        &local, 1, allStatus.data());
+    if (exchangeRet != TILEXR_SUCCESS) {
+        return exchangeRet;
+    }
+    for (int rank = 0; rank < rankSize_; ++rank) {
+        if (allStatus[rank] != TILEXR_SUCCESS) {
+            return static_cast<int>(allStatus[rank]);
+        }
+    }
+    return TILEXR_SUCCESS;
+}
+
+void TileXRComm::LockInternalResource()
+{
+    internalResourceMutex_.lock();
+}
+
+void TileXRComm::UnlockInternalResource()
+{
+    internalResourceMutex_.unlock();
 }
 
 std::string TileXRComm::PrintDFX()

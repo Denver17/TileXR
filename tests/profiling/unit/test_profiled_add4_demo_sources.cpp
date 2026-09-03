@@ -95,6 +95,13 @@ int main()
     Contains(headerPath, header, "tilexrProfilingEventIds_");
     Contains(headerPath, header, "void RecordMarker()");
     Contains(headerPath, header, "void Flush(");
+    Contains(headerPath, header, "class DirectProfilingWriter");
+    Contains(headerPath, header, "void RecordAt(");
+    Contains(headerPath, header, "recordCount_[0] = launchBase_ + cursor_");
+    Excludes(headerPath, header, "const uint32_t occupied = recordCount[0]");
+    Excludes(headerPath, header, "DataCopy");
+    Excludes(headerPath, header, "SetFlag");
+    Excludes(headerPath, header, "WaitFlag");
     Excludes(headerPath, header, "static uint64_t g_tilexrProfiling");
     Contains(commArgsPath, commArgs, "tilexrProfilingTimestampsGM");
     Contains(commArgsPath, commArgs, "tilexrProfilingEventIdsGM");

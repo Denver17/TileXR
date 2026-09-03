@@ -28,14 +28,17 @@ _STAGE_KEYS = frozenset(
         "name",
         "category",
         "parent",
+        "track",
         "critical",
         "begin",
         "end",
         "instant",
         "instances",
+        "instance_range",
     }
 )
 _INSTANCE_KEYS = frozenset({"begin", "end"})
+_INSTANCE_RANGE_KEYS = frozenset({"count", "begin", "end", "stride"})
 
 
 def _object(value: Any, where: str) -> Mapping[str, Any]:
@@ -194,18 +197,23 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
         parent = stage_obj.get("parent")
         if parent is not None:
             parent = _string(parent, f"{where}.parent")
+        track = stage_obj.get("track")
+        if track is not None:
+            track = _string(track, f"{where}.track")
 
         has_interval = "begin" in stage_obj or "end" in stage_obj
         has_instant = "instant" in stage_obj
         has_instances = "instances" in stage_obj
-        if sum((has_interval, has_instant, has_instances)) != 1:
+        has_instance_range = "instance_range" in stage_obj
+        if sum((has_interval, has_instant, has_instances, has_instance_range)) != 1:
             raise ProfilingInputError(
-                f"{where} must define exactly one of begin/end, instant, or instances"
+                f"{where} must define exactly one of begin/end, instant, instances, "
+                "or instance_range"
             )
         if has_interval:
             _required_keys(stage_obj, {"begin", "end"}, where)
             kind = "interval"
-        elif has_instances:
+        elif has_instances or has_instance_range:
             kind = "interval"
         else:
             kind = "instant"
@@ -242,6 +250,11 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
                     f"{where}.category"),
                 kind=kind,
                 critical=critical,
+                attributes=(
+                    {}
+                    if stage_rows[stage_id][0].get("track") is None
+                    else {"track": stage_rows[stage_id][0]["track"]}
+                ),
                 parent_stage_id=parent_id,
             )
         )
@@ -275,6 +288,25 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
                 _required_keys(instance, _INSTANCE_KEYS, instance_where)
                 begin = _uint32(instance["begin"], f"{instance_where}.begin")
                 end = _uint32(instance["end"], f"{instance_where}.end")
+                _append_event(events, event_ids, begin, stage_id, "begin", instance_id, source)
+                _append_event(events, event_ids, end, stage_id, "end", instance_id, source)
+            continue
+        if "instance_range" in stage_obj:
+            range_where = f"{where}.instance_range"
+            instance_range = _object(stage_obj["instance_range"], range_where)
+            _known_keys(instance_range, _INSTANCE_RANGE_KEYS, range_where)
+            _required_keys(instance_range, _INSTANCE_RANGE_KEYS, range_where)
+            count = _uint32(instance_range["count"], f"{range_where}.count")
+            begin_base = _uint32(instance_range["begin"], f"{range_where}.begin")
+            end_base = _uint32(instance_range["end"], f"{range_where}.end")
+            stride = _uint32(instance_range["stride"], f"{range_where}.stride")
+            if count > MAX_EVENTS // 2:
+                raise ProfilingInputError(f"{range_where}.count exceeds event capacity")
+            for instance_id in range(count):
+                begin = begin_base + instance_id * stride
+                end = end_base + instance_id * stride
+                if begin > UINT32_MAX or end > UINT32_MAX:
+                    raise ProfilingInputError(f"{range_where} event ID exceeds uint32")
                 _append_event(events, event_ids, begin, stage_id, "begin", instance_id, source)
                 _append_event(events, event_ids, end, stage_id, "end", instance_id, source)
             continue

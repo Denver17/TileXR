@@ -1,3 +1,4 @@
+#include <cstddef>
 #include <cstdint>
 #include <iostream>
 #include <limits>
@@ -7,6 +8,13 @@
 namespace {
 
 int g_failures = 0;
+
+static_assert(offsetof(TileXR::TileXRUDMAProfileView, infoDev) == 16U,
+    "TileXRUDMAProfileView pointer layout changed");
+static_assert(sizeof(TileXR::TileXRUDMAProfileView) == 40U,
+    "TileXRUDMAProfileView ABI changed");
+static_assert(offsetof(TileXR::TileXRUDMAProfileDesc, reserved) == 12U,
+    "TileXRUDMAProfileDesc reserved field layout changed");
 
 #define CHECK_TRUE(expr) \
     do { \
@@ -119,6 +127,10 @@ void TestProfileContractAgreement()
     CHECK_TRUE(TileXR::UDMAProfileContractsEqual(desc, peer));
     peer.qpBindings[1].remoteRegion = 3;
     CHECK_TRUE(!TileXR::UDMAProfileContractsEqual(desc, peer));
+    peer = desc;
+    peer.reserved = static_cast<uint32_t>(
+        TileXR::TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL);
+    CHECK_TRUE(!TileXR::UDMAProfileContractsEqual(desc, peer));
 }
 
 void TestProfileRegistryAddressing()
@@ -135,12 +147,41 @@ void TestProfileRegistryAddressing()
     registry.regions[rankOneGate].bytes = 4096;
 
     CHECK_TRUE(TileXR::UDMAProfileRegistryValid(&registry, 2, 4, 3));
+    registry.reserved = 99U;
+    CHECK_TRUE(!TileXR::UDMAProfileRegistryValid(&registry, 2, 4, 3));
+    registry.reserved = 0U;
     CHECK_TRUE(TileXR::UDMAProfileRegionContains(&registry, 1, 1, 1024, 3072));
     CHECK_TRUE(!TileXR::UDMAProfileRegionContains(&registry, 1, 1, 1024, 3073));
     CHECK_TRUE(!TileXR::UDMAProfileRegionContains(&registry, 2, 1, 0, 1));
     CHECK_EQ(reinterpret_cast<uintptr_t>(
                  TileXR::UDMAProfileRemoteAddr(&registry, 1, 1, 64)),
              static_cast<uintptr_t>(0x800040));
+}
+
+void TestGroupedProfileClassification()
+{
+    TileXR::TileXRUDMAProfileDesc desc {};
+    desc.reserved = static_cast<uint32_t>(
+        TileXR::TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL);
+    desc.regionCount = 1;
+    desc.qpBindingCount = 39;
+    desc.regions[0].base = reinterpret_cast<GM_ADDR>(0x100000);
+    desc.regions[0].bytes = 4096;
+    CHECK_TRUE(TileXR::UDMAProfileDescValid(&desc, 39));
+    CHECK_TRUE(!TileXR::UDMAProfileDescValid(&desc, 32));
+
+    TileXR::TileXRUDMAProfileRegistry registry {};
+    registry.reserved = static_cast<uint32_t>(
+        TileXR::TileXRUDMAProfileKind::A5_GROUPED_ALLTOALL);
+    registry.rankSize = 8;
+    registry.regionCount = 1;
+    registry.qpCount = 39;
+    CHECK_TRUE(TileXR::UDMAGroupedAllToAllProfileValid(&registry, 8));
+    registry.qpBindings[38].remoteRegion = 1;
+    CHECK_TRUE(!TileXR::UDMAGroupedAllToAllProfileValid(&registry, 8));
+    registry.qpBindings[38].remoteRegion = 0;
+    registry.reserved = 0U;
+    CHECK_TRUE(!TileXR::UDMAGroupedAllToAllProfileValid(&registry, 8));
 }
 
 } // namespace
@@ -151,6 +192,7 @@ int main()
     TestProfileDescriptorValidation();
     TestProfileContractAgreement();
     TestProfileRegistryAddressing();
+    TestGroupedProfileClassification();
     if (g_failures != 0) {
         std::cerr << g_failures << " registry checks failed" << std::endl;
         return 1;

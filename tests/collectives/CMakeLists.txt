@@ -100,6 +100,7 @@ add_executable(test_collective_host_utils
 
 target_include_directories(test_collective_host_utils PRIVATE
     ${TILEXR_ROOT}/src/collectives/host
+    ${TILEXR_ROOT}/src/collectives/kernels
 )
 
 add_executable(test_tilexr_comm_next_magic
@@ -110,8 +111,17 @@ add_executable(test_prepare_host_launch_context
     unit/test_prepare_host_launch_context.cpp
 )
 
+add_executable(test_alltoall_a5_candidate
+    unit/test_alltoall_a5_candidate.cpp
+)
+
+target_include_directories(test_alltoall_a5_candidate PRIVATE
+    ${TILEXR_ROOT}/src/collectives/host
+)
+
 target_include_directories(test_prepare_host_launch_context PRIVATE
     ${TILEXR_ROOT}/src/collectives/host
+    ${TILEXR_ROOT}/src/collectives/kernels
 )
 
 if(TILEXR_COLLECTIVES_IN_TREE)
@@ -247,8 +257,15 @@ target_link_libraries(test_collective_host_utils
 target_link_libraries(test_tilexr_comm_next_magic
     ${TILEXR_COMM_TEST_TARGET}
 )
+target_include_directories(test_tilexr_comm_next_magic PRIVATE
+    ${TILEXR_ROOT}/src/comm
+)
 
 target_link_libraries(test_prepare_host_launch_context
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+)
+
+target_link_libraries(test_alltoall_a5_candidate
     ${TILEXR_COLLECTIVES_TEST_TARGET}
 )
 
@@ -261,7 +278,8 @@ foreach(_tilexr_collectives_link_target
         test_tilexr_collectives_uninitialized_comm
         test_collective_host_utils
         test_tilexr_comm_next_magic
-        test_prepare_host_launch_context)
+        test_prepare_host_launch_context
+        test_alltoall_a5_candidate)
     TileXRAddAscendRpathLink(${_tilexr_collectives_link_target})
 endforeach()
 
@@ -273,7 +291,13 @@ add_test(NAME test_tilexr_collectives_uninitialized_comm COMMAND test_tilexr_col
 add_test(NAME test_collective_host_utils COMMAND test_collective_host_utils)
 add_test(NAME test_tilexr_comm_next_magic COMMAND test_tilexr_comm_next_magic)
 add_test(NAME test_prepare_host_launch_context COMMAND test_prepare_host_launch_context)
+add_test(NAME test_alltoall_a5_candidate COMMAND test_alltoall_a5_candidate)
 if(Python3_Interpreter_FOUND)
+    add_test(
+        NAME test_alltoall_a5_profiling_mapping
+        COMMAND ${Python3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_alltoall_a5_profiling_mapping.py
+    )
     add_test(
         NAME test_vllm_collectives_patch
         COMMAND ${Python3_EXECUTABLE}
@@ -293,6 +317,7 @@ install(TARGETS
     test_collective_host_utils
     test_tilexr_comm_next_magic
     test_prepare_host_launch_context
+    test_alltoall_a5_candidate
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
@@ -306,3 +331,12 @@ install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/tilexr_collectives.mapping.json
     DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/collectives
 )
+
+add_executable(test_tilexr_alltoall_a5_layout
+        unit/test_alltoall_a5_layout.cpp)
+target_compile_features(test_tilexr_alltoall_a5_layout PRIVATE cxx_std_14)
+target_include_directories(test_tilexr_alltoall_a5_layout PRIVATE
+        ${TILEXR_ROOT}/src/collectives/kernels
+        ${TILEXR_ROOT}/src/include)
+add_test(NAME test_tilexr_alltoall_a5_layout
+        COMMAND test_tilexr_alltoall_a5_layout)

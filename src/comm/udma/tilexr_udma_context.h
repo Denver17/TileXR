@@ -56,7 +56,7 @@ public:
     TileXRUDMAContext& operator=(const TileXRUDMAContext&) = delete;
 
     int Init(const TileXRUDMAContextOptions& options);
-    void Shutdown();
+    int Shutdown();
 
     bool IsAvailable() const;
     TileXRUDMACommArgsState GetCommArgsState() const;
@@ -70,6 +70,7 @@ public:
     GM_ADDR GetRegistryDev() const;
     const TileXRUDMARegistry* GetRegistryHost() const;
     uint32_t GetQpCount() const;
+    bool HasGroupedQpProfile() const;
     int QueryFullmesh(TileXRUDMAFullmeshHostView* view) const;
 
 private:
@@ -111,6 +112,7 @@ private:
     std::map<TileXRUDMAProfileHandle, std::unique_ptr<ProfileRecord>> profiles_;
     TileXRUDMAProfileHandle nextProfileHandle_ = 1;
     std::unique_ptr<TileXRUDMATransport> transport_;
+    bool shutdownStarted_ = false;
 };
 
 } // namespace TileXR

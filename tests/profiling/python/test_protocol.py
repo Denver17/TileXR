@@ -34,6 +34,52 @@ class ProfilingMappingTests(unittest.TestCase):
 
         self.assertEqual([event.instance_id for event in events], [0, 0, 1, 1])
 
+    def test_instance_range_generates_stable_instance_ids(self):
+        document = mapping_document()
+        document["stages"][2] = {
+            "name": "payload_transfer",
+            "category": "copy",
+            "parent": "kernel_total",
+            "instance_range": {"count": 3, "begin": 20, "end": 21, "stride": 2},
+        }
+
+        mapping = parse_mapping_document(document)
+        events = [event for event in mapping.events if event.stage_id == 2]
+
+        self.assertEqual(
+            [(event.id, event.instance_id, event.edge) for event in events],
+            [
+                (20, 0, "begin"), (21, 0, "end"),
+                (22, 1, "begin"), (23, 1, "end"),
+                (24, 2, "begin"), (25, 2, "end"),
+            ],
+        )
+
+    def test_stage_track_is_preserved_as_renderer_metadata(self):
+        document = mapping_document()
+        document["stages"][1]["track"] = "send"
+
+        mapping = parse_mapping_document(document)
+
+        self.assertEqual(mapping.stages[1].attributes, {"track": "send"})
+
+    def test_rejects_instance_range_uint32_overflow(self):
+        document = mapping_document()
+        document["stages"][2] = {
+            "name": "payload_transfer",
+            "category": "copy",
+            "parent": "kernel_total",
+            "instance_range": {
+                "count": 2,
+                "begin": (1 << 32) - 2,
+                "end": (1 << 32) - 1,
+                "stride": 2,
+            },
+        }
+
+        with self.assertRaisesRegex(ProfilingInputError, "exceeds uint32"):
+            parse_mapping_document(document)
+
     def test_rejects_unknown_structural_field(self):
         document = mapping_document()
         document["prodcer"] = "typo"

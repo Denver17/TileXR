@@ -23,6 +23,14 @@ namespace TileXR {
 namespace {
 
 constexpr int TILEXR_HCCP_RA_ALREADY_INITIALIZED = 328002;
+constexpr int TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED = 228104;
+
+bool QpUnimportConsumesHostHandle(int ret)
+{
+    // The b131 client frees rem_qp_handle even when the service rejects the
+    // unimport opcode. The server-side QP is reclaimed with the RA context.
+    return ret == 0 || ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+}
 
 bool AttachExistingRaEnabled()
 {
@@ -165,7 +173,10 @@ TileXRUDMATransport::TileXRUDMATransport() = default;
 
 TileXRUDMATransport::~TileXRUDMATransport()
 {
-    Shutdown();
+    const int ret = Shutdown();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA transport fallback cleanup failed: " << ret;
+    }
 }
 
 int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
@@ -181,6 +192,7 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     options_ = options;
+    shutdownComplete_ = false;
     explicitConfig_ = options_.qpConfig.explicitConfig;
     sharedQp_ = options_.qpConfig.sharedQp;
     qpCount_ = UDMAQpConfigQpCount(options_.qpConfig);
@@ -196,6 +208,7 @@ int TileXRUDMATransport::Init(const TileXRUDMATransportOptions& options)
         }
         return TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    groupedQpProfile_ = IsUDMAGroupedQpProfile(options_.qpConfig);
 
     int localStatus = loader_.Load() == TILEXR_HCCP_LOADER_SUCCESS
         ? TILEXR_SUCCESS : TILEXR_ERROR_NOT_FOUND;
@@ -683,7 +696,9 @@ int TileXRUDMATransport::BuildExplicitRoutes(const std::vector<DevEidInfo>& devE
         ? TILEXR_SUCCESS : TILEXR_ERROR_NOT_FOUND;
     bool needsTopology = !sharedQp_ && options_.localRankSize > 1;
     for (const auto& rule : options_.qpConfig.routes) {
-        needsTopology = needsTopology || rule.selector == UDMAQpRouteSelector::TOPOLOGY;
+        needsTopology = needsTopology ||
+            rule.selector == UDMAQpRouteSelector::TOPOLOGY ||
+            rule.selector == UDMAQpRouteSelector::LOCAL_PEER_SLOT;
     }
     if (localStatus == TILEXR_SUCCESS && needsTopology &&
         !LoadUDMATopologyFromPath(rootInfo.topoPath, topoEdges, &error)) {
@@ -722,8 +737,14 @@ int TileXRUDMATransport::BuildExplicitRoutes(const std::vector<DevEidInfo>& devE
             const auto& rule = options_.qpConfig.routes[qpIdx];
             uint32_t localEid = UINT32_MAX;
             bool resolved = false;
-            if ((!sharedQp_ && sameNode) ||
-                rule.selector == UDMAQpRouteSelector::TOPOLOGY) {
+            if (rule.selector == UDMAQpRouteSelector::LOCAL_PEER_SLOT) {
+                const int localPeer = UDMAGroupedLocalPeerFromSlot(
+                    options_.rank, options_.rankSize, rule.value,
+                    static_cast<uint32_t>(options_.localRankSize));
+                resolved = localPeer >= 0 && ResolveUDMATopologyEid(
+                    rootInfo, topoEdges, localId, allLocalIds[localPeer], localEid);
+            } else if ((!sharedQp_ && sameNode) ||
+                       rule.selector == UDMAQpRouteSelector::TOPOLOGY) {
                 resolved = ResolveUDMATopologyEid(
                     rootInfo, topoEdges, localId, allLocalIds[peer], localEid);
             } else {
@@ -772,8 +793,17 @@ int TileXRUDMATransport::BuildExplicitRoutes(const std::vector<DevEidInfo>& devE
             continue;
         }
         for (uint32_t qpIdx = 0; qpIdx < qpCount_; ++qpIdx) {
+            uint32_t remoteQpIdx = qpIdx;
+            remoteQpIdx = UDMARemoteQpIndex(groupedQpProfile_,
+                options_.rank, peer, options_.rankSize, qpIdx,
+                qpCount_, TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT / 2U,
+                static_cast<uint32_t>(options_.localRankSize));
+            if (remoteQpIdx >= qpCount_ &&
+                qpIdx >= TILEXR_UDMA_GROUPED_DIRECT_QP_BASE) {
+                remoteQpIdx = 0U;
+            }
             const uint32_t remoteEid = allRoutes[static_cast<size_t>(peer) * entryCount +
-                RouteIndex(options_.rank, qpIdx)];
+                RouteIndex(options_.rank, remoteQpIdx)];
             if (remoteEid == UINT32_MAX || remoteEid >= eidCount_) {
                 localStatus = TILEXR_ERROR_NOT_FOUND;
                 break;
@@ -889,12 +919,17 @@ int TileXRUDMATransport::AllocDeviceScalar(void** ptr, size_t bytes) const
     return TILEXR_SUCCESS;
 }
 
-void TileXRUDMATransport::FreeDeviceScalar(void*& ptr) const
+int TileXRUDMATransport::FreeDeviceScalar(void*& ptr) const
 {
-    if (ptr != nullptr) {
-        aclrtFree(ptr);
-        ptr = nullptr;
+    if (ptr == nullptr) {
+        return TILEXR_SUCCESS;
     }
+    const aclError ret = aclrtFree(ptr);
+    if (ret != ACL_SUCCESS) {
+        return TILEXR_ERROR_INTERNAL;
+    }
+    ptr = nullptr;
+    return TILEXR_SUCCESS;
 }
 
 int TileXRUDMATransport::CreateQueues()
@@ -1545,7 +1580,21 @@ int TileXRUDMATransport::ImportSharedQueues()
             if (peer == options_.rank) {
                 continue;
             }
-            const size_t remoteIndex = static_cast<size_t>(peer) * qpCount_ + qpIdx;
+            uint32_t remoteQpIdx = qpIdx;
+            if (groupedQpProfile_) {
+                remoteQpIdx = UDMARemoteQpIndex(true,
+                    options_.rank, peer, options_.rankSize, qpIdx,
+                    qpCount_, TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT / 2U,
+                    static_cast<uint32_t>(options_.localRankSize));
+                if (remoteQpIdx >= qpCount_) {
+                    if (qpIdx >= TILEXR_UDMA_GROUPED_DIRECT_QP_BASE) {
+                        continue;
+                    }
+                    return TILEXR_ERROR_INTERNAL;
+                }
+            }
+            const size_t remoteIndex =
+                static_cast<size_t>(peer) * qpCount_ + remoteQpIdx;
             QpImportInfoT importInfo = allImports[remoteIndex];
             importInfo.in.key = allKeys[remoteIndex];
             ret = loader_.RaCtxQpImport(
@@ -2164,6 +2213,15 @@ int TileXRUDMATransport::ExchangeAndImportMemory(RegistrationState& registration
         }
         for (uint32_t qpIdx = 0; qpIdx < qpCount_; ++qpIdx) {
             const size_t imageIndex = RouteIndex(peer, qpIdx);
+            if (groupedQpProfile_ &&
+                qpIdx >= TILEXR_UDMA_GROUPED_DIRECT_QP_BASE &&
+                UDMAGroupedDirectQpIndex(
+                    options_.rank, peer, options_.rankSize, qpCount_,
+                    static_cast<uint32_t>(options_.localRankSize)) != qpIdx) {
+                registration.memoryImage[imageIndex] =
+                    registration.memoryImage[RouteIndex(peer, 0U)];
+                continue;
+            }
             const uint32_t localEid = explicitConfig_
                 ? localRouteByPeerQp_[imageIndex] : peerLocalEid_[peer];
             const uint32_t remoteEid = explicitConfig_
@@ -2722,20 +2780,52 @@ int TileXRUDMATransport::CleanupFullmeshRegistration(
 int TileXRUDMATransport::CleanupRegistration(RegistrationState& registration)
 {
     registration.cleanupPending = true;
-    int firstError = CleanupFullmeshRegistration(registration);
+    registration.fullmeshReady = false;
+
+    int localStatus = CleanupRemoteImports(registration, true);
     const int remoteRet = CleanupRemoteImports(registration, false);
-    if (firstError == TILEXR_SUCCESS && remoteRet != TILEXR_SUCCESS) {
-        firstError = remoteRet;
+    if (localStatus == TILEXR_SUCCESS && remoteRet != TILEXR_SUCCESS) {
+        localStatus = remoteRet;
     }
-    for (auto& region : registration.regions) {
-        const int localRet = CleanupLocalRegistrations(region.localRegistrations);
-        if (firstError == TILEXR_SUCCESS && localRet != TILEXR_SUCCESS) {
-            firstError = localRet;
+    int agreedStatus = AgreeRegistrationStatus(localStatus);
+    int firstError = agreedStatus;
+
+    localStatus = firstError;
+    if (firstError == TILEXR_SUCCESS) {
+        for (auto& region : registration.regions) {
+            int cleanupRet = CleanupLocalRegistrations(
+                region.fullmeshLocalRegistrations);
+            if (localStatus == TILEXR_SUCCESS &&
+                cleanupRet != TILEXR_SUCCESS) {
+                localStatus = cleanupRet;
+            }
+            cleanupRet = CleanupLocalRegistrations(
+                region.localRegistrations);
+            if (localStatus == TILEXR_SUCCESS &&
+                cleanupRet != TILEXR_SUCCESS) {
+                localStatus = cleanupRet;
+            }
         }
     }
-    const int infoRet = FreeDeviceInfo(registration.infoDev);
-    if (firstError == TILEXR_SUCCESS && infoRet != TILEXR_SUCCESS) {
-        firstError = infoRet;
+    agreedStatus = AgreeRegistrationStatus(localStatus);
+    if (firstError == TILEXR_SUCCESS && agreedStatus != TILEXR_SUCCESS) {
+        firstError = agreedStatus;
+    }
+
+    localStatus = firstError;
+    if (firstError == TILEXR_SUCCESS) {
+        localStatus = FreeDeviceInfo(registration.fullmeshInfoDev);
+        const int infoRet = FreeDeviceInfo(registration.infoDev);
+        if (localStatus == TILEXR_SUCCESS && infoRet != TILEXR_SUCCESS) {
+            localStatus = infoRet;
+        }
+    }
+    agreedStatus = AgreeRegistrationStatus(localStatus);
+    if (firstError == TILEXR_SUCCESS && agreedStatus != TILEXR_SUCCESS) {
+        firstError = agreedStatus;
+    }
+    if (firstError != TILEXR_SUCCESS) {
+        return firstError;
     }
     const bool resourcesClean = std::all_of(registration.regions.begin(), registration.regions.end(),
         [](const RegisteredRegionState& region) {
@@ -2757,13 +2847,15 @@ int TileXRUDMATransport::CleanupRegistration(RegistrationState& registration)
         registration.fullmeshReady = false;
         registration.cleanupPending = false;
     }
-    return firstError;
+    return TILEXR_SUCCESS;
 }
 
 int TileXRUDMATransport::CleanupRegistrationPtr(std::unique_ptr<RegistrationState>& registration)
 {
     if (registration == nullptr) {
-        return TILEXR_SUCCESS;
+        int ret = AgreeRegistrationStatus(TILEXR_SUCCESS);
+        ret = AgreeRegistrationStatus(ret);
+        return AgreeRegistrationStatus(ret);
     }
     const int ret = CleanupRegistration(*registration);
     if (ret == TILEXR_SUCCESS && registration->regions.empty() &&
@@ -2811,8 +2903,14 @@ int TileXRUDMATransport::CleanupAllMemory()
 int TileXRUDMATransport::CleanupProfile(TileXRUDMAProfileHandle handle)
 {
     const auto it = profiles_.find(handle);
-    if (handle == 0 || it == profiles_.end()) {
+    if (handle == 0) {
         return TILEXR_ERROR_NOT_FOUND;
+    }
+    if (it == profiles_.end()) {
+        int ret = AgreeRegistrationStatus(TILEXR_SUCCESS);
+        ret = AgreeRegistrationStatus(ret);
+        ret = AgreeRegistrationStatus(ret);
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_NOT_FOUND : ret;
     }
     const int ret = CleanupRegistration(*it->second);
     if (ret == TILEXR_SUCCESS && it->second->regions.empty() &&
@@ -2873,24 +2971,298 @@ int TileXRUDMATransport::UnregisterMemory(GM_ADDR localPtr)
 int TileXRUDMATransport::CleanupQueues()
 {
     int firstError = TILEXR_SUCCESS;
+    bool unimportUnsupported = false;
+    const auto cleanupScalars = [this](auto& state) {
+        int ret = FreeDeviceScalar(state.cqPiAddr);
+        const int cqCiRet = FreeDeviceScalar(state.cqCiAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = cqCiRet;
+        }
+        const int sqPiRet = FreeDeviceScalar(state.sqPiAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = sqPiRet;
+        }
+        const int sqCiRet = FreeDeviceScalar(state.sqCiAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = sqCiRet;
+        }
+        const int wqeRet = FreeDeviceScalar(state.wqeCntAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = wqeRet;
+        }
+        const int amoRet = FreeDeviceScalar(state.amoAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = amoRet;
+        }
+        return ret;
+    };
+    for (auto& statePtr : peerQpStates_) {
+        if (statePtr == nullptr || statePtr->remoteQpHandle == nullptr) {
+            continue;
+        }
+        if (statePtr->ctxHandle == nullptr) {
+            firstError = TILEXR_ERROR_INTERNAL;
+            continue;
+        }
+        const int ret = loader_.RaCtxQpUnimport(
+            statePtr->ctxHandle, statePtr->remoteQpHandle);
+        if (QpUnimportConsumesHostHandle(ret)) {
+            statePtr->remoteQpHandle = nullptr;
+            unimportUnsupported = unimportUnsupported ||
+                ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+        } else if (firstError == TILEXR_SUCCESS) {
+            firstError = TILEXR_ERROR_INTERNAL;
+        }
+    }
+    for (auto& stateEntry : states_) {
+        auto& state = stateEntry.second;
+        for (void*& remoteQp : state.remoteQpHandles) {
+            if (remoteQp == nullptr) {
+                continue;
+            }
+            if (state.ctxHandle == nullptr) {
+                firstError = TILEXR_ERROR_INTERNAL;
+                continue;
+            }
+            const int ret = loader_.RaCtxQpUnimport(
+                state.ctxHandle, remoteQp);
+            if (QpUnimportConsumesHostHandle(ret)) {
+                remoteQp = nullptr;
+                unimportUnsupported = unimportUnsupported ||
+                    ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+    }
+    for (auto& statePtr : fullmeshQpStates_) {
+        if (statePtr == nullptr || statePtr->remoteQpHandle == nullptr) {
+            continue;
+        }
+        if (statePtr->ctxHandle == nullptr) {
+            firstError = TILEXR_ERROR_INTERNAL;
+            continue;
+        }
+        const int ret = loader_.RaCtxQpUnimport(
+            statePtr->ctxHandle, statePtr->remoteQpHandle);
+        if (QpUnimportConsumesHostHandle(ret)) {
+            statePtr->remoteQpHandle = nullptr;
+            unimportUnsupported = unimportUnsupported ||
+                ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+        } else if (firstError == TILEXR_SUCCESS) {
+            firstError = TILEXR_ERROR_INTERNAL;
+        }
+    }
+    std::map<std::pair<void*, void*>, int> sharedUnimportResults;
     for (auto& statePtr : sharedQpStates_) {
         if (statePtr == nullptr) {
             continue;
         }
         auto& state = *statePtr;
-        for (void*& remoteQp : state.remoteQpHandles) {
-            if (remoteQp == nullptr || state.ctxHandle == nullptr) {
+        for (size_t remoteIndex = 0U;
+             remoteIndex < state.remoteQpHandles.size(); ++remoteIndex) {
+            void*& remoteQp = state.remoteQpHandles[remoteIndex];
+            if (remoteQp == nullptr) {
                 continue;
             }
-            const int ret = loader_.RaCtxQpUnimport(state.ctxHandle, remoteQp);
-            if (ret == 0) {
+            if (state.ctxHandle == nullptr) {
+                firstError = TILEXR_ERROR_INTERNAL;
+                continue;
+            }
+            const auto key = std::make_pair(state.ctxHandle, remoteQp);
+            auto result = sharedUnimportResults.find(key);
+            const int ret = result == sharedUnimportResults.end() ?
+                loader_.RaCtxQpUnimport(state.ctxHandle, remoteQp) :
+                result->second;
+            if (result == sharedUnimportResults.end()) {
+                sharedUnimportResults.emplace(key, ret);
+            }
+            if (QpUnimportConsumesHostHandle(ret)) {
                 remoteQp = nullptr;
+                unimportUnsupported = unimportUnsupported ||
+                    ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR shared QP unimport failed, qp "
+                                  << state.qpIdx << ", remote " << remoteIndex
+                                  << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
+            }
+        }
+    }
+    if (unimportUnsupported) {
+        TILEXR_LOG(WARN)
+            << "RaCtxQpUnimport is unsupported by the current HCCP service; "
+            << "the b131 client consumed the Host handles and cleanup will "
+            << "continue through RA context teardown";
+    }
+    const int sharedCleanupAgreement = AgreeInitStatus(firstError);
+    if (firstError == TILEXR_SUCCESS &&
+        sharedCleanupAgreement != TILEXR_SUCCESS) {
+        firstError = sharedCleanupAgreement;
+    }
+    if (sharedCleanupAgreement != TILEXR_SUCCESS) {
+        return sharedCleanupAgreement;
+    }
+
+    for (auto& statePtr : sharedQpStates_) {
+        if (statePtr == nullptr) {
+            continue;
+        }
+        auto& state = *statePtr;
+        const bool remoteClean = std::all_of(
+            state.remoteQpHandles.begin(), state.remoteQpHandles.end(),
+            [](void* handle) { return handle == nullptr; });
+        if (sharedCleanupAgreement == TILEXR_SUCCESS &&
+            remoteClean && state.qpHandle != nullptr) {
+            const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
+            if (ret == 0) {
+                state.qpHandle = nullptr;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR shared QP destroy failed, qp "
+                                  << state.qpIdx << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
+            }
+        }
+        if (sharedCleanupAgreement == TILEXR_SUCCESS &&
+            remoteClean && state.qpHandle == nullptr &&
+            state.cqHandle != nullptr && state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxCqDestroy(state.ctxHandle, state.cqHandle);
+            if (ret == 0) {
+                state.cqHandle = nullptr;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR shared CQ destroy failed, qp "
+                                  << state.qpIdx << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
+            }
+        }
+        if (sharedCleanupAgreement == TILEXR_SUCCESS &&
+            remoteClean && state.qpHandle == nullptr &&
+            state.cqHandle == nullptr && state.chanHandle != nullptr &&
+            state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxChanDestroy(state.ctxHandle, state.chanHandle);
+            if (ret == 0) {
+                state.chanHandle = nullptr;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR shared channel destroy failed, qp "
+                                  << state.qpIdx << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
+            }
+        }
+        const bool hardwareClean = sharedCleanupAgreement == TILEXR_SUCCESS &&
+            remoteClean && state.qpHandle == nullptr &&
+            state.cqHandle == nullptr && state.chanHandle == nullptr;
+        if (hardwareClean) {
+            const int ret = cleanupScalars(state);
+            if (ret == TILEXR_SUCCESS) {
+                statePtr.reset();
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = ret;
+            }
+        }
+    }
+    const bool sharedClean = std::all_of(sharedQpStates_.begin(),
+        sharedQpStates_.end(),
+        [](const std::unique_ptr<SharedQpState>& state) {
+            return state == nullptr;
+        });
+    if (firstError == TILEXR_SUCCESS && !sharedClean) {
+        firstError = TILEXR_ERROR_INTERNAL;
+    }
+    if (sharedClean) {
+        sharedQpStates_.clear();
+    }
+
+    for (auto& statePtr : peerQpStates_) {
+        if (statePtr == nullptr) {
+            continue;
+        }
+        auto& state = *statePtr;
+        if (state.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxQpUnimport(
+                state.ctxHandle, state.remoteQpHandle);
+            if (QpUnimportConsumesHostHandle(ret)) {
+                state.remoteQpHandle = nullptr;
+                unimportUnsupported = unimportUnsupported ||
+                    ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
             } else if (firstError == TILEXR_SUCCESS) {
                 firstError = TILEXR_ERROR_INTERNAL;
             }
         }
-        const bool remoteClean = std::all_of(
-            state.remoteQpHandles.begin(), state.remoteQpHandles.end(),
+        if (state.remoteQpHandle == nullptr && state.qpHandle != nullptr) {
+            const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
+            if (ret == 0) {
+                state.qpHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
+            state.cqHandle != nullptr && state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxCqDestroy(state.ctxHandle, state.cqHandle);
+            if (ret == 0) {
+                state.cqHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
+            state.cqHandle == nullptr && state.chanHandle != nullptr &&
+            state.ctxHandle != nullptr) {
+            const int ret = loader_.RaCtxChanDestroy(state.ctxHandle, state.chanHandle);
+            if (ret == 0) {
+                state.chanHandle = nullptr;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
+            state.cqHandle == nullptr && state.chanHandle == nullptr) {
+            const int ret = cleanupScalars(state);
+            if (ret == TILEXR_SUCCESS) {
+                statePtr.reset();
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = ret;
+            }
+        }
+    }
+    const bool peerClean = std::all_of(peerQpStates_.begin(),
+        peerQpStates_.end(),
+        [](const std::unique_ptr<PerPeerQpState>& state) {
+            return state == nullptr;
+        });
+    if (firstError == TILEXR_SUCCESS && !peerClean) {
+        firstError = TILEXR_ERROR_INTERNAL;
+    }
+    if (peerClean) {
+        peerQpStates_.clear();
+    }
+
+    for (auto stateIt = states_.begin(); stateIt != states_.end();) {
+        auto& state = stateIt->second;
+        for (void*& remoteQp : state.remoteQpHandles) {
+            if (remoteQp == nullptr || state.ctxHandle == nullptr) {
+                continue;
+            }
+            const int ret = loader_.RaCtxQpUnimport(
+                state.ctxHandle, remoteQp);
+            if (QpUnimportConsumesHostHandle(ret)) {
+                remoteQp = nullptr;
+                unimportUnsupported = unimportUnsupported ||
+                    ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+        const bool remoteClean = std::all_of(state.remoteQpHandles.begin(),
+            state.remoteQpHandles.end(),
             [](void* handle) { return handle == nullptr; });
         if (remoteClean && state.qpHandle != nullptr) {
             const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
@@ -2919,124 +3291,22 @@ int TileXRUDMATransport::CleanupQueues()
                 firstError = TILEXR_ERROR_INTERNAL;
             }
         }
-        const bool hardwareClean = remoteClean && state.qpHandle == nullptr &&
-            state.cqHandle == nullptr && state.chanHandle == nullptr;
-        if (hardwareClean) {
-            FreeDeviceScalar(state.cqPiAddr);
-            FreeDeviceScalar(state.cqCiAddr);
-            FreeDeviceScalar(state.sqPiAddr);
-            FreeDeviceScalar(state.sqCiAddr);
-            FreeDeviceScalar(state.wqeCntAddr);
-            FreeDeviceScalar(state.amoAddr);
-            statePtr.reset();
-        }
-    }
-    if (firstError == TILEXR_SUCCESS) {
-        sharedQpStates_.clear();
-    }
-
-    for (auto& statePtr : peerQpStates_) {
-        if (statePtr == nullptr) {
-            continue;
-        }
-        auto& state = *statePtr;
-        if (state.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
-            const int ret = loader_.RaCtxQpUnimport(state.ctxHandle, state.remoteQpHandle);
-            if (ret == 0) {
-                state.remoteQpHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        if (state.qpHandle != nullptr) {
-            const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
-            if (ret == 0) {
-                state.qpHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        if (state.cqHandle != nullptr && state.ctxHandle != nullptr) {
-            const int ret = loader_.RaCtxCqDestroy(state.ctxHandle, state.cqHandle);
-            if (ret == 0) {
-                state.cqHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        if (state.chanHandle != nullptr && state.ctxHandle != nullptr) {
-            const int ret = loader_.RaCtxChanDestroy(state.ctxHandle, state.chanHandle);
-            if (ret == 0) {
-                state.chanHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        FreeDeviceScalar(state.cqPiAddr);
-        FreeDeviceScalar(state.cqCiAddr);
-        FreeDeviceScalar(state.sqPiAddr);
-        FreeDeviceScalar(state.sqCiAddr);
-        FreeDeviceScalar(state.wqeCntAddr);
-        FreeDeviceScalar(state.amoAddr);
-        if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
-            state.cqHandle == nullptr && state.chanHandle == nullptr) {
-            statePtr.reset();
-        }
-    }
-    if (firstError == TILEXR_SUCCESS) {
-        peerQpStates_.clear();
-    }
-
-    for (auto stateIt = states_.begin(); stateIt != states_.end();) {
-        auto& state = stateIt->second;
-        for (void*& remoteQp : state.remoteQpHandles) {
-            if (remoteQp == nullptr || state.ctxHandle == nullptr) {
-                continue;
-            }
-            const int ret = loader_.RaCtxQpUnimport(state.ctxHandle, remoteQp);
-            if (ret == 0) {
-                remoteQp = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        if (state.qpHandle != nullptr) {
-            const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
-            if (ret == 0) {
-                state.qpHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        if (state.cqHandle != nullptr && state.ctxHandle != nullptr) {
-            const int ret = loader_.RaCtxCqDestroy(state.ctxHandle, state.cqHandle);
-            if (ret == 0) {
-                state.cqHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        if (state.chanHandle != nullptr && state.ctxHandle != nullptr) {
-            const int ret = loader_.RaCtxChanDestroy(state.ctxHandle, state.chanHandle);
-            if (ret == 0) {
-                state.chanHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
-            }
-        }
-        FreeDeviceScalar(state.cqPiAddr);
-        FreeDeviceScalar(state.cqCiAddr);
-        FreeDeviceScalar(state.sqPiAddr);
-        FreeDeviceScalar(state.sqCiAddr);
-        FreeDeviceScalar(state.wqeCntAddr);
-        FreeDeviceScalar(state.amoAddr);
-        const bool remoteClean = std::all_of(state.remoteQpHandles.begin(), state.remoteQpHandles.end(),
-            [](void* handle) { return handle == nullptr; });
         if (remoteClean && state.qpHandle == nullptr && state.cqHandle == nullptr && state.chanHandle == nullptr) {
-            stateIt = states_.erase(stateIt);
+            const int ret = cleanupScalars(state);
+            if (ret == TILEXR_SUCCESS) {
+                stateIt = states_.erase(stateIt);
+            } else {
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = ret;
+                }
+                ++stateIt;
+            }
         } else {
             ++stateIt;
         }
+    }
+    if (firstError == TILEXR_SUCCESS && !states_.empty()) {
+        firstError = TILEXR_ERROR_INTERNAL;
     }
     return firstError;
 }
@@ -3044,7 +3314,68 @@ int TileXRUDMATransport::CleanupQueues()
 int TileXRUDMATransport::CleanupFullmeshQueues()
 {
     int firstError = TILEXR_SUCCESS;
-    for (auto& statePtr : fullmeshQpStates_) {
+    bool unimportUnsupported = false;
+    const auto cleanupScalars = [this](PerPeerQpState& state) {
+        int ret = FreeDeviceScalar(state.cqPiAddr);
+        const int cqCiRet = FreeDeviceScalar(state.cqCiAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = cqCiRet;
+        }
+        const int sqPiRet = FreeDeviceScalar(state.sqPiAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = sqPiRet;
+        }
+        const int sqCiRet = FreeDeviceScalar(state.sqCiAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = sqCiRet;
+        }
+        const int wqeRet = FreeDeviceScalar(state.wqeCntAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = wqeRet;
+        }
+        const int amoRet = FreeDeviceScalar(state.amoAddr);
+        if (ret == TILEXR_SUCCESS) {
+            ret = amoRet;
+        }
+        return ret;
+    };
+    for (size_t stateIndex = 0U;
+         stateIndex < fullmeshQpStates_.size(); ++stateIndex) {
+        auto& statePtr = fullmeshQpStates_[stateIndex];
+        if (statePtr == nullptr || statePtr->remoteQpHandle == nullptr) {
+            continue;
+        }
+        if (statePtr->ctxHandle == nullptr) {
+            firstError = TILEXR_ERROR_INTERNAL;
+            continue;
+        }
+        const int ret = loader_.RaCtxQpUnimport(
+            statePtr->ctxHandle, statePtr->remoteQpHandle);
+        if (QpUnimportConsumesHostHandle(ret)) {
+            statePtr->remoteQpHandle = nullptr;
+            unimportUnsupported = unimportUnsupported ||
+                ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+        } else {
+            TILEXR_LOG(ERROR) << "TileXR Fullmesh QP unimport failed, slot "
+                              << stateIndex << ", peer " << statePtr->peer
+                              << ", ret " << ret;
+            if (firstError == TILEXR_SUCCESS) {
+                firstError = TILEXR_ERROR_INTERNAL;
+            }
+        }
+    }
+    if (unimportUnsupported) {
+        TILEXR_LOG(WARN)
+            << "RaCtxQpUnimport is unsupported by the current HCCP service; "
+            << "the b131 client consumed the Host handles and cleanup will "
+            << "continue through RA context teardown";
+    }
+    const int remoteAgreement = AgreeInitStatus(firstError);
+    if (remoteAgreement != TILEXR_SUCCESS) {
+        return remoteAgreement;
+    }
+    for (size_t stateIndex = 0U; stateIndex < fullmeshQpStates_.size(); ++stateIndex) {
+        auto& statePtr = fullmeshQpStates_[stateIndex];
         if (statePtr == nullptr) {
             continue;
         }
@@ -3052,18 +3383,30 @@ int TileXRUDMATransport::CleanupFullmeshQueues()
         if (state.remoteQpHandle != nullptr && state.ctxHandle != nullptr) {
             const int ret = loader_.RaCtxQpUnimport(
                 state.ctxHandle, state.remoteQpHandle);
-            if (ret == 0) {
+            if (QpUnimportConsumesHostHandle(ret)) {
                 state.remoteQpHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
+                unimportUnsupported = unimportUnsupported ||
+                    ret == TILEXR_HCCP_RA_QP_UNIMPORT_UNSUPPORTED;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR Fullmesh QP unimport failed, slot "
+                                  << stateIndex << ", peer " << state.peer
+                                  << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
             }
         }
         if (state.remoteQpHandle == nullptr && state.qpHandle != nullptr) {
             const int ret = loader_.RaCtxQpDestroy(state.qpHandle);
             if (ret == 0) {
                 state.qpHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR Fullmesh QP destroy failed, slot "
+                                  << stateIndex << ", peer " << state.peer
+                                  << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
             }
         }
         if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
@@ -3072,8 +3415,13 @@ int TileXRUDMATransport::CleanupFullmeshQueues()
                 state.ctxHandle, state.cqHandle);
             if (ret == 0) {
                 state.cqHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR Fullmesh CQ destroy failed, slot "
+                                  << stateIndex << ", peer " << state.peer
+                                  << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
             }
         }
         if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
@@ -3083,19 +3431,23 @@ int TileXRUDMATransport::CleanupFullmeshQueues()
                 state.ctxHandle, state.chanHandle);
             if (ret == 0) {
                 state.chanHandle = nullptr;
-            } else if (firstError == TILEXR_SUCCESS) {
-                firstError = TILEXR_ERROR_INTERNAL;
+            } else {
+                TILEXR_LOG(ERROR) << "TileXR Fullmesh channel destroy failed, slot "
+                                  << stateIndex << ", peer " << state.peer
+                                  << ", ret " << ret;
+                if (firstError == TILEXR_SUCCESS) {
+                    firstError = TILEXR_ERROR_INTERNAL;
+                }
             }
         }
         if (state.remoteQpHandle == nullptr && state.qpHandle == nullptr &&
             state.cqHandle == nullptr && state.chanHandle == nullptr) {
-            FreeDeviceScalar(state.cqPiAddr);
-            FreeDeviceScalar(state.cqCiAddr);
-            FreeDeviceScalar(state.sqPiAddr);
-            FreeDeviceScalar(state.sqCiAddr);
-            FreeDeviceScalar(state.wqeCntAddr);
-            FreeDeviceScalar(state.amoAddr);
-            statePtr.reset();
+            const int ret = cleanupScalars(state);
+            if (ret == TILEXR_SUCCESS) {
+                statePtr.reset();
+            } else if (firstError == TILEXR_SUCCESS) {
+                firstError = ret;
+            }
         }
     }
     if (std::all_of(fullmeshQpStates_.begin(), fullmeshQpStates_.end(),
@@ -3103,6 +3455,8 @@ int TileXRUDMATransport::CleanupFullmeshQueues()
                 return state == nullptr;
             })) {
         fullmeshQpStates_.clear();
+    } else if (firstError == TILEXR_SUCCESS) {
+        firstError = TILEXR_ERROR_INTERNAL;
     }
     return firstError;
 }
@@ -3175,91 +3529,120 @@ int TileXRUDMATransport::RollbackAddedContexts(
     return firstError;
 }
 
-void TileXRUDMATransport::CleanupContexts()
+int TileXRUDMATransport::CleanupContexts()
 {
-    for (const auto& tokenEntry : tokenHandleByEid_) {
-        const uint32_t eidIndex = tokenEntry.first;
-        if (ctxHandleByEid_.count(eidIndex) != 0 && tokenEntry.second != nullptr) {
-            loader_.RaCtxTokenIdFree(ctxHandleByEid_[eidIndex], tokenEntry.second);
+    int localRet = TILEXR_SUCCESS;
+    for (auto it = tokenHandleByEid_.begin(); it != tokenHandleByEid_.end();) {
+        const auto ctxIt = ctxHandleByEid_.find(it->first);
+        if (it->second == nullptr) {
+            it = tokenHandleByEid_.erase(it);
+            continue;
         }
-    }
-    tokenHandleByEid_.clear();
-
-    for (const auto& ctxEntry : ctxHandleByEid_) {
-        if (ctxEntry.second != nullptr) {
-            loader_.RaCtxDeinit(ctxEntry.second);
+        if (ctxIt == ctxHandleByEid_.end() || ctxIt->second == nullptr ||
+            loader_.RaCtxTokenIdFree(ctxIt->second, it->second) != 0) {
+            localRet = TILEXR_ERROR_INTERNAL;
+            ++it;
+            continue;
         }
+        it = tokenHandleByEid_.erase(it);
     }
-    ctxHandleByEid_.clear();
+    int ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
 
+    localRet = TILEXR_SUCCESS;
+    for (auto it = ctxHandleByEid_.begin(); it != ctxHandleByEid_.end();) {
+        if (it->second != nullptr && loader_.RaCtxDeinit(it->second) != 0) {
+            localRet = TILEXR_ERROR_INTERNAL;
+            ++it;
+            continue;
+        }
+        it = ctxHandleByEid_.erase(it);
+    }
+    ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    localRet = TILEXR_SUCCESS;
     if (raInitialized_) {
         RaInitConfig deinitConfig {};
         deinitConfig.phyId = logicDevId_ + deviceIdOffset_;
         deinitConfig.nicPosition = NETWORK_OFFLINE;
         deinitConfig.hdcType = HDC_SERVICE_TYPE_RDMA_V2;
         deinitConfig.enableHdcAsync = 1;
-        loader_.RaDeinit(&deinitConfig);
-        raInitialized_ = false;
+        if (loader_.RaDeinit(&deinitConfig) == 0) {
+            raInitialized_ = false;
+        } else {
+            localRet = TILEXR_ERROR_INTERNAL;
+        }
     }
-    if (tsdOpened_) {
-        loader_.TsdProcessClose(logicDevId_, subPid_);
-        tsdOpened_ = false;
-        subPid_ = 0;
+    if (localRet == TILEXR_SUCCESS && tsdOpened_) {
+        if (loader_.TsdProcessClose(logicDevId_, subPid_) == 0) {
+            tsdOpened_ = false;
+            subPid_ = 0;
+        } else {
+            localRet = TILEXR_ERROR_INTERNAL;
+        }
     }
-    raAttached_ = false;
+    ret = AgreeInitStatus(localRet);
+    if (ret == TILEXR_SUCCESS) {
+        raAttached_ = false;
+    }
+    return ret;
 }
 
-void TileXRUDMATransport::Shutdown()
+int TileXRUDMATransport::Shutdown()
 {
+    if (shutdownComplete_) {
+        return TILEXR_SUCCESS;
+    }
     available_ = false;
     udmaInfoDev_ = baseUDMAInfoDev_;
     fullmeshInfoDev_ = baseFullmeshInfoDev_;
-    const int cleanupRet = CleanupAllMemory();
-    if (cleanupRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown left registered memory cleanup pending: " << cleanupRet;
+    int ret = AgreeInitStatus(TILEXR_SUCCESS);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
     }
-    if (HasMemoryCleanupPending()) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains unreleased registered-memory resources"
-                          << ", ptr " << reinterpret_cast<uintptr_t>(GetRegisteredMemoryPtr())
-                          << ", bytes " << GetRegisteredMemoryBytes();
-    }
-    const int profileCleanupRet = CleanupAllProfiles();
-    if (profileCleanupRet != TILEXR_SUCCESS || HasProfileCleanupPending()) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains persistent profile resources: "
-                          << profileCleanupRet;
-    }
-    int fullmeshQueueCleanupRet = CleanupFullmeshQueues();
-    if (fullmeshQueueCleanupRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR Fullmesh queue cleanup will be retried: "
-                          << fullmeshQueueCleanupRet;
-        fullmeshQueueCleanupRet = CleanupFullmeshQueues();
-    }
-    if (fullmeshQueueCleanupRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains unreleased Fullmesh queue handles: "
-                          << fullmeshQueueCleanupRet;
-    }
-    int queueCleanupRet = CleanupQueues();
-    if (queueCleanupRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA queue cleanup will be retried: " << queueCleanupRet;
-        queueCleanupRet = CleanupQueues();
-    }
-    if (queueCleanupRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains unreleased queue handles: "
-                          << queueCleanupRet;
-    }
-    CleanupContexts();
 
-    const int baseInfoRet = FreeDeviceInfo(baseUDMAInfoDev_);
-    if (baseInfoRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retained base info allocation";
+    int localRet = CleanupAllMemory();
+    ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS || HasMemoryCleanupPending()) {
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_INTERNAL : ret;
     }
+    localRet = CleanupAllProfiles();
+    ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS || HasProfileCleanupPending()) {
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_INTERNAL : ret;
+    }
+    localRet = CleanupQueues();
+    ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    localRet = CleanupFullmeshQueues();
+    ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+    ret = CleanupContexts();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
+    localRet = FreeDeviceInfo(baseUDMAInfoDev_);
     const int baseFullmeshInfoRet = FreeDeviceInfo(baseFullmeshInfoDev_);
-    if (baseFullmeshInfoRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retained base Fullmesh info allocation";
+    if (localRet == TILEXR_SUCCESS && baseFullmeshInfoRet != TILEXR_SUCCESS) {
+        localRet = baseFullmeshInfoRet;
     }
     const int eidTableRet = FreeDeviceInfo(eidTableDev_);
-    if (eidTableRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retained EID table allocation";
+    if (localRet == TILEXR_SUCCESS && eidTableRet != TILEXR_SUCCESS) {
+        localRet = eidTableRet;
+    }
+    ret = AgreeInitStatus(localRet);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
     }
     udmaInfoDev_ = nullptr;
     fullmeshInfoDev_ = nullptr;
@@ -3277,10 +3660,13 @@ void TileXRUDMATransport::Shutdown()
     fullmeshRemoteRouteByPeer_.clear();
     explicitConfig_ = false;
     sharedQp_ = false;
+    groupedQpProfile_ = false;
     fullmeshAvailable_ = false;
     fullmeshValidPeerMask_ = 0U;
     qpCount_ = 1;
     loader_.Unload();
+    shutdownComplete_ = true;
+    return TILEXR_SUCCESS;
 }
 
 bool TileXRUDMATransport::IsAvailable() const
@@ -3359,6 +3745,11 @@ uint32_t TileXRUDMATransport::GetQpCount() const
 bool TileXRUDMATransport::UsesSharedQps() const
 {
     return IsAvailable() && sharedQp_;
+}
+
+bool TileXRUDMATransport::UsesGroupedQpProfile() const
+{
+    return IsAvailable() && groupedQpProfile_;
 }
 
 bool TileXRUDMATransport::HasFullmeshDomain() const

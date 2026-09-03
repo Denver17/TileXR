@@ -254,6 +254,31 @@ void TestKernelShimRejectsInvalidParametersBeforeMagic()
                TileXR::TILEXR_SUCCESS);
 }
 
+void TestA5SimtLocalMemorySize()
+{
+    using TileXRCollectives::Host::ComputeA5SimtLocalMemorySize;
+
+    uint32_t localMemorySize = 0;
+    CheckBool("A5 SIMT memory accepts 192 KiB total UB",
+              ComputeA5SimtLocalMemorySize(192LL * 1024, &localMemorySize),
+              true);
+    CheckUint32("A5 SIMT memory reserves 64 KiB DCache",
+                localMemorySize,
+                128U * 1024U);
+    CheckBool("A5 SIMT memory rejects insufficient dynamic UB",
+              ComputeA5SimtLocalMemorySize(128LL * 1024, &localMemorySize),
+              false);
+    CheckBool("A5 SIMT memory rejects null output",
+              ComputeA5SimtLocalMemorySize(192LL * 1024, nullptr),
+              false);
+    CheckBool("A5 SIMT memory rejects uint32 overflow",
+              ComputeA5SimtLocalMemorySize(
+                  static_cast<int64_t>(std::numeric_limits<uint32_t>::max()) +
+                      64LL * 1024 + 1,
+                  &localMemorySize),
+              false);
+}
+
 } // namespace
 
 int main()
@@ -267,5 +292,6 @@ int main()
     TestReduceScatterBlockNum();
     TestBroadcastBlockNum();
     TestKernelShimRejectsInvalidParametersBeforeMagic();
+    TestA5SimtLocalMemorySize();
     return g_failures == 0 ? 0 : 1;
 }

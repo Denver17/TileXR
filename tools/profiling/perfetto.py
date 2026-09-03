@@ -47,6 +47,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
         used_tids.setdefault(pid, set()).add(lane.stream_id)
 
     instance_tids: Dict[tuple, int] = {}
+    grouped_tids: Dict[tuple, int] = {}
     track_sort_indices: Dict[tuple, int] = {}
     next_sort_index: Dict[int, int] = {}
     for launch_id, lane in lane_groups:
@@ -76,11 +77,53 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
             ]
         )
 
+        grouped_tracks = sorted(
+            {
+                sample.attributes.get("track")
+                for sample in lane.samples
+                if isinstance(sample.attributes.get("track"), str)
+            }
+        )
+        for track_name in grouped_tracks:
+            grouped_key = (pid, lane.stream_id, track_name)
+            candidate_tid = 0
+            while candidate_tid in used_tids[pid]:
+                candidate_tid += 1
+            used_tids[pid].add(candidate_tid)
+            grouped_tids[grouped_key] = candidate_tid
+            track_key = ("grouped",) + grouped_key
+            track_sort_indices[track_key] = next_sort_index[pid]
+            next_sort_index[pid] += 1
+            events.extend(
+                [
+                    {
+                        "name": "thread_name",
+                        "ph": "M",
+                        "pid": pid,
+                        "tid": candidate_tid,
+                        "args": {
+                            "name": (
+                                f"rank{lane.rank}/device{device}/core{lane.core}/"
+                                f"{track_name}"
+                            )
+                        },
+                    },
+                    {
+                        "name": "thread_sort_index",
+                        "ph": "M",
+                        "pid": pid,
+                        "tid": candidate_tid,
+                        "args": {"sort_index": track_sort_indices[track_key]},
+                    },
+                ]
+            )
+
         instance_tracks = sorted(
             {
                 (sample.stage_id, sample.instance_id, sample.name)
                 for sample in lane.samples
                 if sample.instance_id is not None
+                and not isinstance(sample.attributes.get("track"), str)
             }
         )
         for stage_id, instance_id, stage_name in instance_tracks:
@@ -129,7 +172,10 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
                 else f"{sample.name}[{sample.instance_id}]"
             )
             event_tid = lane.stream_id
-            if sample.instance_id is not None:
+            track_name = sample.attributes.get("track")
+            if isinstance(track_name, str):
+                event_tid = grouped_tids[(pid, lane.stream_id, track_name)]
+            elif sample.instance_id is not None:
                 event_tid = instance_tids[
                     (pid, lane.stream_id, sample.stage_id, sample.instance_id)
                 ]

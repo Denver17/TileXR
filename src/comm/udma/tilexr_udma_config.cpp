@@ -58,7 +58,8 @@ bool ParsePositiveUint32(const std::string& text, uint32_t& value)
 bool IsKnownSelector(uint32_t selector)
 {
     return selector == static_cast<uint32_t>(UDMAQpRouteSelector::TOPOLOGY) ||
-        selector == static_cast<uint32_t>(UDMAQpRouteSelector::PORT_COUNT);
+        selector == static_cast<uint32_t>(UDMAQpRouteSelector::PORT_COUNT) ||
+        selector == static_cast<uint32_t>(UDMAQpRouteSelector::LOCAL_PEER_SLOT);
 }
 
 bool RuleValid(const UDMAQpRouteWireRule& rule)
@@ -68,6 +69,9 @@ bool RuleValid(const UDMAQpRouteWireRule& rule)
     }
     if (rule.selectorKind == static_cast<uint32_t>(UDMAQpRouteSelector::TOPOLOGY)) {
         return rule.selectorValue == 0;
+    }
+    if (rule.selectorKind == static_cast<uint32_t>(UDMAQpRouteSelector::LOCAL_PEER_SLOT)) {
+        return rule.selectorValue < TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT;
     }
     return rule.selectorValue != 0;
 }
@@ -85,10 +89,22 @@ uint32_t SharedQpExpectedPortCount(uint32_t qp)
 }
 
 bool SharedQpRouteMatchesProfile(
-    uint32_t qp, UDMAQpRouteSelector selector, uint32_t value)
+    uint32_t qp, uint32_t qpCount, UDMAQpRouteSelector selector, uint32_t value)
 {
+    if (qpCount == TILEXR_UDMA_GROUPED_SHARED_QP_COUNT &&
+        qp >= TILEXR_UDMA_GROUPED_DIRECT_QP_BASE) {
+        return selector == UDMAQpRouteSelector::LOCAL_PEER_SLOT &&
+            value == qp - TILEXR_UDMA_GROUPED_DIRECT_QP_BASE;
+    }
     return selector == UDMAQpRouteSelector::PORT_COUNT &&
         value == SharedQpExpectedPortCount(qp);
+}
+
+bool SharedQpCountValid(uint32_t qpCount)
+{
+    return qpCount == TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT ||
+        qpCount == TILEXR_UDMA_GROUPED_SHARED_QP_COUNT ||
+        qpCount == TILEXR_UDMA_MAX_QP_COUNT;
 }
 
 } // namespace
@@ -158,19 +174,47 @@ UDMAQpConfigParseStatus LoadUDMAQpConfigFromEnv(UDMAQpConfig& config, std::strin
         std::getenv(TILEXR_UDMA_QP_ROUTE_SPEC_ENV), config, error);
 }
 
-UDMAQpConfig BuildUDMASharedQpConfig()
+UDMAQpConfig BuildUDMASharedQpConfig(uint32_t qpCount)
 {
     UDMAQpConfig config {};
     config.explicitConfig = true;
     config.sharedQp = true;
-    config.routes.reserve(TILEXR_UDMA_MAX_QP_COUNT);
-    for (uint32_t qp = 0; qp < TILEXR_UDMA_MAX_QP_COUNT; ++qp) {
+    if (!SharedQpCountValid(qpCount)) {
+        return config;
+    }
+    config.routes.reserve(qpCount);
+    for (uint32_t qp = 0; qp < qpCount; ++qp) {
         UDMAQpRouteRule rule {};
-        rule.selector = UDMAQpRouteSelector::PORT_COUNT;
-        rule.value = SharedQpExpectedPortCount(qp);
+        if (qpCount == TILEXR_UDMA_GROUPED_SHARED_QP_COUNT &&
+            qp >= TILEXR_UDMA_GROUPED_DIRECT_QP_BASE) {
+            rule.selector = UDMAQpRouteSelector::LOCAL_PEER_SLOT;
+            rule.value = qp - TILEXR_UDMA_GROUPED_DIRECT_QP_BASE;
+        } else {
+            rule.selector = UDMAQpRouteSelector::PORT_COUNT;
+            rule.value = SharedQpExpectedPortCount(qp);
+        }
         config.routes.push_back(rule);
     }
     return config;
+}
+
+UDMAQpConfigParseStatus LoadUDMASharedQpConfigFromEnv(
+    UDMAQpConfig& config, std::string* error)
+{
+    if (error != nullptr) {
+        error->clear();
+    }
+    uint32_t qpCount = TILEXR_UDMA_MAX_QP_COUNT;
+    const char* value = std::getenv(TILEXR_UDMA_SHARED_QP_COUNT_ENV);
+    if (value != nullptr && value[0] != '\0' &&
+        (!ParsePositiveUint32(Trim(value), qpCount) ||
+         !SharedQpCountValid(qpCount))) {
+        config = {};
+        SetError(error, "shared UDMA QP count must be 32, 39, or 48");
+        return UDMAQpConfigParseStatus::INVALID;
+    }
+    config = BuildUDMASharedQpConfig(qpCount);
+    return UDMAQpConfigParseStatus::SUCCESS;
 }
 
 bool ValidateUDMASharedQpConfig(
@@ -180,14 +224,33 @@ bool ValidateUDMASharedQpConfig(
         error->clear();
     }
     if (!config.sharedQp || !config.explicitConfig ||
-        config.routes.size() != TILEXR_UDMA_MAX_QP_COUNT) {
-        SetError(error, "shared UDMA domain requires the fixed 48-QP profile");
+        !SharedQpCountValid(static_cast<uint32_t>(config.routes.size()))) {
+        SetError(error, "shared UDMA domain requires the 32-QP, 39-QP, or 48-QP profile");
         return false;
     }
-    for (uint32_t qp = 0; qp < TILEXR_UDMA_MAX_QP_COUNT; ++qp) {
+    for (uint32_t qp = 0; qp < config.routes.size(); ++qp) {
         const UDMAQpRouteRule& rule = config.routes[qp];
-        if (!SharedQpRouteMatchesProfile(qp, rule.selector, rule.value)) {
+        if (!SharedQpRouteMatchesProfile(
+                qp, static_cast<uint32_t>(config.routes.size()),
+                rule.selector, rule.value)) {
             SetError(error, "shared UDMA domain route does not match the fixed profile");
+            return false;
+        }
+    }
+    return true;
+}
+
+bool IsUDMAGroupedQpProfile(const UDMAQpConfig& config)
+{
+    if (!config.explicitConfig || !config.sharedQp ||
+        config.routes.size() != TILEXR_UDMA_GROUPED_SHARED_QP_COUNT) {
+        return false;
+    }
+    for (uint32_t qp = 0U; qp < config.routes.size(); ++qp) {
+        const UDMAQpRouteRule& rule = config.routes[qp];
+        if (!SharedQpRouteMatchesProfile(qp,
+                TILEXR_UDMA_GROUPED_SHARED_QP_COUNT,
+                rule.selector, rule.value)) {
             return false;
         }
     }
@@ -273,13 +336,13 @@ bool ValidateUDMAQpConfigWireDescriptor(
         return false;
     }
     if (descriptor.sharedQp != 0) {
-        if (descriptor.qpCount != TILEXR_UDMA_MAX_QP_COUNT) {
-            SetError(error, "shared UDMA descriptor must contain the fixed 48-QP profile");
+        if (!SharedQpCountValid(descriptor.qpCount)) {
+            SetError(error, "shared UDMA descriptor must contain the 32-QP, 39-QP, or 48-QP profile");
             return false;
         }
-        for (uint32_t qp = 0; qp < TILEXR_UDMA_MAX_QP_COUNT; ++qp) {
+        for (uint32_t qp = 0; qp < descriptor.qpCount; ++qp) {
             const UDMAQpRouteWireRule& rule = descriptor.routeRules[qp];
-            if (!SharedQpRouteMatchesProfile(qp,
+            if (!SharedQpRouteMatchesProfile(qp, descriptor.qpCount,
                     static_cast<UDMAQpRouteSelector>(rule.selectorKind),
                     rule.selectorValue)) {
                 SetError(error, "shared UDMA descriptor route does not match the fixed profile");

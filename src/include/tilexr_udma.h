@@ -633,6 +633,91 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostSend(
     return TILEXR_UDMA_STATUS_SUCCESS;
 }
 
+// Preserve the historical grouped-AllToAll posting path: construct the WRITE
+// directly in SQ GM, clean it, then publish doorbell before the software head.
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAPostWriteDirect(
+    __gm__ UDMAInfo* udmaInfo, __gm__ uint8_t* remoteAddr,
+    __gm__ uint8_t* localAddr, uint32_t pe, uint32_t qpIdx,
+    uint64_t messageLen, uint32_t sqeFlag)
+{
+    if (udmaInfo == nullptr || udmaInfo->qpNum == 0U ||
+        udmaInfo->qpNum > TILEXR_UDMA_DEVICE_MAX_QP_COUNT || qpIdx >= udmaInfo->qpNum ||
+        udmaInfo->sqPtr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(udmaInfo, pe, qpIdx);
+    uint32_t validation = UDMAValidatePostSend<UDMAOpcode::WRITE>(
+        udmaInfo, remoteAddr, localAddr, qpIdx, messageLen, sqeFlag, qpCtxEntry);
+    if (validation == TILEXR_UDMA_STATUS_SQ_FULL) {
+        const uint32_t submittedWqeCount =
+            ld_dev(reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+        const uint32_t reclaimStatus = UDMAPollCQ(
+            udmaInfo, pe, qpIdx, submittedWqeCount);
+        if (reclaimStatus != TILEXR_UDMA_STATUS_SUCCESS) {
+            return reclaimStatus;
+        }
+        validation = UDMAValidatePostSend<UDMAOpcode::WRITE>(
+            udmaInfo, remoteAddr, localAddr, qpIdx, messageLen, sqeFlag, qpCtxEntry);
+    }
+    if (validation != TILEXR_UDMA_STATUS_SUCCESS) {
+        return validation;
+    }
+
+    __gm__ UDMAMemInfo* remoteMemInfo = UDMAGetRemoteMemInfo(udmaInfo, pe, qpIdx);
+    if (remoteMemInfo->eidAddr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    uint32_t curHead = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
+    uint32_t wqeCnt = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    __gm__ uint8_t* wqeAddr = reinterpret_cast<__gm__ uint8_t*>(
+        qpCtxEntry->bufAddr + static_cast<uint64_t>(curHead % qpCtxEntry->depth) *
+            TILEXR_UDMA_WQE_BB_BYTES);
+    __gm__ UDMASqeCtx* sqeCtx = reinterpret_cast<__gm__ UDMASqeCtx*>(wqeAddr);
+    sqeCtx->sqeBbIdx = curHead % TILEXR_UDMA_SQ_BB_COUNT;
+    sqeCtx->opcode = static_cast<uint32_t>(UDMAOpcode::WRITE);
+    sqeCtx->flag = sqeFlag;
+    sqeCtx->rsv0 = 0U;
+    sqeCtx->nf = 0U;
+    sqeCtx->tokenEn = remoteMemInfo->tokenValueValid;
+    sqeCtx->rmtJettyType = remoteMemInfo->rmtJettyType;
+    sqeCtx->owner = ((curHead / TILEXR_UDMA_SQ_BB_COUNT) & 1U) == 0U ? 1U : 0U;
+    sqeCtx->targetHint = remoteMemInfo->targetHint;
+    sqeCtx->inlineMsgLen = 0U;
+    sqeCtx->rsv1 = 0U;
+    sqeCtx->tpId = remoteMemInfo->tpn;
+    sqeCtx->sgeNum = 1U;
+    sqeCtx->rmtJettyOrSegId = remoteMemInfo->tid;
+    sqeCtx->rsv2 = 0U;
+    sqeCtx->rmtTokenValue = remoteMemInfo->rmtTokenValue;
+    sqeCtx->udfType = 0U;
+    sqeCtx->reduceDataType = 0U;
+    sqeCtx->reduceOpcode = 0U;
+    sqeCtx->rsv3 = 0U;
+    const uint64_t remoteAddrValue = reinterpret_cast<uint64_t>(remoteAddr);
+    sqeCtx->rmtAddrLOrTokenId = static_cast<uint32_t>(remoteAddrValue);
+    sqeCtx->rmtAddrHOrTokenValue = static_cast<uint32_t>(remoteAddrValue >> 32U);
+    __gm__ uint64_t* remoteEid =
+        reinterpret_cast<__gm__ uint64_t*>(remoteMemInfo->eidAddr);
+    sqeCtx->rmtEidL = remoteEid[0];
+    sqeCtx->rmtEidH = remoteEid[1];
+
+    __gm__ UDMASgeCtx* sgeCtx = reinterpret_cast<__gm__ UDMASgeCtx*>(
+        wqeAddr + sizeof(UDMASqeCtx));
+    sgeCtx->len = messageLen;
+    sgeCtx->tokenId = qpCtxEntry->localTokenId;
+    sgeCtx->va = reinterpret_cast<uint64_t>(localAddr);
+    UDMACleanCacheLines(wqeAddr, TILEXR_UDMA_WQE_BB_BYTES);
+
+    ++curHead;
+    ++wqeCnt;
+    UDMARingDoorbell(curHead, qpCtxEntry);
+    st_dev(curHead, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->headAddr), 0);
+    st_dev(wqeCnt, reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return TILEXR_UDMA_STATUS_SUCCESS;
+}
+
 __attribute__((always_inline)) inline __aicore__ uint32_t UDMAWrite(
     const __gm__ CommArgs* args, const AscendC::LocalTensor<uint8_t>& wqeScratch,
     __gm__ uint8_t* remoteAddr, __gm__ uint8_t* localAddr,
@@ -870,15 +955,18 @@ __attribute__((always_inline)) inline __aicore__ bool UDMAProfilePutOperationVal
             remoteByteOffset, byteCount);
 }
 
-__attribute__((always_inline)) inline __aicore__ uint32_t UDMAProfilePutNbiOnQpDeferred(
+__attribute__((always_inline)) inline __aicore__ uint32_t
+UDMAProfilePutNbiOnQpWithFlagDeferred(
     const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
     const __gm__ TileXRUDMAProfileRegistry* registry,
     const AscendC::LocalTensor<uint8_t>& wqeScratch,
     int targetRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
-    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount)
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount,
+    uint32_t sqeFlag)
 {
     if (!UDMAProfilePutOperationValid(args, udmaInfo, registry, targetRank, qpIdx,
-            localRegion, localByteOffset, remoteRegion, remoteByteOffset, byteCount)) {
+            localRegion, localByteOffset, remoteRegion, remoteByteOffset, byteCount) ||
+        (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
         return TILEXR_UDMA_STATUS_INVALID;
     }
     __gm__ uint8_t* localAddr = UDMAProfileRegisteredAddr(
@@ -887,7 +975,109 @@ __attribute__((always_inline)) inline __aicore__ uint32_t UDMAProfilePutNbiOnQpD
         registry, targetRank, remoteRegion, remoteByteOffset);
     return UDMAPostSend<UDMAOpcode::WRITE, false>(udmaInfo, wqeScratch,
         remoteAddr, localAddr, static_cast<uint32_t>(targetRank), qpIdx, byteCount,
-        nullptr, TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
+        nullptr, sqeFlag);
+}
+
+__attribute__((always_inline)) inline __aicore__ uint32_t
+UDMAProfilePutNbiOnQpWithFlag(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount,
+    uint32_t sqeFlag)
+{
+    (void)wqeScratch;
+    if (!UDMAProfilePutOperationValid(args, udmaInfo, registry, targetRank, qpIdx,
+            localRegion, localByteOffset, remoteRegion, remoteByteOffset, byteCount) ||
+        (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ uint8_t* localAddr = UDMAProfileRegisteredAddr(
+        registry, args->rank, localRegion, localByteOffset);
+    __gm__ uint8_t* remoteAddr = UDMAProfileRegisteredAddr(
+        registry, targetRank, remoteRegion, remoteByteOffset);
+    return UDMAPostWriteDirect(udmaInfo,
+        remoteAddr, localAddr, static_cast<uint32_t>(targetRank), qpIdx, byteCount,
+        sqeFlag);
+}
+
+__attribute__((always_inline)) inline __aicore__ uint32_t UDMAProfilePutNbiOnQpDeferred(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx, uint32_t localRegion, uint64_t localByteOffset,
+    uint32_t remoteRegion, uint64_t remoteByteOffset, uint64_t byteCount)
+{
+    return UDMAProfilePutNbiOnQpWithFlagDeferred(
+        args, udmaInfo, registry, wqeScratch, targetRank, qpIdx,
+        localRegion, localByteOffset, remoteRegion, remoteByteOffset, byteCount,
+        TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION);
+}
+
+// The selected QP contributes the local MR token while the payload address is
+// caller-owned GM. This is the legacy grouped-AllToAll registration contract.
+__attribute__((always_inline)) inline __aicore__ uint32_t
+UDMAProfilePutRawLocalNbiOnQpDeferred(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx, const __gm__ uint8_t* localAddr,
+    uint32_t localTokenRegion, uint32_t remoteRegion,
+    uint64_t remoteByteOffset, uint64_t byteCount, uint32_t sqeFlag)
+{
+    if (!TILEXR_UDMA_ARCH_SUPPORTED ||
+        !UDMAProfileRegistryValid(args, udmaInfo, registry) ||
+        targetRank < 0 || targetRank >= args->rankSize || targetRank == args->rank ||
+        qpIdx >= registry->qpCount || localAddr == nullptr || byteCount == 0U ||
+        byteCount > 0xFFFFFFFFULL ||
+        (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const __gm__ TileXRUDMAProfileQpBinding* binding = &registry->qpBindings[qpIdx];
+    if (binding->localRegion != localTokenRegion ||
+        binding->remoteRegion != remoteRegion ||
+        !UDMAProfileRegisteredRangeValid(registry, targetRank, remoteRegion,
+            remoteByteOffset, byteCount)) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ uint8_t* remoteAddr = UDMAProfileRegisteredAddr(
+        registry, targetRank, remoteRegion, remoteByteOffset);
+    return UDMAPostSend<UDMAOpcode::WRITE, false>(udmaInfo, wqeScratch,
+        remoteAddr, const_cast<__gm__ uint8_t*>(localAddr),
+        static_cast<uint32_t>(targetRank), qpIdx, byteCount, nullptr, sqeFlag);
+}
+
+__attribute__((always_inline)) inline __aicore__ uint32_t
+UDMAProfilePutRawLocalNbiOnQp(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    const AscendC::LocalTensor<uint8_t>& wqeScratch,
+    int targetRank, uint32_t qpIdx, const __gm__ uint8_t* localAddr,
+    uint32_t localTokenRegion, uint32_t remoteRegion,
+    uint64_t remoteByteOffset, uint64_t byteCount, uint32_t sqeFlag)
+{
+    (void)wqeScratch;
+    if (!TILEXR_UDMA_ARCH_SUPPORTED ||
+        !UDMAProfileRegistryValid(args, udmaInfo, registry) ||
+        targetRank < 0 || targetRank >= args->rankSize || targetRank == args->rank ||
+        qpIdx >= registry->qpCount || localAddr == nullptr || byteCount == 0U ||
+        byteCount > 0xFFFFFFFFULL ||
+        (sqeFlag & TILEXR_UDMA_SQE_FLAG_COMPLETION) == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const __gm__ TileXRUDMAProfileQpBinding* binding = &registry->qpBindings[qpIdx];
+    if (binding->localRegion != localTokenRegion ||
+        binding->remoteRegion != remoteRegion ||
+        !UDMAProfileRegisteredRangeValid(registry, targetRank, remoteRegion,
+            remoteByteOffset, byteCount)) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ uint8_t* remoteAddr = UDMAProfileRegisteredAddr(
+        registry, targetRank, remoteRegion, remoteByteOffset);
+    return UDMAPostWriteDirect(udmaInfo,
+        remoteAddr, const_cast<__gm__ uint8_t*>(localAddr),
+        static_cast<uint32_t>(targetRank), qpIdx, byteCount, sqeFlag);
 }
 
 __aicore__ inline uint32_t UDMAProfileCompletionFrontier(
@@ -957,6 +1147,27 @@ __aicore__ inline uint32_t UDMAProfileQuietStatusOnQpUntil(
     }
     return UDMAPollCQUntilSqTail(udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx,
         completionFrontier);
+}
+
+__aicore__ inline uint32_t UDMAProfileQuietStatusOnQp(
+    const __gm__ CommArgs* args, __gm__ UDMAInfo* udmaInfo,
+    const __gm__ TileXRUDMAProfileRegistry* registry,
+    int sourceRank, uint32_t qpIdx)
+{
+    if (!UDMAProfileRegistryValid(args, udmaInfo, registry) || sourceRank < 0 ||
+        sourceRank >= args->rankSize || sourceRank == args->rank || qpIdx >= registry->qpCount ||
+        udmaInfo->scqPtr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    __gm__ UDMAWQCtx* qpCtxEntry = UDMAGetWQCtx(
+        udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx);
+    if (qpCtxEntry == nullptr || qpCtxEntry->wqeCntAddr == 0U) {
+        return TILEXR_UDMA_STATUS_INVALID;
+    }
+    const uint32_t completionTarget = ld_dev(
+        reinterpret_cast<__gm__ uint32_t*>(qpCtxEntry->wqeCntAddr), 0);
+    return UDMAPollCQ(
+        udmaInfo, static_cast<uint32_t>(sourceRank), qpIdx, completionTarget);
 }
 
 template <typename T>

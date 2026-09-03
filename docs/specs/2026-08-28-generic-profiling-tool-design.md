@@ -103,20 +103,24 @@ tilexrProfilingEventIds_[slot] = event_id
 
 The slot and event ID are compile-time constants. The measured region performs
 no JSON work, string handling, allocation, lock, atomic reservation, or GM
-write. After the critical interval ends, one common flush copies the occupied
-register arrays through UB to the per-core GM region referenced by `CommArgs`.
+write. After the critical interval ends, one common flush appends the occupied
+register arrays directly to the per-core GM region referenced by `CommArgs`.
 
 ```mermaid
 sequenceDiagram
     participant K as Kernel
     participant R as Register arrays
-    participant U as UB scratch
     participant G as CommArgs GM
     K->>R: RecordMarker(slot, event_id)
     K->>R: more numeric markers
-    K->>U: pack retained records once
-    U->>G: one bounded MTE3 flush per core
+    R->>G: scalar timestamp and event-ID stores
+    K->>G: publish updated per-core count
 ```
+
+The profiling flush uses no `DataCopy`, UB scratch, or profiling-specific
+`S_MTE3`/`MTE3_S` synchronization. This direct-GM exception is scoped to
+capture storage after the measured interval and does not change the required
+cache and publication protocol for UDMA SQEs, queue heads, or doorbells.
 
 The common runtime allocates capture storage before launch and serializes it to
 `tilexr_profiling_records.v1` when the communication domain is destroyed.

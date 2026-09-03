@@ -237,19 +237,21 @@ def _pair_stream(
 def _normalize_timeline(
     launches: Tuple[Launch, ...], mapping: ProfilingMapping
 ) -> Tuple[Launch, ...]:
-    origins: Dict[int, int] = {}
+    origins: Dict[Tuple[int, int, str], int] = {}
     for launch in launches:
         for lane in launch.lanes:
             if not lane.records:
                 continue
+            clock_key = (launch.id, lane.rank, lane.device or "unknown")
             minimum = min(record.timestamp for record in lane.records)
-            origins[lane.stream_id] = minimum
+            origins[clock_key] = min(origins.get(clock_key, minimum), minimum)
 
     normalized_launches = []
     for launch in launches:
         normalized_lanes = []
         for lane in launch.lanes:
-            origin = origins.get(lane.stream_id, 0)
+            clock_key = (launch.id, lane.rank, lane.device or "unknown")
+            origin = origins.get(clock_key, 0)
             normalized_samples = tuple(
                 replace(
                     sample,

@@ -31,7 +31,10 @@ TileXRUDMAContext::TileXRUDMAContext() = default;
 
 TileXRUDMAContext::~TileXRUDMAContext()
 {
-    Shutdown();
+    const int ret = Shutdown();
+    if (ret != TILEXR_SUCCESS) {
+        TILEXR_LOG(ERROR) << "TileXR UDMA context fallback cleanup failed: " << ret;
+    }
 }
 
 int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
@@ -94,44 +97,59 @@ int TileXRUDMAContext::Init(const TileXRUDMAContextOptions& options)
     return TILEXR_SUCCESS;
 }
 
-void TileXRUDMAContext::Shutdown()
+int TileXRUDMAContext::Shutdown()
 {
+    if (lifecycle_ == Lifecycle::Unavailable && transport_ == nullptr) {
+        return TILEXR_SUCCESS;
+    }
+    shutdownStarted_ = true;
+
     TileXRUDMACommArgsState disabledState {};
-    const int publishRet = ApplyCommArgsState(disabledState);
-    if (publishRet != TILEXR_SUCCESS) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown failed to clear comm args: " << publishRet;
+    int ret = AgreeStatus(ApplyCommArgsState(disabledState));
+    if (ret != TILEXR_SUCCESS) {
+        EnterCleanupPending("communicator arguments could not be disabled on every rank");
+        return ret;
     }
 
-    const int profileCleanupRet = CleanupAllProfiles();
-    int memoryCleanupRet = TILEXR_SUCCESS;
-    if (transport_ != nullptr) {
-        memoryCleanupRet = transport_->CleanupAllMemory();
+    ret = AgreeStatus(CleanupAllProfiles());
+    if (ret != TILEXR_SUCCESS || !profiles_.empty()) {
+        EnterCleanupPending("profile cleanup did not complete on every rank");
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_INTERNAL : ret;
     }
-    const int registryCleanupRet = CleanupAllRegistries();
-    const int fullmeshViewCleanupRet = FreeDeviceFullmeshView(fullmeshViewDev_);
-    const int retiredFullmeshCleanupRet = CleanupRetiredFullmeshViews();
-    if (profileCleanupRet != TILEXR_SUCCESS || memoryCleanupRet != TILEXR_SUCCESS ||
-        registryCleanupRet != TILEXR_SUCCESS ||
-        fullmeshViewCleanupRet != TILEXR_SUCCESS ||
-        retiredFullmeshCleanupRet != TILEXR_SUCCESS ||
-        (transport_ != nullptr && transport_->HasMemoryCleanupPending()) ||
-        (transport_ != nullptr && transport_->HasProfileCleanupPending()) ||
-        udmaRegistryDev_ != nullptr || !retiredRegistryDevs_.empty() ||
-        fullmeshViewDev_ != nullptr || !retiredFullmeshViewDevs_.empty() ||
-        !profiles_.empty()) {
-        TILEXR_LOG(ERROR) << "TileXR UDMA shutdown retains memory cleanup state"
-                          << ", profile ret " << profileCleanupRet
-                          << ", transport ret " << memoryCleanupRet
-                          << ", registry ret " << registryCleanupRet
-                          << ", Fullmesh view ret " << fullmeshViewCleanupRet
-                          << ", retired Fullmesh view ret "
-                          << retiredFullmeshCleanupRet
-                          << ", registry ptr " << reinterpret_cast<uintptr_t>(udmaRegistryDev_)
-                          << ", retired registries " << retiredRegistryDevs_.size();
+
+    const int localMemoryRet = transport_ == nullptr ?
+        TILEXR_SUCCESS : transport_->CleanupAllMemory();
+    ret = AgreeStatus(localMemoryRet);
+    if (ret != TILEXR_SUCCESS ||
+        (transport_ != nullptr && transport_->HasMemoryCleanupPending())) {
+        EnterCleanupPending("registered-memory cleanup did not complete on every rank");
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_INTERNAL : ret;
+    }
+
+    int localRegistryRet = CleanupAllRegistries();
+    const int fullmeshViewRet = FreeDeviceFullmeshView(fullmeshViewDev_);
+    if (localRegistryRet == TILEXR_SUCCESS && fullmeshViewRet != TILEXR_SUCCESS) {
+        localRegistryRet = fullmeshViewRet;
+    }
+    const int retiredFullmeshRet = CleanupRetiredFullmeshViews();
+    if (localRegistryRet == TILEXR_SUCCESS &&
+        retiredFullmeshRet != TILEXR_SUCCESS) {
+        localRegistryRet = retiredFullmeshRet;
+    }
+    ret = AgreeStatus(localRegistryRet);
+    if (ret != TILEXR_SUCCESS || udmaRegistryDev_ != nullptr ||
+        !retiredRegistryDevs_.empty() || fullmeshViewDev_ != nullptr ||
+        !retiredFullmeshViewDevs_.empty()) {
+        EnterCleanupPending("device registry cleanup did not complete on every rank");
+        return ret == TILEXR_SUCCESS ? TILEXR_ERROR_INTERNAL : ret;
     }
 
     if (transport_ != nullptr) {
-        transport_->Shutdown();
+        ret = transport_->Shutdown();
+        if (ret != TILEXR_SUCCESS) {
+            EnterCleanupPending("transport cleanup did not complete on every rank");
+            return ret;
+        }
         transport_.reset();
     }
 
@@ -148,6 +166,8 @@ void TileXRUDMAContext::Shutdown()
     registeredBytes_ = 0;
     udmaInfoDev_ = nullptr;
     lifecycle_ = Lifecycle::Unavailable;
+    shutdownStarted_ = false;
+    return TILEXR_SUCCESS;
 }
 
 bool TileXRUDMAContext::IsAvailable() const
@@ -495,6 +515,7 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
     hiddenState.registryDev = nullptr;
     int ret = hiddenState.infoDev == nullptr
         ? TILEXR_ERROR_NOT_INITIALIZED : ApplyCommArgsState(hiddenState);
+    ret = AgreeStatus(ret);
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXRUDMAUnregister failed to clear comm args: " << ret;
         return ret;
@@ -521,6 +542,7 @@ int TileXRUDMAContext::UnregisterMemory(TileXRUDMAMemHandle handle)
         fullmeshViewDev_ != nullptr || !retiredFullmeshViewDevs_.empty())) {
         ret = TILEXR_ERROR_INTERNAL;
     }
+    ret = AgreeStatus(ret);
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR UDMA memory unregistration failed: " << ret;
         return ret;
@@ -619,6 +641,7 @@ int TileXRUDMAContext::RegisterProfile(
         candidate->registry.rankSize = static_cast<uint32_t>(options_.rankSize);
         candidate->registry.regionCount = desc.regionCount;
         candidate->registry.qpCount = qpCount;
+        candidate->registry.reserved = desc.reserved;
         for (uint32_t qp = 0; qp < qpCount; ++qp) {
             candidate->registry.qpBindings[qp] = desc.qpBindings[qp];
         }
@@ -710,6 +733,7 @@ int TileXRUDMAContext::UnregisterProfile(TileXRUDMAProfileHandle handle)
     if (ret == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
         ret = registryRet;
     }
+    ret = AgreeStatus(ret);
     if (ret == TILEXR_SUCCESS) {
         profiles_.erase(it);
     }
@@ -760,6 +784,11 @@ uint32_t TileXRUDMAContext::GetQpCount() const
     return IsAvailable() ? transport_->GetQpCount() : 0U;
 }
 
+bool TileXRUDMAContext::HasGroupedQpProfile() const
+{
+    return IsAvailable() && transport_->UsesGroupedQpProfile();
+}
+
 int TileXRUDMAContext::QueryFullmesh(
     TileXRUDMAFullmeshHostView* view) const
 {
@@ -796,7 +825,7 @@ int TileXRUDMAContext::LoadAndAgreeQpConfig(UDMAQpConfig& config) const
     std::string parseError;
     UDMAQpConfigParseStatus parseStatus = UDMAQpConfigParseStatus::SUCCESS;
     if (options_.sharedQpDomain) {
-        config = BuildUDMASharedQpConfig();
+        parseStatus = LoadUDMASharedQpConfigFromEnv(config, &parseError);
     } else {
         parseStatus = LoadUDMAQpConfigFromEnv(config, &parseError);
     }
@@ -935,27 +964,15 @@ int TileXRUDMAContext::CleanupAllRegistries()
 int TileXRUDMAContext::CleanupAllProfiles()
 {
     int firstError = TILEXR_SUCCESS;
-    for (auto it = profiles_.begin(); it != profiles_.end();) {
-        ProfileRecord& record = *it->second;
-        const bool retrying = record.cleanupPending;
-        record.cleanupPending = true;
-        int transportRet = transport_ == nullptr
-            ? TILEXR_ERROR_NOT_FOUND : transport_->CleanupProfile(it->first);
-        if (retrying && transportRet == TILEXR_ERROR_NOT_FOUND) {
-            transportRet = TILEXR_SUCCESS;
-        }
-        const int registryRet = FreeDeviceRegistry(record.registryDev);
-        int ret = transportRet;
-        if (ret == TILEXR_SUCCESS && registryRet != TILEXR_SUCCESS) {
-            ret = registryRet;
-        }
+    std::vector<TileXRUDMAProfileHandle> handles;
+    handles.reserve(profiles_.size());
+    for (const auto& entry : profiles_) {
+        handles.push_back(entry.first);
+    }
+    for (TileXRUDMAProfileHandle handle : handles) {
+        const int ret = UnregisterProfile(handle);
         if (firstError == TILEXR_SUCCESS && ret != TILEXR_SUCCESS) {
             firstError = ret;
-        }
-        if (ret == TILEXR_SUCCESS) {
-            it = profiles_.erase(it);
-        } else {
-            ++it;
         }
     }
     return firstError;
@@ -1012,7 +1029,7 @@ void TileXRUDMAContext::EnterCleanupPending(const char* reason)
 
     TILEXR_LOG(ERROR) << "TileXR UDMA entered cleanup-pending state: " << reason;
     TileXRUDMACommArgsState hiddenState {};
-    hiddenState.available = IsAvailable();
+    hiddenState.available = !shutdownStarted_ && IsAvailable();
     hiddenState.sharedQp = hiddenState.available && transport_ != nullptr &&
         transport_->UsesSharedQps();
     hiddenState.infoDev = hiddenState.available ? udmaInfoDev_ : nullptr;

@@ -12,7 +12,9 @@
 
 #include <cstdint>
 
+#include "acl/acl_base.h"
 #include "tilexr_api.h"
+#include "tilexr_types.h"
 
 namespace TileXRCollectives {
 namespace Host {
@@ -24,6 +26,12 @@ struct HostLaunchContext {
 };
 
 int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context);
+
+bool IsA5AllToAllCandidate(const HostLaunchContext &context,
+    TileXR::TileXRDataType dataType);
+
+int LaunchA5AllToAll(TileXRCommPtr comm, const HostLaunchContext &context,
+    void *sendBuf, void *recvBuf, int64_t sendCount, aclrtStream stream);
 
 } // namespace Host
 } // namespace TileXRCollectives

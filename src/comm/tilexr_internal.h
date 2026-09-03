@@ -11,7 +11,19 @@
 #define TILEXR_INTERNAL_H
 
 #include <cstdint>
+#include "../include/tilexr_api.h"
 #include "../include/tilexr_types.h"
+
+using TileXRInternalResourceDestroyFn = int (*)(TileXRCommPtr, void*);
+
+int TileXRCommGetInternalResource(TileXRCommPtr comm, void **resource);
+int TileXRCommAttachInternalResource(TileXRCommPtr comm, void *resource,
+    TileXRInternalResourceDestroyFn destroy);
+int TileXRCommDetachInternalResource(TileXRCommPtr comm, void *resource);
+int TileXRCommAgreeInternalStatus(TileXRCommPtr comm, int localStatus);
+int TileXRCommHasA5GroupedQpProfile(TileXRCommPtr comm, bool *available);
+int TileXRCommLockInternalResource(TileXRCommPtr comm);
+int TileXRCommUnlockInternalResource(TileXRCommPtr comm);
 
 namespace TileXR {
 enum class IpcPidMode {

@@ -63,7 +63,7 @@ public:
     int CleanupAllProfiles();
     GM_ADDR GetProfileInfoDev(TileXRUDMAProfileHandle handle) const;
     bool HasProfileCleanupPending() const;
-    void Shutdown();
+    int Shutdown();
 
     bool IsAvailable() const;
     GM_ADDR GetUDMAInfoDev() const;
@@ -75,6 +75,7 @@ public:
     bool HasMemoryCleanupPending() const;
     uint32_t GetQpCount() const;
     bool UsesSharedQps() const;
+    bool UsesGroupedQpProfile() const;
     bool HasFullmeshDomain() const;
     uint32_t GetFullmeshValidPeerMask() const;
 
@@ -133,13 +134,13 @@ private:
     int CleanupRegistrationPtr(std::unique_ptr<RegistrationState>& registration);
     int FreeDeviceInfo(GM_ADDR& infoDev) const;
     int AllocDeviceScalar(void** ptr, size_t bytes) const;
-    void FreeDeviceScalar(void*& ptr) const;
+    int FreeDeviceScalar(void*& ptr) const;
     int CleanupQueues();
     int CleanupFullmeshQueues();
     int RollbackAddedContexts(
         const std::map<uint32_t, void*>& previousContexts,
         const std::map<uint32_t, void*>& previousTokens);
-    void CleanupContexts();
+    int CleanupContexts();
     uint32_t FallbackLocalEid() const;
     const PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx) const;
     PerPeerQpState* GetPeerQpState(int peer, uint32_t qpIdx);
@@ -189,8 +190,10 @@ private:
     uint32_t qpCount_ = 1;
     bool explicitConfig_ = false;
     bool sharedQp_ = false;
+    bool groupedQpProfile_ = false;
     bool fullmeshAvailable_ = false;
     uint32_t fullmeshValidPeerMask_ = 0U;
+    bool shutdownComplete_ = true;
 };
 
 } // namespace TileXR

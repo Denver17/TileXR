@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -46,6 +47,7 @@ enum class CollectiveOp {
 enum class CommMode {
     LOCAL,
     SOCKET,
+    SHARED_QP,
 };
 
 struct DataTypeInfo {
@@ -67,16 +69,19 @@ struct Options {
     int firstNpu = 0;
     int deviceIdOverride = -1;
     CommMode commMode = CommMode::LOCAL;
+    int commDomain = 61;
     bool check = true;
     std::string csvPath;
     double minAlgBw = -1.0;
     double maxLatencyUs = -1.0;
+    bool batchTiming = false;
 };
 
 struct Measurement {
     double avgUs = 0.0;
     double minUs = 0.0;
     double maxUs = 0.0;
+    bool hasLatencyRange = true;
 };
 
 struct Row {
@@ -91,6 +96,7 @@ struct Row {
     double avgUs = 0.0;
     double minUs = 0.0;
     double maxUs = 0.0;
+    bool hasLatencyRange = true;
     int errors = 0;
 };
 
@@ -129,6 +135,8 @@ std::string CommModeName(CommMode mode)
             return "local";
         case CommMode::SOCKET:
             return "socket";
+        case CommMode::SHARED_QP:
+            return "shared-qp";
     }
     return "unknown";
 }
@@ -177,10 +185,10 @@ void PrintUsage(const char *program)
         << "  Message-size semantics: allgather/allreduce/broadcast: count * dtype_size; "
            "alltoall/reducescatter: count * rank_size * dtype_size\n"
         << "  --min-bytes N --max-bytes N --step-factor F\n"
-        << "  --iters N --warmup-iters N\n"
+        << "  --iters N --warmup-iters N [--batch-timing 0|1]\n"
         << "  --datatype int8|int16|int32|int64|fp16|fp32|bf16\n"
         << "  --rank-size N --rank R --first-npu D\n"
-        << "  [--device-id D] [--comm-mode local|socket]\n"
+        << "  [--device-id D] [--comm-mode local|socket|shared-qp] [--comm-domain N]\n"
         << "  --check 0|1 [--csv path]\n"
         << "  [--min-algbw GB/s] [--max-latency-us us]\n";
 }
@@ -228,6 +236,10 @@ bool ParseCommMode(const std::string &value, CommMode &mode)
     }
     if (value == "socket") {
         mode = CommMode::SOCKET;
+        return true;
+    }
+    if (value == "shared-qp") {
+        mode = CommMode::SHARED_QP;
         return true;
     }
     return false;
@@ -479,6 +491,12 @@ bool ParseOptions(int argc, char **argv, Options &options)
                 std::cerr << "ERROR: invalid --warmup-iters" << std::endl;
                 return false;
             }
+        } else if (arg == "--batch-timing") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseBool(value, options.batchTiming)) {
+                std::cerr << "ERROR: --batch-timing must be 0 or 1" << std::endl;
+                return false;
+            }
         } else if (arg == "--datatype") {
             const char *value = requireValue(arg);
             if (value == nullptr || !ParseDataType(value, options.dtype)) {
@@ -524,7 +542,13 @@ bool ParseOptions(int argc, char **argv, Options &options)
         } else if (arg == "--comm-mode") {
             const char *value = requireValue(arg);
             if (value == nullptr || !ParseCommMode(value, options.commMode)) {
-                std::cerr << "ERROR: --comm-mode must be local or socket" << std::endl;
+                std::cerr << "ERROR: --comm-mode must be local, socket, or shared-qp" << std::endl;
+                return false;
+            }
+        } else if (arg == "--comm-domain") {
+            const char *value = requireValue(arg);
+            if (value == nullptr || !ParseInt(value, options.commDomain)) {
+                std::cerr << "ERROR: invalid --comm-domain" << std::endl;
                 return false;
             }
         } else if (arg == "--check") {
@@ -569,8 +593,13 @@ bool ParseOptions(int argc, char **argv, Options &options)
     if (options.minBytes <= 0 || options.maxBytes < options.minBytes || options.stepFactor <= 1.0 ||
         options.iters <= 0 || options.warmupIters < 0 || options.rankSize <= 0 ||
         options.rank < 0 || options.rank >= options.rankSize || options.firstNpu < 0 ||
-        options.deviceIdOverride < -1) {
+        options.deviceIdOverride < -1 || options.commDomain < 0) {
         std::cerr << "ERROR: invalid option value" << std::endl;
+        return false;
+    }
+    const char *profilingRecordsPath = std::getenv("TILEXR_PROFILING_RECORDS_PATH");
+    if (options.batchTiming && profilingRecordsPath != nullptr && profilingRecordsPath[0] != '\0') {
+        std::cerr << "ERROR: --batch-timing does not support profiling" << std::endl;
         return false;
     }
     if (options.check && options.dtype.name != "int32" && IsReductionOp(options.op)) {
@@ -910,6 +939,26 @@ bool MeasureOnce(const Options &options, void *devSend, void *devRecv, int64_t c
     return true;
 }
 
+bool MeasureBatch(const Options &options, void *devSend, void *devRecv, int64_t count,
+                  TileXRCommPtr comm, aclrtStream stream, Measurement &measurement)
+{
+    const auto start = std::chrono::steady_clock::now();
+    for (int i = 0; i < options.iters; ++i) {
+        if (!CallCollective(options, devSend, devRecv, count, comm, stream)) {
+            return false;
+        }
+    }
+    if (!CheckAcl(options.rank, "aclrtSynchronizeStream batch measurement",
+            aclrtSynchronizeStream(stream))) {
+        return false;
+    }
+    const auto stop = std::chrono::steady_clock::now();
+    const std::chrono::duration<double, std::micro> elapsed = stop - start;
+    measurement.avgUs = elapsed.count() / static_cast<double>(options.iters);
+    measurement.hasLatencyRange = false;
+    return true;
+}
+
 bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count, TileXRCommPtr comm,
              aclrtStream stream, Measurement &measurement)
 {
@@ -920,6 +969,10 @@ bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count
     }
     if (!CheckAcl(options.rank, "aclrtSynchronizeStream warmup", aclrtSynchronizeStream(stream))) {
         return false;
+    }
+
+    if (options.batchTiming) {
+        return MeasureBatch(options, devSend, devRecv, count, comm, stream, measurement);
     }
 
     std::vector<double> samples;
@@ -953,8 +1006,13 @@ void PrintRow(const Row &row)
     std::cout << row.op << ' ' << row.dtype << ' ' << row.ranks << ' ' << row.bytes << ' '
               << row.count << ' ' << row.iters << ' '
               << std::fixed << std::setprecision(3)
-              << row.algBw << ' ' << row.busBw << ' ' << row.avgUs << ' '
-              << row.minUs << ' ' << row.maxUs << ' ' << row.errors << std::endl;
+              << row.algBw << ' ' << row.busBw << ' ' << row.avgUs << ' ';
+    if (row.hasLatencyRange) {
+        std::cout << row.minUs << ' ' << row.maxUs;
+    } else {
+        std::cout << "N/A N/A";
+    }
+    std::cout << ' ' << row.errors << std::endl;
 }
 
 bool AppendCsv(const std::string &path, const Row &row)
@@ -976,23 +1034,36 @@ bool AppendCsv(const std::string &path, const Row &row)
     }
     out << row.op << ',' << row.dtype << ',' << row.ranks << ',' << row.bytes << ','
         << row.count << ',' << row.iters << ',' << std::fixed << std::setprecision(6)
-        << row.algBw << ',' << row.busBw << ',' << row.avgUs << ','
-        << row.minUs << ',' << row.maxUs << ',' << row.errors << '\n';
+        << row.algBw << ',' << row.busBw << ',' << row.avgUs << ',';
+    if (row.hasLatencyRange) {
+        out << row.minUs << ',' << row.maxUs;
+    } else {
+        out << "N/A,N/A";
+    }
+    out << ',' << row.errors << '\n';
     return true;
 }
 
-void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet)
+bool Cleanup(int rank, TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet)
 {
     if (comm != nullptr) {
-        TileXRCommDestroy(comm);
+        const int ret = TileXRCommDestroy(comm);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            std::cerr << "[rank " << rank
+                      << "] ERROR: TileXRCommDestroy failed, ret="
+                      << ret << std::endl;
+            return false;
+        }
     }
+    bool ok = true;
     if (stream != nullptr) {
-        aclrtDestroyStream(stream);
+        ok = CheckAcl(rank, "aclrtDestroyStream", aclrtDestroyStream(stream)) && ok;
     }
     if (deviceSet) {
-        aclrtResetDevice(deviceId);
+        ok = CheckAcl(rank, "aclrtResetDevice", aclrtResetDevice(deviceId)) && ok;
     }
-    aclFinalize();
+    ok = CheckAcl(rank, "aclFinalize", aclFinalize()) && ok;
+    return ok;
 }
 
 } // namespace
@@ -1013,12 +1084,12 @@ int main(int argc, char **argv)
         return 1;
     }
     if (!CheckAcl(options.rank, "aclrtSetDevice", aclrtSetDevice(deviceId))) {
-        Cleanup(comm, stream, deviceId, deviceSet);
+        Cleanup(options.rank, comm, stream, deviceId, deviceSet);
         return 1;
     }
     deviceSet = true;
     if (!CheckAcl(options.rank, "aclrtCreateStream", aclrtCreateStream(&stream))) {
-        Cleanup(comm, stream, deviceId, deviceSet);
+        Cleanup(options.rank, comm, stream, deviceId, deviceSet);
         return 1;
     }
 
@@ -1028,12 +1099,16 @@ int main(int argc, char **argv)
         commOk = CheckTileXR(options.rank, "TileXRGetUniqueId", TileXRGetUniqueId(&uniqueId, 0)) &&
             CheckTileXR(options.rank, "TileXRCommInitRank",
                 TileXRCommInitRank(uniqueId, options.rankSize, options.rank, &comm));
+    } else if (options.commMode == CommMode::SHARED_QP) {
+        commOk = CheckTileXR(options.rank, "TileXRCommInitRankWithSharedQpDomain",
+            TileXRCommInitRankWithSharedQpDomain(
+                options.commDomain, options.rankSize, options.rank, &comm));
     } else {
         commOk = CheckTileXR(options.rank, "TileXRCommInitRankLocal",
             TileXRCommInitRankLocal(options.rankSize, options.rank, &comm));
     }
     if (!commOk) {
-        Cleanup(comm, stream, deviceId, deviceSet);
+        Cleanup(options.rank, comm, stream, deviceId, deviceSet);
         return 1;
     }
 
@@ -1053,7 +1128,7 @@ int main(int argc, char **argv)
         int64_t recvBytes = 0;
         if (!ComputeMessageSizes(options, count, sendElements, recvElements, sendBytes, recvBytes)) {
             std::cerr << "ERROR: message size too large" << std::endl;
-            Cleanup(comm, stream, deviceId, deviceSet);
+            Cleanup(options.rank, comm, stream, deviceId, deviceSet);
             return 1;
         }
         const int64_t actualSendBytesPerRank = sendBytes;
@@ -1119,7 +1194,7 @@ int main(int argc, char **argv)
             aclrtFree(devRecv);
         }
         if (!ok) {
-            Cleanup(comm, stream, deviceId, deviceSet);
+            Cleanup(options.rank, comm, stream, deviceId, deviceSet);
             return 1;
         }
 
@@ -1136,11 +1211,12 @@ int main(int argc, char **argv)
         totalErrors += errors;
 
         Row row{opName, options.dtype.name, options.rankSize, actualSendBytesPerRank, count, options.iters,
-            algBw, busBw, measurement.avgUs, measurement.minUs, measurement.maxUs, errors};
+            algBw, busBw, measurement.avgUs, measurement.minUs, measurement.maxUs,
+            measurement.hasLatencyRange, errors};
         if (options.rank == 0) {
             PrintRow(row);
             if (!AppendCsv(options.csvPath, row)) {
-                Cleanup(comm, stream, deviceId, deviceSet);
+                Cleanup(options.rank, comm, stream, deviceId, deviceSet);
                 return 1;
             }
         }
@@ -1148,7 +1224,7 @@ int main(int argc, char **argv)
         int64_t nextBytes = 0;
         if (!AdvanceBytes(bytes, options.stepFactor, options.maxBytes, nextBytes)) {
             std::cerr << "ERROR: message size step overflow" << std::endl;
-            Cleanup(comm, stream, deviceId, deviceSet);
+            Cleanup(options.rank, comm, stream, deviceId, deviceSet);
             return 1;
         }
         if (nextBytes <= bytes) {
@@ -1157,6 +1233,7 @@ int main(int argc, char **argv)
         bytes = nextBytes;
     }
 
-    Cleanup(comm, stream, deviceId, deviceSet);
-    return totalErrors == 0 ? 0 : 1;
+    const bool cleanupOk = Cleanup(
+        options.rank, comm, stream, deviceId, deviceSet);
+    return totalErrors == 0 && cleanupOk ? 0 : 1;
 }

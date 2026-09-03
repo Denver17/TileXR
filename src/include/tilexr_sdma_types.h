@@ -25,6 +25,22 @@ enum class SDMAInitStatus : int32_t {
     NULL_WORKSPACE = 4,
 };
 
+struct SDMASubmitTrace {
+    uint64_t prepareBegin;
+    uint64_t prepareEnd;
+    uint64_t cacheCleanBegin;
+    uint64_t cacheCleanEnd;
+    uint64_t dsbBegin;
+    uint64_t dsbEnd;
+    uint64_t doorbellBegin;
+    uint64_t doorbellEnd;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t newTail;
+    uint32_t depth;
+    uint32_t generation;
+};
+
 } // namespace TileXR
 
 #endif // TILEXR_SDMA_TYPES_H

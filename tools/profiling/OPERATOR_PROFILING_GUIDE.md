@@ -90,34 +90,24 @@ device arrays and flush implementation are not emitted.
 
 ### One Deferred Flush
 
-After the last measured marker, flush once through a UB scratch tensor:
+After the last measured marker, flush once directly to the per-core GM range:
 
 ```cpp
-constexpr uint32_t kFlushSlots = 8U; // round record count up to 8
-
-AscendC::TBuf<AscendC::QuePosition::VECCALC> profileFlushBuf;
-pipe.InitBuffer(profileFlushBuf, kFlushSlots * sizeof(uint64_t));
-
 // Record total end before this call; flush time is not part of kernel_total.
-tilexrProfiler.Flush(commArgsGM, profileFlushBuf.Get<uint64_t>());
+tilexrProfiler.Flush(commArgsGM);
 ```
 
-The helper stages timestamps and IDs through UB and publishes them with MTE3.
-It pads each append to eight slots so timestamp and ID destinations remain
-32-byte aligned. Padding uses event ID zero and is removed by the Host exporter;
-it never appears in `capture.records.bin`.
-
-The default synchronization event is `EVENT_ID0`. A Kernel that still owns
-that event at the flush boundary must complete it first or select another free
-event through the second template argument:
-
-```cpp
-tilexrProfiler.Flush<EVENT_ID3>(commArgsGM, scratch);
-```
-
-The scratch buffer must provide at least
-`align_up(record_count, 8) * sizeof(uint64_t)` bytes. A single Kernel invocation
+The helper reads the per-core append counter, writes timestamp and event-ID
+slots with scalar GM stores, then publishes the new counter. It deliberately
+uses no profiling `DataCopy`, UB scratch, or `S_MTE3`/`MTE3_S` synchronization.
+This keeps profiling from adding MTE pipeline dependencies to the operator.
+Each append is still padded to eight slots; event-ID zero marks padding and the
+Host exporter removes it from `capture.records.bin`. A single Kernel invocation
 may record at most 256 markers.
+
+Direct scalar GM stores are limited to this post-interval profiling capture.
+They must not be generalized to UDMA SQEs, queue heads, or doorbells, whose
+cache-coherency and publication rules remain transport-specific.
 
 ## CommArgs And Runtime Lifecycle
 
@@ -287,12 +277,12 @@ report/report.html
 3. Include `tilexr_profiling.h` and compile the profiled Kernel with the enable macro.
 4. Use compile-time marker slots and prove the maximum marker count is at most 256.
 5. Record the critical end before calling the common flush helper.
-6. Provide an aligned UB scratch tensor and a free MTE3 synchronization event.
-7. Pass the communicator's existing device `CommArgs` pointer to the Kernel.
-8. Set a new records path and one shared capture UUID before communicator initialization.
-9. Order profiled launches on one stream for each communicator capture.
-10. Destroy the communicator before invoking `tools/profiling`.
-11. Inspect generated Kernel code for spills and compare profiling-on/off latency.
+6. Pass the communicator's existing device `CommArgs` pointer to the Kernel.
+7. Set a new records path and one shared capture UUID before communicator initialization.
+8. Order profiled launches on one stream for each communicator capture.
+9. Destroy the communicator before invoking `tools/profiling`.
+10. Inspect generated Kernel code for spills and confirm profiling adds no MTE synchronization.
+11. Compare profiling-on/off latency.
 12. Retain the JSON, records file, reports, build provenance, and hardware identity.
 
 The complete executable example is under `tests/profiling/demo`.

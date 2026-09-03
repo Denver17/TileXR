@@ -96,6 +96,7 @@ add_executable(test_tilexr_udma_transport_layout
 target_include_directories(test_tilexr_udma_transport_layout PRIVATE
     ${TILEXR_ROOT}/src/include
     ${TILEXR_ROOT}/src/comm
+    ${TILEXR_ROOT}/src/collectives/kernels
 )
 
 add_executable(test_tilexr_udma_route_config

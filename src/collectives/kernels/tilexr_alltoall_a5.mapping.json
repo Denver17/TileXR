@@ -1,0 +1,119 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "AIV URMA Grouped AllToAll",
+  "cycles_per_us": 1000.0,
+  "stages": [
+    {
+      "name": "kernel_total",
+      "category": "total",
+      "critical": true,
+      "begin": 1,
+      "end": 2
+    },
+    {
+      "name": "send_all",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 10,
+      "end": 11
+    },
+    {
+      "name": "credit-wait",
+      "category": "wait",
+      "parent": "send_all",
+      "track": "send",
+      "instance_range": {"count": 128, "begin": 1000, "end": 1001, "stride": 2}
+    },
+    {
+      "name": "send-put-signal",
+      "category": "issue",
+      "parent": "send_all",
+      "track": "send",
+      "instance_range": {"count": 128, "begin": 2000, "end": 2001, "stride": 2}
+    },
+    {
+      "name": "send-quiet",
+      "category": "wait",
+      "parent": "send_all",
+      "track": "send",
+      "instance_range": {"count": 128, "begin": 3000, "end": 3001, "stride": 2}
+    },
+    {
+      "name": "sdma_prewarm",
+      "category": "setup",
+      "parent": "kernel_total",
+      "begin": 22,
+      "end": 23
+    },
+    {
+      "name": "self_copy",
+      "category": "copy",
+      "parent": "kernel_total",
+      "begin": 20,
+      "end": 21
+    },
+    {
+      "name": "receive_loop",
+      "category": "wait",
+      "parent": "kernel_total",
+      "begin": 30,
+      "end": 31
+    },
+    {
+      "name": "receive-wait",
+      "category": "wait",
+      "parent": "receive_loop",
+      "track": "receive",
+      "instance_range": {"count": 128, "begin": 4000, "end": 4001, "stride": 2}
+    },
+    {
+      "name": "receive-copy",
+      "category": "copy",
+      "parent": "receive_loop",
+      "track": "receive",
+      "instance_range": {"count": 128, "begin": 5000, "end": 5001, "stride": 2}
+    },
+    {
+      "name": "sdma-submit",
+      "category": "issue",
+      "parent": "receive-copy",
+      "track": "sdma-request",
+      "instance_range": {"count": 128, "begin": 6000, "end": 6001, "stride": 2}
+    },
+    {
+      "name": "sdma-prepare",
+      "category": "issue",
+      "parent": "sdma-submit",
+      "track": "sdma-submit-detail",
+      "instance_range": {"count": 128, "begin": 7000, "end": 7001, "stride": 2}
+    },
+    {
+      "name": "sdma-cache-clean",
+      "category": "issue",
+      "parent": "sdma-submit",
+      "track": "sdma-submit-detail",
+      "instance_range": {"count": 128, "begin": 8000, "end": 8001, "stride": 2}
+    },
+    {
+      "name": "sdma-dsb",
+      "category": "wait",
+      "parent": "sdma-submit",
+      "track": "sdma-submit-detail",
+      "instance_range": {"count": 128, "begin": 9000, "end": 9001, "stride": 2}
+    },
+    {
+      "name": "sdma-doorbell",
+      "category": "issue",
+      "parent": "sdma-submit",
+      "track": "sdma-submit-detail",
+      "instance_range": {"count": 128, "begin": 10000, "end": 10001, "stride": 2}
+    },
+    {
+      "name": "sdma-wait",
+      "category": "wait",
+      "parent": "receive-copy",
+      "track": "sdma-request",
+      "instance_range": {"count": 128, "begin": 11000, "end": 11001, "stride": 2}
+    }
+  ]
+}

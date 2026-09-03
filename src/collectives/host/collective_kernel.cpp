@@ -15,17 +15,38 @@
 #include <mutex>
 #include <string>
 
+#include "acl/acl_rt.h"
 #include "collective_utils.h"
 #include "runtime/kernel.h"
 
 extern "C" {
 extern const unsigned char TileXRCollectivesKernelBinaryData[];
 extern const std::size_t TileXRCollectivesKernelBinarySize;
+extern const unsigned char TileXRAllToAllA5KernelBinaryData[];
+extern const std::size_t TileXRAllToAllA5KernelBinarySize;
+extern const unsigned char TileXRAllToAllA5Kernel128BinaryData[];
+extern const std::size_t TileXRAllToAllA5Kernel128BinarySize;
 }
 
 namespace TileXRCollectives {
 namespace Host {
 namespace {
+
+int ConfigureSimtMemory(rtTaskCfgInfo_t &cfg)
+{
+    int32_t device = 0;
+    int64_t totalUbBytes = 0;
+    if (aclrtGetDevice(&device) != ACL_SUCCESS ||
+        aclrtGetDeviceInfo(static_cast<uint32_t>(device),
+            ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE, &totalUbBytes) != ACL_SUCCESS ||
+        !ComputeA5SimtLocalMemorySize(totalUbBytes,
+            &cfg.localMemorySize)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    cfg.schemMode = RT_SCHEM_MODE_NORMAL;
+    return TileXR::TILEXR_SUCCESS;
+}
 
 constexpr uint32_t LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC = 0x41415246;
 constexpr uint64_t FUNSIG_OFFSET_BITS = 16;
@@ -35,6 +56,11 @@ std::mutex g_registrationMutex;
 bool g_registered = false;
 int g_registrationStatus = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
 void *g_binaryHandle = nullptr;
+void *g_a5BinaryHandle = nullptr;
+void *g_a5Binary128Handle = nullptr;
+uint8_t g_a5KernelStub = 0U;
+uint8_t g_a5Kernel128Stub = 0U;
+bool g_a5Registered = false;
 
 struct DataTypeRegistration {
     TileXR::TileXRDataType dataType;
@@ -136,6 +162,55 @@ int EnsureCollectivesKernelsRegistered()
     return RegisterCollectivesKernelsLocked();
 }
 
+int RegisterA5Binary(const unsigned char *data, std::size_t size,
+    const char *name, void **handle, uint8_t *stub)
+{
+    if (data == nullptr || size == 0U || size > UINT32_MAX) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    rtDevBinary_t binary {};
+    binary.data = data;
+    binary.length = static_cast<uint32_t>(size);
+    binary.magic = LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC;
+    void *binaryHandle = nullptr;
+    rtError_t ret = rtDevBinaryRegister(&binary, &binaryHandle);
+    if (ret == RT_ERROR_NONE) {
+        ret = rtFunctionRegister(binaryHandle, stub, name, name, 0U);
+    }
+    if (ret != RT_ERROR_NONE) {
+        if (binaryHandle != nullptr) {
+            (void)rtDevBinaryUnRegister(binaryHandle);
+        }
+        return TileXR::TILEXR_ERROR_MKIRT;
+    }
+    *handle = binaryHandle;
+    return TileXR::TILEXR_SUCCESS;
+}
+
+int EnsureA5KernelsRegistered()
+{
+    std::lock_guard<std::mutex> guard(g_registrationMutex);
+    if (g_a5Registered) {
+        return TileXR::TILEXR_SUCCESS;
+    }
+    int ret = RegisterA5Binary(TileXRAllToAllA5KernelBinaryData,
+        TileXRAllToAllA5KernelBinarySize, "tilexr_alltoall_a5_kernel",
+        &g_a5BinaryHandle, &g_a5KernelStub);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
+    ret = RegisterA5Binary(TileXRAllToAllA5Kernel128BinaryData,
+        TileXRAllToAllA5Kernel128BinarySize, "tilexr_alltoall_a5_kernel_128",
+        &g_a5Binary128Handle, &g_a5Kernel128Stub);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        (void)rtDevBinaryUnRegister(g_a5BinaryHandle);
+        g_a5BinaryHandle = nullptr;
+        return ret;
+    }
+    g_a5Registered = true;
+    return TileXR::TILEXR_SUCCESS;
+}
+
 } // namespace
 
 int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const HostLaunchContext &context,
@@ -188,6 +263,34 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
                   << ", stream=" << stream << std::endl;
     }
     return ret == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;
+}
+
+int LaunchA5AllToAllKernel(uint32_t rankSize,
+    const TileXRGrouped::KernelArgs &args, aclrtStream stream)
+{
+    if (!TileXRGrouped::ValidRankSize(rankSize) || stream == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const int registerRet = EnsureA5KernelsRegistered();
+    if (registerRet != TileXR::TILEXR_SUCCESS) {
+        return registerRet;
+    }
+    rtArgsEx_t argsInfo {};
+    argsInfo.args = const_cast<TileXRGrouped::KernelArgs *>(&args);
+    argsInfo.argsSize = static_cast<uint32_t>(sizeof(args));
+    rtTaskCfgInfo_t cfg {};
+    const int configRet = ConfigureSimtMemory(cfg);
+    if (configRet != TileXR::TILEXR_SUCCESS) {
+        return configRet;
+    }
+    const void *stub = rankSize == 128U ?
+        static_cast<const void *>(&g_a5Kernel128Stub) :
+        static_cast<const void *>(&g_a5KernelStub);
+    const rtError_t ret = rtKernelLaunchWithFlagV2(stub,
+        TileXRGrouped::kBlockDim, &argsInfo, nullptr,
+        static_cast<rtStream_t>(stream), 0U, &cfg);
+    return ret == RT_ERROR_NONE ?
+        TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;
 }
 
 } // namespace Host

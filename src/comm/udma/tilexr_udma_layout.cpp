@@ -5,6 +5,8 @@
 
 #include "udma/tilexr_udma_layout.h"
 
+#include "udma/tilexr_udma_config.h"
+
 #include <cstring>
 #include <limits>
 
@@ -59,6 +61,136 @@ void CopyVector(std::vector<uint8_t>& dst, size_t offset, const std::vector<T>& 
 }
 
 } // namespace
+
+uint32_t UDMAGroupedSharedQpLane(
+    int rank, int peer, int rankSize, uint32_t laneCount)
+{
+    if (rankSize <= 1 || rank < 0 || peer < 0 || rank >= rankSize ||
+        peer >= rankSize || rank == peer || laneCount == 0U ||
+        laneCount % 2U != 0U) {
+        return laneCount;
+    }
+
+    if (rankSize == 128 && laneCount == 16U) {
+        constexpr int partitionSize = 64;
+        const int rankPartition = rank / partitionSize;
+        const int peerPartition = peer / partitionSize;
+        const uint32_t rankInPartition = static_cast<uint32_t>(rank % partitionSize);
+        const uint32_t peerInPartition = static_cast<uint32_t>(peer % partitionSize);
+        const uint32_t forward =
+            (peerInPartition + partitionSize - rankInPartition) % partitionSize;
+        if (rankPartition == peerPartition) {
+            if (forward <= partitionSize / 2U) {
+                return (forward - 1U) % 4U;
+            }
+            const uint32_t backward = partitionSize - forward;
+            return 4U + (backward - 1U) % 4U;
+        }
+        if (forward == 0U) {
+            return 8U;
+        }
+        if (forward < partitionSize / 2U) {
+            return 8U + forward % 4U;
+        }
+        if (forward == partitionSize / 2U) {
+            return 12U;
+        }
+        const uint32_t backward = partitionSize - forward;
+        return 12U + backward % 4U;
+    }
+
+    const uint32_t lanesPerDirection = laneCount / 2U;
+    const uint32_t forward = static_cast<uint32_t>(
+        (peer - rank + rankSize) % rankSize);
+    const uint32_t backward = static_cast<uint32_t>(rankSize) - forward;
+    return forward <= backward ?
+        (forward - 1U) % lanesPerDirection :
+        lanesPerDirection + (backward - 1U) % lanesPerDirection;
+}
+
+uint32_t UDMAGroupedRemoteQpIndex(
+    int rank, int peer, int rankSize, uint32_t qpIdx,
+    uint32_t qpCount, uint32_t laneCount, uint32_t localRankSize)
+{
+    if (laneCount == 0U || laneCount > UINT32_MAX / 2U || qpIdx >= qpCount) {
+        return qpCount;
+    }
+    if (qpCount == TILEXR_UDMA_GROUPED_SHARED_QP_COUNT &&
+        qpIdx >= TILEXR_UDMA_GROUPED_DIRECT_QP_BASE) {
+        const uint32_t localDirect = UDMAGroupedDirectQpIndex(
+            rank, peer, rankSize, qpCount, localRankSize);
+        if (qpIdx != localDirect) {
+            return qpCount;
+        }
+        return UDMAGroupedDirectQpIndex(
+            peer, rank, rankSize, qpCount, localRankSize);
+    }
+    const uint32_t aggregateQpCount = qpCount == TILEXR_UDMA_GROUPED_SHARED_QP_COUNT ?
+        TILEXR_UDMA_GROUPED_AGGREGATE_QP_COUNT : qpCount;
+    if (aggregateQpCount != laneCount * 2U ||
+        qpIdx >= aggregateQpCount) {
+        return qpCount;
+    }
+    const uint32_t localLane = UDMAGroupedSharedQpLane(
+        rank, peer, rankSize, laneCount);
+    const uint32_t remoteLane = UDMAGroupedSharedQpLane(
+        peer, rank, rankSize, laneCount);
+    if (localLane >= laneCount || remoteLane >= laneCount) {
+        return qpCount;
+    }
+    const uint32_t routeBase = qpIdx / laneCount * laneCount;
+    const uint32_t lane = qpIdx % laneCount;
+    if (lane == localLane) {
+        return routeBase + remoteLane;
+    }
+    if (lane == remoteLane) {
+        return routeBase + localLane;
+    }
+    return qpIdx;
+}
+
+uint32_t UDMARemoteQpIndex(bool groupedQpProfile,
+    int rank, int peer, int rankSize, uint32_t qpIdx,
+    uint32_t qpCount, uint32_t laneCount, uint32_t localRankSize)
+{
+    if (qpIdx >= qpCount) {
+        return qpCount;
+    }
+    return groupedQpProfile ? UDMAGroupedRemoteQpIndex(
+        rank, peer, rankSize, qpIdx, qpCount, laneCount, localRankSize) : qpIdx;
+}
+
+uint32_t UDMAGroupedDirectQpIndex(
+    int rank, int peer, int rankSize, uint32_t qpCount, uint32_t localRankSize)
+{
+    if (qpCount != TILEXR_UDMA_GROUPED_SHARED_QP_COUNT ||
+        rankSize <= 1 || rank < 0 || peer < 0 || rank >= rankSize ||
+        peer >= rankSize || rank == peer || localRankSize < 2U ||
+        localRankSize - 1U != TILEXR_UDMA_GROUPED_DIRECT_QP_COUNT ||
+        rank / static_cast<int>(localRankSize) !=
+            peer / static_cast<int>(localRankSize)) {
+        return qpCount;
+    }
+    const uint32_t localRank = static_cast<uint32_t>(rank) % localRankSize;
+    const uint32_t peerLocalRank = static_cast<uint32_t>(peer) % localRankSize;
+    const uint32_t slot = peerLocalRank < localRank ?
+        peerLocalRank : peerLocalRank - 1U;
+    return TILEXR_UDMA_GROUPED_DIRECT_QP_BASE + slot;
+}
+
+int UDMAGroupedLocalPeerFromSlot(
+    int rank, int rankSize, uint32_t slot, uint32_t localRankSize)
+{
+    if (rankSize <= 1 || rank < 0 || rank >= rankSize || localRankSize < 2U ||
+        rankSize % static_cast<int>(localRankSize) != 0 ||
+        slot >= localRankSize - 1U) {
+        return -1;
+    }
+    const uint32_t localRank = static_cast<uint32_t>(rank) % localRankSize;
+    const uint32_t peerLocalRank = slot < localRank ? slot : slot + 1U;
+    return rank / static_cast<int>(localRankSize) *
+        static_cast<int>(localRankSize) + static_cast<int>(peerLocalRank);
+}
 
 int BuildUDMAInfoImage(
     uintptr_t deviceBase,
