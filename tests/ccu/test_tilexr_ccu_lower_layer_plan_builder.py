@@ -165,6 +165,11 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                     std::cerr << "peer-specific EID mapping mismatch\n";
                     return 2;
                 }
+                if (routes[0].tpType != TILEXR_CCU_HCCP_TP_TYPE_CTP ||
+                    routes[1].tpType != TILEXR_CCU_HCCP_TP_TYPE_RTP) {
+                    std::cerr << "peer-specific TP protocol mismatch\n";
+                    return 3;
+                }
                 return 0;
             }
             ''')
@@ -174,7 +179,8 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
             root_path = temp_path / "rootinfo.json"
             topo_path.write_text(json.dumps({
                 "edge_list": [
-                    {"local_a": 0, "local_a_ports": ["0/8"], "local_b": 1, "local_b_ports": ["0/7"]},
+                    {"local_a": 0, "local_a_ports": ["0/8"], "local_b": 1, "local_b_ports": ["0/7"],
+                     "protocols": ["UB_CTP", "UB_MEM"]},
                     {"local_a": 0, "local_a_ports": ["0/0"], "local_b": 2, "local_b_ports": ["0/0"]},
                     {"local_a": 0, "local_a_ports": ["0/7"], "local_b": 3, "local_b_ports": ["0/7"]},
                 ]
@@ -1187,7 +1193,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 request.sqeArgCount = TILEXR_CCU_SQE_ARGS_LEN;
                 request.syncResourceCount = 2;
                 request.syncInstructionCount = 9;
-                request.bindingsPerSyncResource = 1;
+                request.bindingsPerSyncResource = 3;
                 TileXRCcuProducerPlan producerPlan;
                 TileXRCcuResourceAllocation allocation;
                 TileXRCcuResourceAllocatorReport allocatorReport;
@@ -1201,12 +1207,14 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 remote0.remoteCcuVa = specInfo.xnBaseAddr + allocation.remoteXn.startId * 8ULL;
                 remote0.memoryTokenId = 0x23456;
                 remote0.memoryTokenValue = 0x5678;
+                remote0.remoteXnId = allocation.remoteXn.startId;
                 remote0.remoteNotifyCke = 0x360;
                 remoteCcuBuffers.push_back(remote0);
                 TileXRCcuRemoteCcuBufferInfo remote1 = remote0;
-                remote1.remoteCcuVa = specInfo.xnBaseAddr + (allocation.remoteXn.startId + 1U) * 8ULL;
+                remote1.remoteCcuVa = specInfo.xnBaseAddr + (allocation.remoteXn.startId + 8U) * 8ULL;
                 remote1.memoryTokenId = 0x23457;
                 remote1.memoryTokenValue = 0x5679;
+                remote1.remoteXnId = static_cast<uint16_t>(allocation.remoteXn.startId + 8U);
                 remote1.remoteNotifyCke = 0x361;
                 remoteCcuBuffers.push_back(remote1);
 
@@ -1236,7 +1244,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
                 if (snapshot.routes.size() != 2 || snapshot.routes[0].channelId != allocation.channels.startId ||
                     snapshot.routes[1].channelId != allocation.channels.startId + 1U ||
                     snapshot.routes[0].remoteXnId != allocation.remoteXn.startId ||
-                    snapshot.routes[1].remoteXnId != allocation.remoteXn.startId + 1U ||
+                    snapshot.routes[1].remoteXnId != allocation.remoteXn.startId + 8U ||
                     snapshot.routes[0].remoteNotifyCke != 0x360 ||
                     snapshot.routes[1].remoteNotifyCke != 0x361 ||
                     snapshot.routes[0].wqeBasicBlockStartId != 0 ||
@@ -2237,7 +2245,7 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertIn("TileXRCcuBuildPfeCtx", source)
         self.assertIn("TileXRCcuBuildLocalJettyCtx", source)
         self.assertIn("TileXRCcuBuildChannelCtxV1", source)
-        self.assertIn("allocation.channels.num < remoteCcuBuffers.size()", source)
+        self.assertIn("remoteCcuBuffers.size() != allocation.channels.num", source)
         self.assertIn("channel allocation count does not match lower-layer route count", source)
         self.assertNotIn("TILEXR_CCU_DIRECT_SYNC_RESOURCE_MAP", source)
         self.assertNotIn("UseHcommTraceSyncResourceMap", source)
@@ -2534,6 +2542,12 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
     def test_lower_layer_clears_the_complete_allocated_remote_xn_range(self):
         source = BUILDER_SOURCE.read_text(encoding="utf-8")
 
+        self.assertIn(
+            "remoteCcuBuffers.size() != allocation.channels.num",
+            source)
+        self.assertNotIn(
+            "remoteCcuBuffers.size() != allocation.remoteXn.num",
+            source)
         self.assertIn("result.remoteXnStartId = allocation.remoteXn.startId", source)
         self.assertIn("result.remoteXnCount = allocation.remoteXn.num", source)
         self.assertIn("snapshot.remoteXnStartId", source)
@@ -2570,20 +2584,26 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         compact_body = " ".join(exchange_body.split())
 
         self.assertIn("const size_t peerRouteCount = static_cast<size_t>(rankSize - 1)", compact_body)
-        self.assertIn("const size_t syncRouteCount = allocation.remoteXn.num", compact_body)
+        self.assertIn("const size_t syncRouteCount = allocation.channels.num", compact_body)
         self.assertIn("allocation.remoteXn.num < routedPeerCount", compact_body)
+        self.assertIn("allocation.localWaitCke.num < syncRouteCount", compact_body)
+        self.assertIn("allocation.remoteNotifyCke.num < syncRouteCount", compact_body)
         self.assertNotIn("allocation.remoteXn.num != static_cast<uint16_t>(rankSize - 1)", compact_body)
         self.assertIn("peerCcuBuffersByRank", compact_body)
         self.assertIn("peerCcuBuffer.peerRank", compact_body)
         self.assertIn("invalid direct CCU peer buffer rank mapping", compact_body)
         self.assertIn("incomplete direct CCU peer buffer rank mapping", compact_body)
         self.assertIn("remoteCcuBuffers->assign(syncRouteCount, TileXRCcuRemoteCcuBufferInfo{})", compact_body)
-        self.assertIn("for (uint32_t syncIndex = 0; syncIndex < allocation.remoteXn.num; ++syncIndex)", compact_body)
+        self.assertIn("for (uint32_t syncIndex = 0; syncIndex < syncRouteCount; ++syncIndex)", compact_body)
         self.assertIn("const size_t peerBufferIndex = syncIndex / routesPerPeer", compact_body)
         self.assertIn(
             "(*remoteCcuBuffers)[routeIndex] = *peerCcuBuffersByRank[static_cast<size_t>(peer)]",
             compact_body)
         self.assertIn("peerLocalIndex * routesPerPeer + routeWithinPeer", compact_body)
+        self.assertIn(
+            "SelectDirectCcuChannelBoundRemoteXnOffset( peerLocalIndex, routeWithinPeer, "
+            "routesPerPeer, channelStridedRemoteXn)",
+            compact_body)
         self.assertIn("peerResources.remoteXnStartId", compact_body)
         self.assertIn("DirectCcuRemoteXnProofSpan(allocation.remoteXn.num)", compact_body)
 
@@ -2611,9 +2631,17 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
     def test_peer_endpoints_keep_per_peer_resource_and_jetty_tokens(self):
         source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
 
+        self.assertIn("SelectEndpointRouteJettyCtxId(state->eidInfo.funcId, peerOrdinal", source)
+        self.assertIn(
+            "TILEXR_CCU_DIRECT_LOOP_JETTY_ID + jettyCtxId",
+            source)
+        self.assertIn("SelectEndpointRouteSqVa(localResourceWindow_, jettyCtxId)", source)
+        self.assertIn("state->resourceWindow.tokenId = localResourceWindow_.tokenId", source)
+        self.assertIn("state->resourceWindow.tokenValue = localResourceWindow_.tokenValue", source)
+        self.assertNotIn("mr.in.ub.tokenValue = state->resourceWindow.tokenValue", source)
         self.assertIn("offer.resourceTokenId = state.resourceWindow.tokenId", source)
         self.assertIn("offer.resourceTokenValue = state.resourceWindow.tokenValue", source)
-        self.assertIn("offer.jettyTokenValue = state.resourceWindow.tokenValue", source)
+        self.assertIn("offer.jettyTokenValue = state.jettyTokenValue", source)
         self.assertIn("importInfo.in.ub.tokenValue = peerOffer.jettyTokenValue", source)
         self.assertIn("state.route.memoryTokenValue = peerOffer.resourceTokenValue", source)
 
@@ -2890,8 +2918,14 @@ class TileXRCcuLowerLayerPlanBuilderTest(unittest.TestCase):
         self.assertIn("loopEidCandidate", source)
         self.assertIn("TraceRaCtxEidInfos", source)
         self.assertIn("ctxAttr.ub.eidIndex = candidate.eidIndex", source)
-        self.assertEqual(2, source.count(
+        self.assertEqual(1, source.count(
             "qpAttr.ub.errTimeout = TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT"))
+        self.assertIn(
+            "qpAttr.ub.errTimeout = state->tpType == TILEXR_CCU_HCCP_TP_TYPE_CTP ?",
+            source)
+        self.assertIn(
+            "TILEXR_CCU_DIRECT_CTP_ENDPOINT_ERR_TIMEOUT : TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT",
+            source)
 
     def test_direct_ccu_runtime_can_select_ra_ctx_resource_window_eid_by_env(self):
         code = textwrap.dedent(

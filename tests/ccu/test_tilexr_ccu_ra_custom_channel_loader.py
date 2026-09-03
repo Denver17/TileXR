@@ -1305,6 +1305,27 @@ class TileXRCcuRaCustomChannelLoaderTest(unittest.TestCase):
         self.assertIn("qpAttr.ub.priority = state->mappedJettyPriority", create_body)
         self.assertNotIn("qpAttr.ub.priority = 2", create_body)
 
+    def test_direct_runtime_maps_ctp_jetty_priority_without_setting_tp_sl(self):
+        source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
+        select_start = source.index("int TileXRCcuDirectRuntime::SelectTpRouteForPeer(")
+        select_body = source[
+            select_start:
+            source.index("int TileXRCcuDirectRuntime::QueryTpHandleForPeer(", select_start)
+        ]
+        compact_body = " ".join(select_body.split())
+
+        self.assertNotIn(
+            "if (tpType == TILEXR_CCU_HCCP_TP_TYPE_CTP) {",
+            select_body,
+        )
+        self.assertIn("RaGetTpAttrAsync(", select_body)
+        self.assertIn("MapQosToTpAndSl(", select_body)
+        self.assertIn(
+            "if (tpType == TILEXR_CCU_HCCP_TP_TYPE_RTP) { TileXRCcuHccpTpAttr setAttr",
+            compact_body,
+        )
+        self.assertIn("*mappedJettyPriority = mappedSl", select_body)
+
     def test_peer_endpoint_route_uses_the_driver_returned_jetty_id(self):
         source = DIRECT_RUNTIME_SOURCE.read_text(encoding="utf-8")
         prepare_body = source[

@@ -500,10 +500,7 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
         remoteNotifyCke.num == 0 || allocation.remoteXn.num == 0) {
         return Fail(nullptr, report, "missing lower-layer CCU allocated resources");
     }
-    if (remoteCcuBuffers.empty() || remoteCcuBuffers.size() != allocation.remoteXn.num) {
-        return Fail(nullptr, report, "remote CCU buffer template count does not match remote XN allocation");
-    }
-    if (allocation.channels.num < remoteCcuBuffers.size()) {
+    if (remoteCcuBuffers.empty() || remoteCcuBuffers.size() != allocation.channels.num) {
         return Fail(nullptr, report, "channel allocation count does not match lower-layer route count");
     }
     if (remoteCcuBuffers.size() > std::numeric_limits<uint16_t>::max()) {

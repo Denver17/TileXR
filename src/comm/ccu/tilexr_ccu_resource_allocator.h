@@ -43,6 +43,8 @@ struct TileXRCcuResourceRequest {
     uint32_t syncResourceCount = 0;
     uint32_t syncInstructionCount = 0;
     uint32_t bindingsPerSyncResource = 1;
+    uint32_t minimumLocalXnCount = 0;
+    uint32_t minimumRemoteXnCount = 0;
     uint32_t sourceCkeCount = 1;
     TileXRCcuBarrierMode barrierMode = TileXRCcuBarrierMode::SyncXn;
 };

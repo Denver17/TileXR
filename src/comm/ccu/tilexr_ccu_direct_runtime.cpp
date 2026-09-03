@@ -26,6 +26,10 @@ constexpr uint32_t TILEXR_CCU_DIRECT_CCUM_SQE_BYTES = 64;
 constexpr uint32_t TILEXR_CCU_DIRECT_SQ_EBB_WORDS = 4;
 constexpr uint32_t TILEXR_CCU_DIRECT_LOOP_JETTY_ID = 1024;
 constexpr uint32_t TILEXR_CCU_DIRECT_LOOP_JETTY_CTX_ID = 0;
+constexpr uint32_t TILEXR_CCU_HCOMM_INNER_FE_JETTY_NUM = 23;
+constexpr uint32_t TILEXR_CCU_HCOMM_OUTER_FE_START_JETTY_CTX_ID = 92;
+constexpr uint32_t TILEXR_CCU_HCOMM_OUTER_FE_JETTY_NUM = 36;
+constexpr uint32_t TILEXR_CCU_HCOMM_MAX_INNER_FE_ID = 7;
 constexpr uint64_t TILEXR_CCU_V1_WQE_BASIC_BLOCK_OFFSET = TILEXR_CCU_V1_CCUM_OFFSET + 0x800000ULL;
 constexpr uint64_t TILEXR_CCU_DIRECT_SQ_BUFFER_BYTES = 256ULL * 1024ULL;
 constexpr uint32_t TILEXR_CCU_DIRECT_CCU_POLL_CQ_DEPTH = 64;
@@ -33,6 +37,7 @@ constexpr uint32_t TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_ASYNC_MAX_POLLS = 1000;
 constexpr uint32_t TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_ASYNC_SLEEP_US = 1000;
 constexpr uint32_t TILEXR_CCU_DIRECT_ENDPOINT_ROUTE_MAX_ATTEMPTS = 8;
 constexpr uint8_t TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT = 16;
+constexpr uint8_t TILEXR_CCU_DIRECT_CTP_ENDPOINT_ERR_TIMEOUT = 8;
 constexpr int TILEXR_CCU_DIRECT_MAX_RANK_SIZE = 128;
 constexpr int TILEXR_CCU_HCCP_JFC_MODE_CCU_POLL = 2;
 constexpr int TILEXR_CCU_HCCP_ASYNC_EAGAIN = 128301;
@@ -458,10 +463,30 @@ uint32_t SelectEndpointRouteSqBytes(uint32_t sqDepth)
     return sqDepth * TILEXR_CCU_DIRECT_SQ_EBB_WORDS * TILEXR_CCU_DIRECT_CCUM_SQE_BYTES;
 }
 
-uint64_t SelectEndpointRouteSqVa(const TileXRCcuLocalResourceWindowInfo& localResourceWindow)
+bool SelectEndpointRouteJettyCtxId(uint32_t pfeId, uint32_t peerOrdinal, uint16_t* jettyCtxId)
+{
+    if (jettyCtxId == nullptr) {
+        return false;
+    }
+    const uint32_t start = pfeId > TILEXR_CCU_HCOMM_MAX_INNER_FE_ID ?
+        TILEXR_CCU_HCOMM_OUTER_FE_START_JETTY_CTX_ID :
+        pfeId * TILEXR_CCU_HCOMM_INNER_FE_JETTY_NUM;
+    const uint32_t count = pfeId > TILEXR_CCU_HCOMM_MAX_INNER_FE_ID ?
+        TILEXR_CCU_HCOMM_OUTER_FE_JETTY_NUM :
+        TILEXR_CCU_HCOMM_INNER_FE_JETTY_NUM;
+    if (peerOrdinal >= count || start + peerOrdinal >= 128U) {
+        return false;
+    }
+    *jettyCtxId = static_cast<uint16_t>(start + peerOrdinal);
+    return true;
+}
+
+uint64_t SelectEndpointRouteSqVa(
+    const TileXRCcuLocalResourceWindowInfo& localResourceWindow,
+    uint16_t jettyCtxId)
 {
     return localResourceWindow.addr + TILEXR_CCU_V1_WQE_BASIC_BLOCK_OFFSET +
-        static_cast<uint64_t>(TILEXR_CCU_DIRECT_LOOP_JETTY_CTX_ID) * TILEXR_CCU_DIRECT_SQ_BUFFER_BYTES;
+        static_cast<uint64_t>(jettyCtxId) * TILEXR_CCU_DIRECT_SQ_BUFFER_BYTES;
 }
 
 int WaitRaCtxAsyncRequest(TileXRCcuHccpLoader& loader, void* reqHandle)
@@ -1371,7 +1396,9 @@ int TileXRCcuDirectRuntime::CollectLocalEndpointRouteWithRaCtxOnce(
 
     ReleaseLocalEndpointRoute();
     const uint32_t sqDepth = SelectEndpointRouteSqDepth();
-    const uint64_t sqVa = SelectEndpointRouteSqVa(localResourceWindow_);
+    const uint64_t sqVa = SelectEndpointRouteSqVa(
+        localResourceWindow_,
+        TILEXR_CCU_DIRECT_LOOP_JETTY_CTX_ID);
     const uint32_t sqBytes = SelectEndpointRouteSqBytes(sqDepth);
     if (TraceEndpointRoute()) {
         std::cerr << "TileXRDirectCcuTrace endpointRoute begin"
@@ -1648,6 +1675,7 @@ int TileXRCcuDirectRuntime::CreatePeerEndpointState(
     uint32_t peerDevicePhyId,
     const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
     const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+    uint32_t tpType,
     uint32_t peerOrdinal,
     TileXRCcuPeerEndpointState* state)
 {
@@ -1658,6 +1686,10 @@ int TileXRCcuDirectRuntime::CreatePeerEndpointState(
     *state = TileXRCcuPeerEndpointState {};
     state->peerRank = peerRank;
     state->peerDevicePhyId = peerDevicePhyId;
+    state->tpType = tpType;
+    if (tpType != TILEXR_CCU_HCCP_TP_TYPE_RTP && tpType != TILEXR_CCU_HCCP_TP_TYPE_CTP) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
 
     TileXRCcuRaInfo raInfo {};
     raInfo.mode = TILEXR_CCU_NETWORK_OFFLINE;
@@ -1709,47 +1741,34 @@ int TileXRCcuDirectRuntime::CreatePeerEndpointState(
     TileXRCcuRaInfo randomInfo {};
     randomInfo.mode = TILEXR_CCU_NETWORK_OFFLINE;
     randomInfo.phyId = devicePhyId_;
-    ret = loader_.RaGetSecRandom(&randomInfo, &state->resourceWindow.tokenValue);
+    ret = loader_.RaGetSecRandom(&randomInfo, &state->jettyTokenValue);
     if (ret != 0) {
         ReleasePeerEndpointState(state);
         return TILEXR_ERROR_MKIRT;
     }
-
-    const uint64_t alignedAddr = AlignResourceWindowAddr(localResourceWindow_.addr);
-    TileXRCcuHccpMrRegInfo mr {};
-    mr.in.mem.addr = alignedAddr;
-    mr.in.mem.size = localResourceWindow_.bytes + (localResourceWindow_.addr - alignedAddr);
-    mr.in.ub.flags.value = 0;
-    mr.in.ub.flags.bs.tokenPolicy = TILEXR_CCU_HCCP_TOKEN_POLICY_PLAIN_TEXT;
-    mr.in.ub.flags.bs.tokenIdValid = 1;
-    mr.in.ub.flags.bs.access = TILEXR_CCU_HCCP_MEM_SEG_ACCESS_DEFAULT;
-    mr.in.ub.flags.bs.nonPin = 1;
-    mr.in.ub.tokenValue = state->resourceWindow.tokenValue;
-    mr.in.ub.tokenIdHandle = state->resourceWindow.tokenIdHandle;
-    ret = loader_.RaCtxLmemRegister(
-        state->resourceWindow.raCtxHandle,
-        &mr,
-        &state->resourceWindow.lmemHandle);
-    if (ret != 0 || state->resourceWindow.lmemHandle == nullptr) {
-        ReleasePeerEndpointState(state);
-        return TILEXR_ERROR_MKIRT;
-    }
-    const uint32_t rawTokenId = mr.out.ub.tokenId != 0 ? mr.out.ub.tokenId : allocatedToken.tokenId;
     state->resourceWindow.addr = localResourceWindow_.addr;
     state->resourceWindow.bytes = localResourceWindow_.bytes;
-    state->resourceWindow.rawTokenId = rawTokenId;
-    state->resourceWindow.tokenId = rawTokenId >> TILEXR_CCU_URMA_TOKEN_ID_RIGHT_SHIFT;
-    state->resourceWindow.targetSegHandle = mr.out.ub.targetSegHandle;
+    state->resourceWindow.rawTokenId = localResourceWindow_.rawTokenId;
+    state->resourceWindow.tokenId = localResourceWindow_.tokenId;
+    state->resourceWindow.tokenValue = localResourceWindow_.tokenValue;
+    state->resourceWindow.targetSegHandle = localResourceWindow_.targetSegHandle;
     state->resourceWindow.eid = localEid;
     state->resourceWindow.eidIndex = state->eidInfo.eidIndex;
     state->resourceWindow.funcId = state->eidInfo.funcId;
     state->resourceWindow.funcIdValid = true;
-    state->resourceWindow.raCtxRegistered = true;
+    state->resourceWindow.raCtxRegistered = false;
+
+    uint16_t jettyCtxId = 0;
+    if (!SelectEndpointRouteJettyCtxId(state->eidInfo.funcId, peerOrdinal, &jettyCtxId)) {
+        ReleasePeerEndpointState(state);
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
 
     ret = SelectTpRouteForPeer(
         state->resourceWindow.raCtxHandle,
         localEid,
         peerEid,
+        state->tpType,
         &state->localTpHandle,
         &state->mappedJettyPriority);
     if (ret != TILEXR_SUCCESS) {
@@ -1779,19 +1798,19 @@ int TileXRCcuDirectRuntime::CreatePeerEndpointState(
     qpAttr.rqDepth = TILEXR_CCU_HCCP_RQ_DEPTH_DEFAULT;
     qpAttr.transportMode = TILEXR_CCU_HCCP_TRANSPORT_MODE_RM;
     qpAttr.ub.mode = static_cast<int>(TILEXR_CCU_HCCP_JETTY_MODE_CCU);
-    qpAttr.ub.jettyId = static_cast<uint16_t>(TILEXR_CCU_DIRECT_LOOP_JETTY_ID + peerOrdinal);
+    qpAttr.ub.jettyId = static_cast<uint16_t>(TILEXR_CCU_DIRECT_LOOP_JETTY_ID + jettyCtxId);
     qpAttr.ub.tokenIdHandle = state->resourceWindow.tokenIdHandle;
-    qpAttr.ub.tokenValue = state->resourceWindow.tokenValue;
+    qpAttr.ub.tokenValue = state->jettyTokenValue;
     qpAttr.ub.flag.value = 0;
     qpAttr.ub.flag.bs.shareJfr = 1;
     qpAttr.ub.jfsFlag.bs.errorSuspend = 1;
     qpAttr.ub.priority = state->mappedJettyPriority;
     qpAttr.ub.rnrRetry = TILEXR_CCU_HCCP_RNR_RETRY_DEFAULT;
-    qpAttr.ub.errTimeout = TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT;
+    qpAttr.ub.errTimeout = state->tpType == TILEXR_CCU_HCCP_TP_TYPE_CTP ?
+        TILEXR_CCU_DIRECT_CTP_ENDPOINT_ERR_TIMEOUT : TILEXR_CCU_DIRECT_ENDPOINT_ERR_TIMEOUT;
     qpAttr.ub.extMode.cstmFlag.value = 0;
     qpAttr.ub.extMode.cstmFlag.bs.sqCstm = 1;
-    qpAttr.ub.extMode.sq.buffVa = SelectEndpointRouteSqVa(localResourceWindow_) +
-        static_cast<uint64_t>(peerOrdinal) * TILEXR_CCU_DIRECT_SQ_BUFFER_BYTES;
+    qpAttr.ub.extMode.sq.buffVa = SelectEndpointRouteSqVa(localResourceWindow_, jettyCtxId);
     qpAttr.ub.extMode.sq.buffSize = SelectEndpointRouteSqBytes(sqDepth);
     qpAttr.ub.extMode.sqebbNum = sqDepth;
     ret = loader_.RaCtxQpCreate(
@@ -1814,6 +1833,9 @@ int TileXRCcuDirectRuntime::CreatePeerEndpointState(
                   << " funcId=" << state->eidInfo.funcId
                   << " tpHandle=0x" << std::hex << state->localTpHandle << std::dec
                   << " priority=" << static_cast<uint32_t>(state->mappedJettyPriority)
+                  << " tpType=" << state->tpType
+                  << " jettyCtxId=" << jettyCtxId
+                  << " sqVa=0x" << std::hex << qpAttr.ub.extMode.sq.buffVa << std::dec
                   << " qpId=" << state->qpInfo.ub.id
                   << " psn=" << state->psn
                   << std::endl;
@@ -1885,6 +1907,7 @@ int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes(TileXRCcuDirectRuntimeRepo
             peerDevicePhyIds[ordinal],
             topologyRoutes[ordinal].localEid,
             peerEid,
+            topologyRoutes[ordinal].tpType,
             ordinal,
             &state);
         if (ret != TILEXR_SUCCESS) {
@@ -1901,7 +1924,7 @@ int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes(TileXRCcuDirectRuntimeRepo
         offer.resourceTokenId = state.resourceWindow.tokenId;
         offer.resourceRawTokenId = state.resourceWindow.rawTokenId;
         offer.resourceTokenValue = state.resourceWindow.tokenValue;
-        offer.jettyTokenValue = state.resourceWindow.tokenValue;
+        offer.jettyTokenValue = state.jettyTokenValue;
         offer.eid = state.resourceWindow.eid;
         offer.qpKey = state.qpInfo.key;
         if (offer.qpKey.size == 0 || offer.qpKey.size > TILEXR_CCU_HCCP_QP_KEY_BYTES) {
@@ -1973,7 +1996,7 @@ int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes(TileXRCcuDirectRuntimeRepo
         importInfo.in.ub.expImportCfg.peerTpHandle = peerTpHandle;
         importInfo.in.ub.expImportCfg.txPsn = state.psn;
         importInfo.in.ub.expImportCfg.rxPsn = peerOffer.psn;
-        importInfo.in.ub.tpType = TILEXR_CCU_HCCP_TP_TYPE_RTP;
+        importInfo.in.ub.tpType = state.tpType;
         ret = loader_.RaCtxQpImport(
             state.resourceWindow.raCtxHandle,
             &importInfo,
@@ -1987,7 +2010,7 @@ int TileXRCcuDirectRuntime::PreparePeerEndpointRoutes(TileXRCcuDirectRuntimeRepo
         state.route.doorbellVa = state.qpInfo.ub.dbAddr;
         state.route.doorbellTokenId =
             state.qpInfo.ub.dbTokenId >> TILEXR_CCU_URMA_TOKEN_ID_RIGHT_SHIFT;
-        state.route.doorbellTokenValue = state.resourceWindow.tokenValue;
+        state.route.doorbellTokenValue = state.jettyTokenValue;
         state.route.sqDepth = SelectEndpointRouteSqDepth();
         state.route.startJettyId = static_cast<uint16_t>(state.qpInfo.ub.id);
         state.route.remoteCcuVa = peerOffer.resourceAddr;
@@ -2041,6 +2064,7 @@ int TileXRCcuDirectRuntime::SelectTpRouteForPeer(
     void* ctxHandle,
     const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
     const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+    uint32_t tpType,
     uint64_t* tpHandle,
     uint8_t* mappedJettyPriority)
 {
@@ -2054,7 +2078,8 @@ int TileXRCcuDirectRuntime::SelectTpRouteForPeer(
     *mappedJettyPriority = 0;
 
     TileXRCcuHccpGetTpCfg tpCfg {};
-    tpCfg.flag.bs.rtp = 1;
+    tpCfg.flag.bs.rtp = tpType == TILEXR_CCU_HCCP_TP_TYPE_RTP ? 1 : 0;
+    tpCfg.flag.bs.ctp = tpType == TILEXR_CCU_HCCP_TP_TYPE_CTP ? 1 : 0;
     tpCfg.transMode = TILEXR_CCU_HCCP_TRANSPORT_MODE_RM;
     std::copy(localEid.begin(), localEid.end(), tpCfg.localEid.raw);
     std::copy(peerEid.begin(), peerEid.end(), tpCfg.peerEid.raw);
@@ -2094,21 +2119,23 @@ int TileXRCcuDirectRuntime::SelectTpRouteForPeer(
         return TILEXR_ERROR_NOT_FOUND;
     }
 
-    TileXRCcuHccpTpAttr setAttr {};
-    setAttr.sl = mappedSl;
-    reqHandle = nullptr;
-    ret = loader_.RaSetTpAttrAsync(
-        ctxHandle,
-        tpInfos[tpIndex].tpHandle,
-        TILEXR_CCU_TP_ATTR_BITMAP_SL,
-        &setAttr,
-        &reqHandle);
-    if (ret != 0 || reqHandle == nullptr) {
-        return TILEXR_ERROR_MKIRT;
-    }
-    ret = WaitRaCtxAsyncRequest(loader_, reqHandle);
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
+    if (tpType == TILEXR_CCU_HCCP_TP_TYPE_RTP) {
+        TileXRCcuHccpTpAttr setAttr {};
+        setAttr.sl = mappedSl;
+        reqHandle = nullptr;
+        ret = loader_.RaSetTpAttrAsync(
+            ctxHandle,
+            tpInfos[tpIndex].tpHandle,
+            TILEXR_CCU_TP_ATTR_BITMAP_SL,
+            &setAttr,
+            &reqHandle);
+        if (ret != 0 || reqHandle == nullptr) {
+            return TILEXR_ERROR_MKIRT;
+        }
+        ret = WaitRaCtxAsyncRequest(loader_, reqHandle);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
     }
 
     if (TraceEndpointRoute()) {

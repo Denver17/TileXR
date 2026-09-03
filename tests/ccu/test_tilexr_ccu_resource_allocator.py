@@ -143,7 +143,7 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                     std::cerr << "first sync resource mismatch\n";
                     return 7;
                 }
-                if (plan.syncResources[2].localXn != 1963 || plan.syncResources[2].remoteXn != 1977 ||
+                if (plan.syncResources[2].localXn != 1963 || plan.syncResources[2].remoteXn != 1991 ||
                     plan.syncResources[2].notifyCke != 334 || plan.syncResources[2].channelId != 4) {
                     std::cerr << "last sync resource mismatch\n";
                     return 8;
@@ -163,6 +163,7 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                 }
                 if (allocation.receiptId == 0 || allocation.packageProvider != "tilexr-hcomm-derived-resource-allocator" ||
                     allocation.localXn.startId != 1961 || allocation.remoteXn.startId != 1975 ||
+                    allocation.remoteXn.num != 24 ||
                     allocation.localGsa.startId != 510 || allocation.localGsa.num != 1 ||
                     allocation.notifyCke.startId != 332 || allocation.channels.startId != 2 ||
                     allocation.channels.num != 3) {
@@ -171,7 +172,7 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                 }
                 if (report.missionAllocated != 1 || report.localXnAllocated != 14 ||
                     report.localGsaAllocated != 1 ||
-                    report.remoteXnAllocated != 3 || report.notifyCkeAllocated != 3 ||
+                    report.remoteXnAllocated != 24 || report.notifyCkeAllocated != 3 ||
                     report.channelBindingsAllocated != 9 || report.repositoryAllocated != 156 ||
                     report.message != "ok") {
                     std::cerr << "report mismatch\n";
@@ -391,6 +392,8 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                 request.syncResourceCount = 1;
                 request.syncInstructionCount = 2;
                 request.bindingsPerSyncResource = 1;
+                request.minimumLocalXnCount = 3;
+                request.minimumRemoteXnCount = 3;
 
                 TileXRCcuResourceAllocator allocator;
                 if (allocator.Init(spec) != TILEXR_SUCCESS) {
@@ -416,15 +419,15 @@ class TileXRCcuResourceAllocatorTest(unittest.TestCase):
                     std::cerr << "pure barrier sync task mismatch\n";
                     return 4;
                 }
-                if (plan.kernelLocalXn.startId != 1 || plan.kernelLocalXn.num != 1 ||
-                    allocation.localXn.startId != 1 || allocation.localXn.num != 1 ||
-                    allocation.remoteXn.startId != 2 || allocation.remoteXn.num != 1 ||
+                if (plan.kernelLocalXn.startId != 1 || plan.kernelLocalXn.num != 3 ||
+                    allocation.localXn.startId != 1 || allocation.localXn.num != 3 ||
+                    allocation.remoteXn.startId != 4 || allocation.remoteXn.num != 3 ||
                     allocation.repository.startId != 1 || allocation.repository.num != 2) {
                     std::cerr << "pure barrier allocation mismatch\n";
                     return 5;
                 }
-                if (report.localXnAllocated != 1 ||
-                    report.remoteXnAllocated != 1 ||
+                if (report.localXnAllocated != 3 ||
+                    report.remoteXnAllocated != 3 ||
                     report.repositoryAllocated != 2) {
                     std::cerr << "pure barrier report mismatch\n";
                     return 6;

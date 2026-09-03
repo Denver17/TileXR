@@ -17,7 +17,9 @@ BUSY_GUARD = REPO_ROOT / "tests" / "ccu" / "ccu_npu_smi_busy_guard.py"
 
 
 class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
-    def run_fake_mesh_runner(self, devices="4,5,6,7", rank_size="4", loop_count="10"):
+    def run_fake_mesh_runner(
+        self, devices="4,5,6,7", rank_size="4", loop_count="10", submit=True
+    ):
         temp_dir = tempfile.TemporaryDirectory()
         temp_path = Path(temp_dir.name)
         fake_bin = temp_path / "bin"
@@ -35,6 +37,7 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
             "rank_size=${TILEXR_CCU_PROBE_RANK_SIZE}\n"
             "loops=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}\n"
             "echo \"tilexr_ccu_alltoall prepare ret=0 installSucceeded=1 submitReady=1\"\n"
+            "if [ \"${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}\" = 1 ]; then\n"
             "for ((loop=0; loop<loops; ++loop)); do\n"
             "  echo \"tilexr_ccu_alltoall submit ret=0 loopIndex=$loop\"\n"
             "  echo \"tilexr_ccu_alltoall timing rank=$rank loopIndex=$loop syncMs=1\"\n"
@@ -45,6 +48,7 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
             "  done\n"
             "  echo \"tilexr_ccu_alltoall result passed=1 rank=$rank loopIndex=$loop mismatches=0\"\n"
             "done\n"
+            "fi\n"
             "PROBE\n"
             "chmod +x \"$out\"\n",
             encoding="utf-8",
@@ -66,7 +70,7 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
             "TILEXR_RUN_CCU_DIRECT_SMOKE_PROBE": "1",
             "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL": "1",
             "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH": "1",
-            "TILEXR_CCU_DIRECT_SMOKE_SUBMIT": "1",
+            "TILEXR_CCU_DIRECT_SMOKE_SUBMIT": "1" if submit else "0",
             "TILEXR_CCU_RANK_SIZE": rank_size,
             "TILEXR_CCU_SMOKE_DEVICES": devices,
             "TILEXR_CCU_ALLTOALL_LOOP_COUNT": loop_count,
@@ -88,6 +92,22 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn("rank=3 device=7", result.stdout)
         self.assertIn("expectedResults=40 actualResults=40", result.stdout)
         self.assertNotIn("expectedMarkerMatches", result.stdout)
+
+    def test_runner_executes_eight_rank_mesh_loop10_with_exact_counts(self):
+        result = self.run_fake_mesh_runner(
+            devices="0,1,2,3,4,5,6,7", rank_size="8", loop_count="10"
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("rank=7 device=7", result.stdout)
+        self.assertIn("expectedResults=80 actualResults=80", result.stdout)
+
+    def test_runner_accepts_prepare_only_without_data_results(self):
+        result = self.run_fake_mesh_runner(loop_count="1", submit=False)
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("success", result.stdout)
+        self.assertNotIn("alltoallCounts", result.stdout)
 
     def test_runner_mesh_defaults_cover_every_rank_resource_range(self):
         source = RUNNER.read_text(encoding="utf-8")

@@ -600,12 +600,12 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                 spec.chunkBytes = 2ULL * 1024ULL * 1024ULL;
                 spec.selfSourceGsa = 0x180;
                 spec.selfDestinationGsa = 0x181;
-                spec.selfSourceXn = 0x280;
-                spec.selfDestinationXn = 0x281;
-                spec.selfLengthXn = 0x282;
+                spec.selfSourceXn = 0x200;
+                spec.selfDestinationXn = 0x201;
+                spec.selfLengthXn = 0x202;
                 spec.selfChannelId = 0;
                 spec.selfCompletionCke = 0x480;
-                spec.remoteCompletionCke = 0x491;
+                spec.remoteCompletionCkes = {0x491};
                 spec.peers = {Peer(2, 3, 2), Peer(2, 0, 0), Peer(2, 1, 1)};
 
                 std::vector<TileXRCcuInstr> program;
@@ -693,9 +693,9 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                     return 7;
                 }
                 auto overlappingCke = spec;
-                overlappingCke.remoteCompletionCke = overlappingCke.peers[0].route.sourceCke;
+                overlappingCke.remoteCompletionCkes[0] = overlappingCke.peers[0].route.sourceCke;
                 for (auto& peer : overlappingCke.peers) {
-                    peer.route.copyCompletionCke = overlappingCke.remoteCompletionCke;
+                    peer.route.copyCompletionCke = overlappingCke.remoteCompletionCkes[0];
                 }
                 if (TileXRCcuBuildAllToAllMeshProgram(overlappingCke, &program, &report) !=
                         TILEXR_ERROR_PARA_CHECK_FAIL ||
@@ -732,6 +732,62 @@ class TileXRCcuAllToAllProgramTest(unittest.TestCase):
                         std::cerr << "rank " << localRank << " self offset mismatch\n";
                         return 9;
                     }
+                }
+                auto spec8 = spec;
+                spec8.rankSize = 8;
+                spec8.localRank = 3;
+                spec8.peers.clear();
+                spec8.remoteCompletionCkes = {0x491};
+                uint16_t ordinal8 = 0;
+                for (uint32_t peerRank = 0; peerRank < spec8.rankSize; ++peerRank) {
+                    if (peerRank != spec8.localRank) {
+                        spec8.peers.push_back(Peer(spec8.localRank, peerRank, ordinal8++));
+                    }
+                }
+                if (TileXRCcuBuildAllToAllMeshProgram(spec8, &program, &report) != TILEXR_SUCCESS ||
+                    program.size() != 3367 || report.peerCount != 7 || report.syncResourceCount != 7 ||
+                    report.remoteBlockCount != 448 || report.selfBlockCount != 64) {
+                    std::cerr << "unexpected 8-rank 2MB mesh: " << report.message
+                              << " instructions=" << program.size() << "\n";
+                    return 10;
+                }
+
+                auto spec2 = spec;
+                spec2.rankSize = 2;
+                spec2.localRank = 0;
+                spec2.peers = {Peer(0, 1, 0)};
+                spec2.remoteCompletionCkes = {0x491};
+                if (TileXRCcuBuildAllToAllMeshProgram(spec2, &program, &report) != TILEXR_SUCCESS ||
+                    program.size() != 1033 || report.peerCount != 1 || report.syncResourceCount != 1 ||
+                    report.remoteBlockCount != 64 || report.selfBlockCount != 64) {
+                    std::cerr << "unexpected 2-rank 2MB full mesh: " << report.message
+                              << " instructions=" << program.size() << "\n";
+                    return 11;
+                }
+
+                auto spec64 = spec;
+                spec64.rankSize = 64;
+                spec64.localRank = 17;
+                spec64.chunkBytes = 128ULL * 1024ULL;
+                spec64.peers.clear();
+                spec64.remoteCompletionCkes = {0x491, 0x492, 0x493, 0x494};
+                uint16_t ordinal64 = 0;
+                for (uint32_t peerRank = 0; peerRank < spec64.rankSize; ++peerRank) {
+                    if (peerRank == spec64.localRank) {
+                        continue;
+                    }
+                    auto peer = Peer(spec64.localRank, peerRank, ordinal64);
+                    peer.route.bytes = spec64.chunkBytes;
+                    peer.route.copyCompletionCke = spec64.remoteCompletionCkes[ordinal64 / 16U];
+                    spec64.peers.push_back(peer);
+                    ++ordinal64;
+                }
+                if (TileXRCcuBuildAllToAllMeshProgram(spec64, &program, &report) != TILEXR_SUCCESS ||
+                    program.size() != 1883 || report.peerCount != 63 || report.syncResourceCount != 63 ||
+                    report.remoteBlockCount != 252 || report.selfBlockCount != 4) {
+                    std::cerr << "unexpected 64-rank 128KB mesh: " << report.message
+                              << " instructions=" << program.size() << "\n";
+                    return 12;
                 }
                 return 0;
             }

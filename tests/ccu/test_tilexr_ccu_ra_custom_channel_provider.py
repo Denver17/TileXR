@@ -227,6 +227,68 @@ class TileXRCcuRaCustomChannelProviderTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_provider_retries_transient_roce_eagain(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_ra_custom_channel_provider.h"
+
+            #include <iostream>
+
+            using namespace TileXR;
+
+            int g_calls = 0;
+
+            int FakeRaCustomChannel(
+                TileXRCcuRaInfo,
+                TileXRCcuCustomChannelIn*,
+                TileXRCcuCustomChannelOut* out)
+            {
+                ++g_calls;
+                if (g_calls < 3) {
+                    out->opRet = 99;
+                    return 128101;
+                }
+                out->opRet = 0;
+                out->data.dataInfo.dataArray[0].baseinfo.msId = 0x55;
+                out->data.dataInfo.dataArray[0].baseinfo.missionKey = 0xabcdef01U;
+                out->data.dataInfo.dataArray[0].baseinfo.resourceAddr = 0x500000000ULL;
+                out->data.dataInfo.dataArray[0].baseinfo.caps.cap0 = (1U << 24) | (2U << 16) | 31U;
+                out->data.dataInfo.dataArray[0].baseinfo.caps.cap1 = (15U << 16) | 7U;
+                out->data.dataInfo.dataArray[0].baseinfo.caps.cap2 = (3U << 16) | 5U;
+                out->data.dataInfo.dataArray[0].baseinfo.caps.cap3 = (9U << 16) | 1U;
+                return 0;
+            }
+
+            int main()
+            {
+                TileXRCcuRaCustomChannelProvider provider;
+                TileXRCcuRaCustomChannelProviderReport providerReport;
+                if (provider.Init(3, FakeRaCustomChannel, &providerReport) != TILEXR_SUCCESS) {
+                    return 1;
+                }
+                TileXRCcuDriverAdapter adapter;
+                TileXRCcuDriverAdapterReport adapterReport;
+                if (provider.CreateAdapter(&adapter, &adapterReport) != TILEXR_SUCCESS) {
+                    return 2;
+                }
+                TileXRCcuBasicInfo basic;
+                if (adapter.GetBasicInfo(0, &basic, &adapterReport) != TILEXR_SUCCESS) {
+                    std::cerr << adapterReport.message << "\n";
+                    return 3;
+                }
+                if (g_calls != 3 || basic.msId != 0x55 || basic.missionKey != 0xabcdef01U) {
+                    return 4;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_provider_is_wired_and_keeps_hcomm_runtime_out_of_ccu_surface(self):
         cmake = COMM_CMAKE.read_text(encoding="utf-8")
         header = PROVIDER_HEADER.read_text(encoding="utf-8")

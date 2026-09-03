@@ -92,7 +92,7 @@ struct TileXRCcuDirectAllToAllMeshPeerSpec {
 };
 
 struct TileXRCcuDirectAllToAllMeshSpec {
-    uint32_t rankSize = 4;
+    uint32_t rankSize = 2;
     uint32_t localRank = 0;
     uint64_t localSendAddr = 0;
     uint64_t localSendToken = 0;

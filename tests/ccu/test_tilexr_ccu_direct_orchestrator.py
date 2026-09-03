@@ -506,8 +506,8 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 lowerLayer.xnClears.push_back({1, 1961, 14});
                 lowerLayer.ckeClears.push_back({1, 332, 3});
                 lowerLayer.remoteXnBindings.push_back({1, 2, 1961, 1975, 332, 0, true, 0, true, true, true});
-                lowerLayer.remoteXnBindings.push_back({1, 3, 1962, 1976, 333, 0, true, 0, true, true, true});
-                lowerLayer.remoteXnBindings.push_back({1, 4, 1963, 1977, 334, 0, true, 0, true, true, true});
+                lowerLayer.remoteXnBindings.push_back({1, 3, 1962, 1983, 333, 0, true, 0, true, true, true});
+                lowerLayer.remoteXnBindings.push_back({1, 4, 1963, 1991, 334, 0, true, 0, true, true, true});
                 return lowerLayer;
             }
 
@@ -872,7 +872,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
             {
                 auto* state = static_cast<CallbackState*>(userData);
                 ++state->callCount;
-                state->syncResourceCount = allocation.remoteXn.num;
+                state->syncResourceCount = allocation.channels.num;
                 if (plan == nullptr || report == nullptr) {
                     return TILEXR_ERROR_PARA_CHECK_FAIL;
                 }
@@ -912,12 +912,12 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 }
                 plan->xnClears.push_back({1, allocation.localXn.startId, allocation.localXn.num});
                 plan->ckeClears.push_back({1, allocation.notifyCke.startId, allocation.notifyCke.num});
-                for (uint32_t i = 0; i < allocation.remoteXn.num; ++i) {
+                for (uint32_t i = 0; i < allocation.channels.num; ++i) {
                     plan->remoteXnBindings.push_back({
                         1,
                         static_cast<uint16_t>(allocation.channels.startId + i),
                         static_cast<uint16_t>(allocation.localXn.startId + i),
-                        static_cast<uint16_t>(allocation.remoteXn.startId + i),
+                        static_cast<uint16_t>(allocation.remoteXn.startId + i * 8U),
                         static_cast<uint16_t>(allocation.notifyCke.startId + i),
                         i,
                         true,
@@ -973,7 +973,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 options.xnStartId = 1961;
                 options.gsaStartId = 510;
                 options.remoteXnStartId = 2361;
-                options.remoteXnCount = 8;
+                options.remoteXnCount = 24;
                 options.ckeStartId = 332;
                 options.remoteNotifyCkeStartId = 364;
                 options.remoteNotifyCkeCount = 8;
@@ -1133,12 +1133,12 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 }
                 plan->xnClears.push_back({1, allocation.localXn.startId, allocation.localXn.num});
                 plan->ckeClears.push_back({1, allocation.localWaitCke.startId, allocation.localWaitCke.num});
-                for (uint32_t i = 0; i < allocation.remoteXn.num; ++i) {
+                for (uint32_t i = 0; i < allocation.channels.num; ++i) {
                     plan->remoteXnBindings.push_back({
                         1,
                         allocation.channels.startId + i,
                         static_cast<uint16_t>(allocation.localXn.startId + i),
-                        static_cast<uint16_t>(allocation.remoteXn.startId + i),
+                        static_cast<uint16_t>(allocation.remoteXn.startId + i * 8U),
                         static_cast<uint16_t>(allocation.remoteNotifyCke.startId + i),
                         i,
                         true,
@@ -1756,8 +1756,8 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         ]
 
         self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    7U + 64U * 7U", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    7U + 64U * 7U", planner)
+        self.assertIn("DirectAllToAll2RankInstructionCapacity", source)
+        self.assertIn("DirectAllToAll2RankInstructionCapacity", planner)
         self.assertIn("alltoall != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT", source)
         self.assertIn("alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn", source)
         self.assertIn("const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[0]", source)
@@ -1896,11 +1896,82 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                     attempt.package.program.sync.size() != 1811 ||
                     attempt.plan.taskWindows[0].instCnt != 1811 ||
                     attempt.plan.kernelLocalGsa.num != 2 || attempt.allocation.sourceCke.num != 2 ||
+                    attempt.allocation.remoteXn.num != 3 ||
+                    attempt.plan.syncResources[1].remoteXn -
+                        attempt.plan.syncResources[0].remoteXn != 1 ||
+                    attempt.plan.syncResources[2].remoteXn -
+                        attempt.plan.syncResources[1].remoteXn != 1 ||
                     attempt.plan.barrierMode != TileXRCcuBarrierMode::SyncCke) {
                     std::cerr << "unexpected mesh package: " << report.message
                               << " resources=" << attempt.plan.syncResources.size()
                               << " instructions=" << attempt.package.program.sync.size() << "\n";
                     return 1;
+                }
+                auto mesh8 = mesh;
+                mesh8.rankSize = 8;
+                mesh8.peers.clear();
+                for (uint32_t peerRank = 0; peerRank < mesh8.rankSize; ++peerRank) {
+                    if (peerRank == mesh8.localRank) {
+                        continue;
+                    }
+                    TileXRCcuDirectAllToAllMeshPeerSpec peer;
+                    peer.peerRank = peerRank;
+                    peer.remoteRecvAddr = 0x40000000ULL + peerRank * 0x1000000ULL;
+                    peer.remoteRecvToken = TileXRCcuPackMemoryToken(30 + peerRank, 40 + peerRank, true);
+                    mesh8.peers.push_back(peer);
+                }
+                TileXRCcuDirectInstallAttempt attempt8;
+                TileXRCcuDirectInstallReport report8;
+                const int ret8 = TileXRCcuRunDirectAllToAllMeshInstallAttempt(
+                    options, mesh8, &attempt8, &report8);
+                (void)ret8;
+                if (!report8.pipelineBuilt || attempt8.plan.syncResources.size() != 7 ||
+                    attempt8.package.program.sync.size() != 3367 ||
+                    attempt8.plan.taskWindows[0].instCnt != 3367 ||
+                    attempt8.allocation.remoteXn.num != 7 ||
+                    attempt8.plan.syncResources[6].remoteXn -
+                        attempt8.plan.syncResources[5].remoteXn != 1 ||
+                    attempt8.allocation.sourceCke.num != 2) {
+                    std::cerr << "unexpected 8-rank mesh package: " << report8.message
+                              << " resources=" << attempt8.plan.syncResources.size()
+                              << " instructions=" << attempt8.package.program.sync.size() << "\n";
+                    return 3;
+                }
+                auto mesh2 = mesh;
+                mesh2.rankSize = 2;
+                mesh2.localRank = 0;
+                mesh2.peers.clear();
+                TileXRCcuDirectAllToAllMeshPeerSpec peer2;
+                peer2.peerRank = 1;
+                peer2.remoteRecvAddr = 0x50000000ULL;
+                peer2.remoteRecvToken = TileXRCcuPackMemoryToken(50, 60, true);
+                mesh2.peers.push_back(peer2);
+                TileXRCcuDirectInstallAttempt attempt2;
+                TileXRCcuDirectInstallReport report2;
+                const int ret2 = TileXRCcuRunDirectAllToAllMeshInstallAttempt(
+                    options, mesh2, &attempt2, &report2);
+                (void)ret2;
+                if (!report2.pipelineBuilt || attempt2.plan.syncResources.size() != 1 ||
+                    attempt2.package.program.sync.size() != 1033 ||
+                    attempt2.plan.taskWindows[0].instCnt != 1033 ||
+                    attempt2.allocation.localXn.num != 3 ||
+                    attempt2.allocation.remoteXn.num != 3 ||
+                    attempt2.allocation.sourceCke.num != 2) {
+                    std::cerr << "unexpected 2-rank full mesh package: " << report2.message
+                              << " resources=" << attempt2.plan.syncResources.size()
+                              << " instructions=" << attempt2.package.program.sync.size() << "\n";
+                    return 4;
+                }
+                auto invalidMesh = mesh;
+                invalidMesh.rankSize = 0xffffffffU;
+                invalidMesh.peers.clear();
+                TileXRCcuDirectInstallAttempt invalidAttempt;
+                TileXRCcuDirectInstallReport invalidReport;
+                if (TileXRCcuRunDirectAllToAllMeshInstallAttempt(
+                        options, invalidMesh, &invalidAttempt, &invalidReport) !=
+                        TILEXR_ERROR_PARA_CHECK_FAIL || invalidReport.pipelineBuilt) {
+                    std::cerr << "unexpected invalid rank-size result: " << invalidReport.message << "\n";
+                    return 5;
                 }
                 basic.caps.cap0 = (7U << 24) | (11U << 16) | 1599U;
                 TileXRCcuDirectInstallAttempt smallAttempt;
@@ -1959,7 +2030,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("alltoall.remoteRecvAddr = remoteImportRequest.addr", source)
         self.assertIn("alltoall.remoteRecvToken", source)
         self.assertNotIn("alltoall.remoteRecvAddr = peerEndpoint.destinationAddr", source)
-        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT", source)
+        self.assertIn("DirectAllToAll2RankInstructionCapacity(bytes)", source)
         self.assertIn("tilexr-comm-direct-ccu-alltoall", source)
         self.assertIn("TileXRCcuRunDirectAllToAll2RankInstallAttempt", source)
 
@@ -1990,7 +2061,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_NOTIFY_MASK", planner)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_WAIT_MASK", planner)
         self.assertIn("RegisterCcuResourceRmaBuffer", planner)
-        self.assertIn("next.syncResourceCount = rankSize == 4 ? 3U : 1U", planner)
+        self.assertIn("next.syncResourceCount = static_cast<uint32_t>(rankSize - 1)", planner)
         self.assertIn("attempt->plan.syncResources.empty()", source)
         self.assertIn("syncXnPing != nullptr ? options.syncResourceCount", source)
 

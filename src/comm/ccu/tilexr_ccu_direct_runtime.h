@@ -137,6 +137,8 @@ struct TileXRCcuPeerEndpointState {
     void* remoteQpHandle = nullptr;
     TileXRCcuHccpQpCreateInfo qpInfo {};
     TileXRCcuLowerLayerTransportRoute route;
+    uint32_t jettyTokenValue = 0;
+    uint32_t tpType = TILEXR_CCU_HCCP_TP_TYPE_RTP;
     uint32_t psn = 0;
     uint64_t localTpHandle = 0;
     uint8_t mappedJettyPriority = 0;
@@ -176,12 +178,14 @@ private:
         uint32_t peerDevicePhyId,
         const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
         const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+        uint32_t tpType,
         uint32_t peerOrdinal,
         TileXRCcuPeerEndpointState* state);
     int SelectTpRouteForPeer(
         void* ctxHandle,
         const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& localEid,
         const std::array<uint8_t, TILEXR_CCU_EID_BYTES>& peerEid,
+        uint32_t tpType,
         uint64_t* tpHandle,
         uint8_t* mappedJettyPriority);
     int QueryTpHandleForPeer(

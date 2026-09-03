@@ -17,6 +17,9 @@
 namespace TileXR {
 namespace {
 
+constexpr const char* TILEXR_CCU_DIRECT_FORCE_TP_TYPE_ENV =
+    "TILEXR_CCU_DIRECT_FORCE_TP_TYPE";
+
 struct RootInfo {
     std::string topoPath;
     std::unordered_map<uint32_t, uint32_t> deviceToLocalId;
@@ -29,6 +32,7 @@ struct TopoEdge {
     uint32_t localB = 0;
     std::vector<std::string> localAPorts;
     std::vector<std::string> localBPorts;
+    bool supportsCtp = false;
 };
 
 std::string ReadTextFile(const std::string& path)
@@ -195,6 +199,8 @@ std::vector<TopoEdge> ParseTopoInfo(const std::string& path)
         }
         edge.localAPorts = JsonStringArrayField(edgeObject, "local_a_ports");
         edge.localBPorts = JsonStringArrayField(edgeObject, "local_b_ports");
+        const auto protocols = JsonStringArrayField(edgeObject, "protocols");
+        edge.supportsCtp = std::find(protocols.begin(), protocols.end(), "UB_CTP") != protocols.end();
         if (!edge.localAPorts.empty() && !edge.localBPorts.empty()) {
             edges.push_back(edge);
         }
@@ -206,22 +212,41 @@ bool ResolveLocalPort(
     const std::vector<TopoEdge>& edges,
     uint32_t localId,
     uint32_t peerLocalId,
-    std::string* localPort)
+    std::string* localPort,
+    bool* supportsCtp)
 {
-    if (localPort == nullptr) {
+    if (localPort == nullptr || supportsCtp == nullptr) {
         return false;
     }
     for (const auto& edge : edges) {
         if (edge.localA == localId && edge.localB == peerLocalId) {
             *localPort = edge.localAPorts.front();
+            *supportsCtp = edge.supportsCtp;
             return true;
         }
         if (edge.localB == localId && edge.localA == peerLocalId) {
             *localPort = edge.localBPorts.front();
+            *supportsCtp = edge.supportsCtp;
             return true;
         }
     }
     return false;
+}
+
+int ForcedTpType()
+{
+    const char* value = std::getenv(TILEXR_CCU_DIRECT_FORCE_TP_TYPE_ENV);
+    if (value == nullptr) {
+        return -1;
+    }
+    const std::string text(value);
+    if (text == "rtp" || text == "RTP" || text == "0") {
+        return static_cast<int>(TILEXR_CCU_HCCP_TP_TYPE_RTP);
+    }
+    if (text == "ctp" || text == "CTP" || text == "1") {
+        return static_cast<int>(TILEXR_CCU_HCCP_TP_TYPE_CTP);
+    }
+    return -1;
 }
 
 } // namespace
@@ -262,8 +287,9 @@ int TileXRCcuResolvePeerEidRoutes(
     for (const uint32_t peerDevicePhyId : peerDevicePhyIds) {
         const auto peerIdIt = root.deviceToLocalId.find(peerDevicePhyId);
         std::string localPort;
+        bool supportsCtp = false;
         if (peerIdIt == root.deviceToLocalId.end() ||
-            !ResolveLocalPort(edges, localIdIt->second, peerIdIt->second, &localPort)) {
+            !ResolveLocalPort(edges, localIdIt->second, peerIdIt->second, &localPort, &supportsCtp)) {
             if (message != nullptr) {
                 *message = "HCCL topology has no device-pair edge";
             }
@@ -282,6 +308,10 @@ int TileXRCcuResolvePeerEidRoutes(
         route.peerDevicePhyId = peerDevicePhyId;
         route.localEid = eidIt->second;
         route.localPort = localPort;
+        const int forcedTpType = ForcedTpType();
+        route.tpType = forcedTpType >= 0 ?
+            static_cast<uint32_t>(forcedTpType) :
+            (supportsCtp ? TILEXR_CCU_HCCP_TP_TYPE_CTP : TILEXR_CCU_HCCP_TP_TYPE_RTP);
         routes->push_back(route);
     }
     if (message != nullptr) {

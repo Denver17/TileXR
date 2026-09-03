@@ -235,6 +235,7 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         ]
 
         self.assertIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(", prepare_alltoall)
+        self.assertIn("peerRanks.size() < routedPeerCount", planner)
         self.assertIn("0U", prepare_alltoall)
         self.assertIn("uint32_t routeIndex = 0", override_apply)
         self.assertIn("override.syncRouteIndex != routeIndex", override_apply)
@@ -251,7 +252,9 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
             planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAllMeshInstallAttempt"):
             planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuSyncXnPingInstallAttempt")
         ]
-        self.assertIn("rankSize != 4", mesh_body)
+        self.assertIn("rankSize < 2", mesh_body)
+        self.assertIn("rankSize > 64", mesh_body)
+        self.assertIn("rankSize - 1", mesh_body)
         self.assertEqual(1, mesh_body.count("session.AllGather("))
         self.assertIn("endpoint.rank != peerRank", mesh_body)
         self.assertIn("session.ImportRemoteMemoryBuffer", mesh_body)

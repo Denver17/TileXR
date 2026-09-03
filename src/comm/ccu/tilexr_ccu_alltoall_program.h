@@ -81,7 +81,7 @@ struct TileXRCcuAllToAllMeshPeerSpec {
 };
 
 struct TileXRCcuAllToAllMeshProgramSpec {
-    uint32_t rankSize = 4;
+    uint32_t rankSize = 2;
     uint32_t localRank = 0;
     uint64_t localSendAddr = 0;
     uint64_t localSendToken = 0;
@@ -95,7 +95,7 @@ struct TileXRCcuAllToAllMeshProgramSpec {
     uint16_t selfLengthXn = 0;
     uint16_t selfChannelId = 0;
     uint16_t selfCompletionCke = 0;
-    uint16_t remoteCompletionCke = 0;
+    std::vector<uint16_t> remoteCompletionCkes;
     std::vector<TileXRCcuAllToAllMeshPeerSpec> peers;
 };
 

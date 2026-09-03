@@ -5,8 +5,16 @@
 
 #include "ccu/tilexr_ccu_ra_custom_channel_provider.h"
 
+#include <chrono>
+#include <cstring>
+#include <thread>
+
 namespace TileXR {
 namespace {
+
+constexpr int TILEXR_CCU_ROCE_EAGAIN = 128101;
+constexpr uint32_t TILEXR_CCU_RA_EAGAIN_RETRY_COUNT = 100;
+constexpr uint32_t TILEXR_CCU_RA_EAGAIN_RETRY_INTERVAL_MS = 100;
 
 void ResetReport(TileXRCcuRaCustomChannelProviderReport* report)
 {
@@ -103,10 +111,15 @@ int TileXRCcuRaCustomChannelProvider::AdapterCallback(
     TileXRCcuRaInfo info {};
     info.mode = TILEXR_CCU_NETWORK_OFFLINE;
     info.phyId = devicePhyId;
-    return provider->raCustomChannel_(
-        info,
-        in,
-        out);
+    for (uint32_t retry = 0; retry <= TILEXR_CCU_RA_EAGAIN_RETRY_COUNT; ++retry) {
+        std::memset(out, 0, sizeof(*out));
+        const int ret = provider->raCustomChannel_(info, in, out);
+        if (ret != TILEXR_CCU_ROCE_EAGAIN || retry == TILEXR_CCU_RA_EAGAIN_RETRY_COUNT) {
+            return ret;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(TILEXR_CCU_RA_EAGAIN_RETRY_INTERVAL_MS));
+    }
+    return TILEXR_CCU_ROCE_EAGAIN;
 }
 
 } // namespace TileXR

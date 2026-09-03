@@ -20,6 +20,7 @@ struct TileXRCcuPeerEidRoute {
     uint32_t peerDevicePhyId = 0;
     std::array<uint8_t, TILEXR_CCU_EID_BYTES> localEid {};
     std::string localPort;
+    uint32_t tpType = TILEXR_CCU_HCCP_TP_TYPE_RTP;
 };
 
 int TileXRCcuResolvePeerEidRoutes(

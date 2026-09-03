@@ -14,6 +14,7 @@ namespace {
 constexpr const char* TILEXR_CCU_HCOMM_DERIVED_PROVIDER = "tilexr-hcomm-derived-resource-allocator";
 constexpr uint32_t TILEXR_CCU_HCOMM_TASK1_PRELUDE_INSTRUCTION_COUNT = 5U;
 constexpr uint32_t TILEXR_CCU_HCOMM_TASK1_PRELUDE_RESERVED_XN_COUNT = 1U;
+constexpr uint32_t TILEXR_CCU_CHANNEL_XN_STRIDE = 8U;
 
 void ResetReport(TileXRCcuResourceAllocatorReport* report)
 {
@@ -216,8 +217,19 @@ int TileXRCcuResourceAllocator::Allocate(
     }
 
     const uint32_t localSqeXnCount = RequiredSqeLoadXnCount(request.sqeArgCount, hcommStyleTask1Prelude);
-    const uint32_t localXnCount = std::max(localSqeXnCount, syncXnMode ? request.syncResourceCount : 0U);
-    const uint32_t remoteXnCount = syncXnMode ? request.syncResourceCount : 0U;
+    const uint32_t requestedLocalXnCount = std::max(
+        std::max(
+            std::max(localSqeXnCount, request.syncResourceCount),
+            request.bindingsPerSyncResource),
+        request.minimumLocalXnCount);
+    const uint32_t localXnCount = syncXnMode ? requestedLocalXnCount : localSqeXnCount;
+    const uint32_t remoteXnStride = request.bindingsPerSyncResource > 1U ?
+        TILEXR_CCU_CHANNEL_XN_STRIDE : 1U;
+    if (request.syncResourceCount > std::numeric_limits<uint32_t>::max() / remoteXnStride) {
+        return Fail(report, "remote XN resource count overflows");
+    }
+    const uint32_t remoteXnCount = syncXnMode ?
+        std::max(request.syncResourceCount * remoteXnStride, request.minimumRemoteXnCount) : 0U;
     const uint32_t localGsaCount = hcommStyleTask1Prelude && spec_.gsaCount != 0 ? 1U : 0U;
     const uint32_t totalXnCount = localXnCount + remoteXnCount;
     const uint32_t localWaitCkeCount = request.syncResourceCount;
@@ -306,7 +318,8 @@ int TileXRCcuResourceAllocator::Allocate(
         resource.dieId = spec_.dieId;
         if (syncXnMode) {
             resource.localXn = static_cast<uint16_t>(result.localXn.startId + i);
-            resource.remoteXn = static_cast<uint16_t>(static_cast<uint32_t>(result.remoteXn.startId) + i);
+            resource.remoteXn = static_cast<uint16_t>(
+                static_cast<uint32_t>(result.remoteXn.startId) + i * remoteXnStride);
         }
         resource.notifyCke = static_cast<uint16_t>(static_cast<uint32_t>(result.remoteNotifyCke.startId) + i);
         resource.channelId = static_cast<uint16_t>(static_cast<uint32_t>(result.channels.startId) + i);

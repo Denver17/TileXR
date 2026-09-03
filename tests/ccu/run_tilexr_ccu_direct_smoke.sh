@@ -234,23 +234,40 @@ apply_alltoall_defaults()
     export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
     export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
     if alltoall_mesh_mode_enabled; then
+        mesh_rank_size="$(parse_int "${TILEXR_CCU_RANK_SIZE:-${TILEXR_CCU_PROBE_RANK_SIZE:-2}}" 2)"
+        mesh_peer_count=$((mesh_rank_size - 1))
+        mesh_completion_cke_count=$(((mesh_peer_count + 15) / 16))
+        mesh_chunk_bytes="$(parse_int "${TILEXR_CCU_ALLTOALL_BYTES:-131072}" 131072)"
+        mesh_block_count=$((mesh_chunk_bytes / 32768))
+        mesh_pre_sync_count=$((3 + mesh_peer_count * 3))
+        mesh_copy_per_block=$((mesh_peer_count * 6 + 9 + mesh_completion_cke_count))
+        if [ "${mesh_peer_count}" -gt 16 ]; then
+            mesh_remote_xn_count=${mesh_peer_count}
+        else
+            mesh_remote_xn_count=16
+        fi
+        mesh_instruction_count=$((mesh_pre_sync_count + mesh_block_count * mesh_copy_per_block + mesh_peer_count * 2 + 1))
+        mesh_local_cke_count=$((mesh_peer_count + 1 + mesh_completion_cke_count))
         export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE:-hcomm_die}"
         export TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION="${TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_PARTITION:-hcomm}"
         export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
-        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-3}"
-        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-131}"
+        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-${mesh_peer_count}}"
+        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-${mesh_instruction_count}}"
         export TILEXR_CCU_PROBE_XN_START="${TILEXR_CCU_PROBE_XN_START:-1961}"
         export TILEXR_CCU_PROBE_REMOTE_XN_START="${TILEXR_CCU_PROBE_REMOTE_XN_START:-2361}"
-        export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-16}"
+        export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-${mesh_remote_xn_count}}"
         export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_START:-332}"
-        export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-16}"
+        export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-${mesh_local_cke_count}}"
         export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_START:-364}"
-        export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-16}"
+        export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-${mesh_peer_count}}"
         export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_EID_INDEX:-3}"
     elif [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then
+        long_mission_bytes="$(parse_int "${TILEXR_CCU_ALLTOALL_BYTES:-2097152}" 2097152)"
+        long_mission_block_count=$((long_mission_bytes / 32768))
+        long_mission_instruction_count=$((7 + long_mission_block_count * 7))
         export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-13}"
         export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-3}"
-        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-453}"
+        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-${long_mission_instruction_count}}"
     else
         export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
         export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"
@@ -286,6 +303,10 @@ apply_alltoall_defaults
 rank_size="$(parse_int "${TILEXR_CCU_RANK_SIZE:-${TILEXR_CCU_PROBE_RANK_SIZE:-2}}" 2)"
 if [ "${rank_size}" -lt 1 ]; then
     echo "ERROR: rank size must be positive: ${rank_size}" >&2
+    exit 2
+fi
+if alltoall_mesh_mode_enabled && { [ "${rank_size}" -lt 2 ] || [ "${rank_size}" -gt 64 ]; }; then
+    echo "ERROR: direct CCU alltoall mesh rank size must be in [2,64]: ${rank_size}" >&2
     exit 2
 fi
 devices="${TILEXR_CCU_SMOKE_DEVICES:-${TILEXR_TEST_DEVICES:-0,1}}"
@@ -949,9 +970,20 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     done
 fi
 
-if alltoall_mode_enabled; then
+if alltoall_mode_enabled && [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     loop_count="$(parse_int "${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}" 1)"
     expected_results=$((rank_size * loop_count))
+    if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ] &&
+        [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_MESH:-0}" != "1" ]; then
+        expected_loop_results=$((rank_size * loop_count))
+        actual_loop_results="$(grep -h -c "tilexr_ccu_alltoall loopResult passed=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
+        echo "tilexr_ccu_direct_smoke_runner alltoallLoopCounts expectedResults=${expected_loop_results} actualResults=${actual_loop_results}"
+        if [ "${actual_loop_results}" -ne "${expected_loop_results}" ]; then
+            echo "ERROR: direct CCU alltoall loop result count mismatch expected=${expected_loop_results} actual=${actual_loop_results}" >&2
+            exit 9
+        fi
+        expected_results="${rank_size}"
+    fi
     actual_results="$(grep -h -c "tilexr_ccu_alltoall result passed=1" "${rank_logs[@]}" | awk '{ total += $1 } END { print total + 0 }')"
     echo "tilexr_ccu_direct_smoke_runner alltoallCounts expectedResults=${expected_results} actualResults=${actual_results}"
     if [ "${actual_results}" -ne "${expected_results}" ]; then
