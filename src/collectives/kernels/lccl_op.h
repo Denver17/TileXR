@@ -53,8 +53,6 @@
 
 extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR"))) void TileXRDescriptor() {}
 
-constexpr uint64_t TILEXR_COLLECTIVES_PROFILE_FLUSH_UB_OFFSET = 195616U;
-
 #define TILEXR_COARSE_PERF_BEGIN(tokenName) \
     TileXR::ProfilingRecorder<2U> tokenName; \
     const bool tokenName##Enabled = (extraFlag & ExtraFlag::PROFILING) != 0U; \
@@ -65,12 +63,7 @@ constexpr uint64_t TILEXR_COLLECTIVES_PROFILE_FLUSH_UB_OFFSET = 195616U;
 #define TILEXR_COARSE_PERF_END(tokenName) \
     if (tokenName##Enabled) { \
         tokenName.RecordMarker<1U, 2U>(); \
-        AscendC::LocalTensor<uint64_t> tilexrProfileScratch; \
-        AscendC::TBuffAddr tilexrProfileScratchAddr; \
-        tilexrProfileScratchAddr.logicPos = static_cast<uint8_t>(AscendC::TPosition::VECIN); \
-        tilexrProfileScratchAddr.bufferAddr = TILEXR_COLLECTIVES_PROFILE_FLUSH_UB_OFFSET; \
-        tilexrProfileScratch.SetAddr(tilexrProfileScratchAddr); \
-        tokenName.Flush(commArgs, tilexrProfileScratch); \
+        tokenName.Flush(commArgs); \
     }
 
 #define CLASS_OP_QUANT_LAUNCH(name, outputType, inputType) \
