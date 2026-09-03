@@ -78,6 +78,56 @@ test -f install/lib/libtilexr_udma_demo_kernel.so
 
 If `bisheng` is unavailable, `build.sh` may skip only the demo target while still building host-only tests.
 
+## Qualify EP Compile-Time Specialization
+
+Treat compile-time specialization as a measured optimization, not a successful
+build. Keep generic and candidate artifacts separate, require exact-shape
+all-rank correctness, and time individual ACL Events in interleaved and
+reverse-order legs. Retain a candidate only when it improves the cross-rank
+median by the larger of 2 us or 3 percent.
+
+Experiments on Ascend950DT with CANN 9.1.0 and the peer-memory Dispatch path
+specialized rank, world size, shape, layout, quantization, UB sizes, send counts,
+address arithmetic, and the launch ABI. All candidates passed 8-rank
+BF16-to-MXFP8-E4M3 correctness, but none cleared the gate: full specialization
+measured `73.468 us` generic versus `73.475 us` static at `S=256`, and
+`33.784875 us` versus `33.803249 us` at `S=96` (`K=6`, `H=7168`, `E=16`). At
+`S=96`, `E=384`, the result was `34.413499 us` versus `34.426625 us`. Partial
+shape and route-loop specializations also failed. Do not add fixed-shape kernel
+variants based on compiler success or Host-only tests.
+
+A CANN registered-operator trial confirmed that rank-specific static task names
+were executed. At `S=96`, direct launch measured `64.688 us` and static ACLNN
+measured `63.426 us` across 12,800 samples, a `1.262 us` (`1.95 percent`) change.
+Profiler data located the apparent saving: low-tail Kernel duration fell from
+`42.184 us` to `40.270 us`, but the required per-call magic H2D took `2.011 us`
+and immediately preceded the Kernel on the same stream. Leg medians varied by
+more than 13 us. The critical-path saving is therefore below the gate and the
+registered path must not be integrated. Moving magic to a device-side counter
+would change round ordering and concurrent communicator semantics.
+
+Other bounded costs do not supply a hidden 3-5 us opportunity. Scalar setup was
+`0.263 us` median (`0.391 us` on each rank's slowest core); device queries took
+`1.248 us`; and direct Host submission did not starve the device queue. ACL
+Graph capture saved about `0.44 us` of Host submission, regressed device time by
+about `4.90 us`, and froze `TileXRCommNextMagic`, replaying a stale generation.
+Graph support requires a replay-safe round protocol or dynamic task update.
+Compiler experiments were also rejected: removing automatic synchronization
+hung on hardware, `-O3` was slower than `-O2`, and `-funroll-loops` generated an
+identical object.
+
+Sparse token-mask validation exposed a separate correctness rule. Per-token
+`topK * sizeof(int32_t)` copies can start at unaligned GM addresses. Copy the
+full aligned expert-ID tensor to UB, wait for MTE2, compact the increasing active
+token indices in UB, and establish the scalar-to-vector dependency. Validate a
+sparse mask on every rank; mask-free and aligned cases do not cover this path.
+
+For a one-time multi-host HCCL qualification, source the selected CANN
+environment and verify its resolved OPP/AICPU `ccl_kernel.json` on every host.
+Checking `ldd` alone is insufficient: a mismatched OPP path can fail the first
+ranks during communicator initialization and leave peers timing out without any
+submitted operation.
+
 ## Build MoonEP Five-Stage Runtime
 
 MoonEP native five-stage support requires CANN 9.1 and an A5 target compiler. Building

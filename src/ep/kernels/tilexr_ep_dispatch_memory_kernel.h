@@ -1828,30 +1828,35 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ExpIdsCop
     Duplicate<int32_t>(validExpertIdsTensor_, -1,
         static_cast<int32_t>(expertIdsBufSize_ / sizeof(int32_t)));
     SyncFunc<AscendC::HardEvent::V_MTE2>();
-    const DataCopyPadExtParams<int32_t> expertIdsPadParams{false, 0U, 0U, 0U};
+    const uint32_t expertIdsCount = axisBS_ * axisK_;
+    const uint32_t expertIdsAlignCount =
+        Ceil(expertIdsCount, static_cast<uint32_t>(BITS_PER_BYTE)) * BITS_PER_BYTE;
+    const uint32_t rightPadding = expertIdsAlignCount - expertIdsCount;
+    const DataCopyPadExtParams<int32_t> allExpertIdsPadParams{
+        true, 0U, static_cast<uint8_t>(rightPadding), -1};
+    const DataCopyExtParams expertIdsCopyParams{
+        1U, expertIdsCount * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
+    DataCopyPad(validExpertIdsTensor_, expertIdsGMTensor_, expertIdsCopyParams,
+        allExpertIdsPadParams);
+    SyncFunc<AscendC::HardEvent::MTE2_S>();
     if (isTokenMaskFlag_) {
-        const DataCopyExtParams tokenExpertIdsCopyParams{
-            1U, axisK_ * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
         for (uint32_t activeTokenIndex = 0U;
              activeTokenIndex < activeMaskBsCnt_; ++activeTokenIndex) {
             const uint32_t tokenIndex =
                 static_cast<uint32_t>(validBsIndexTensor_.GetValue(activeTokenIndex));
-            DataCopyPad(validExpertIdsTensor_[activeTokenIndex * axisK_],
-                expertIdsGMTensor_[tokenIndex * axisK_], tokenExpertIdsCopyParams,
-                expertIdsPadParams);
+            if (tokenIndex == activeTokenIndex) {
+                continue;
+            }
+            for (uint32_t k = 0U; k < axisK_; ++k) {
+                validExpertIdsTensor_.SetValue(activeTokenIndex * axisK_ + k,
+                    validExpertIdsTensor_.GetValue(tokenIndex * axisK_ + k));
+            }
         }
-    } else {
-        const uint32_t expertIdsCount = axisBS_ * axisK_;
-        const uint32_t expertIdsAlignCount =
-            Ceil(expertIdsCount, static_cast<uint32_t>(BITS_PER_BYTE)) * BITS_PER_BYTE;
-        const uint32_t rightPadding = expertIdsAlignCount - expertIdsCount;
-        const DataCopyPadExtParams<int32_t> allExpertIdsPadParams{
-            true, 0U, static_cast<uint8_t>(rightPadding), -1};
-        const DataCopyExtParams expertIdsCopyParams{
-            1U, expertIdsCount * static_cast<uint32_t>(sizeof(int32_t)), 0U, 0U, 0U};
-        DataCopyPad(validExpertIdsTensor_, expertIdsGMTensor_, expertIdsCopyParams,
-            allExpertIdsPadParams);
+        SyncFunc<AscendC::HardEvent::S_V>();
     }
+    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_ROUTE_PREPARE,
+        prepareStart);
+    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_ROUTE_PREPARE_END);
     SyncFunc<AscendC::HardEvent::MTE2_S>();
 }
 
