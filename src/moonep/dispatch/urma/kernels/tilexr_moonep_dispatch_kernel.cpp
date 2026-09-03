@@ -70,7 +70,7 @@ struct alignas(32) DispatchWqePatchContext {
     uint64_t weightLocalSourceBase;
     uint64_t weightRemoteScratchBase;
     uint64_t weightRowBytes;
-    uint64_t routeCountMask;
+    uint64_t destinationBase;
     uint64_t signalLocalAddr;
     uint64_t signalRemoteAddr;
     uint32_t batchHead;
@@ -99,8 +99,8 @@ constexpr uint32_t kMaxRouteIndexUbBytes =
 constexpr uint32_t kMaxRouteCompareMaskUbBytes =
     kRouteSelectChunkElements / 8U;
 constexpr uint32_t kMaxRouteSelectSendUbBytes =
-    2U * kMaxRoutePlanUbBytes + 2U * kMaxRouteIndexUbBytes +
-    kMaxRouteCompareMaskUbBytes + kRelayUbBytes +
+    kMaxRoutePlanUbBytes + 2U * kMaxRouteIndexUbBytes +
+    2U * kMaxRouteCompareMaskUbBytes + kRelayUbBytes +
     2U * kDispatchUdmaIssueUbBytes;
 
 static_assert(sizeof(TileXR::UDMASqeCtx) + sizeof(TileXR::UDMASgeCtx) ==
@@ -232,8 +232,8 @@ inline void DispatchPatchWriteWqeBatchVf(__ubuf__ uint8_t *wqeBytes,
             const uint32_t routeId =
                 context->routePlanStart + routeInChunk;
             const uint64_t targetSlot = static_cast<uint64_t>(
-                static_cast<uint32_t>(dstValues[routeInChunk])) &
-                context->routeCountMask;
+                static_cast<uint32_t>(dstValues[routeInChunk])) -
+                context->destinationBase;
             const uint32_t sourceRow = weightTask ? routeId :
                 AscendC::Simt::UintDiv(routeId, context->topKMagic,
                     context->topKShift);
@@ -1020,18 +1020,35 @@ __aicore__ inline void PrepareDispatchRemotePeerBatch(
 }
 
 __aicore__ inline uint32_t SelectDispatchPeerRoutes(
-    AscendC::LocalTensor<uint8_t> compareMaskLocal,
-    AscendC::LocalTensor<int32_t> routeRankLocal,
+    AscendC::LocalTensor<uint8_t> lowerMaskLocal,
+    AscendC::LocalTensor<uint8_t> upperMaskLocal,
+    AscendC::LocalTensor<int32_t> routePlanLocal,
     AscendC::LocalTensor<int16_t> routeIndexLocal,
     AscendC::LocalTensor<int16_t> selectedRouteIndexLocal,
-    int32_t peer, uint32_t routeCount)
+    int32_t peer, uint64_t destinationCapacity, uint32_t routeCount,
+    uint32_t compareMaskElements)
 {
-    AscendC::Compares(compareMaskLocal, routeRankLocal, peer,
-        AscendC::CMPMODE::EQ, routeCount);
+    const uint64_t peerBase = static_cast<uint64_t>(
+        static_cast<uint32_t>(peer)) * destinationCapacity;
+    const uint64_t peerEnd = peerBase + destinationCapacity;
+    if (peerBase > static_cast<uint64_t>(INT32_MAX)) {
+        return 0U;
+    }
+    AscendC::Compares(lowerMaskLocal, routePlanLocal,
+        static_cast<int32_t>(peerBase), AscendC::CMPMODE::GE, routeCount);
+    if (peerEnd <= static_cast<uint64_t>(INT32_MAX)) {
+        AscendC::Compares(upperMaskLocal, routePlanLocal,
+            static_cast<int32_t>(peerEnd), AscendC::CMPMODE::LT, routeCount);
+        AscendC::PipeBarrier<PIPE_V>();
+        AscendC::And(lowerMaskLocal.ReinterpretCast<uint16_t>(),
+            lowerMaskLocal.ReinterpretCast<uint16_t>(),
+            upperMaskLocal.ReinterpretCast<uint16_t>(),
+            static_cast<int32_t>(compareMaskElements));
+    }
     AscendC::PipeBarrier<PIPE_V>();
     uint64_t selectedCount = 0U;
     AscendC::GatherMask(selectedRouteIndexLocal, routeIndexLocal,
-        compareMaskLocal.ReinterpretCast<uint16_t>(), true, routeCount,
+        lowerMaskLocal.ReinterpretCast<uint16_t>(), true, routeCount,
         {1U, 1U, 0U, 0U}, selectedCount);
     SyncFunc<AscendC::HardEvent::V_S>();
     return static_cast<uint32_t>(selectedCount);
@@ -1039,9 +1056,8 @@ __aicore__ inline uint32_t SelectDispatchPeerRoutes(
 
 __aicore__ inline void LoadDispatchRouteChunk(
     AscendC::GlobalTensor<int32_t> dstGlobal, uint64_t chunkStart,
-    uint32_t chunkElements, uint32_t routeShift,
-    AscendC::LocalTensor<int32_t> routePlanLocal,
-    AscendC::LocalTensor<int32_t> routeRankLocal, bool waitForReuse)
+    uint32_t chunkElements, AscendC::LocalTensor<int32_t> routePlanLocal,
+    bool waitForReuse)
 {
     if (waitForReuse) {
         SyncFunc<AscendC::HardEvent::S_MTE2>();
@@ -1056,9 +1072,6 @@ __aicore__ inline void LoadDispatchRouteChunk(
     if (waitForReuse) {
         SyncFunc<AscendC::HardEvent::S_V>();
     }
-    AscendC::ShiftRight(routeRankLocal, routePlanLocal,
-        static_cast<int32_t>(routeShift), chunkElements);
-    AscendC::PipeBarrier<PIPE_V>();
 }
 
 __aicore__ inline bool BuildDispatchWriteWqeBatch(
@@ -1067,7 +1080,7 @@ __aicore__ inline bool BuildDispatchWriteWqeBatch(
     AscendC::LocalTensor<int32_t> dstValues,
     DispatchWqeBatchState &state, uint64_t hiddenLocalSourceBase,
     uint64_t hiddenRowBytes, uint64_t weightLocalSourceBase,
-    uint64_t weightRowBytes, bool hasWeight, uint64_t routeCountMask,
+    uint64_t weightRowBytes, bool hasWeight, uint64_t destinationCapacity,
     uint32_t topKMagic, uint32_t topKShift, uint32_t dataTaskStart,
     uint32_t dataTaskCount, bool appendSignal, uint64_t signalLocalAddr,
     uint32_t sequencePhase, uint32_t routePlanStart)
@@ -1085,7 +1098,8 @@ __aicore__ inline bool BuildDispatchWriteWqeBatch(
     context->weightRemoteScratchBase =
         reinterpret_cast<uint64_t>(state.weightRemoteScratchBase);
     context->weightRowBytes = weightRowBytes;
-    context->routeCountMask = routeCountMask;
+    context->destinationBase = static_cast<uint64_t>(
+        static_cast<uint32_t>(state.targetRank)) * destinationCapacity;
     context->signalLocalAddr = signalLocalAddr;
     context->signalRemoteAddr =
         reinterpret_cast<uint64_t>(state.remoteSignalAddr);
@@ -1336,7 +1350,7 @@ __aicore__ inline bool AppendDispatchWqes(DispatchWqeBatchState &state,
     AscendC::LocalTensor<int16_t> selectedRouteIndices,
     AscendC::LocalTensor<int32_t> dstValues, uint64_t hiddenLocalSourceBase,
     uint64_t hiddenRowBytes, uint64_t weightLocalSourceBase,
-    uint64_t weightRowBytes, bool hasWeight, uint64_t routeCountMask,
+    uint64_t weightRowBytes, bool hasWeight, uint64_t destinationCapacity,
     uint32_t topKMagic, uint32_t topKShift, uint32_t selectedRouteCount,
     bool appendSignal,
     uint64_t signalLocalAddr, uint32_t phase, uint32_t &dfxFlags,
@@ -1372,7 +1386,7 @@ __aicore__ inline bool AppendDispatchWqes(DispatchWqeBatchState &state,
         if (!BuildDispatchWriteWqeBatch(issueLocal,
                 selectedRouteIndices, dstValues, state, hiddenLocalSourceBase,
                 hiddenRowBytes, weightLocalSourceBase, weightRowBytes,
-                hasWeight, routeCountMask, topKMagic, topKShift,
+                hasWeight, destinationCapacity, topKMagic, topKShift,
                 dataTaskStart, batchDataTaskCount,
                 appendSignalNow, signalLocalAddr, sequencePhase,
                 routePlanStart)) {
@@ -1495,7 +1509,7 @@ __aicore__ inline bool DispatchBuildGroupedQpBatch(
     AscendC::LocalTensor<int16_t> selectedRouteIndices,
     AscendC::LocalTensor<int32_t> dstValues, uint64_t hiddenLocalSourceBase,
     uint64_t hiddenRowBytes, uint64_t weightLocalSourceBase,
-    uint64_t weightRowBytes, bool hasWeight, uint64_t routeCountMask,
+    uint64_t weightRowBytes, bool hasWeight, uint64_t destinationCapacity,
     uint32_t topKMagic, uint32_t topKShift, uint32_t selectedRouteCount,
     uint32_t &dataTaskStart, bool &signalPending, uint64_t signalLocalAddr,
     uint32_t sequencePhase, uint32_t routePlanStart, bool &finalBatch)
@@ -1527,7 +1541,7 @@ __aicore__ inline bool DispatchBuildGroupedQpBatch(
     }
     if (!BuildDispatchWriteWqeBatch(issueLocal, selectedRouteIndices,
             dstValues, state, hiddenLocalSourceBase, hiddenRowBytes,
-            weightLocalSourceBase, weightRowBytes, hasWeight, routeCountMask,
+            weightLocalSourceBase, weightRowBytes, hasWeight, destinationCapacity,
             topKMagic, topKShift, dataTaskStart, batchDataTaskCount,
             appendSignalNow, signalLocalAddr, sequencePhase,
             routePlanStart)) {
@@ -2444,11 +2458,8 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
 
         uint32_t fallbackReason = TileXRMoonEp::kDispatchVectorFallbackNone;
         uint32_t routeSelectChunkElements = 0U;
-        bool useVectorSlotSelect =
-            (destinationCapacity & (destinationCapacity - 1U)) == 0U;
-        if (!useVectorSlotSelect) {
-            fallbackReason = TileXRMoonEp::kDispatchVectorFallbackNotPowerOfTwo;
-        } else if (routeCount < kVectorCompareMinElements) {
+        bool useVectorSlotSelect = true;
+        if (routeCount < kVectorCompareMinElements) {
             useVectorSlotSelect = false;
             fallbackReason = TileXRMoonEp::kDispatchVectorFallbackApiGranularity;
         } else if (routeCount > UINT32_MAX) {
@@ -2464,29 +2475,26 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         }
 
         uint32_t routePlanUbBytes = kRouteTileBytes;
-        uint32_t routeRankUbBytes = 0U;
         uint32_t routeIndexUbBytes = 0U;
         uint32_t compareMaskUbBytes = 0U;
         if (useVectorSlotSelect) {
             routePlanUbBytes = static_cast<uint32_t>(AlignUp(
                 static_cast<uint64_t>(routeSelectChunkElements) * sizeof(int32_t),
                 kUbAlignBytes));
-            routeRankUbBytes = routePlanUbBytes;
             routeIndexUbBytes = static_cast<uint32_t>(AlignUp(
                 static_cast<uint64_t>(routeSelectChunkElements) * sizeof(int16_t),
                 kUbAlignBytes));
             compareMaskUbBytes = static_cast<uint32_t>(AlignUp(
                 CeilDiv(routeSelectChunkElements, 8U), kUbAlignBytes));
             const uint64_t sendFixedUbBytes =
-                2ULL * routePlanUbBytes + 2ULL * routeIndexUbBytes +
-                compareMaskUbBytes + kRelayUbBytes +
+                routePlanUbBytes + 2ULL * routeIndexUbBytes +
+                2ULL * compareMaskUbBytes + kRelayUbBytes +
                 2ULL * kDispatchUdmaIssueUbBytes;
             if (sendFixedUbBytes >= kFullUbBytes) {
                 useVectorSlotSelect = false;
                 fallbackReason = TileXRMoonEp::kDispatchVectorFallbackUbBudget;
                 routeSelectChunkElements = 0U;
                 routePlanUbBytes = kRouteTileBytes;
-                routeRankUbBytes = 0U;
                 routeIndexUbBytes = 0U;
                 compareMaskUbBytes = 0U;
             }
@@ -2522,16 +2530,14 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         AscendC::TBuf<AscendC::QuePosition::VECCALC> relayBuf;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> udmaIssueQp0Buf;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> udmaIssueQp1Buf;
-        AscendC::TBuf<AscendC::QuePosition::VECCALC> routeRankBuf;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> routeIndexBuf;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> selectedRouteIndexBuf;
-        AscendC::TBuf<AscendC::QuePosition::VECCALC> compareMaskBuf;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> lowerMaskBuf;
+        AscendC::TBuf<AscendC::QuePosition::VECCALC> upperMaskBuf;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> outputRelayBuf;
         AscendC::TBuf<AscendC::QuePosition::VECCALC> outputDiagnosticBuf;
         AscendC::TQue<AscendC::QuePosition::VECIN, 1> outputCopyQueue;
 
-        const uint32_t routeRankAllocBytes = useVectorSlotSelect ?
-            routeRankUbBytes : kUbAlignBytes;
         const uint32_t routeIndexAllocBytes = useVectorSlotSelect ?
             routeIndexUbBytes : kUbAlignBytes;
         const uint32_t compareMaskAllocBytes = useVectorSlotSelect ?
@@ -2541,10 +2547,10 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         pipe.InitBuffer(relayBuf, kRelayUbBytes);
         pipe.InitBuffer(udmaIssueQp0Buf, kDispatchUdmaIssueUbBytes);
         pipe.InitBuffer(udmaIssueQp1Buf, kDispatchUdmaIssueUbBytes);
-        pipe.InitBuffer(routeRankBuf, routeRankAllocBytes);
         pipe.InitBuffer(routeIndexBuf, routeIndexAllocBytes);
         pipe.InitBuffer(selectedRouteIndexBuf, routeIndexAllocBytes);
-        pipe.InitBuffer(compareMaskBuf, compareMaskAllocBytes);
+        pipe.InitBuffer(lowerMaskBuf, compareMaskAllocBytes);
+        pipe.InitBuffer(upperMaskBuf, compareMaskAllocBytes);
 
         AscendC::LocalTensor<int32_t> routePlanLocal = routePlanBuf.Get<int32_t>();
         AscendC::LocalTensor<uint8_t> relayLocal = relayBuf.Get<uint8_t>();
@@ -2552,11 +2558,11 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
             udmaIssueQp0Buf.Get<uint8_t>();
         AscendC::LocalTensor<uint8_t> udmaIssueQp1Local =
             udmaIssueQp1Buf.Get<uint8_t>();
-        AscendC::LocalTensor<int32_t> routeRankLocal = routeRankBuf.Get<int32_t>();
         AscendC::LocalTensor<int16_t> routeIndexLocal = routeIndexBuf.Get<int16_t>();
         AscendC::LocalTensor<int16_t> selectedRouteIndexLocal =
             selectedRouteIndexBuf.Get<int16_t>();
-        AscendC::LocalTensor<uint8_t> compareMaskLocal = compareMaskBuf.Get<uint8_t>();
+        AscendC::LocalTensor<uint8_t> lowerMaskLocal = lowerMaskBuf.Get<uint8_t>();
+        AscendC::LocalTensor<uint8_t> upperMaskLocal = upperMaskBuf.Get<uint8_t>();
         AscendC::LocalTensor<uint8_t> diagnosticLocal;
 
 #if defined(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING)
@@ -2652,13 +2658,9 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
         uint64_t quietCycles = 0U;
 #endif
 
-        uint32_t routeShift = 0U;
         const bool singleRouteChunkCached = useVectorSlotSelect &&
             routeCount <= static_cast<uint64_t>(routeSelectChunkElements);
         if (useVectorSlotSelect) {
-            for (uint64_t value = destinationCapacity; value > 1U; value >>= 1U) {
-                ++routeShift;
-            }
             AscendC::CreateVecIndex(routeIndexLocal, static_cast<int16_t>(0),
                 routeSelectChunkElements);
             AscendC::PipeBarrier<PIPE_V>();
@@ -2666,8 +2668,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     TileXRMoonEp::kDispatchStatusSuccess) {
                 const uint64_t routeLoadBegin = DispatchTraceCycle(trace);
                 LoadDispatchRouteChunk(dstGlobal, 0U,
-                    static_cast<uint32_t>(routeCount), routeShift,
-                    routePlanLocal, routeRankLocal, false);
+                    static_cast<uint32_t>(routeCount), routePlanLocal, false);
                 RecordDispatchTraceEvent(trace,
                     TileXRMoonEp::kDispatchTraceRouteLoad,
                     TileXRMoonEp::kDispatchTraceNoPeer,
@@ -2864,8 +2865,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     if (!singleRouteChunkCached) {
                         const uint64_t routeLoadBegin = DispatchTraceCycle(trace);
                         LoadDispatchRouteChunk(dstGlobal, chunkStart,
-                            chunkElements, routeShift, routePlanLocal,
-                            routeRankLocal, chunkStart != 0U);
+                            chunkElements, routePlanLocal, chunkStart != 0U);
                         RecordDispatchTraceEvent(trace,
                             TileXRMoonEp::kDispatchTraceRouteLoad, peer,
                             TileXRMoonEp::kDispatchTraceNoQp, group, traceChunk,
@@ -2874,8 +2874,10 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                     }
                     const uint64_t routeSelectBegin = DispatchTraceCycle(trace);
                     const uint32_t selectedCount = SelectDispatchPeerRoutes(
-                        compareMaskLocal, routeRankLocal, routeIndexLocal,
-                        selectedRouteIndexLocal, peer, chunkElements);
+                        lowerMaskLocal, upperMaskLocal, routePlanLocal,
+                        routeIndexLocal, selectedRouteIndexLocal, peer,
+                        destinationCapacity, chunkElements,
+                        compareMaskUbBytes / sizeof(uint16_t));
                     RecordDispatchTraceEvent(trace,
                         TileXRMoonEp::kDispatchTraceRouteSelect, peer,
                         TileXRMoonEp::kDispatchTraceNoQp, group, traceChunk,
@@ -2947,7 +2949,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                                 reinterpret_cast<uint64_t>(workspace +
                                     weightSourceOffset), weightRowBytes,
                                 hasWeight,
-                                destinationCapacity - 1U, topKMagic, topKShift,
+                                destinationCapacity, topKMagic, topKShift,
                                 qpSelectedCount[qpIdx],
                                 qpDataTaskStart[qpIdx], qpSignalPending[qpIdx],
                                 reinterpret_cast<uint64_t>(signalSource + qpIdx),
@@ -3199,8 +3201,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                         if (!singleRouteChunkCached) {
                             const uint64_t routeLoadBegin = DispatchTraceCycle(trace);
                             LoadDispatchRouteChunk(dstGlobal, chunkStart,
-                                chunkElements, routeShift, routePlanLocal,
-                                routeRankLocal, chunkStart != 0U);
+                                chunkElements, routePlanLocal, chunkStart != 0U);
                             RecordDispatchTraceEvent(trace,
                                 TileXRMoonEp::kDispatchTraceRouteLoad, peer,
                                 TileXRMoonEp::kDispatchTraceNoQp, issuePhase,
@@ -3210,8 +3211,10 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                         }
                         const uint64_t routeSelectBegin = DispatchTraceCycle(trace);
                         const uint32_t selectedCount = SelectDispatchPeerRoutes(
-                            compareMaskLocal, routeRankLocal, routeIndexLocal,
-                            selectedRouteIndexLocal, peer, chunkElements);
+                            lowerMaskLocal, upperMaskLocal, routePlanLocal,
+                            routeIndexLocal, selectedRouteIndexLocal, peer,
+                            destinationCapacity, chunkElements,
+                            compareMaskUbBytes / sizeof(uint16_t));
                         RecordDispatchTraceEvent(trace,
                             TileXRMoonEp::kDispatchTraceRouteSelect, peer,
                             TileXRMoonEp::kDispatchTraceNoQp, issuePhase,
@@ -3257,7 +3260,7 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                                 reinterpret_cast<uint64_t>(workspace +
                                     weightSourceOffset), weightRowBytes,
                                 hasWeight,
-                                destinationCapacity - 1U, topKMagic, topKShift,
+                                destinationCapacity, topKMagic, topKShift,
                                 qpRouteCount[qpIdx], appendSignal,
                                 reinterpret_cast<uint64_t>(signalSource + qpIdx),
                                 issuePhase, dfxFlags, firstQuietStatus,
@@ -3445,12 +3448,13 @@ extern "C" __global__ __aicore__ void tilexr_moonep_dispatch_urma_kernel(
                         chunkRemaining : routeSelectChunkElements);
                     if (!singleRouteChunkCached) {
                         LoadDispatchRouteChunk(dstGlobal, chunkStart,
-                            chunkElements, routeShift, routePlanLocal,
-                            routeRankLocal, chunkStart != 0U);
+                            chunkElements, routePlanLocal, chunkStart != 0U);
                     }
                     const uint32_t localRouteCount = SelectDispatchPeerRoutes(
-                        compareMaskLocal, routeRankLocal, routeIndexLocal,
-                        selectedRouteIndexLocal, rank, chunkElements);
+                        lowerMaskLocal, upperMaskLocal, routePlanLocal,
+                        routeIndexLocal, selectedRouteIndexLocal, rank,
+                        destinationCapacity, chunkElements,
+                        compareMaskUbBytes / sizeof(uint16_t));
                     scannedRouteCount += chunkElements;
                     uint64_t localStart = 0U;
                     uint64_t localEnd = 0U;

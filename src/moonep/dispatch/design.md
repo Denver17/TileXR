@@ -27,6 +27,10 @@ peer = raw / NvS
 loff = raw % NvS
 ```
 
+Grouped URMA route selection must compare the encoded destination against each
+peer's `[peer * NvS, (peer + 1) * NvS)` range. `NvS` is not required to be a
+power of two, so bit shifts and masks are not valid for general decoding.
+
 A nonnegative route scatters the source token row. A negative route identifies a
 duplicate of an earlier route from the same token to the same peer. Fresh Dispatch
 exchanges parent offsets, builds group-contiguous `dupLoffs` slices in two passes, and

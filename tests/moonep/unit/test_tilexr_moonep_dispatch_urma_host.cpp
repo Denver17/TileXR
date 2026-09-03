@@ -336,6 +336,41 @@ void TestGroupedFullmeshCapability()
     SetPeerMode(nullptr);
 }
 
+void TestGroupedNonPowerOfTwoCapacity()
+{
+    for (const char *mode : {"group_credit", "group"}) {
+        Reset();
+        TileXRMoonEpPlanV1 plan = ValidPlan();
+        plan.n = 1024;
+        plan.r = 2;
+        plan.nvS = 2040;
+        plan.k = 4;
+        plan.dst = reinterpret_cast<void *>(uintptr_t {0x10000});
+        plan.zeroFillRanges = reinterpret_cast<void *>(uintptr_t {0x20000});
+        plan.status = reinterpret_cast<void *>(uintptr_t {0x30000});
+        TileXRMoonEpTensorV1 hiddenInput = Tensor(
+            reinterpret_cast<void *>(uintptr_t {0x400000}),
+            TILEXR_MOONEP_DTYPE_FLOAT16, 2, 256, 16, 4096);
+        TileXRMoonEpTensorV1 hiddenOutput = Tensor(
+            reinterpret_cast<void *>(uintptr_t {0x500000}),
+            TILEXR_MOONEP_DTYPE_FLOAT16, 2, 2040, 16, 32640);
+        TileXRMoonEpDispatchArgsV2 args = Args(
+            &plan, &hiddenInput, nullptr, &hiddenOutput, nullptr);
+        ConfigureGroupedTransport(
+            args.registeredWorkspace, args.registeredWorkspaceBytes);
+        SetPeerMode(mode);
+
+        CheckStatus(mode, TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(
+            &args, reinterpret_cast<aclrtStream>(uintptr_t {0x8000})),
+            TILEXR_MOONEP_SUCCESS);
+        Check(launchCalls == 1,
+            std::string(mode) + " must launch with non-power-of-two nvS");
+        Check(launchedParams.layout.destinationCapacity == 2040,
+            std::string(mode) + " must preserve nvS=2040");
+    }
+    SetPeerMode(nullptr);
+}
+
 } // namespace
 
 extern "C" int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&args)
@@ -423,6 +458,7 @@ int main()
     TestPairedSingleLaunch();
     TestHiddenOnlyAndFailureBoundaries();
     TestGroupedFullmeshCapability();
+    TestGroupedNonPowerOfTwoCapacity();
     SetPeerMode(nullptr);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

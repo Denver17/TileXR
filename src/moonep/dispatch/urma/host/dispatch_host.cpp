@@ -63,7 +63,6 @@ bool DispatchVectorBatchShapeSupported(uint64_t routeCount,
         routeCount <= UINT32_MAX &&
         destinationCapacity >= routeCount &&
         destinationCapacity <= UINT32_MAX &&
-        (destinationCapacity & (destinationCapacity - 1U)) == 0U &&
         DispatchPeerWqesStreamable(routeCount,
             TileXR::TILEXR_UDMA_SQ_BB_COUNT,
             kDispatchSqPollReserve, hasWeight);

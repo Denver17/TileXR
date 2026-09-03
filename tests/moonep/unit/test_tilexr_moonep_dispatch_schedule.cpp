@@ -318,6 +318,21 @@ void TestDestinationDecode()
     CHECK_TRUE(!TileXRMoonEp::DispatchDecodeDestination(-6, 4, 2, &rank, &slot));
     CHECK_TRUE(!TileXRMoonEp::DispatchDecodeDestination(8, 4, 2, &rank, &slot));
     CHECK_TRUE(!TileXRMoonEp::DispatchDecodeDestination(INT32_MIN, 4, 2, &rank, &slot));
+
+    CHECK_TRUE(TileXRMoonEp::DispatchDecodeDestination(
+        2039, 2040, 2, &rank, &slot));
+    CHECK_EQ(rank, 0);
+    CHECK_EQ(slot, 2039);
+    CHECK_TRUE(TileXRMoonEp::DispatchDecodeDestination(
+        2040, 2040, 2, &rank, &slot));
+    CHECK_EQ(rank, 1);
+    CHECK_EQ(slot, 0);
+    CHECK_TRUE(TileXRMoonEp::DispatchDecodeDestination(
+        4079, 2040, 2, &rank, &slot));
+    CHECK_EQ(rank, 1);
+    CHECK_EQ(slot, 2039);
+    CHECK_TRUE(!TileXRMoonEp::DispatchDecodeDestination(
+        4080, 2040, 2, &rank, &slot));
 }
 
 void TestContiguousRanges()
