@@ -87,6 +87,21 @@ signal_wait_mode_enabled()
         [ "${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-0}" = "1" ]
 }
 
+alltoall_mode_enabled()
+{
+    [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL:-0}" = "1" ]
+}
+
+alltoall_long_mission_enabled()
+{
+    [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]
+}
+
+sync_xn_ping_mode_enabled()
+{
+    [ "${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-0}" = "1" ]
+}
+
 apply_p2p_ccu_copy_defaults()
 {
     if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0}" != "1" ]; then
@@ -154,8 +169,89 @@ apply_signal_wait_defaults()
     export TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE="${TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE:-hcomm_cap}"
 }
 
+apply_sync_xn_ping_defaults()
+{
+    if ! sync_xn_ping_mode_enabled; then
+        return
+    fi
+
+    export TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"
+    export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"
+    export TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"
+    export TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"
+    export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
+    export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
+    export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
+    export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"
+    export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW="${TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW:-full_repository}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-instruction_bytes}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-acl}"
+    export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"
+    export TILEXR_CCU_PROBE_RANK0_XN_START="${TILEXR_CCU_PROBE_RANK0_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_RANK1_XN_START="${TILEXR_CCU_PROBE_RANK1_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE="${TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE:-hcomm_cap}"
+    export TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN="${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-1}"
+}
+
+apply_alltoall_defaults()
+{
+    if ! alltoall_mode_enabled; then
+        return
+    fi
+
+    export TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"
+    export TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"
+    export TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"
+    export TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"
+    export TILEXR_CCU_PROBE_MISSION_START="${TILEXR_CCU_PROBE_MISSION_START:-6}"
+    export TILEXR_CCU_PROBE_INSTRUCTION_START="${TILEXR_CCU_PROBE_INSTRUCTION_START:-475}"
+    export TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START="${TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START:-489}"
+    if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then
+        export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-13}"
+        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-3}"
+        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-453}"
+    else
+        export TILEXR_CCU_PROBE_SQE_ARG_COUNT="${TILEXR_CCU_PROBE_SQE_ARG_COUNT:-0}"
+        export TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"
+        export TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-7}"
+    fi
+    export TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW="${TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW:-full_repository}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE:-instruction_bytes}"
+    export TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE="${TILEXR_CCU_DIRECT_REPOSITORY_MEMORY_ALLOC_MODE:-acl}"
+    export TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"
+    export TILEXR_CCU_PROBE_RANK0_XN_START="${TILEXR_CCU_PROBE_RANK0_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_RANK1_XN_START="${TILEXR_CCU_PROBE_RANK1_XN_START:-1961}"
+    export TILEXR_CCU_PROBE_GSA_START="${TILEXR_CCU_PROBE_GSA_START:-510}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_XN_START:-2361}"
+    export TILEXR_CCU_PROBE_REMOTE_XN_COUNT="${TILEXR_CCU_PROBE_REMOTE_XN_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK0_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START="${TILEXR_CCU_PROBE_RANK1_LOCAL_WAIT_CKE_START:-332}"
+    export TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT="${TILEXR_CCU_PROBE_LOCAL_WAIT_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK0_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START="${TILEXR_CCU_PROBE_RANK1_REMOTE_NOTIFY_CKE_START:-364}"
+    export TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT="${TILEXR_CCU_PROBE_REMOTE_NOTIFY_CKE_COUNT:-8}"
+    export TILEXR_CCU_PROBE_CHANNEL_START="${TILEXR_CCU_PROBE_CHANNEL_START:-2}"
+    export TILEXR_CCU_DIRECT_BARRIER_MODE="${TILEXR_CCU_DIRECT_BARRIER_MODE:-sync_cke}"
+    export TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE="${TILEXR_CCU_DIRECT_LOWER_LAYER_WQE_MODE:-hcomm_cap}"
+    export TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN="${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-1}"
+}
+
 apply_p2p_ccu_copy_defaults
 apply_signal_wait_defaults
+apply_sync_xn_ping_defaults
+apply_alltoall_defaults
 
 if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
     echo "tilexr_ccu_direct_smoke_runner dryRun=1 workDir=${work_dir}"
@@ -170,6 +266,12 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_DRY_RUN:-0}" = "1" ]; then
         TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT \
         TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK \
         TILEXR_CCU_DIRECT_SMOKE_BARRIER \
+        TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING \
+        TILEXR_CCU_DIRECT_SMOKE_ALLTOALL \
+        TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION \
+        TILEXR_CCU_ALLTOALL_BYTES \
+        TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP \
+        TILEXR_CCU_ALLTOALL_LOOP_COUNT \
         TILEXR_CCU_PROBE_SQE_ARG_COUNT \
         TILEXR_CCU_PROBE_MISSION_INSTRUCTION_START; do
         diagnostic_value="${!diagnostic_var:-}"
@@ -428,6 +530,42 @@ fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES}")
 fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION}")
+fi
+if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL}")
+fi
+if [ "${TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC=${TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC}")
+fi
+if [ "${TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC_WAIT:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC_WAIT=${TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC_WAIT}")
+fi
+if [ "${TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_ON_COPY_ROUTE:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_ON_COPY_ROUTE=${TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_ON_COPY_ROUTE}")
+fi
+if [ "${TILEXR_CCU_ALLTOALL_BYTES:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_ALLTOALL_BYTES=${TILEXR_CCU_ALLTOALL_BYTES}")
+fi
+if [ "${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP=${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP}")
+fi
+if [ "${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-}" != "" ]; then
+    common_env+=("TILEXR_CCU_ALLTOALL_LOOP_COUNT=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}")
+fi
 if [ "${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-}" != "" ]; then
     common_env+=("TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN=${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN}")
 fi
@@ -559,7 +697,7 @@ for token_field in "${resource_window_token_fields[@]}"; do
     fi
 done
 
-echo "tilexr_ccu_direct_smoke_runner begin workDir=${work_dir} devices=${devices} commId=${comm_id} threadMode=${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0} submit=${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0} barrierMode=${TILEXR_CCU_DIRECT_BARRIER_MODE:-} p2pCcuCopy=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0} signalWait=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT:-0} signalRank=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK:-0} ccuBarrier=${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-0} timeout=${timeout_s} npuSmiTimeout=${TILEXR_CCU_SMOKE_NPU_SMI_TIMEOUT:-20}"
+echo "tilexr_ccu_direct_smoke_runner begin workDir=${work_dir} devices=${devices} commId=${comm_id} threadMode=${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0} submit=${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0} barrierMode=${TILEXR_CCU_DIRECT_BARRIER_MODE:-} p2pCcuCopy=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY:-0} syncXnPing=${TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-0} alltoall=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL:-0} alltoallLongMission=${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0} signalWait=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_WAIT:-0} signalRank=${TILEXR_CCU_DIRECT_SMOKE_SIGNAL_RANK:-0} ccuBarrier=${TILEXR_CCU_DIRECT_SMOKE_BARRIER:-0} timeout=${timeout_s} npuSmiTimeout=${TILEXR_CCU_SMOKE_NPU_SMI_TIMEOUT:-20}"
 
 if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]; then
     thread_log="${work_dir}/ccu_thread.log"
@@ -574,7 +712,34 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_THREAD_MODE:-0}" = "1" ]; then
         echo "thread log: ${thread_log}" >&2
         exit 4
     fi
-    if signal_wait_mode_enabled; then
+    if alltoall_mode_enabled; then
+        if [ "$(grep -c "tilexr_ccu_alltoall prepare ret=0" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU alltoall thread-mode prepare did not return success for both ranks" >&2
+            exit 5
+        fi
+        if [ "$(grep -c "installSucceeded=1" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU alltoall thread-mode prepare did not complete install attempt for both ranks" >&2
+            exit 6
+        fi
+        if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
+            if [ "$(grep -c "submitReady=1" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU alltoall thread-mode submit requested but prepare did not reach submitReady=1" >&2
+                exit 6
+            fi
+            if [ "$(grep -c "tilexr_ccu_alltoall submit ret=0" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU alltoall thread-mode submit did not return success for both ranks" >&2
+                exit 7
+            fi
+            if [ "$(grep -c "tilexr_ccu_alltoall timing" "${thread_log}")" -lt 2 ]; then
+                echo "ERROR: direct CCU alltoall thread-mode timing was not reported for both ranks" >&2
+                exit 8
+            fi
+        fi
+        if [ "$(grep -c "tilexr_ccu_alltoall result passed=1" "${thread_log}")" -lt 2 ]; then
+            echo "ERROR: direct CCU alltoall thread-mode result did not pass for both ranks" >&2
+            exit 8
+        fi
+    elif signal_wait_mode_enabled; then
         if [ "$(grep -c "tilexr_ccu_signal_wait prepare ret=0" "${thread_log}")" -lt 2 ]; then
             echo "ERROR: direct CCU signal/wait thread-mode prepare did not return success for both ranks" >&2
             exit 5
@@ -666,7 +831,18 @@ if [ "${rank0_status}" -ne 0 ] || [ "${rank1_status}" -ne 0 ]; then
     exit 4
 fi
 
-if signal_wait_mode_enabled; then
+if alltoall_mode_enabled; then
+    for log in "${rank0_log}" "${rank1_log}"; do
+        if ! grep -q "tilexr_ccu_alltoall prepare ret=0" "${log}"; then
+            echo "ERROR: direct CCU alltoall prepare did not return success in ${log}" >&2
+            exit 5
+        fi
+        if ! grep -q "installSucceeded=1" "${log}"; then
+            echo "ERROR: direct CCU alltoall prepare did not complete install attempt in ${log}" >&2
+            exit 6
+        fi
+    done
+elif signal_wait_mode_enabled; then
     for log in "${rank0_log}" "${rank1_log}"; do
         if ! grep -q "tilexr_ccu_signal_wait prepare ret=0" "${log}"; then
             echo "ERROR: direct CCU signal/wait prepare did not return success in ${log}" >&2
@@ -705,6 +881,17 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
         fi
     done
     for log in "${rank0_log}" "${rank1_log}"; do
+        if alltoall_mode_enabled; then
+            if ! grep -q "tilexr_ccu_alltoall submit ret=0" "${log}"; then
+                echo "ERROR: direct CCU alltoall submit did not return success in ${log}" >&2
+                exit 7
+            fi
+            if ! grep -q "tilexr_ccu_alltoall timing" "${log}"; then
+                echo "ERROR: direct CCU alltoall timing was not reported in ${log}" >&2
+                exit 8
+            fi
+            continue
+        fi
         if signal_wait_mode_enabled; then
             if ! grep -q "tilexr_ccu_signal_wait submit ret=0" "${log}"; then
                 echo "ERROR: direct CCU signal/wait submit did not return success in ${log}" >&2
@@ -733,7 +920,14 @@ if [ "${TILEXR_CCU_DIRECT_SMOKE_SUBMIT:-0}" = "1" ]; then
     done
 fi
 
-if signal_wait_mode_enabled; then
+if alltoall_mode_enabled; then
+    for log in "${rank0_log}" "${rank1_log}"; do
+        if ! grep -q "tilexr_ccu_alltoall result passed=1" "${log}"; then
+            echo "ERROR: direct CCU alltoall result did not pass in ${log}" >&2
+            exit 9
+        fi
+    done
+elif signal_wait_mode_enabled; then
     for log in "${rank0_log}" "${rank1_log}"; do
         if ! grep -q "tilexr_ccu_signal_wait result passed=1" "${log}"; then
             echo "ERROR: direct CCU signal/wait result did not pass in ${log}" >&2

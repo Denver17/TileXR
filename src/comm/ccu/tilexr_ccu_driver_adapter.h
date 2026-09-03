@@ -17,6 +17,8 @@ namespace TileXR {
 constexpr uint32_t TILEXR_CCU_U_OP_GET_BASIC_INFO = 11;
 constexpr uint32_t TILEXR_CCU_U_OP_GET_DIE_WORKING = 15;
 constexpr uint32_t TILEXR_CCU_U_OP_GET_INSTRUCTION = 201;
+constexpr uint32_t TILEXR_CCU_U_OP_GET_XN = 203;
+constexpr uint32_t TILEXR_CCU_U_OP_GET_CKE = 204;
 constexpr uint32_t TILEXR_CCU_U_OP_GET_MISSION_CTX = 208;
 constexpr uint32_t TILEXR_CCU_U_OP_SET_MSID_TOKEN = 53;
 constexpr uint32_t TILEXR_CCU_U_OP_SET_TASKKILL = 54;
@@ -87,6 +89,18 @@ public:
         void* missionContext,
         uint32_t missionContextBytes,
         TileXRCcuDriverAdapterReport* report) const;
+    int ReadXnRange(
+        uint8_t dieId,
+        uint32_t startXnId,
+        uint64_t* values,
+        uint32_t count,
+        TileXRCcuDriverAdapterReport* report) const;
+    int ReadCkeRange(
+        uint8_t dieId,
+        uint32_t startCkeId,
+        uint64_t* values,
+        uint32_t count,
+        TileXRCcuDriverAdapterReport* report) const;
     int InstallInstructions(
         uint8_t dieId,
         uint16_t instructionStartId,
@@ -144,6 +158,13 @@ private:
         uint32_t opcode,
         const TileXRCcuCustomChannelIn& in,
         TileXRCcuCustomChannelOut* out,
+        TileXRCcuDriverAdapterReport* report) const;
+    int ReadResourceRange(
+        uint8_t dieId,
+        uint32_t opcode,
+        uint32_t startId,
+        uint64_t* values,
+        uint32_t count,
         TileXRCcuDriverAdapterReport* report) const;
 
     uint32_t devicePhyId_ = 0;

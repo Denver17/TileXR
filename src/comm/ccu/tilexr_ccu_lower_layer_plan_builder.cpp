@@ -118,6 +118,52 @@ bool RangeContains(uint32_t start, uint32_t count, uint32_t value)
     return count != 0 && value >= start && value < start + count;
 }
 
+void NormalizeVerifiedEndpointRouteJettyWindow(TileXRCcuLowerLayerTransportSnapshot* snapshot)
+{
+    if (snapshot == nullptr || snapshot->routes.empty()) {
+        return;
+    }
+
+    uint16_t minExplicitStart = 0;
+    uint32_t explicitEnd = 0;
+    uint32_t explicitStartCount = 0;
+    for (const auto& route : snapshot->routes) {
+        if (route.startJettyId == 0) {
+            continue;
+        }
+        if (explicitStartCount == 0) {
+            minExplicitStart = route.startJettyId;
+        } else {
+            minExplicitStart = std::min<uint16_t>(minExplicitStart, route.startJettyId);
+        }
+        explicitEnd = std::max<uint32_t>(explicitEnd, static_cast<uint32_t>(route.startJettyId) + 1U);
+        ++explicitStartCount;
+    }
+
+    if (minExplicitStart != 0) {
+        snapshot->startJettyId = minExplicitStart;
+    }
+
+    uint32_t requiredJettyCount = static_cast<uint32_t>(snapshot->routes.size());
+    if (snapshot->startJettyId != 0) {
+        uint32_t end = static_cast<uint32_t>(snapshot->startJettyId) + snapshot->routes.size();
+        for (uint32_t i = 0; i < snapshot->routes.size(); ++i) {
+            const uint32_t start = snapshot->routes[i].startJettyId == 0 ?
+                static_cast<uint32_t>(snapshot->startJettyId) + i :
+                snapshot->routes[i].startJettyId;
+            end = std::max<uint32_t>(end, start + 1U);
+        }
+        requiredJettyCount = std::max<uint32_t>(
+            requiredJettyCount,
+            end - static_cast<uint32_t>(snapshot->startJettyId));
+    } else if (explicitEnd != 0 && minExplicitStart != 0) {
+        requiredJettyCount = std::max<uint32_t>(
+            requiredJettyCount,
+            explicitEnd - static_cast<uint32_t>(minExplicitStart));
+    }
+    snapshot->pfeJettyCount = CheckedU16(std::max<uint32_t>(snapshot->pfeJettyCount, requiredJettyCount));
+}
+
 uint32_t SelectLowerLayerPfeOffset(uint8_t dieId, uint32_t pfeId)
 {
     if (LowerLayerEnvEquals("TILEXR_CCU_DIRECT_LOWER_LAYER_PFE_OFFSET_SOURCE", "hcomm_die")) {
@@ -531,6 +577,7 @@ int TileXRCcuBuildLowerLayerTransportTemplate(
         const uint32_t requiredJettyCount = verifiedJettyEnd - verifiedStartJettyId;
         result.pfeJettyCount = CheckedU16(std::max<uint32_t>(result.pfeJettyCount, requiredJettyCount));
     }
+    NormalizeVerifiedEndpointRouteJettyWindow(&result);
 
     *snapshot = result;
     FillTemplateReport(*snapshot, report);
@@ -575,10 +622,12 @@ int TileXRCcuOverlayVerifiedEndpointRoutes(
         routeIt->localDoorbellTokenId = verified.localDoorbellTokenId;
         routeIt->localDoorbellTokenValue = verified.localDoorbellTokenValue;
         routeIt->localSqDepth = verified.localSqDepth;
+        routeIt->startJettyId = verified.startJettyId;
         routeIt->endpointRouteVerified = true;
         routeIt->channelResourceOwnerVerified = verified.channelResourceOwnerVerified;
         routeIt->transportResourceExchangeVerified = verified.transportResourceExchangeVerified;
     }
+    NormalizeVerifiedEndpointRouteJettyWindow(snapshot);
 
     FillTemplateReport(*snapshot, report);
     return TILEXR_SUCCESS;
@@ -602,28 +651,31 @@ int TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
         return Fail(plan, report, "too many lower-layer CCU transport routes");
     }
 
+    TileXRCcuLowerLayerTransportSnapshot normalized = snapshot;
+    NormalizeVerifiedEndpointRouteJettyWindow(&normalized);
+
     TileXRCcuLowerLayerPlanSpec spec;
-    spec.msidToken = snapshot.msidToken;
-    spec.pfe.dieId = snapshot.dieId;
-    spec.pfe.pfeOffset = snapshot.pfeOffset;
-    spec.pfe.startJettyId = snapshot.startJettyId;
-    spec.pfe.jettyCount = snapshot.pfeJettyCount;
-    spec.pfe.startLocalJettyCtxId = snapshot.startLocalJettyCtxId;
-    spec.xnClear.dieId = snapshot.dieId;
-    spec.xnClear.startXnId = snapshot.xnStartId;
-    spec.xnClear.count = snapshot.xnCount;
-    spec.xnClear.valid = snapshot.xnCount != 0;
-    spec.ckeClear.dieId = snapshot.dieId;
-    spec.ckeClear.startCkeId = snapshot.ckeStartId;
-    spec.ckeClear.count = snapshot.ckeCount;
-    spec.ckeClear.valid = snapshot.ckeCount != 0;
+    spec.msidToken = normalized.msidToken;
+    spec.pfe.dieId = normalized.dieId;
+    spec.pfe.pfeOffset = normalized.pfeOffset;
+    spec.pfe.startJettyId = normalized.startJettyId;
+    spec.pfe.jettyCount = normalized.pfeJettyCount;
+    spec.pfe.startLocalJettyCtxId = normalized.startLocalJettyCtxId;
+    spec.xnClear.dieId = normalized.dieId;
+    spec.xnClear.startXnId = normalized.xnStartId;
+    spec.xnClear.count = normalized.xnCount;
+    spec.xnClear.valid = normalized.xnCount != 0;
+    spec.ckeClear.dieId = normalized.dieId;
+    spec.ckeClear.startCkeId = normalized.ckeStartId;
+    spec.ckeClear.count = normalized.ckeCount;
+    spec.ckeClear.valid = normalized.ckeCount != 0;
 
     uint32_t routeIndex = 0;
-    for (const auto& route : snapshot.routes) {
+    for (const auto& route : normalized.routes) {
         TileXRCcuLowerLayerJettySpec jetty;
-        jetty.dieId = snapshot.dieId;
-        jetty.pfeId = snapshot.pfeId;
-        jetty.startJettyCtxId = static_cast<uint16_t>(snapshot.startLocalJettyCtxId + routeIndex);
+        jetty.dieId = normalized.dieId;
+        jetty.pfeId = normalized.pfeId;
+        jetty.startJettyCtxId = static_cast<uint16_t>(normalized.startLocalJettyCtxId + routeIndex);
         jetty.doorbellVa = route.localDoorbellVa == 0 ? route.doorbellVa : route.localDoorbellVa;
         jetty.doorbellTokenId = route.localDoorbellTokenId == 0 ?
             route.doorbellTokenId :
@@ -636,13 +688,13 @@ int TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
         spec.jettys.push_back(jetty);
 
         TileXRCcuLowerLayerChannelSpec channel;
-        channel.dieId = snapshot.dieId;
+        channel.dieId = normalized.dieId;
         channel.channelId = route.channelId;
         channel.remoteEid = route.remoteEid;
         channel.tpn = route.tpn;
-        channel.sourcePfeId = snapshot.pfeId;
+        channel.sourcePfeId = normalized.pfeId;
         channel.startJettyId = route.startJettyId == 0 ?
-            static_cast<uint16_t>(snapshot.startJettyId + routeIndex) :
+            static_cast<uint16_t>(normalized.startJettyId + routeIndex) :
             route.startJettyId;
         channel.jettyCount = 1;
         channel.memoryTokenId = route.memoryTokenId;
@@ -659,16 +711,16 @@ int TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
         }
 
         TileXRCcuRemoteXnBindingProof remoteXn;
-        remoteXn.dieId = snapshot.dieId;
+        remoteXn.dieId = normalized.dieId;
         remoteXn.channelId = static_cast<uint16_t>(route.channelId);
-        remoteXn.localXn = static_cast<uint16_t>(snapshot.xnStartId + routeIndex);
+        remoteXn.localXn = static_cast<uint16_t>(normalized.xnStartId + routeIndex);
         remoteXn.remoteXn = route.remoteXnId;
         remoteXn.notifyCke = route.remoteNotifyCke == 0 ?
-            static_cast<uint16_t>(snapshot.ckeStartId + routeIndex) :
+            static_cast<uint16_t>(normalized.ckeStartId + routeIndex) :
             route.remoteNotifyCke;
         remoteXn.peerRank = route.peerRank;
         remoteXn.peerExchangeObserved = route.remoteXnId != 0;
-        remoteXn.localWaitCke = static_cast<uint16_t>(snapshot.ckeStartId + routeIndex);
+        remoteXn.localWaitCke = static_cast<uint16_t>(normalized.ckeStartId + routeIndex);
         remoteXn.endpointRouteVerified = route.endpointRouteVerified;
         remoteXn.channelResourceOwnerVerified = route.channelResourceOwnerVerified;
         remoteXn.transportResourceExchangeVerified = route.transportResourceExchangeVerified;
@@ -680,8 +732,8 @@ int TileXRCcuBuildLowerLayerInstallPlanFromTransportSnapshot(
     if (ret != TILEXR_SUCCESS) {
         return ret;
     }
-    AppendRemoteXnClears(snapshot, plan);
-    AppendRemoteNotifyCkeClears(snapshot, plan);
+    AppendRemoteXnClears(normalized, plan);
+    AppendRemoteNotifyCkeClears(normalized, plan);
     FillReport(*plan, report);
     return TILEXR_SUCCESS;
 }

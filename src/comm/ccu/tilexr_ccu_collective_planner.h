@@ -63,6 +63,24 @@ public:
         TileXRCcuMemoryCopyDirection direction,
         TileXRCcuDirectInstallAttempt *attempt,
         TileXRCcuDirectInstallReport *report);
+    int PrepareDirectCcuAllToAll2RankInstallAttempt(
+        TileXRCcuRuntimeSession &session,
+        const TileXRCcuDirectInstallOptions &options,
+        uint64_t localSourceAddr,
+        uint64_t localDestinationAddr,
+        uint64_t bytes,
+        uint32_t peerRank,
+        TileXRCcuDirectInstallAttempt *attempt,
+        TileXRCcuDirectInstallReport *report);
+    int PrepareDirectCcuSyncXnPingInstallAttempt(
+        TileXRCcuRuntimeSession &session,
+        const TileXRCcuDirectInstallOptions &options,
+        uint64_t localSourceAddr,
+        uint64_t localDestinationAddr,
+        uint64_t bytes,
+        uint32_t peerRank,
+        TileXRCcuDirectInstallAttempt *attempt,
+        TileXRCcuDirectInstallReport *report);
 #endif
     int RefreshDirectCcuLowerLayerPlan(TileXRCcuRuntimeSession &session);
     bool HasDirectCcuLowerLayerPlan() const;
@@ -94,6 +112,13 @@ private:
         uint32_t memoryTokenId,
         uint32_t rawMemoryTokenId,
         uint32_t memoryTokenValue);
+    void SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(
+        uint32_t syncRouteIndex,
+        uint32_t peerRank,
+        uint64_t remoteCcuVa,
+        uint32_t memoryTokenId,
+        uint32_t rawMemoryTokenId,
+        uint32_t memoryTokenValue);
     void ClearDirectCcuRemoteRouteMemoryOverride();
     void ApplyDirectCcuRemoteRouteMemoryOverride(
         std::vector<TileXRCcuRemoteCcuBufferInfo> *remoteCcuBuffers) const;
@@ -117,6 +142,8 @@ private:
 #ifdef TILEXR_CCU_TESTING
     TileXRCcuRemoteCcuBufferInfo directCcuRemoteRouteMemoryOverride_ = {};
     bool directCcuRemoteRouteMemoryOverrideValid_ = false;
+    bool directCcuRemoteRouteMemoryOverrideAllRoutes_ = true;
+    uint32_t directCcuRemoteRouteMemoryOverrideSyncRouteIndex_ = 0;
 #endif
 };
 

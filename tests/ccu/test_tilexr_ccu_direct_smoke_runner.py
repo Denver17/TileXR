@@ -34,6 +34,8 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY", source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_EXPECT_P2P_CCU_COPY", source)
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_BYTES", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION", source)
         self.assertIn("TILEXR_CCU_DIRECT_BARRIER_MODE", source)
         self.assertIn("TILEXR_CCU_DIRECT_REPOSITORY_INSTALL_WINDOW", source)
         self.assertIn("TILEXR_CCU_DIRECT_REPOSITORY_DATA_LEN_MODE", source)
@@ -143,6 +145,8 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn('TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE="${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE:-ra_ctx}"', source)
         self.assertIn('TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN="${TILEXR_CCU_DIRECT_SMOKE_FAST_EXIT_AFTER_RUN:-1}"', source)
         self.assertIn('common_env+=("TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE=${TILEXR_CCU_DIRECT_RESOURCE_WINDOW_REGISTRATION_MODE}")', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_ACTIVE_RANK}")', source)
+        self.assertIn('common_env+=("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION=${TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION}")', source)
         self.assertIn("p2p_passed_count=0", source)
         self.assertIn('grep -q "tilexr_ccu_direct_smoke p2pCcuCopy skipped"', source)
         self.assertIn("direct CCU P2P CCU-copy produced no passing receiver result", source)
@@ -166,6 +170,21 @@ class TileXRCcuDirectSmokeRunnerTest(unittest.TestCase):
         self.assertIn('grep -q "tilexr_ccu_signal_wait prepare ret=0"', source)
         self.assertIn('grep -q "tilexr_ccu_signal_wait submit ret=0"', source)
         self.assertIn('grep -q "tilexr_ccu_signal_wait result passed=1"', source)
+
+    def test_runner_sync_xn_ping_mode_applies_direct_ccu_resource_defaults(self):
+        source = RUNNER.read_text(encoding="utf-8")
+
+        self.assertIn("sync_xn_ping_mode_enabled", source)
+        self.assertIn("apply_sync_xn_ping_defaults", source)
+        self.assertIn('TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING:-0', source)
+        self.assertIn('TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT="${TILEXR_CCU_DIRECT_SMOKE_DIRECT_CCU_ONLY_INIT:-1}"', source)
+        self.assertIn('TILEXR_CCU_ALLTOALL_BYTES="${TILEXR_CCU_ALLTOALL_BYTES:-2097152}"', source)
+        self.assertIn('TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP="${TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP:-8}"', source)
+        self.assertIn('TILEXR_CCU_ALLTOALL_LOOP_COUNT="${TILEXR_CCU_ALLTOALL_LOOP_COUNT:-1}"', source)
+        self.assertIn('common_env+=("TILEXR_CCU_ALLTOALL_LOOP_COUNT=${TILEXR_CCU_ALLTOALL_LOOP_COUNT}")', source)
+        self.assertIn('TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT="${TILEXR_CCU_PROBE_SYNC_RESOURCE_COUNT:-1}"', source)
+        self.assertIn('TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT="${TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-3}"', source)
+        self.assertLess(source.index("apply_sync_xn_ping_defaults"), source.index("apply_alltoall_defaults"))
 
     def test_runner_allows_inactive_p2p_rank_to_skip_submit(self):
         source = RUNNER.read_text(encoding="utf-8")

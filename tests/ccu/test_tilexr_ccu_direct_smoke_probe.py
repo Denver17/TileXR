@@ -245,6 +245,8 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
         self.assertIn("TILEXR_CCU_DIRECT_SMOKE_P2P_CCU_COPY_DIRECTION", source)
         self.assertIn("P2pCcuCopyDirectionFromEnv", source)
         self.assertIn("TileXRCcuMemoryCopyDirection::LocalToRemote", source)
+        self.assertIn('"LocalToRemote"', source)
+        self.assertIn('"1"', source)
         self.assertIn("ACL_MEMCPY_HOST_TO_DEVICE", source)
         self.assertIn("ACL_MEMCPY_DEVICE_TO_HOST", source)
         self.assertIn("p2pCcuCopy", source)
@@ -574,6 +576,33 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
             default_body,
         )
 
+    def test_alltoall_submit_uses_bounded_stream_synchronize(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        alltoall_body = source[
+            source.index("int RunAllToAllCopyPhase"):
+            source.index("int RunSignalWaitSmokeForRank")
+        ]
+
+        self.assertIn("aclrtSynchronizeStreamWithTimeout", alltoall_body)
+        self.assertIn("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", alltoall_body)
+        self.assertIn("PrintMissionContext(context, attempt.submitTasks.front(), \"tilexr_ccu_alltoall\")", alltoall_body)
+        self.assertNotIn("const int syncRet = aclrtSynchronizeStream(stream);", alltoall_body)
+
+    def test_alltoall_inactive_rank_still_prepares_before_host_phase_wait(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        alltoall_body = source[
+            source.index("int RunAllToAllCopyPhase"):
+            source.index("int RunAllToAllSmokeForRank")
+        ]
+
+        prepare_index = alltoall_body.index("PrepareDirectCcuMemoryCopyInstallAttempt")
+        inactive_index = alltoall_body.index("if (!active)")
+        self.assertLess(prepare_index, inactive_index)
+        self.assertIn("const bool phaseReady =", alltoall_body)
+        self.assertIn("WaitForCollectiveSubmitReadiness(rank, rankSize, installReport.submitReady, phase)", alltoall_body)
+        self.assertIn("WaitForCollectiveSubmitDone(rank, rankSize, finalRet, phase)", alltoall_body)
+        self.assertIn("RankPhaseFileStem", source)
+
     def test_thread_mode_rank_specific_resource_env_overrides_common_prepare_options(self):
         source = PROBE_SOURCE.read_text(encoding="utf-8")
         prepare_options_body = source[
@@ -621,6 +650,113 @@ class TileXRCcuDirectSmokeProbeTest(unittest.TestCase):
                 self.assertNotIn(needle, source)
         self.assertNotIn("runtime/kernel.h", source)
         self.assertNotIn("rtCCULaunch", source)
+
+    def test_alltoall_smoke_mode_is_opt_in_and_validates_peer_pattern(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('kAllToAllEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL"', source)
+        self.assertIn('kAllToAllLongMissionEnv = "TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION"', source)
+        self.assertIn("kAllToAllSingleRouteBidirectionalEnv", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_SINGLE_ROUTE_BIDIRECTIONAL", source)
+        self.assertIn('kAllToAllBytesEnv = "TILEXR_CCU_ALLTOALL_BYTES"', source)
+        self.assertIn('kAllToAllMemSlicePerLoopEnv = "TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP"', source)
+        self.assertIn("struct AllToAllState", source)
+        self.assertIn("AllToAllSmokeEnabled", source)
+        self.assertIn("AllToAllLongMissionEnabled", source)
+        self.assertIn("AllToAllSingleRouteBidirectionalEnabled", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::LocalToRemote", source)
+        self.assertIn("singleRouteBidirectional", source)
+        self.assertIn("InitAllToAllState", source)
+        self.assertIn("RunAllToAllCopyPhase", source)
+        self.assertIn("RunAllToAllLongMissionSmokeForRank", source)
+        self.assertIn("RunAllToAllSmokeForRank", source)
+        self.assertIn("PrepareDirectCcuMemoryCopyInstallAttempt", source)
+        self.assertIn("PrepareDirectCcuAllToAll2RankInstallAttempt", source)
+        self.assertIn("TileXRCcuMemoryCopyDirection::RemoteToLocal", source)
+        self.assertIn("tilexr_ccu_alltoall config", source)
+        self.assertIn("tilexr_ccu_alltoall result passed=1", source)
+        self.assertIn("BuildP2pCcuCopyPattern(peer", source)
+
+    def test_alltoall_long_mission_reuses_prepare_with_loop_specific_state(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+        body = source[
+            source.index("int RunAllToAllLongMissionSmokeForRank"):
+            source.index("int RunAllToAllSmokeForRank")
+        ]
+
+        self.assertIn('kAllToAllLoopCountEnv = "TILEXR_CCU_ALLTOALL_LOOP_COUNT"', source)
+        self.assertIn("AllToAllLoopCountFromEnv", source)
+        loop_count_body = source[
+            source.index("int AllToAllLoopCountFromEnv"):
+            source.index("uint64_t BuildAllToAllLoopMarker")
+        ]
+        self.assertIn("std::strtol", loop_count_body)
+        self.assertIn("parsed < 1 || parsed > 1024", loop_count_body)
+        self.assertIn("BuildAllToAllLoopMarker", source)
+        self.assertIn("BuildAllToAllLoopPattern", source)
+        self.assertIn("ResetAllToAllStateForLoop", source)
+        self.assertIn("ReadAndValidatePeerLoopMarker", source)
+        self.assertIn("for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)", body)
+        self.assertIn("attempt.submitTasks.front().args[0] =", body)
+        self.assertIn("WaitForCollectiveSubmitReadiness(", body)
+        self.assertIn("loopIndex);", body)
+        self.assertIn("WaitForCollectiveSubmitDone(rank, rankSize, finalRet, loopIndex)", body)
+        self.assertIn("adapter.ReadXnRange", source)
+        self.assertIn("peerLoopMarker", source)
+        self.assertIn("loopIndex=", body)
+        self.assertLess(
+            body.index("PrepareDirectCcuAllToAll2RankInstallAttempt"),
+            body.index("for (int loopIndex = 0; loopIndex < loopCount; ++loopIndex)"),
+        )
+
+    def test_sync_xn_ping_smoke_mode_is_opt_in_and_uses_bounded_sync(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn('kSyncXnPingEnv = "TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING"', source)
+        self.assertIn("SyncXnPingSmokeEnabled", source)
+        self.assertIn("RunSyncXnPingSmokeForRank", source)
+        self.assertIn("PrepareDirectCcuSyncXnPingInstallAttempt", source)
+        sync_ping_body = source[
+            source.index("int RunSyncXnPingSmokeForRank"):
+            source.index("int RunSignalWaitSmokeForRank")
+        ]
+        self.assertIn("AllToAllState routeState", sync_ping_body)
+        self.assertIn("InitAllToAllState(rank, peer, &routeState)", sync_ping_body)
+        self.assertIn("tilexr_ccu_sync_xn_ping prepare", source)
+        self.assertIn("tilexr_ccu_sync_xn_ping submit", source)
+        self.assertIn("tilexr_ccu_sync_xn_ping timing", source)
+        self.assertIn("aclrtSynchronizeStreamWithTimeout", source)
+
+    def test_alltoall_timeout_prints_xn_and_cke_readback(self):
+        source = PROBE_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("PrintCcuResourceState", source)
+        self.assertIn("adapter.ReadXnRange", source)
+        self.assertIn("adapter.ReadCkeRange", source)
+        self.assertIn("localXnStartId", source)
+        self.assertIn("remoteXnStartId", source)
+        self.assertIn("localWaitCkeStartId", source)
+        self.assertIn("remoteNotifyCkeStartId", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SUBMIT_TIMEOUT", source)
+        self.assertIn("tilexr_ccu_sync_xn_ping result passed=1", source)
+
+    def test_smoke_runner_forwards_alltoall_env(self):
+        runner = (REPO_ROOT / "tests" / "ccu" / "run_tilexr_ccu_direct_smoke.sh").read_text(encoding="utf-8")
+
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL", runner)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION", runner)
+        self.assertIn("TILEXR_CCU_ALLTOALL_BYTES", runner)
+        self.assertIn("TILEXR_CCU_ALLTOALL_MEM_SLICE_PER_LOOP", runner)
+        self.assertIn("TILEXR_CCU_ALLTOALL_LOOP_COUNT", runner)
+        self.assertIn('if [ "${TILEXR_CCU_DIRECT_SMOKE_ALLTOALL_LONG_MISSION:-0}" = "1" ]; then', runner)
+        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-453", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-451", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-452", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-458", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-454", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-455", runner)
+        self.assertNotIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-476", runner)
+        self.assertIn("TILEXR_CCU_PROBE_SYNC_INSTRUCTION_COUNT:-7", runner)
 
     def test_probe_compiles_and_default_run_skips_without_touching_hardware(self):
         temp_dir, probe_bin, tile_comm_dir, cann_lib_dir, driver_lib_dir = self.compile_probe()

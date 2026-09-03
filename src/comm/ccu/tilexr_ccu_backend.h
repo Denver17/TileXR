@@ -53,6 +53,8 @@ enum class TileXRCcuSignalWaitRole {
 struct TileXRCcuSignalWaitRequest {
     int peerRank = -1;
     TileXRCcuSignalWaitRole role = TileXRCcuSignalWaitRole::Signal;
+    bool overrideBarrierMode = false;
+    TileXRCcuBarrierMode barrierMode = TileXRCcuBarrierMode::SyncCke;
     uint32_t syncInstructionCount = 0;
     uint16_t missionStartId = 0;
     uint16_t instructionStartId = 0;

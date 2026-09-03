@@ -223,6 +223,24 @@ class TileXRCcuBackendBoundaryTest(unittest.TestCase):
         self.assertNotIn("QueryDirectCcuProcessMemoryToken(sourceAddr", endpoint_builder)
         self.assertNotIn("QueryDirectCcuProcessMemoryToken(destinationAddr", endpoint_builder)
 
+    def test_alltoall_overrides_only_copy_route_memory_not_sync_routes(self):
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
+        prepare_alltoall = planner[
+            planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAll2RankInstallAttempt"):
+            planner.index("#endif", planner.index("int TileXRCcuCollectivePlanner::PrepareDirectCcuAllToAll2RankInstallAttempt"))
+        ]
+        override_apply = planner[
+            planner.index("void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride"):
+            planner.index("#endif", planner.index("void TileXRCcuCollectivePlanner::ApplyDirectCcuRemoteRouteMemoryOverride"))
+        ]
+
+        self.assertIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(", prepare_alltoall)
+        self.assertIn("0U", prepare_alltoall)
+        self.assertIn("uint32_t routeIndex = 0", override_apply)
+        self.assertIn("routeIndex != directCcuRemoteRouteMemoryOverrideSyncRouteIndex_", override_apply)
+        self.assertIn("++routeIndex", override_apply)
+        self.assertIn("directCcuRemoteRouteMemoryOverrideAllRoutes_", override_apply)
+
 
 if __name__ == "__main__":
     unittest.main()

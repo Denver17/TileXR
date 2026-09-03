@@ -349,6 +349,65 @@ int TileXRCcuDriverAdapter::ReadMissionContext(
     return TILEXR_SUCCESS;
 }
 
+int TileXRCcuDriverAdapter::ReadResourceRange(
+    uint8_t dieId,
+    uint32_t opcode,
+    uint32_t startId,
+    uint64_t* values,
+    uint32_t count,
+    TileXRCcuDriverAdapterReport* report) const
+{
+    ResetReport(report);
+    if (values == nullptr || count == 0) {
+        return Fail(report, "invalid CCU resource readback range");
+    }
+
+    uint32_t remaining = count;
+    uint32_t offset = startId;
+    uint32_t outputOffset = 0;
+    while (remaining > 0) {
+        const uint32_t batch = std::min(remaining, TILEXR_CCU_MAX_DATA_ARRAY_SIZE);
+        TileXRCcuCustomChannelIn in;
+        InitRequest(dieId, opcode, &in);
+        in.offsetStartIdx = offset;
+        in.data.dataInfo.dataArraySize = batch;
+        in.data.dataInfo.dataLen = batch * sizeof(uint64_t);
+
+        TileXRCcuCustomChannelOut out;
+        const int ret = CallPrepared(dieId, opcode, in, &out, report);
+        if (ret != TILEXR_SUCCESS) {
+            return ret;
+        }
+        for (uint32_t i = 0; i < batch; ++i) {
+            std::memcpy(&values[outputOffset + i], &out.data.dataInfo.dataArray[i], sizeof(uint64_t));
+        }
+        remaining -= batch;
+        offset += batch;
+        outputOffset += batch;
+    }
+    return TILEXR_SUCCESS;
+}
+
+int TileXRCcuDriverAdapter::ReadXnRange(
+    uint8_t dieId,
+    uint32_t startXnId,
+    uint64_t* values,
+    uint32_t count,
+    TileXRCcuDriverAdapterReport* report) const
+{
+    return ReadResourceRange(dieId, TILEXR_CCU_U_OP_GET_XN, startXnId, values, count, report);
+}
+
+int TileXRCcuDriverAdapter::ReadCkeRange(
+    uint8_t dieId,
+    uint32_t startCkeId,
+    uint64_t* values,
+    uint32_t count,
+    TileXRCcuDriverAdapterReport* report) const
+{
+    return ReadResourceRange(dieId, TILEXR_CCU_U_OP_GET_CKE, startCkeId, values, count, report);
+}
+
 int TileXRCcuDriverAdapter::InstallInstructions(
     uint8_t dieId,
     uint16_t instructionStartId,

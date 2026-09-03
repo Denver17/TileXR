@@ -16,6 +16,8 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DIRECT_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_orchestrator.h"
 DIRECT_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_direct_orchestrator.cpp"
+PLANNER_HEADER = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_collective_planner.h"
+PLANNER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_collective_planner.cpp"
 INSTALL_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_install_provider.cpp"
 PROVIDER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_provider.cpp"
 PACKAGE_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_launch_package.cpp"
@@ -27,6 +29,7 @@ PRODUCER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_producer_plan
 BARRIER_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_barrier_program.cpp"
 MICROCODE_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_microcode.cpp"
 MEMORY_PROGRAM_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_memory_program.cpp"
+ALLTOALL_PROGRAM_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_alltoall_program.cpp"
 SIGNAL_WAIT_PROGRAM_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_signal_wait_program.cpp"
 RUNTIME_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_runtime.cpp"
 LOWER_LAYER_PLAN_SOURCE = REPO_ROOT / "src" / "comm" / "ccu" / "tilexr_ccu_lower_layer_plan_builder.cpp"
@@ -138,6 +141,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
                 str(BARRIER_SOURCE),
                 str(MICROCODE_SOURCE),
                 str(MEMORY_PROGRAM_SOURCE),
+                str(ALLTOALL_PROGRAM_SOURCE),
                 str(SIGNAL_WAIT_PROGRAM_SOURCE),
                 str(RUNTIME_SOURCE),
                 str(LOWER_LAYER_PLAN_SOURCE),
@@ -1684,11 +1688,13 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         cmake = COMM_CMAKE.read_text(encoding="utf-8")
         header = DIRECT_HEADER.read_text(encoding="utf-8")
         source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
 
         self.assertIn("ccu/tilexr_ccu_direct_orchestrator.h", cmake)
         self.assertIn("ccu/tilexr_ccu_direct_orchestrator.cpp", cmake)
         self.assertIn("struct TileXRCcuDirectInstallOptions", header)
         self.assertIn("struct TileXRCcuDirectMemoryCopySpec", header)
+        self.assertIn("struct TileXRCcuDirectAllToAll2RankSpec", header)
         self.assertIn("struct TileXRCcuDirectSignalWaitSpec", header)
         self.assertIn("struct TileXRCcuDirectInstallAttempt", header)
         self.assertIn("struct TileXRCcuDirectInstallReport", header)
@@ -1703,6 +1709,7 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("TileXRCcuSubmitPreparedTasks", header)
         self.assertIn("TileXRCcuRunDirectInstallAttempt", header)
         self.assertIn("TileXRCcuRunDirectMemoryCopyInstallAttempt", header)
+        self.assertIn("TileXRCcuRunDirectAllToAll2RankInstallAttempt", header)
         self.assertIn("TileXRCcuRunDirectSignalWaitInstallAttempt", header)
         self.assertIn("TileXRCcuDecodeBasicInfo", source)
         self.assertIn("TileXRCcuBuildResourceSpec", source)
@@ -1710,6 +1717,8 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("TileXRCcuBuildLaunchPackage", source)
         self.assertIn("TileXRCcuBuildMemoryCopyProgram", source)
         self.assertIn("BuildDirectMemoryCopyLaunchPackage", source)
+        self.assertIn("TileXRCcuBuildAllToAll2RankProgram", source)
+        self.assertIn("BuildDirectAllToAll2RankLaunchPackage", source)
         self.assertIn("TileXRCcuBuildSignalWaitProgram", source)
         self.assertIn("BuildDirectSignalWaitLaunchPackage", source)
         self.assertIn("spec.localWaitCke = resource.localWaitCke == 0 ? resource.notifyCke : resource.localWaitCke", source)
@@ -1734,6 +1743,81 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("decoded=TransLocMemToRmtMem", source)
         self.assertIn("TILEXR_CCU_TRACE_TRANS_RMT_MEM_TO_LOC_MEM_HEADER", source)
         self.assertIn("TILEXR_CCU_TRACE_TRANS_LOC_MEM_TO_RMT_MEM_HEADER", source)
+
+    def test_direct_alltoall_uses_three_sync_resources_and_distinct_phases(self):
+        header = DIRECT_HEADER.read_text(encoding="utf-8")
+        source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT = 3U", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    7U + 64U * 7U", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT =\n    7U + 64U * 7U", planner)
+        self.assertIn("alltoall != nullptr ? TILEXR_CCU_DIRECT_ALLTOALL_SYNC_RESOURCE_COUNT", source)
+        self.assertIn("alltoall != nullptr ? TileXRCcuBarrierMode::SyncXn", source)
+        self.assertIn("const TileXRCcuSyncResource& copyResource = attempt->plan.syncResources[0]", source)
+        self.assertIn("const TileXRCcuSyncResource& preResource = attempt->plan.syncResources[1]", source)
+        self.assertIn("const TileXRCcuSyncResource& postResource = attempt->plan.syncResources[2]", source)
+        self.assertIn("SetDirectCcuRemoteRouteMemoryOverrideForSyncRoute(\n        0U,", planner)
+        self.assertIn(
+            "static_cast<uint32_t>(peerResources.localWaitCkeStartId) +\n                peerLocalWaitCkeOffset",
+            planner,
+        )
+        self.assertNotIn(
+            "peerResources.remoteNotifyCkeStartId) +\n                peerLocalWaitCkeOffset", planner
+        )
+        self.assertIn(
+            "preSyncOnCopyRoute ? copyResource.localXn : preResource.localXn", source
+        )
+        self.assertIn(
+            "preSyncOnCopyRoute ? copyResource.localXn : preSyncRemoteAddrXn", source
+        )
+        self.assertIn(
+            "preSyncPeerLocalXn ? postResource.localXn : postResource.remoteXn", source
+        )
+        self.assertIn("preSyncTokenChannelId = preResource.channelId", source)
+        self.assertIn("preSyncLocalMarkerXn = copyResource.localXn", source)
+        self.assertIn("preSyncRemoteMarkerXn = copyResource.remoteXn", source)
+        self.assertIn("preSyncMarkerArgIndex = 0", source)
+        self.assertIn("preSyncMarkerEnabled = true", source)
+        self.assertNotIn("preSyncTokenChannelId = postResource.channelId", source)
+        self.assertIn(
+            "preSyncOnCopyRoute ? attempt->allocation.remoteNotifyCke.startId : preResource.notifyCke", source
+        )
+        self.assertIn("preSyncRemoteTokenNotifyCke = preResource.notifyCke", source)
+        self.assertIn("preSyncTokenLocalWaitCke =", source)
+        self.assertIn("preResource.localWaitCke == 0 ? preResource.notifyCke : preResource.localWaitCke", source)
+        self.assertIn("alltoallSpec.copyCompletionCke =", source)
+        self.assertIn("copyResource.localWaitCke == 0 ? copyResource.notifyCke : copyResource.localWaitCke", source)
+        self.assertIn("postSyncRemoteNotifyCke = postResource.notifyCke", source)
+        self.assertNotIn("postSyncRemoteNotifyCke = preResource.notifyCke", source)
+        self.assertIn("postResource.localWaitCke == 0 ? postResource.notifyCke : postResource.localWaitCke", source)
+        self.assertIn(
+            "preSyncOnCopyRoute ? copyResource.channelId : preResource.channelId", source
+        )
+        self.assertIn("copyChannelId = copyResource.channelId", source)
+        self.assertIn("postSyncChannelId = postResource.channelId", source)
+        self.assertNotIn("postSyncChannelId = preResource.channelId", source)
+        self.assertIn("postSyncNotify = false", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC", source)
+        self.assertIn("alltoallSpec.preSyncNotify", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_SKIP_PRE_SYNC_WAIT", source)
+        self.assertIn("alltoallSpec.preSyncWait", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_ON_COPY_ROUTE", source)
+        self.assertIn("preSyncOnCopyRoute", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_PRE_SYNC_PEER_LOCAL_XN", source)
+        self.assertIn(
+            "preSyncPeerLocalXn ? preResource.localXn : preResource.remoteXn", source
+        )
+        self.assertIn(
+            "preSyncPeerLocalXn ? postResource.localXn : postResource.remoteXn", source
+        )
+        self.assertIn("postSyncWait = false", source)
+        self.assertIn("emitFinish = false", source)
+        self.assertNotIn("postSyncNotify = true", source)
+        self.assertNotIn("postSyncWait = true", source)
+        self.assertNotIn("emitFinish = true", source)
+        self.assertIn("LocalToRemote", source)
+        self.assertIn("uint32_t memSlicePerBlock", header)
 
         combined = header + "\n" + source
         for needle in PRIVATE_CCU_PRODUCER_NEEDLES:
@@ -1762,6 +1846,44 @@ class TileXRCcuDirectOrchestratorTest(unittest.TestCase):
         self.assertIn("attempt->package.tasks = tasks", memory_copy_body)
         self.assertNotIn("NormalizeDirectMemoryCopySubmitTasks", source)
         self.assertNotIn("task.argSize = 1", source)
+
+    def test_collective_planner_has_private_alltoall_prepare_path(self):
+        header = PLANNER_HEADER.read_text(encoding="utf-8")
+        source = PLANNER_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("PrepareDirectCcuAllToAll2RankInstallAttempt", header)
+        self.assertIn("PrepareDirectCcuAllToAll2RankInstallAttempt", source)
+        self.assertIn("rankSize != 2", source)
+        self.assertIn("alltoall.localSendAddr = localEndpoint.sourceAddr", source)
+        self.assertIn("alltoall.localSendToken = localEndpoint.sourceToken", source)
+        self.assertIn("remoteImportRequest = peerEndpoint.destinationRemoteImport", source)
+        self.assertIn("alltoall.remoteRecvAddr = remoteImportRequest.addr", source)
+        self.assertIn("alltoall.remoteRecvToken", source)
+        self.assertNotIn("alltoall.remoteRecvAddr = peerEndpoint.destinationAddr", source)
+        self.assertIn("TILEXR_CCU_DIRECT_ALLTOALL_INSTRUCTION_COUNT", source)
+        self.assertIn("tilexr-comm-direct-ccu-alltoall", source)
+        self.assertIn("TileXRCcuRunDirectAllToAll2RankInstallAttempt", source)
+
+    def test_direct_sync_xn_ping_uses_one_route_and_variable_bit_masks(self):
+        header = DIRECT_HEADER.read_text(encoding="utf-8")
+        source = DIRECT_SOURCE.read_text(encoding="utf-8")
+        planner_header = PLANNER_HEADER.read_text(encoding="utf-8")
+        planner = PLANNER_SOURCE.read_text(encoding="utf-8")
+
+        self.assertIn("struct TileXRCcuDirectSyncXnPingSpec", header)
+        self.assertIn("uint16_t remoteNotifyMask = 0", header)
+        self.assertIn("uint16_t localWaitMask = 0", header)
+        self.assertIn("TileXRCcuRunDirectSyncXnPingInstallAttempt", header)
+        self.assertIn("BuildDirectSyncXnPingLaunchPackage", source)
+        self.assertIn("TileXRCcuEncodeSyncXn", source)
+        self.assertIn("defaultRemoteNotifyMask = static_cast<uint16_t>(1U << syncXnPing.localRank)", source)
+        self.assertIn("defaultLocalWaitMask = static_cast<uint16_t>(1U << syncXnPing.peerRank)", source)
+        self.assertIn("TILEXR_CCU_DIRECT_SYNC_XN_PING_INSTRUCTION_COUNT = 5U", source)
+        self.assertIn("PrepareDirectCcuSyncXnPingInstallAttempt", planner_header)
+        self.assertIn("PrepareDirectCcuSyncXnPingInstallAttempt", planner)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_NOTIFY_MASK", planner)
+        self.assertIn("TILEXR_CCU_DIRECT_SMOKE_SYNC_XN_PING_WAIT_MASK", planner)
+        self.assertIn("RegisterCcuResourceRmaBuffer", planner)
 
 
 if __name__ == "__main__":

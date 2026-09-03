@@ -488,6 +488,70 @@ class TileXRCcuDriverAdapterTest(unittest.TestCase):
         self.assertEqual("", result.stderr)
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
+    def test_adapter_reads_xn_and_cke_ranges_from_driver_slots(self):
+        code = textwrap.dedent(
+            r'''
+            #include "ccu/tilexr_ccu_driver_adapter.h"
+
+            #include <cstring>
+            #include <iostream>
+
+            using namespace TileXR;
+
+            struct FakeState {
+                int calls = 0;
+            };
+
+            int FakeCustomChannel(
+                uint32_t,
+                const TileXRCcuCustomChannelIn& in,
+                TileXRCcuCustomChannelOut* out,
+                void* userData)
+            {
+                auto* state = static_cast<FakeState*>(userData);
+                state->calls++;
+                if (in.data.dataInfo.udieIdx != 1 || in.offsetStartIdx != (in.op == 203 ? 2362 : 332) ||
+                    in.data.dataInfo.dataArraySize != 3 || in.data.dataInfo.dataLen != 24) {
+                    return -1;
+                }
+                for (uint32_t i = 0; i < 3; ++i) {
+                    const uint64_t value = (static_cast<uint64_t>(in.op) << 32U) | i;
+                    std::memcpy(&out->data.dataInfo.dataArray[i], &value, sizeof(value));
+                }
+                out->opRet = 0;
+                return 0;
+            }
+
+            int main()
+            {
+                FakeState state;
+                TileXRCcuDriverAdapter adapter;
+                TileXRCcuDriverAdapterReport report;
+                if (adapter.Init(5, FakeCustomChannel, &state, &report) != TILEXR_SUCCESS) {
+                    return 1;
+                }
+                uint64_t xn[3] {};
+                uint64_t cke[3] {};
+                if (adapter.ReadXnRange(1, 2362, xn, 3, &report) != TILEXR_SUCCESS ||
+                    adapter.ReadCkeRange(1, 332, cke, 3, &report) != TILEXR_SUCCESS) {
+                    std::cerr << report.message << "\n";
+                    return 2;
+                }
+                if (state.calls != 2 || xn[0] != (203ULL << 32U) || xn[2] != ((203ULL << 32U) | 2U) ||
+                    cke[0] != (204ULL << 32U) || cke[2] != ((204ULL << 32U) | 2U)) {
+                    std::cerr << "resource readback mismatch\n";
+                    return 3;
+                }
+                return 0;
+            }
+            '''
+        )
+
+        result = self.compile_and_run(code)
+
+        self.assertEqual("", result.stderr)
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+
     def test_adapter_set_instruction_trailer_wire_word_is_offset_then_opcode(self):
         code = textwrap.dedent(
             r'''
