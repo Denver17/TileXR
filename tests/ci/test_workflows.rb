@@ -45,8 +45,8 @@ npu = load_workflow(NPU_WORKFLOW_PATH)
 assert_equal(["pull_request"], pr.fetch("on").keys,
              "PR workflow must use only pull_request")
 pull_request = pr.fetch("on").fetch("pull_request")
-assert_equal(["main", "codex/ccu-stack-*"], pull_request.fetch("branches"),
-             "PR workflow must target main and the temporary CCU stack")
+assert_equal(["main"], pull_request.fetch("branches"),
+             "PR workflow must target main")
 assert_equal(%w[opened reopened synchronize ready_for_review converted_to_draft closed],
              pull_request.fetch("types"), "PR event types differ")
 assert_equal({"contents" => "read"}, pr.fetch("permissions"),

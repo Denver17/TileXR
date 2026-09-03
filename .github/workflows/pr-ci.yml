@@ -2,9 +2,7 @@ name: PR CI
 
 "on":
   pull_request:
-    branches:
-      - main
-      - "codex/ccu-stack-*"
+    branches: [main]
     types: [opened, reopened, synchronize, ready_for_review, converted_to_draft, closed]
 
 permissions:
