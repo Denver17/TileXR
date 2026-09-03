@@ -32,7 +32,6 @@ def test_lightweight_capture_skips_warmup_and_writes_55_ordered_events(
     monkeypatch.setenv("TILEXR_MOONEP_PERF_CAPTURE_OPERATORS", "55")
     buffer = object.__new__(TileXRMoonEPBuffer)
     buffer.context = SimpleNamespace(global_rank=3)
-    buffer.runtime = SimpleNamespace(combine_version=2)
     buffer._torch = SimpleNamespace(
         npu=SimpleNamespace(Event=_Event, current_stream=lambda: object())
     )

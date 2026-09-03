@@ -1,7 +1,8 @@
 # TileXR MoonEP Benchmark
 
 The native five-stage API, tensor contracts, status ranges, and validation
-boundaries are documented in `docs/moonep/DISPATCH_COMBINE.md`.
+boundaries are documented in `docs/specs/moonep-runtime.md` and
+`docs/specs/moonep-combine.md`.
 
 This benchmark runs the complete protocol with TileXR bootstrap and no HCCL. Expert
 Forward has one implementation: BF16 `torch_npu.npu_grouped_matmul`,

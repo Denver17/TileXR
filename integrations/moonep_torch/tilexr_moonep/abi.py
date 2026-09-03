@@ -13,8 +13,6 @@ TILEXR_MOONEP_FLAG_NONE = 0
 TILEXR_MOONEP_FLAG_BUILD_DEDUP = 1 << 0
 TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC = 1 << 1
 TILEXR_MOONEP_FLAG_ZERO_COPY = 1 << 2
-TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY = 1 << 3
-TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY = 1 << 4
 TILEXR_MOONEP_FLAG_RESET_STATUS = 1 << 5
 TILEXR_MOONEP_REDUCE_GRAD_UDMA_THRESHOLD_BYTES = 1 << 20
 
@@ -126,21 +124,6 @@ class TileXRMoonEPPrefetchWeightArgsV1(ctypes.Structure):
         ("gate", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("up", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("down", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("flags", ctypes.c_uint64),
-    ]
-
-
-class TileXRMoonEPCombineArgsV1(ctypes.Structure):
-    _fields_ = [
-        ("structSize", ctypes.c_uint32),
-        ("abiVersion", ctypes.c_uint32),
-        ("comm", ctypes.c_void_p),
-        ("plan", ctypes.POINTER(TileXRMoonEPPlanV1)),
-        ("dstLocal", ctypes.c_void_p),
-        ("hiddenNvsh", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("routeWeightsNvs", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("hiddenSh", ctypes.POINTER(TileXRMoonEPTensorV1)),
-        ("routeWeightsSk", ctypes.POINTER(TileXRMoonEPTensorV1)),
         ("flags", ctypes.c_uint64),
     ]
 

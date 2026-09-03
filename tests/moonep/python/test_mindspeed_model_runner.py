@@ -126,7 +126,6 @@ def test_runner_scripts_expose_the_supported_interface_and_validated_shape() -> 
     assert "export TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy" not in node
     assert "TILEXR_MOONEP_DISPATCH_PEER_MODE=legacy is prohibited" in node
     assert "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16" in node
-    assert "TILEXR_MOONEP_COMBINE_VERSION=2" in node
     assert "unset TILEXR_MOONEP_DISPATCH_TRANSPORT" in node
     assert (
         "HCCL_NPU_SOCKET_PORT_RANGE=${MODEL_RUNNER_HCCL_NPU_SOCKET_PORT_RANGE:-47000-47100}"

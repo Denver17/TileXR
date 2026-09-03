@@ -40,5 +40,5 @@ The kernel is compiled as a pure AICore ELF, embedded and registered with
 `moonep_peer_window.h`.
 
 Validation includes Host/layout/source tests, a K=4 multi-duplicate hardware
-regression, and the four-rank NPU 4-7 flow documented in
-`docs/moonep/DISPATCH_COMBINE.md`.
+regression, and the runtime validation ladder documented in
+`docs/BUILD_VERIFICATION.md`.

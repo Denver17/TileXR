@@ -113,7 +113,6 @@ def _case_environment(
             "TILEXR_HOME": str(source_root),
             # A meta gate must fail instead of falling through to a full model capture.
             "TILEXR_MODEL_REPLAY_BASH": "/bin/false",
-            "TILEXR_MOONEP_COMBINE_VERSION": "2",
             "TILEXR_MOONEP_DIAGNOSTIC_FLOW": "0",
             "TILEXR_MOONEP_DISPATCH_GROUP_WIDTH": "16",
             "TILEXR_MOONEP_DISPATCH_PEER_MODE": case.peer_mode,

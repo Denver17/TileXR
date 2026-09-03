@@ -114,24 +114,6 @@ def test_algorithm_bytes_follow_routes_and_runtime_tensor_dtypes() -> None:
     }
 
 
-def test_stage_metadata_reports_selected_combine_v1_memory_kernel() -> None:
-    capabilities = {
-        "implementations": {
-            "planning": "native",
-            "dispatch": "native",
-            "prefetch_weight": "native",
-            "combine": "native",
-            "reduce_grad": "native",
-        }
-    }
-    metadata = stage_execution_metadata(
-        capabilities, torch_npu_version="test", combine_version=1
-    )
-    assert metadata["combine"]["kernel_version"] == (
-        "tilexr_moonep_combine_kernel (CombineV1Memory)"
-    )
-
-
 def _result(rank: int, world_size: int, node_count: int) -> dict[str, object]:
     capabilities = {
         "stage_mask": 31,

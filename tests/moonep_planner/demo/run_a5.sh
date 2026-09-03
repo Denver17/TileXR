@@ -2,7 +2,7 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [[ -x "${SCRIPT_DIR}/tilexr_moonep_flow_demo" ]]; then
+if [[ -x "${SCRIPT_DIR}/tilexr_moonep_planner_demo" ]]; then
     TILEXR_INSTALL_PREFIX="$(cd "${SCRIPT_DIR}/.." && pwd)"
 else
     TILEXR_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"

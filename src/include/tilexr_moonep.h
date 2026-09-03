@@ -21,8 +21,6 @@ typedef void *TileXRCommPtr;
 #define TILEXR_MOONEP_FLAG_BUILD_DEDUP (UINT64_C(1) << 0)
 #define TILEXR_MOONEP_FLAG_SKIP_INTER_RANK_SYNC (UINT64_C(1) << 1)
 #define TILEXR_MOONEP_FLAG_ZERO_COPY (UINT64_C(1) << 2)
-#define TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY (UINT64_C(1) << 3)
-#define TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY (UINT64_C(1) << 4)
 #define TILEXR_MOONEP_FLAG_RESET_STATUS (UINT64_C(1) << 5)
 
 typedef enum TileXRMoonEpStatus {
@@ -140,19 +138,6 @@ typedef struct TileXRMoonEpPrefetchWeightArgsV1 {
     uint64_t flags;
 } TileXRMoonEpPrefetchWeightArgsV1;
 
-typedef struct TileXRMoonEpCombineArgsV1 {
-    uint32_t structSize;
-    uint32_t abiVersion;
-    TileXRCommPtr comm;
-    const TileXRMoonEpPlanV1 *plan;
-    const int32_t *dstLocal;
-    const TileXRMoonEpTensorV1 *hiddenNvsh;
-    const TileXRMoonEpTensorV1 *routeWeightsNvs;
-    TileXRMoonEpTensorV1 *hiddenSh;
-    TileXRMoonEpTensorV1 *routeWeightsSk;
-    uint64_t flags;
-} TileXRMoonEpCombineArgsV1;
-
 typedef struct TileXRMoonEpReduceGradArgsV1 {
     uint32_t structSize;
     uint32_t abiVersion;
@@ -256,8 +241,6 @@ int TileXRMoonEpDispatchV2(const TileXRMoonEpDispatchArgsV2 *args, aclrtStream s
 
 int TileXRMoonEpPrefetchWeightV1(const TileXRMoonEpPrefetchWeightArgsV1 *args,
     aclrtStream stream);
-
-int TileXRMoonEpCombineV1(const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);
 
 int TileXRMoonEpReduceGradV1(const TileXRMoonEpReduceGradArgsV1 *args,
     aclrtStream stream);

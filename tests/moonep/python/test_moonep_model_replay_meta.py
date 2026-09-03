@@ -464,7 +464,7 @@ def test_code_build_provenance_does_not_block_route_materialization(
     assert performance["comparison"]["classification"] == "checked-in reference"
 
 
-def test_route_materialization_still_rejects_combine_version_changes(
+def test_route_materialization_rejects_combine_kernel_changes(
     tmp_path: Path,
 ) -> None:
     captured = _identity()
@@ -477,7 +477,7 @@ def test_route_materialization_still_rejects_combine_version_changes(
         replace=False,
     )
     current = copy.deepcopy(captured)
-    current["provenance"]["kernel_version"]["combine"] = "1"
+    current["provenance"]["kernel_version"]["combine"] = "unexpected-combine"
 
     with pytest.raises(MetaValidationError, match="route contract is incompatible"):
         load_meta_bundle(tmp_path, _shape(), current)

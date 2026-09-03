@@ -19,20 +19,18 @@ int TileXRMoonEpRunDispatchUrmaV1(
     const TileXRMoonEpDispatchArgsV1 *args, aclrtStream stream);
 int TileXRMoonEpRunDispatchUrmaV2(
     const TileXRMoonEpDispatchArgsV2 *args, aclrtStream stream);
-int TileXRMoonEpRunCombineV1(
-    const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream);
 int TileXRMoonEpRunPrefetchWeightV1(
     const TileXRMoonEpPrefetchWeightArgsV1 *args, aclrtStream stream);
 } // namespace TileXRMoonEp
 
 namespace {
 
-const uint64_t kNativeStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
+const uint64_t kNativeStagesV1 = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PLANNING) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_DISPATCH) |
-    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT) |
-    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE);
-const uint64_t kStubStages = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
-const uint64_t kNativeStagesV2 = kNativeStages |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT);
+const uint64_t kStubStagesV1 = static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
+const uint64_t kNativeStagesV2 = kNativeStagesV1 |
+    static_cast<uint64_t>(TILEXR_MOONEP_STAGE_COMBINE) |
     static_cast<uint64_t>(TILEXR_MOONEP_STAGE_REDUCE_GRAD);
 const uint64_t kStubStagesV2 = 0;
 
@@ -237,8 +235,8 @@ extern "C" int TileXRMoonEpGetCapabilitiesV1(uint64_t *nativeStages, uint64_t *s
     if (nativeStages == nullptr || stubStages == nullptr) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
-    *nativeStages = kNativeStages;
-    *stubStages = kStubStages;
+    *nativeStages = kNativeStagesV1;
+    *stubStages = kStubStagesV1;
     return TILEXR_MOONEP_SUCCESS;
 }
 
@@ -360,12 +358,6 @@ extern "C" int TileXRMoonEpPrefetchWeightV1(
     const TileXRMoonEpPrefetchWeightArgsV1 *args, aclrtStream stream)
 {
     return TileXRMoonEp::TileXRMoonEpRunPrefetchWeightV1(args, stream);
-}
-
-extern "C" int TileXRMoonEpCombineV1(const TileXRMoonEpCombineArgsV1 *args,
-    aclrtStream stream)
-{
-    return TileXRMoonEp::TileXRMoonEpRunCombineV1(args, stream);
 }
 
 extern "C" int TileXRMoonEpReduceGradV1(const TileXRMoonEpReduceGradArgsV1 *args,

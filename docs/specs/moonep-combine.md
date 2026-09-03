@@ -3,10 +3,8 @@
 ## Scope
 
 MoonEP Combine returns expert rows to token order and reduces top-k contributions
-with optional FP32 route weights. Combine V2 is the default complete-flow
-backend. Combine V1 remains a supported peer-memory single-launch fallback
-selected through the existing runtime version contract; it is not deleted merely
-because V2 is the default.
+with optional FP32 route weights. Combine V2 is the sole supported backend; the
+runtime has no backend-version selector or V1 fallback.
 
 The V2 public ABI is declared in `src/include/tilexr_moonep_combine_v2.h`. The
 caller owns the saved plan, registered workspace, output, stream, and
@@ -110,3 +108,8 @@ Performance reports include backend, native status, kernel version, algorithm or
 communication volume, latency, bandwidth where applicable, and rank median,
 minimum, and maximum. Host or simulator evidence cannot prove UDMA ordering or
 bandwidth.
+
+When retiring a stage backend, remove its source target, public ABI, runtime
+selector, reporting provenance, demos, and dedicated tests in one change. Keeping
+any one of those surfaces creates a false compatibility promise; validate the
+remaining backend independently after the removal.

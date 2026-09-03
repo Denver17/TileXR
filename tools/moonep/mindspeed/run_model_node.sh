@@ -410,7 +410,6 @@ if [[ "${backend}" == tilexr ]]; then
         export TILEXR_MOONEP_DISPATCH_PEER_MODE=group_credit
         export TILEXR_MOONEP_DISPATCH_GROUP_WIDTH=16
     fi
-    export TILEXR_MOONEP_COMBINE_VERSION=2
     export TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES=${TILEXR_MOONEP_UDMA_ARENA_RESERVE_BYTES:-$((768 * 1024 * 1024))}
     unset TILEXR_MOONEP_DISPATCH_TRANSPORT
     export TILEXR_COMM_ID="${master_addr}:$((master_port + 10000))"

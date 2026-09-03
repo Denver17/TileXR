@@ -3,7 +3,6 @@
 #include <iostream>
 #include <limits>
 
-#include "combine_layout.h"
 #include "comm_args.h"
 #include "dispatch_layout.h"
 #include "moonep_peer_window.h"
@@ -127,74 +126,6 @@ void TestChunkingAndPlanAgreement()
     CHECK_TRUE(dispatch.chunkCount == 2 &&
         dispatch.hiddenPayloadBytes <= static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE));
 
-    TileXRMoonEp::CombineLayout combine {};
-    CheckStatus("chunked combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &output, nullptr, &input, nullptr, 0, &combine),
-        TILEXR_MOONEP_SUCCESS);
-    CHECK_TRUE(combine.chunkCount >= 3 && combine.hiddenPayloadBytes > 0 &&
-        combine.receiveHiddenOffset >= combine.hiddenPayloadBytes &&
-        combine.windowBytes <= static_cast<uint64_t>(TileXR::IPC_BUFF_MAX_SIZE));
-    CheckStatus("chunked split combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &output, nullptr, &input, nullptr,
-        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &combine),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-
-    plan.r = 4;
-    CheckStatus("world mismatch", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &output, nullptr, &input, nullptr, 0, &combine),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-
-    plan = Plan(2, 1, 1, 1);
-    plan.e = std::numeric_limits<int64_t>::max() - 1;
-    plan.b = 2;
-    CheckStatus("expert plus slot overflow",
-        TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-            0, 2, &plan, &output, nullptr, &input, nullptr, 0, &combine),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-}
-
-void TestCombinePairedLayout()
-{
-    TileXRMoonEpPlanV1 plan = Plan(2, 4, 2, 12);
-    TileXRMoonEpTensorV1 hiddenNvsh = Tensor(
-        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 12, 16, 192, 0x1000);
-    TileXRMoonEpTensorV1 hiddenSh = Tensor(
-        TILEXR_MOONEP_DTYPE_BFLOAT16, 2, 4, 16, 64, 0x2000);
-    TileXRMoonEpTensorV1 weightsNvs = Tensor(
-        TILEXR_MOONEP_DTYPE_FLOAT32, 1, 12, 0, 12, 0x3000);
-    TileXRMoonEpTensorV1 weightsSk = Tensor(
-        TILEXR_MOONEP_DTYPE_FLOAT32, 2, 4, 2, 8, 0x4000);
-    TileXRMoonEp::CombineLayout layout {};
-    CheckStatus("paired combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk, 0, &layout),
-        TILEXR_MOONEP_SUCCESS);
-    CHECK_TRUE(layout.s == 4 && layout.n == 8 && layout.nvS == 12);
-    CHECK_TRUE(layout.hiddenRowBytes == 32 && layout.hiddenChunkStride == 32);
-    CHECK_TRUE(layout.blockDim == 2 && layout.stepCount == 1);
-    CHECK_TRUE(layout.hiddenPayloadBytes == 384 && layout.receiveHiddenOffset == 384);
-    CHECK_TRUE(layout.sourceWeightsOffset == 768 && layout.receiveWeightsOffset == 832);
-    CHECK_TRUE(layout.routeWeightsBytes == 48 && layout.duplicateMaskOffset == 896);
-    CHECK_TRUE(layout.doneOffset == 960 && layout.doneBytes == 128);
-    CHECK_TRUE(layout.coreStatusOffset == 1088 && layout.windowBytes == 1216);
-
-    CheckStatus("publish-only combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
-        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY, &layout),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-    CheckStatus("consume-only combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
-        TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY, &layout),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-    CheckStatus("ambiguous split combine", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk,
-        TILEXR_MOONEP_FLAG_COMBINE_PUBLISH_ONLY |
-            TILEXR_MOONEP_FLAG_COMBINE_CONSUME_ONLY,
-        &layout), TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-
-    weightsSk.shape[1] = 3;
-    CheckStatus("weight shape mismatch", TileXRMoonEp::TileXRMoonEpBuildCombineLayout(
-        0, 2, &plan, &hiddenNvsh, &weightsNvs, &hiddenSh, &weightsSk, 0, &layout),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
 }
 
 } // namespace
@@ -204,6 +135,5 @@ int main()
     TestAlignment();
     TestDispatchPairedLayout();
     TestChunkingAndPlanAgreement();
-    TestCombinePairedLayout();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

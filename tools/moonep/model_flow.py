@@ -92,8 +92,7 @@ _KERNEL_NAMES = {
     "planning": ("tilexr_ep_plan_kernel", "tilexr_moonep_planner_kernel"),
     "dispatch": ("tilexr_moonep_dispatch_urma_kernel",),
     "prefetch_weight": ("tilexr_moonep_prefetch_weight_kernel",),
-    "combine_v1": ("tilexr_moonep_combine_kernel",),
-    "combine_v2": ("tilexr_moonep_combine_v2_kernel",),
+    "combine": ("tilexr_moonep_combine_v2_kernel",),
     "reduce_grad": ("tilexr_moonep_reduce_grad_kernel",),
 }
 
@@ -806,7 +805,6 @@ def run_model_case(torch_module, case, args, root: Path) -> None:
         result["stage_execution"] = stage_execution_metadata(
             capabilities,
             torch_npu_version=str(environment["torch_npu"]),
-            combine_version=int(getattr(context.runtime, "combine_version", 2)),
         )
         result["topology"] = topology_metadata(context)
         inputs = make_model_inputs(torch_module, case, context)
@@ -967,8 +965,7 @@ def parse_tilexr_kernel_rows(
     planning = _duration_values(rows, _KERNEL_NAMES["planning"])
     dispatch = _duration_values(rows, _KERNEL_NAMES["dispatch"])
     prefetch = _duration_values(rows, _KERNEL_NAMES["prefetch_weight"])
-    combine_v1 = _duration_values(rows, _KERNEL_NAMES["combine_v1"])
-    combine_v2 = _duration_values(rows, _KERNEL_NAMES["combine_v2"])
+    combine = _duration_values(rows, _KERNEL_NAMES["combine"])
     reduce_grad = _duration_values(rows, _KERNEL_NAMES["reduce_grad"])
 
     planning_chunks = _chunks(planning, 10, iterations, "Planning")
@@ -996,45 +993,28 @@ def parse_tilexr_kernel_rows(
     else:
         raise ValueError(f"unexpected TileXR Dispatch Kernel count {len(dispatch)}")
 
-    if combine_v2 and not combine_v1:
-        if len(combine_v2) == 15 * iterations:
-            combine_chunks = _chunks(combine_v2, 15, iterations, "CombineV2")
-            combine_forward = [
-                _select(values, _FORWARD_CALL_INDICES) for values in combine_chunks
-            ]
-            combine_backward = [
-                _select(values, _BACKWARD_CALL_INDICES) for values in combine_chunks
-            ]
-            combine_backward_launches = 1
-        elif len(combine_v2) == 20 * iterations:
-            combine_chunks = _chunks(combine_v2, 20, iterations, "CombineV2")
-            combine_forward = [
-                _select(values, _FORWARD_COMBINE_V2) for values in combine_chunks
-            ]
-            combine_backward = [
-                _pair_sums(values, _BACKWARD_COMBINE_V2) for values in combine_chunks
-            ]
-            combine_backward_launches = 2
-        else:
-            raise ValueError(f"unexpected CombineV2 Kernel count {len(combine_v2)}")
-        combine_kernel = _KERNEL_NAMES["combine_v2"][0]
-        combine_forward_launches = 1
-    elif combine_v1 and not combine_v2:
-        combine_chunks = _chunks(combine_v1, 15, iterations, "CombineV1")
+    if len(combine) == 15 * iterations:
+        combine_chunks = _chunks(combine, 15, iterations, "CombineV2")
         combine_forward = [
             _select(values, _FORWARD_CALL_INDICES) for values in combine_chunks
         ]
         combine_backward = [
             _select(values, _BACKWARD_CALL_INDICES) for values in combine_chunks
         ]
-        combine_kernel = _KERNEL_NAMES["combine_v1"][0]
-        combine_forward_launches = 1
         combine_backward_launches = 1
+    elif len(combine) == 20 * iterations:
+        combine_chunks = _chunks(combine, 20, iterations, "CombineV2")
+        combine_forward = [
+            _select(values, _FORWARD_COMBINE_V2) for values in combine_chunks
+        ]
+        combine_backward = [
+            _pair_sums(values, _BACKWARD_COMBINE_V2) for values in combine_chunks
+        ]
+        combine_backward_launches = 2
     else:
-        raise ValueError(
-            "expected exactly one TileXR Combine kernel version, got "
-            f"v1={len(combine_v1)} v2={len(combine_v2)}"
-        )
+        raise ValueError(f"unexpected CombineV2 Kernel count {len(combine)}")
+    combine_kernel = _KERNEL_NAMES["combine"][0]
+    combine_forward_launches = 1
 
     per_iteration = []
     for iteration in range(iterations):

@@ -128,13 +128,11 @@ target_include_directories(test_tilexr_moonep_host PRIVATE
 add_executable(test_tilexr_moonep_stage_layout
     unit/test_tilexr_moonep_stage_layout.cpp
     ${TILEXR_ROOT}/src/moonep/dispatch/host/dispatch_layout.cpp
-    ${TILEXR_ROOT}/src/moonep/combine/host/combine_layout.cpp
 )
 target_include_directories(test_tilexr_moonep_stage_layout PRIVATE
     ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
     ${TILEXR_ROOT}/src/moonep/common
     ${TILEXR_ROOT}/src/moonep/dispatch/host
-    ${TILEXR_ROOT}/src/moonep/combine/host
 )
 
 add_executable(test_tilexr_moonep_stage_reference
@@ -198,19 +196,6 @@ target_include_directories(test_tilexr_moonep_dispatch_host PRIVATE
     ${TILEXR_ROOT}/src/moonep/dispatch/host
 )
 
-add_executable(test_tilexr_moonep_combine_host
-    unit/test_tilexr_moonep_combine_host.cpp
-    ${TILEXR_ROOT}/src/moonep/combine/host/combine_layout.cpp
-    ${TILEXR_ROOT}/src/moonep/combine/host/combine_host.cpp
-    ${TILEXR_ROOT}/src/moonep/combine/host/tilexr_moonep_combine.cpp
-)
-target_include_directories(test_tilexr_moonep_combine_host PRIVATE
-    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
-    ${TILEXR_ROOT}/src/moonep/common
-    ${TILEXR_ROOT}/src/moonep/combine/common
-    ${TILEXR_ROOT}/src/moonep/combine/host
-)
-
 add_executable(test_tilexr_moonep_prefetch_weight_host
     unit/test_tilexr_moonep_prefetch_weight_host.cpp
     ${TILEXR_ROOT}/src/moonep/prefetch_weight/host/prefetch_weight_layout.cpp
@@ -266,35 +251,7 @@ add_test(NAME test_tilexr_moonep_dispatch_urma_host
 add_test(NAME test_tilexr_moonep_dispatch_urma_launch
     COMMAND test_tilexr_moonep_dispatch_urma_launch)
 add_test(NAME test_tilexr_moonep_dispatch_host COMMAND test_tilexr_moonep_dispatch_host)
-add_test(NAME test_tilexr_moonep_combine_host COMMAND test_tilexr_moonep_combine_host)
 add_test(NAME test_tilexr_moonep_prefetch_weight_host COMMAND test_tilexr_moonep_prefetch_weight_host)
 add_test(NAME test_tilexr_moonep_reduce_grad_layout COMMAND test_tilexr_moonep_reduce_grad_layout)
 add_test(NAME test_tilexr_moonep_reduce_grad_host COMMAND test_tilexr_moonep_reduce_grad_host)
 add_test(NAME test_tilexr_moonep_reduce_grad_launch COMMAND test_tilexr_moonep_reduce_grad_launch)
-if(TARGET tilexr-moonep)
-    add_executable(tilexr_moonep_flow_demo
-        demo/tilexr_moonep_flow_demo.cpp
-    )
-    target_compile_features(tilexr_moonep_flow_demo PRIVATE cxx_std_14)
-    target_include_directories(tilexr_moonep_flow_demo PRIVATE
-        ${TILEXR_ROOT}/src/include
-        ${ASCEND_HOME_PATH}/${ARCH}-linux/include
-        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc
-        ${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc/runtime
-    )
-    target_link_directories(tilexr_moonep_flow_demo PRIVATE
-        ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
-    )
-    target_link_libraries(tilexr_moonep_flow_demo PRIVATE
-        tilexr-moonep
-        tilexr-moonep-reduce-grad
-        tile-comm
-        ascendcl
-        runtime
-    )
-    install(TARGETS tilexr_moonep_flow_demo
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-    install(PROGRAMS demo/run_a5.sh
-        DESTINATION ${CMAKE_INSTALL_BINDIR}
-        RENAME tilexr_moonep_flow_run_a5.sh)
-endif()

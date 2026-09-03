@@ -695,7 +695,7 @@ def build_runtime_provenance(
             "stage_barrier": settings.stage_barrier,
         },
         "kernel_version": {
-            "combine": env.get("TILEXR_MOONEP_COMBINE_VERSION", "2"),
+            "combine": "2",
             "dispatch_peer_mode": (
                 env.get("TILEXR_MOONEP_DISPATCH_PEER_MODE")
                 or "group_credit"

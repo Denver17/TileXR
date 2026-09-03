@@ -84,28 +84,18 @@ _NATIVE_STAGE_KERNEL_VERSIONS = {
     "reduce_grad": "tilexr_moonep_reduce_grad_kernel (V2)",
 }
 
-_COMBINE_KERNEL_VERSIONS = {
-    1: "tilexr_moonep_combine_kernel (CombineV1Memory)",
-    2: "tilexr_moonep_combine_v2_kernel (CombineV2)",
-}
-
 FINAL_SHARED_STATUS_SUCCESS = 0
 REDUCE_GRAD_STATUS_SUCCESS = 0
 
 
 def stage_execution_metadata(
-    capabilities: Mapping[str, object], *, torch_npu_version: str,
-    combine_version: int = 2,
+    capabilities: Mapping[str, object], *, torch_npu_version: str
 ) -> dict[str, dict[str, object]]:
-    if combine_version not in _COMBINE_KERNEL_VERSIONS:
-        raise ValueError(f"unsupported MoonEP Combine version {combine_version}")
     implementations = capabilities.get("implementations")
     if not isinstance(implementations, Mapping):
         raise ValueError("MoonEP capabilities do not contain stage implementations")
     result = {}
-    versions = dict(_NATIVE_STAGE_KERNEL_VERSIONS)
-    versions["combine"] = _COMBINE_KERNEL_VERSIONS[combine_version]
-    for stage, kernel_version in versions.items():
+    for stage, kernel_version in _NATIVE_STAGE_KERNEL_VERSIONS.items():
         implementation = str(implementations.get(stage, "unavailable"))
         native = implementation == "native"
         result[stage] = {
@@ -866,7 +856,6 @@ def run_case(torch_module, case, args, root: Path) -> None:
         result["stage_execution"] = stage_execution_metadata(
             capabilities,
             torch_npu_version=str(environment["torch_npu"]),
-            combine_version=int(getattr(context.runtime, "combine_version", 2)),
         )
         result["topology"] = topology_metadata(context)
         if os.environ.get("TILEXR_MOONEP_TRACE_STAGES", "0") == "1":

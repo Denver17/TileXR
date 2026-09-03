@@ -774,9 +774,8 @@ class TileXRMoonEPBuffer:
 
     def _perf_kernel_version(self, stage: str) -> tuple[str, int]:
         if stage in ("combine_forward", "combine_backward"):
-            version = int(getattr(self.runtime, "combine_version", 2))
-            launches = 2 if stage == "combine_backward" and version == 2 else 1
-            return f"tilexr_moonep_combine_v{version}_kernel", launches
+            launches = 2 if stage == "combine_backward" else 1
+            return "tilexr_moonep_combine_v2_kernel", launches
         try:
             return _PERF_KERNEL_VERSIONS[stage], 1
         except KeyError as exc:
@@ -1437,8 +1436,7 @@ class TileXRMoonEPBuffer:
             else None
         )
         self._retain(plan, hidden_nvsh, hidden_sh, route_weights_nvs, route_weights_sk)
-        combine_version = int(getattr(self.runtime, "combine_version", 2))
-        self._trace_stage(f"combine_v{combine_version}_launch_begin")
+        self._trace_stage("combine_v2_launch_begin")
         perf_token = self._begin_perf_capture(
             "combine_backward" if route_weights_nvs is not None else "combine_forward"
         )
@@ -1458,9 +1456,7 @@ class TileXRMoonEPBuffer:
             )
         finally:
             self._end_perf_capture(perf_token)
-        self._trace_stage(f"combine_v{combine_version}_launch_end")
-        if combine_version == 1:
-            self._expect_status(plan, 0)
+        self._trace_stage("combine_v2_launch_end")
         event = self._record_event() if async_finish else None
         return hidden_sh, route_weights_sk, event
 

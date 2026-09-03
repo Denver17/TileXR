@@ -18,9 +18,6 @@ endif()
 if(NOT TARGET tilexr-moonep-dispatch)
     add_subdirectory(dispatch)
 endif()
-if(NOT TARGET tilexr-moonep-combine)
-    add_subdirectory(combine)
-endif()
 if(NOT TARGET tilexr-moonep-combine-v2)
     add_subdirectory(combine_v2)
 endif()
@@ -50,7 +47,6 @@ target_link_directories(tilexr-moonep PRIVATE
 target_link_libraries(tilexr-moonep PRIVATE
     tilexr-moonep-planner
     tilexr-moonep-dispatch
-    tilexr-moonep-combine
     tilexr-moonep-combine-v2
     tilexr-moonep-prefetch-weight
     tilexr-moonep-reduce-grad

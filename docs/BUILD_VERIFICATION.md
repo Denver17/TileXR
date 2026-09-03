@@ -181,31 +181,34 @@ Inspect the installed public library:
 
 ```bash
 nm -D install/lib*/libtilexr-moonep.so.1 | \
-  grep -E 'TileXRMoonEp(Planning|Dispatch|PrefetchWeight|Combine|ReduceGrad)V1'
+  grep -E 'TileXRMoonEp(Planning|Dispatch|PrefetchWeight|ReduceGrad)V1'
+nm -D install/lib*/libtilexr-moonep-combine-v2.so.2 | \
+  grep -E 'TileXRMoonEpCombine(GetWorkspaceSize|Stage|StageV2Fused|V2)'
 readelf -d install/lib*/libtilexr-moonep.so.1 | \
   grep -E 'NEEDED|RPATH|RUNPATH'
 ```
 
 Expected:
 
-- all five V1 symbols are exported;
-- planner, dispatch, prefetch-weight, combine, and reduce-grad Host libraries are NEEDED;
+- the remaining V1 Planning, Dispatch, PrefetchWeight, and ReduceGrad symbols are
+  exported, while Combine is exported only by the V2 library;
+- planner, dispatch, Combine V2, prefetch-weight, and reduce-grad Host libraries are NEEDED;
 - RPATH is `$ORIGIN` and contains no CANN `devlib` directory;
 - Host and Python fake-runtime tests pass without device execution.
 
 Do not describe these checks as NPU correctness. When runtime testing is authorized,
-run the installed demo first on one rank, then on the intended physical A5 ranks. For
-the validated four-card shape used on 2026-08-04:
+run the compatibility-critical Python E2E probe on the intended physical A5 ranks in
+an allowed grouped Dispatch mode, preserving its public call contract:
 
 ```bash
 ASCEND_RT_VISIBLE_DEVICES=4,5,6,7 \
-  bash install/bin/tilexr_moonep_flow_run_a5.sh 4 64 4 32 512 4
+  TILEXR_MOONEP_DISPATCH_PEER_MODE=group_credit \
+  torchrun --nproc-per-node=4 tools/moonep/test_npu_e2e.py
 ```
 
-Require every rank to report Planning 0, Dispatch 2000, PrefetchWeight 4000, Combine
-3000, and ReduceGrad 5000, plus `native MoonEP flow smoke passed`. Then run the
-separate precision and msprof gates documented in
-`docs/moonep/DISPATCH_COMBINE.md`.
+Require all ranks and all stages to pass. Keep the framework profiler and stage
+barrier enabled for model or replay performance validation; use the MoonEP specs
+for the runtime and Combine validation boundaries.
 
 ### MoonEP Python Correctness Reference
 

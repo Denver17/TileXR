@@ -30,11 +30,12 @@ consumer and recorded event complete.
 ## Public ABI
 
 `TileXRMoonEpGetAbiVersion` and capability queries describe the installed
-runtime. V1 reports Planning, Dispatch, PrefetchWeight, and Combine as native and
-ReduceGrad as a compatibility stub. V2 reports all five stages as native; its
-ReduceGrad entry uses the query/prepare/execute/destroy lifecycle. Stage-specific
-V1/V2 structures preserve tensor dtype, shape, pointer, workspace, plan, and
-stream semantics. New versions do not reinterpret existing structures in place.
+runtime. V1 reports Planning, Dispatch, and PrefetchWeight as native and
+ReduceGrad as a compatibility stub; it does not expose Combine. V2 reports all
+five stages as native; Combine uses its separate V2 library and ReduceGrad uses
+the query/prepare/execute/destroy lifecycle. Remaining stage-specific V1/V2
+structures preserve tensor dtype, shape, pointer, workspace, plan, and stream
+semantics. New versions do not reinterpret existing structures in place.
 
 The Python API preserves the `Buffer` and `MoonEPCommPlan` names, method
 signatures and keyword arguments, return tuple arity/order, exposed plan fields,

@@ -13,7 +13,6 @@ from .abi import (
     TILEXR_MOONEP_FLAG_RESET_STATUS,
     TILEXR_SUCCESS,
     TileXRMoonEPDType,
-    TileXRMoonEPCombineArgsV1,
     TileXRMoonEPDispatchArgsV2,
     TileXRMoonEPDispatchTraceV1,
     TileXRMoonEPPlanV1,
@@ -199,13 +198,6 @@ class TileXRMoonEPRuntime:
             raise ValueError(f"rank must be in [0, {world_size}), got {rank}")
         self.rank = int(rank)
         self.world_size = int(world_size)
-        combine_version = os.environ.get("TILEXR_MOONEP_COMBINE_VERSION", "2").strip()
-        if combine_version not in ("1", "2"):
-            raise ValueError(
-                "TILEXR_MOONEP_COMBINE_VERSION must be 1 or 2, "
-                f"got {combine_version!r}"
-            )
-        self.combine_version = int(combine_version)
         self.install_prefix = _resolve_install_prefix(install_prefix)
         self._closed = False
         self._comm = ctypes.c_void_p()
@@ -233,21 +225,15 @@ class TileXRMoonEPRuntime:
             self.install_prefix,
             paths.get("moonep"),
         )
-        combine_v2_path = None
-        if self.combine_version == 2:
-            combine_v2_path = _resolve_library(
-                ("libtilexr-moonep-combine-v2.so.2", "libtilexr-moonep-combine-v2.so"),
-                "TILEXR_MOONEP_COMBINE_V2_LIB",
-                self.install_prefix,
-                paths.get("combine_v2"),
-            )
+        combine_v2_path = _resolve_library(
+            ("libtilexr-moonep-combine-v2.so.2", "libtilexr-moonep-combine-v2.so"),
+            "TILEXR_MOONEP_COMBINE_V2_LIB",
+            self.install_prefix,
+            paths.get("combine_v2"),
+        )
         self._comm_lib = cdll_loader(comm_path, mode=ctypes.RTLD_GLOBAL)
         self._planner_lib = cdll_loader(planner_path, mode=ctypes.RTLD_GLOBAL)
-        self._combine_v2_lib = (
-            cdll_loader(combine_v2_path, mode=ctypes.RTLD_GLOBAL)
-            if combine_v2_path is not None
-            else None
-        )
+        self._combine_v2_lib = cdll_loader(combine_v2_path, mode=ctypes.RTLD_GLOBAL)
         self._moonep_lib = cdll_loader(moonep_path, mode=ctypes.RTLD_GLOBAL)
         self._configure_symbols()
         ret = self._comm_lib.TileXRCommInitRankWithSharedQpDomain(
@@ -261,23 +247,22 @@ class TileXRMoonEPRuntime:
             ret,
             f"rank={self.rank} world_size={self.world_size}",
         )
-        if self.combine_version == 2:
-            ret = self._comm_lib.TileXRCommInitRankMemoryDomain(
-                ctypes.c_int(1),
-                ctypes.c_int(self.world_size),
-                ctypes.c_int(self.rank),
-                ctypes.byref(self._weight_memory_comm),
+        ret = self._comm_lib.TileXRCommInitRankMemoryDomain(
+            ctypes.c_int(1),
+            ctypes.c_int(self.world_size),
+            ctypes.c_int(self.rank),
+            ctypes.byref(self._weight_memory_comm),
+        )
+        if int(ret) != 0:
+            destroy_ret = self._comm_lib.TileXRCommDestroy(self._comm)
+            self._comm = ctypes.c_void_p()
+            if int(destroy_ret) != 0:
+                self._check("TileXRCommDestroy", destroy_ret, "rollback main communicator")
+            self._check(
+                "TileXRCommInitRankMemoryDomain",
+                ret,
+                f"rank={self.rank} world_size={self.world_size} domain=1",
             )
-            if int(ret) != 0:
-                destroy_ret = self._comm_lib.TileXRCommDestroy(self._comm)
-                self._comm = ctypes.c_void_p()
-                if int(destroy_ret) != 0:
-                    self._check("TileXRCommDestroy", destroy_ret, "rollback main communicator")
-                self._check(
-                    "TileXRCommInitRankMemoryDomain",
-                    ret,
-                    f"rank={self.rank} world_size={self.world_size} domain=1",
-                )
         self._udma_qp_count = self._query_udma_qp_count()
         self.capabilities = self._query_capabilities()
 
@@ -355,56 +340,55 @@ class TileXRMoonEPRuntime:
             ctypes.POINTER(ctypes.c_uint64),
         ]
         self._planner_lib.TileXRMoonEpPlannerGetDstLocalOffsetV3.restype = ctypes.c_int
-        if self._combine_v2_lib is not None:
-            self._combine_v2_lib.TileXRMoonEpCombineGetWorkspaceSizeV2.argtypes = [
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_uint32,
-                ctypes.POINTER(ctypes.c_uint64),
-                ctypes.POINTER(ctypes.c_uint64),
-                ctypes.POINTER(ctypes.c_uint64),
-                ctypes.POINTER(ctypes.c_uint64),
-            ]
-            self._combine_v2_lib.TileXRMoonEpCombineGetWorkspaceSizeV2.restype = ctypes.c_int
-            self._combine_v2_lib.TileXRMoonEpCombineStageV2.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_uint64,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_uint32,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_uint32,
-                ctypes.c_void_p,
-            ]
-            self._combine_v2_lib.TileXRMoonEpCombineStageV2.restype = ctypes.c_int
-            self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused.argtypes = [
-                ctypes.c_void_p,
-                ctypes.c_uint64,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_int64,
-                ctypes.c_uint32,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_void_p,
-                ctypes.c_uint32,
-                ctypes.c_void_p,
-            ]
-            self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused.restype = ctypes.c_int
+        self._combine_v2_lib.TileXRMoonEpCombineGetWorkspaceSizeV2.argtypes = [
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+            ctypes.POINTER(ctypes.c_uint64),
+        ]
+        self._combine_v2_lib.TileXRMoonEpCombineGetWorkspaceSizeV2.restype = ctypes.c_int
+        self._combine_v2_lib.TileXRMoonEpCombineStageV2.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        self._combine_v2_lib.TileXRMoonEpCombineStageV2.restype = ctypes.c_int
+        self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_int64,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused.restype = ctypes.c_int
         symbols = (
             ("TileXRMoonEpPlanningV1", TileXRMoonEPPlanningArgsV1),
             ("TileXRMoonEpDispatchV2", TileXRMoonEPDispatchArgsV2),
@@ -414,10 +398,6 @@ class TileXRMoonEPRuntime:
             function = getattr(self._moonep_lib, name)
             function.argtypes = [ctypes.POINTER(args_type), ctypes.c_void_p]
             function.restype = ctypes.c_int
-        self._moonep_lib.TileXRMoonEpCombineV1.argtypes = [
-            ctypes.POINTER(TileXRMoonEPCombineArgsV1), ctypes.c_void_p
-        ]
-        self._moonep_lib.TileXRMoonEpCombineV1.restype = ctypes.c_int
         self._moonep_lib.TileXRMoonEpReduceGradGetWorkspaceSizeV2.argtypes = [
             ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceQueryV2),
             ctypes.POINTER(TileXRMoonEPReduceGradWorkspaceInfoV2),
@@ -556,8 +536,6 @@ class TileXRMoonEPRuntime:
         return int(dst_local_offset.value)
 
     def _combine_v2_workspace_size(self, context, h: int, dtype: int) -> int:
-        if self._combine_v2_lib is None:
-            return 0
         workspace_bytes = ctypes.c_uint64()
         profile_offset = ctypes.c_uint64()
         output_epoch0_offset = ctypes.c_uint64()
@@ -595,11 +573,9 @@ class TileXRMoonEPRuntime:
             ctypes.byref(workspace_alignment),
         )
         self._check("TileXRMoonEpDispatchGetWorkspaceSizeV2", ret)
-        hidden_combine_bytes = 0
-        if self.combine_version == 2:
-            hidden_combine_bytes = self._combine_v2_workspace_size(
-                context, int(context.hidden_size), dtype_code(context.dtype)
-            )
+        hidden_combine_bytes = self._combine_v2_workspace_size(
+            context, int(context.hidden_size), dtype_code(context.dtype)
+        )
         alignment = max(int(workspace_alignment.value), _UDMA_REGISTRATION_ALIGNMENT)
         required_bytes = max(
             int(workspace_bytes.value), hidden_combine_bytes
@@ -846,7 +822,7 @@ class TileXRMoonEPRuntime:
                 "route_weights and output_route_weights must both be provided or both be None"
             )
         if int(flags) != TILEXR_MOONEP_FLAG_NONE:
-            raise ValueError("MoonEP Combine does not support publish/consume flags")
+            raise ValueError("MoonEP Combine does not support flags")
         dst_local_offset = int(plan.dst_local_offset)
         planner_workspace_bytes = tensor_nbytes(plan.workspace)
         dst_local_bytes = int(context.nv_s) * ctypes.sizeof(ctypes.c_int32)
@@ -861,34 +837,6 @@ class TileXRMoonEPRuntime:
                 f"workspace={planner_workspace_bytes}"
             )
         dst_local_ptr = int(plan.workspace.data_ptr()) + dst_local_offset
-        if self.combine_version == 1:
-            plan_v1 = self._plan_v1(context, plan)
-            hidden_nvsh = make_tensor_v1(input_tensor)
-            hidden_sh = make_tensor_v1(output_tensor)
-            weights_nvs = make_tensor_v1(route_weights) if route_weights is not None else None
-            weights_sk = (
-                make_tensor_v1(output_route_weights)
-                if output_route_weights is not None
-                else None
-            )
-            args = initialize_struct(TileXRMoonEPCombineArgsV1())
-            args.comm = void_p(self.comm_ptr)
-            args.plan = ctypes.pointer(plan_v1)
-            args.dstLocal = void_p(dst_local_ptr)
-            args.hiddenNvsh = ctypes.pointer(hidden_nvsh)
-            args.routeWeightsNvs = (
-                ctypes.pointer(weights_nvs) if weights_nvs is not None else None
-            )
-            args.hiddenSh = ctypes.pointer(hidden_sh)
-            args.routeWeightsSk = (
-                ctypes.pointer(weights_sk) if weights_sk is not None else None
-            )
-            args.flags = TILEXR_MOONEP_FLAG_NONE
-            ret = self._moonep_lib.TileXRMoonEpCombineV1(
-                ctypes.byref(args), void_p(stream_ptr)
-            )
-            self._check("TileXRMoonEpCombineV1", ret)
-            return
         if registered_workspace is None or int(registered_workspace_bytes) <= 0:
             raise ValueError("Combine V2 requires the registered Dispatch workspace")
         ret = self._combine_v2_lib.TileXRMoonEpCombineStageV2Fused(

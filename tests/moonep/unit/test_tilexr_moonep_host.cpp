@@ -17,7 +17,6 @@ int queryReturn = TILEXR_MOONEP_SUCCESS;
 int plannerReturn = TILEXR_MOONEP_SUCCESS;
 int dispatchReturn = TILEXR_MOONEP_SUCCESS;
 int dispatchUrmaReturn = TILEXR_MOONEP_SUCCESS;
-int combineReturn = TILEXR_MOONEP_SUCCESS;
 int prefetchReturn = TILEXR_MOONEP_SUCCESS;
 int queryCalls = 0;
 int plannerCalls = 0;
@@ -25,7 +24,6 @@ int dispatchCalls = 0;
 int dispatchUrmaCalls = 0;
 int dispatchUrmaV2Calls = 0;
 int dispatchWorkspaceQueryCalls = 0;
-int combineCalls = 0;
 int prefetchCalls = 0;
 int memsetCalls = 0;
 uint64_t queryWorkspaceBytes = 512;
@@ -34,9 +32,7 @@ TileXR::CommArgs commArgs {};
 const TileXRMoonEpDispatchArgsV1 *seenDispatch = nullptr;
 const TileXRMoonEpDispatchArgsV1 *seenDispatchUrma = nullptr;
 uint64_t seenDispatchUrmaFlags = UINT64_MAX;
-const TileXRMoonEpCombineArgsV1 *seenCombine = nullptr;
 aclrtStream seenDispatchStream = nullptr;
-aclrtStream seenCombineStream = nullptr;
 
 struct QueryCall {
     TileXRCommPtr comm = nullptr;
@@ -71,12 +67,12 @@ struct PlannerCall {
 
 void Reset()
 {
-    commReturn = queryReturn = plannerReturn = dispatchReturn = dispatchUrmaReturn = combineReturn =
+    commReturn = queryReturn = plannerReturn = dispatchReturn = dispatchUrmaReturn =
         TILEXR_MOONEP_SUCCESS;
     prefetchReturn = TILEXR_MOONEP_SUCCESS;
     queryCalls = plannerCalls = dispatchCalls = dispatchUrmaCalls =
         dispatchUrmaV2Calls =
-        dispatchWorkspaceQueryCalls = combineCalls = prefetchCalls = 0;
+        dispatchWorkspaceQueryCalls = prefetchCalls = 0;
     memsetCalls = 0;
     queryWorkspaceBytes = 512;
     queryNvS = 12;
@@ -88,9 +84,7 @@ void Reset()
     seenDispatch = nullptr;
     seenDispatchUrma = nullptr;
     seenDispatchUrmaFlags = UINT64_MAX;
-    seenCombine = nullptr;
     seenDispatchStream = nullptr;
-    seenCombineStream = nullptr;
 }
 
 void Check(bool condition, const std::string &message)
@@ -174,8 +168,7 @@ void TestAbiAndCapabilities()
     CheckStatus("capabilities", TileXRMoonEpGetCapabilitiesV1(&nativeStages, &stubStages),
         TILEXR_MOONEP_SUCCESS);
     Check(nativeStages == (TILEXR_MOONEP_STAGE_PLANNING |
-        TILEXR_MOONEP_STAGE_DISPATCH | TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT |
-        TILEXR_MOONEP_STAGE_COMBINE),
+        TILEXR_MOONEP_STAGE_DISPATCH | TILEXR_MOONEP_STAGE_PREFETCH_WEIGHT),
         "native capability mask mismatch");
     Check(stubStages == TILEXR_MOONEP_STAGE_REDUCE_GRAD,
         "stub capability mask mismatch");
@@ -333,13 +326,6 @@ void TestStageDelegation()
         seenDispatchUrma == &dispatchV2,
         "V2 dispatch must select the URMA implementation");
 
-    TileXRMoonEpCombineArgsV1 combine {};
-    combine.structSize = sizeof(combine);
-    combine.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
-    CheckStatus("combine", TileXRMoonEpCombineV1(&combine, stream), combineReturn);
-    Check(combineCalls == 1 && seenCombine == &combine && seenCombineStream == stream,
-        "combine delegation mismatch");
-
     TileXRMoonEpPrefetchWeightArgsV1 prefetch {};
     prefetch.structSize = sizeof(prefetch);
     prefetch.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
@@ -444,15 +430,6 @@ int TileXRMoonEpRunDispatchUrmaV2(
     ++dispatchUrmaV2Calls;
     seenDispatchUrma = args;
     return dispatchUrmaReturn;
-}
-
-int TileXRMoonEpRunCombineV1(
-    const TileXRMoonEpCombineArgsV1 *args, aclrtStream stream)
-{
-    ++combineCalls;
-    seenCombine = args;
-    seenCombineStream = stream;
-    return combineReturn;
 }
 
 int TileXRMoonEpRunPrefetchWeightV1(
