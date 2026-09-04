@@ -5,10 +5,11 @@ and `ops-transformer`. The memory backend uses TileXR peer-memory windows for bo
 dispatch/combine, while the UDMA backend uses TileXR-registered workspaces. Memory generally performs better for
 small transfers, while UDMA generally performs better for large transfers.
 
-Dispatch Memory and Combine Memory are supported only on A5-class SoCs
-(`Ascend950`, `Ascend910_9`, or `A5`). Their AICore binaries are not built on
-Ascend910B; the public Memory API symbols remain available and return
-`TILEXR_ERROR_NOT_SUPPORT` without launching a kernel.
+All EP Dispatch and Combine variants are supported only on A5-class SoCs
+(`Ascend950`, `Ascend910_9`, or `A5`). The build always produces the four A5
+AICore objects and never produces 910B EP kernels. The public API symbols remain
+available in the same Host library on non-A5 systems and return
+`TILEXR_ERROR_NOT_SUPPORT` before loading a kernel or consuming launch state.
 
 Internal Memory classes, profiling artifacts, trace tools, and test helpers use unversioned names. Version suffixes
 are reserved for public ABI compatibility and MoonEP-owned identifiers.
@@ -38,11 +39,12 @@ bash build.sh full
 bash demo/run_tilexr_ep_dispatch_demo.sh 2
 ```
 
-`full` mode builds and installs `tile-comm`, `tilexr-ep`, `libtilexr_ep_dispatch_kernel.so`, and
-`libtilexr_ep_combine_kernel.so` under the repository `install` directory, then builds the EP demo. The memory
-dispatch/combine CCE binaries are embedded in `libtilexr-ep.so` on A5-class SoCs rather than installed as separate
-shared libraries. Non-A5 builds link zero-length placeholders to preserve the public library ABI without compiling
-the unsupported Memory kernels.
+`full` mode builds and installs `tile-comm` and `tilexr-ep` under the repository
+`install` directory, then builds the EP demo. Dispatch, Combine, Dispatch Memory,
+and Combine Memory are fixed A5 CCE objects installed under
+`lib/tilexr/kernels` and loaded by `libtilexr-ep.so`; they are not embedded or
+built as separate Host shared libraries. No `TILEXR_SOC_NAME` or EP SoC CMake
+option is needed, including when the package is built on a 910B host.
 
 The EP demo is linked without RPATH/RUNPATH. CANN `devlib` is a link-time fallback only; embedding it in the demo's
 runtime search path can make the loader select the stub `libascend_hal.so` before the real driver HAL, causing

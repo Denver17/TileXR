@@ -27,8 +27,7 @@ inline const void *KernelSignature(uintptr_t value)
 }
 
 int EnsureMoonEpKernelRegistered(KernelRegistrationState &state,
-    const unsigned char *binaryData, std::size_t binarySize,
-    const void *signature, const char *kernelName);
+    const char *binaryFileName, const void *signature, const char *kernelName);
 
 } // namespace TileXRMoonEp
 

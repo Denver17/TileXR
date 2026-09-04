@@ -1,17 +1,11 @@
 #include "planner_launch.h"
 
-#include <cstddef>
 #include <iostream>
 
 #include "moonep_kernel_registration.h"
 #include "planner_common.h"
 #include "runtime/kernel.h"
 #include "tilexr_types.h"
-
-extern "C" {
-extern const unsigned char TileXRMoonEpPlannerKernelBinaryData[];
-extern const std::size_t TileXRMoonEpPlannerKernelBinarySize;
-}
 
 namespace TileXRMoonEpV3 {
 namespace {
@@ -24,7 +18,7 @@ TileXRMoonEp::KernelRegistrationState g_plannerRegistration;
 int TileXRMoonEpLaunchKernel(const PlannerParams &params, const PlannerLaunchContext &context)
 {
     const int registerRet = TileXRMoonEp::EnsureMoonEpKernelRegistered(g_plannerRegistration,
-        TileXRMoonEpPlannerKernelBinaryData, TileXRMoonEpPlannerKernelBinarySize,
+        "tilexr_moonep_planner_kernel.o",
         TileXRMoonEp::KernelSignature(TileXRMoonEp::kPlannerKernelSignature), kPlannerKernelName);
     if (registerRet != TileXR::TILEXR_SUCCESS) {
         return registerRet;

@@ -6,10 +6,11 @@ PrefetchWeight and ReduceGrad are the weight-side stages of the native MoonEP
 flow. They share the saved plan and public tensor ownership contract but have
 independent kernels, workspaces, transport state, and completion boundaries.
 
-PrefetchWeight V1 and ReduceGrad V2 use pure AICore binaries embedded and
-launched through the runtime registration APIs. ReduceGrad V1 remains the
-capability-reported compatibility stub. The stages preserve the C and Python
-contracts declared in `src/include/tilexr_moonep.h`.
+PrefetchWeight V1 and ReduceGrad V2 use external pure AICore binaries loaded
+from the owning Host library's `tilexr/kernels` directory and launched through
+the runtime registration APIs. ReduceGrad V1 remains the capability-reported
+compatibility stub. The stages preserve the C and Python contracts declared in
+`src/include/tilexr_moonep.h`.
 
 ## PrefetchWeight
 

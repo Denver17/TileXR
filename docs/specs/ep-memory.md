@@ -8,9 +8,17 @@ same-node and cross-node traffic. It is distinct from the UDMA backend and must
 not be selected solely from topology.
 
 The Host layer validates public arguments, builds a round-specific window
-layout, selects the embedded kernel, and launches through the registered AICore
-signature. The communicator and stream are borrowed; EP owns only its launch
-metadata and kernel registration.
+layout, loads the selected kernel from the Host library's `tilexr/kernels`
+directory, and launches through the registered AICore signature. The
+communicator and stream are borrowed; EP owns only its launch metadata and
+kernel registration.
+
+EP packaging is SoC-independent at configure time. Ordinary Dispatch/Combine
+and their Memory variants are all A5-only and are shipped as four external
+AICore objects in one installation; no 910B EP kernel variant is produced.
+`libtilexr-ep.so` checks `aclrtGetSocName()` at each public entry point and
+returns `TILEXR_ERROR_NOT_SUPPORT` on non-A5 hardware before context preparation,
+kernel loading, registration, or magic-value advancement.
 
 ## Dispatch Contract
 
@@ -57,6 +65,11 @@ Dispatch and Combine use separate fixed-size profiling records declared in
 `src/ep/common/ep_dispatch_memory_profile.h` and
 `src/ep/common/ep_combine_memory_profile.h`. Profiling is compile-time opt-in,
 does not alter the public ABI, and writes only the owning core's record.
+Every profiling call must reference a timestamp or metric that exists in the
+matching record definition and has a live start value in the same feature
+configuration. Removing a profiling field therefore requires removing its
+producer call as well; the default profiling-off CCE build is the minimum
+validation boundary for such cleanup.
 
 The generic profiling report path consumes versioned stage timestamps and
 accumulated metrics. Incomplete ranks or records are labeled explicitly. The
@@ -76,7 +89,7 @@ make profiler/diagnostic configuration part of normal operator semantics.
 ## Verification Boundary
 
 Host tests cover layouts, validation, quantization helpers, registration, and
-source-level invariants. Functional multi-rank runs verify the selected memory
+runtime rejection behavior. Functional multi-rank runs verify the selected memory
 path and shapes. Performance reports must state backend, native status, kernel
 version, data volume, latency, bandwidth where applicable, and rank median/min/
 max. Results on one rank count or topology do not validate another.

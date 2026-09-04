@@ -5,6 +5,7 @@
 
 namespace TileXREp {
 
+bool TileXREpIsA5Soc();
 int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLaunchContext &context);
 int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpHostLaunchContext &context);
 int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunchContext &context);

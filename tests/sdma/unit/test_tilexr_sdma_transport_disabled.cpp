@@ -2,9 +2,39 @@
 #include <iostream>
 #include <string>
 
+#include "sdma/tilexr_sdma_a5_backend.h"
 #include "sdma/tilexr_sdma_transport.h"
 #include "tilexr_sdma_types.h"
 #include "tilexr_types.h"
+
+extern "C" const char* aclrtGetSocName(void)
+{
+    return "Ascend910B";
+}
+
+namespace TileXR {
+
+struct TileXRA5SDMABackend::Impl {};
+
+TileXRA5SDMABackend::TileXRA5SDMABackend() = default;
+TileXRA5SDMABackend::~TileXRA5SDMABackend() = default;
+
+bool TileXRA5SDMABackend::Init(int32_t)
+{
+    return false;
+}
+
+bool TileXRA5SDMABackend::Shutdown()
+{
+    return true;
+}
+
+GM_ADDR TileXRA5SDMABackend::GetWorkspaceDev() const
+{
+    return nullptr;
+}
+
+} // namespace TileXR
 
 namespace {
 

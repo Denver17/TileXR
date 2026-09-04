@@ -158,9 +158,6 @@ void TestRejectsInvalidDynamicUb()
 } // namespace
 
 extern "C" {
-extern const unsigned char TileXRMoonEpCombineV2KernelBinaryData[] = {0};
-extern const std::size_t TileXRMoonEpCombineV2KernelBinarySize = 1;
-
 aclError aclrtGetDevice(int32_t *deviceId)
 {
     if (getDeviceReturn == ACL_SUCCESS && deviceId != nullptr) {
@@ -206,7 +203,7 @@ rtError_t rtKernelLaunchWithFlagV2(const void *, uint32_t blockDim,
 namespace TileXRMoonEp {
 
 int EnsureMoonEpKernelRegistered(KernelRegistrationState &,
-    const unsigned char *, std::size_t, const void *, const char *)
+    const char *, const void *, const char *)
 {
     ++registrationCalls;
     return registrationReturn;

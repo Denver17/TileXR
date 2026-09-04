@@ -61,6 +61,7 @@ nm -D install/lib64/libtilexr-moonep-planner.so | \
   grep -E 'rtDevBinaryRegister|rtFunctionRegister|rtKernelLaunchWithFlagV2'
 ```
 
-The Host planner library embeds the pure AICore ELF and must use only
+The Host planner library loads its pure AICore ELF from
+`lib/tilexr/kernels/tilexr_moonep_planner_v2_kernel.o` and must use only
 `RPATH=$ORIGIN`; it must not contain a CANN `devlib` RPATH or RUNPATH. No
 standalone Bisheng Host kernel SO is installed.

@@ -86,6 +86,9 @@ target_include_directories(test_tilexr_sdma_transport_disabled PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/include/
     ${ASCEND_DRIVER_PATH}/kernel/inc
 )
+target_compile_definitions(test_tilexr_sdma_transport_disabled PRIVATE
+    TILEXR_HAVE_PTO_SDMA=0
+)
 
 add_executable(test_tilexr_sdma_header_compile
     unit/test_tilexr_sdma_header_compile.cpp

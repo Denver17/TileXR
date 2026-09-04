@@ -6,11 +6,6 @@
 #include "acl/acl_rt.h"
 #include "moonep_kernel_launch.h"
 
-extern "C" {
-extern const unsigned char TileXRMoonEpCombineV2KernelBinaryData[];
-extern const std::size_t TileXRMoonEpCombineV2KernelBinarySize;
-}
-
 namespace TileXRMoonEp {
 namespace {
 
@@ -119,8 +114,7 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         return memoryRet;
     }
     const int ret = LaunchRegisteredMoonEpKernel(g_combineV2Registration,
-        TileXRMoonEpCombineV2KernelBinaryData,
-        TileXRMoonEpCombineV2KernelBinarySize,
+        "tilexr_moonep_combine_v2_kernel.o",
         KernelSignature(kCombineV2KernelSignature),
         kCombineV2KernelName, "combine_v2",
         kMoonEpCombineV2CoreCount, &args, sizeof(args),

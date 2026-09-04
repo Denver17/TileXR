@@ -1,20 +1,16 @@
 #include "tilexr_ep.h"
 
-#ifndef TILEXR_EP_MEMORY_SUPPORTED
-#define TILEXR_EP_MEMORY_SUPPORTED 1
-#endif
-
-#if TILEXR_EP_MEMORY_SUPPORTED
 #include "ep_host.h"
 #include "ep_kernel_launch.h"
-#endif
 #include "tilexr_types.h"
 
-#if TILEXR_EP_MEMORY_SUPPORTED
 namespace {
 
 int LaunchEpCombineMemory(const TileXREp::EpCombineParams &params)
 {
+    if (!TileXREp::TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     int ret = TileXREp::TileXREpValidateBasicCombineParams(params);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
@@ -28,7 +24,6 @@ int LaunchEpCombineMemory(const TileXREp::EpCombineParams &params)
 }
 
 } // namespace
-#endif
 
 int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int32_t *sendCounts,
     float *expertScales, bool *xActiveMask, int64_t activeMaskType, void *sharedExpertX,
@@ -37,9 +32,6 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
     int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream)
 {
-#if !TILEXR_EP_MEMORY_SUPPORTED
-    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
-#else
     TileXREp::EpCombineParams params {};
     params.expertOut = expertOut;
     params.assistInfoForCombine = assistInfoForCombine;
@@ -67,5 +59,4 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     params.dtype = dtype;
     params.stream = stream;
     return LaunchEpCombineMemory(params);
-#endif
 }

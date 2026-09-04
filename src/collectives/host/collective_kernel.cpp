@@ -18,15 +18,7 @@
 #include "acl/acl_rt.h"
 #include "collective_utils.h"
 #include "runtime/kernel.h"
-
-extern "C" {
-extern const unsigned char TileXRCollectivesKernelBinaryData[];
-extern const std::size_t TileXRCollectivesKernelBinarySize;
-extern const unsigned char TileXRAllToAllA5KernelBinaryData[];
-extern const std::size_t TileXRAllToAllA5KernelBinarySize;
-extern const unsigned char TileXRAllToAllA5Kernel128BinaryData[];
-extern const std::size_t TileXRAllToAllA5Kernel128BinarySize;
-}
+#include "tilexr_kernel_binary_loader.h"
 
 namespace TileXRCollectives {
 namespace Host {
@@ -114,14 +106,17 @@ int RegisterCollectivesKernelsLocked()
     if (g_registered) {
         return TileXR::TILEXR_SUCCESS;
     }
-    if (TileXRCollectivesKernelBinaryData == nullptr || TileXRCollectivesKernelBinarySize == 0) {
+    TileXR::KernelBinaryView kernelBinary {};
+    if (!TileXR::LoadKernelBinary(
+            reinterpret_cast<const void *>(&RegisterCollectivesKernelsLocked),
+            "tilexr_collectives_op.o", &kernelBinary)) {
         g_registrationStatus = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
         return g_registrationStatus;
     }
 
     rtDevBinary_t binary {};
-    binary.data = TileXRCollectivesKernelBinaryData;
-    binary.length = static_cast<uint32_t>(TileXRCollectivesKernelBinarySize);
+    binary.data = kernelBinary.data;
+    binary.length = static_cast<uint32_t>(kernelBinary.size);
     binary.magic = LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC;
     binary.version = 0;
 
@@ -129,7 +124,7 @@ int RegisterCollectivesKernelsLocked()
     rtError_t rtRet = rtDevBinaryRegister(&binary, &binHandle);
     if (rtRet != RT_ERROR_NONE) {
         std::cerr << "TileXR collectives rtDevBinaryRegister failed, ret=" << rtRet
-                  << ", binarySize=" << TileXRCollectivesKernelBinarySize << std::endl;
+                  << ", binarySize=" << kernelBinary.size << std::endl;
         g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
         return g_registrationStatus;
     }
@@ -162,15 +157,18 @@ int EnsureCollectivesKernelsRegistered()
     return RegisterCollectivesKernelsLocked();
 }
 
-int RegisterA5Binary(const unsigned char *data, std::size_t size,
-    const char *name, void **handle, uint8_t *stub)
+int RegisterA5Binary(const char *fileName, const char *name,
+    void **handle, uint8_t *stub)
 {
-    if (data == nullptr || size == 0U || size > UINT32_MAX) {
+    TileXR::KernelBinaryView kernelBinary {};
+    if (!TileXR::LoadKernelBinary(
+            reinterpret_cast<const void *>(&RegisterA5Binary), fileName,
+            &kernelBinary)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
     rtDevBinary_t binary {};
-    binary.data = data;
-    binary.length = static_cast<uint32_t>(size);
+    binary.data = kernelBinary.data;
+    binary.length = static_cast<uint32_t>(kernelBinary.size);
     binary.magic = LCCL_RT_DEV_BINARY_MAGIC_ELF_AIVEC;
     void *binaryHandle = nullptr;
     rtError_t ret = rtDevBinaryRegister(&binary, &binaryHandle);
@@ -193,14 +191,14 @@ int EnsureA5KernelsRegistered()
     if (g_a5Registered) {
         return TileXR::TILEXR_SUCCESS;
     }
-    int ret = RegisterA5Binary(TileXRAllToAllA5KernelBinaryData,
-        TileXRAllToAllA5KernelBinarySize, "tilexr_alltoall_a5_kernel",
+    int ret = RegisterA5Binary("tilexr_alltoall_a5_kernel.o",
+        "tilexr_alltoall_a5_kernel",
         &g_a5BinaryHandle, &g_a5KernelStub);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-    ret = RegisterA5Binary(TileXRAllToAllA5Kernel128BinaryData,
-        TileXRAllToAllA5Kernel128BinarySize, "tilexr_alltoall_a5_kernel_128",
+    ret = RegisterA5Binary("tilexr_alltoall_a5_kernel_128.o",
+        "tilexr_alltoall_a5_kernel_128",
         &g_a5Binary128Handle, &g_a5Kernel128Stub);
     if (ret != TileXR::TILEXR_SUCCESS) {
         (void)rtDevBinaryUnRegister(g_a5BinaryHandle);

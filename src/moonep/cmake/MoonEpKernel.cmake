@@ -11,11 +11,11 @@ if(NOT TILEXR_MOONEP_CCE_LINKER)
 endif()
 
 function(tilexr_add_moonep_kernel target)
-    set(oneValueArgs SOURCE BINARY EMBED_CPP DATA_SYMBOL SIZE_SYMBOL)
+    set(oneValueArgs SOURCE BINARY)
     set(multiValueArgs OPTIONS INCLUDES DEPENDS)
     cmake_parse_arguments(MOONEP "" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
-    foreach(required SOURCE BINARY EMBED_CPP DATA_SYMBOL SIZE_SYMBOL)
+    foreach(required SOURCE BINARY)
         if(NOT MOONEP_${required})
             message(FATAL_ERROR "tilexr_add_moonep_kernel requires ${required}")
         endif()
@@ -40,18 +40,4 @@ function(tilexr_add_moonep_kernel target)
         COMMENT "Building pure AICore kernel ${target}"
     )
     add_custom_target(${target} ALL DEPENDS "${MOONEP_BINARY}")
-
-    add_custom_command(
-        OUTPUT "${MOONEP_EMBED_CPP}"
-        COMMAND ${CMAKE_COMMAND}
-            -DTILEXR_MOONEP_KERNEL_BINARY=${MOONEP_BINARY}
-            -DTILEXR_MOONEP_KERNEL_EMBED_CPP=${MOONEP_EMBED_CPP}
-            -DTILEXR_MOONEP_KERNEL_DATA_SYMBOL=${MOONEP_DATA_SYMBOL}
-            -DTILEXR_MOONEP_KERNEL_SIZE_SYMBOL=${MOONEP_SIZE_SYMBOL}
-            -P "${CMAKE_SOURCE_DIR}/src/moonep/cmake/embed_moonep_kernel.cmake"
-        DEPENDS "${MOONEP_BINARY}"
-            "${CMAKE_SOURCE_DIR}/src/moonep/cmake/embed_moonep_kernel.cmake"
-        VERBATIM
-        COMMENT "Embedding pure AICore kernel ${target}"
-    )
 endfunction()

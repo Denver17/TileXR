@@ -9,6 +9,7 @@ if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source the CANN environment before configuring the MoonEP planner")
 endif()
 include(${CMAKE_SOURCE_DIR}/src/moonep/cmake/MoonEpKernel.cmake)
+include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
 set(TILEXR_MOONEP_PLANNER_DEFAULT_SOC_TYPE "$ENV{TILEXR_SOC_NAME}")
 if(NOT TILEXR_MOONEP_PLANNER_DEFAULT_SOC_TYPE)
@@ -27,8 +28,6 @@ set(TILEXR_MOONEP_PLANNER_KERNEL_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_moonep_planner_kernel.cpp")
 set(TILEXR_MOONEP_PLANNER_KERNEL_BINARY
     "${CMAKE_CURRENT_BINARY_DIR}/tilexr_moonep_planner_kernel.o")
-set(TILEXR_MOONEP_PLANNER_KERNEL_EMBED_CPP
-    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_moonep_planner_kernel_embed.cpp")
 
 set(TILEXR_MOONEP_PLANNER_KERNEL_OPTIONS
     -xcce
@@ -57,9 +56,6 @@ set(TILEXR_MOONEP_PLANNER_KERNEL_INCLUDES
 tilexr_add_moonep_kernel(tilexr_moonep_planner_kernel
     SOURCE "${TILEXR_MOONEP_PLANNER_KERNEL_SOURCE}"
     BINARY "${TILEXR_MOONEP_PLANNER_KERNEL_BINARY}"
-    EMBED_CPP "${TILEXR_MOONEP_PLANNER_KERNEL_EMBED_CPP}"
-    DATA_SYMBOL TileXRMoonEpPlannerKernelBinaryData
-    SIZE_SYMBOL TileXRMoonEpPlannerKernelBinarySize
     OPTIONS ${TILEXR_MOONEP_PLANNER_KERNEL_OPTIONS}
     INCLUDES ${TILEXR_MOONEP_PLANNER_KERNEL_INCLUDES}
     DEPENDS
@@ -73,7 +69,6 @@ add_library(tilexr-moonep-planner-v3-objects OBJECT
     host/planner_host.cpp
     host/planner_launch.cpp
     host/tilexr_moonep_planner.cpp
-    ${TILEXR_MOONEP_PLANNER_KERNEL_EMBED_CPP}
 )
 add_dependencies(tilexr-moonep-planner-v3-objects tilexr_moonep_planner_kernel)
 target_compile_features(tilexr-moonep-planner-v3-objects PRIVATE cxx_std_14)
@@ -91,3 +86,6 @@ target_include_directories(tilexr-moonep-planner-v3-objects
 )
 target_sources(tilexr-moonep-planner PRIVATE
     $<TARGET_OBJECTS:tilexr-moonep-planner-v3-objects>)
+tilexr_attach_kernel_artifacts(tilexr-moonep-planner FILES
+    ${TILEXR_MOONEP_PLANNER_KERNEL_BINARY}
+    TARGETS tilexr_moonep_planner_kernel)

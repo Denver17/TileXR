@@ -1,13 +1,6 @@
 #include "dispatch_launch.h"
 
-#include <cstddef>
-
 #include "moonep_kernel_launch.h"
-
-extern "C" {
-extern const unsigned char TileXRMoonEpDispatchKernelBinaryData[];
-extern const std::size_t TileXRMoonEpDispatchKernelBinarySize;
-}
 
 namespace TileXRMoonEp {
 namespace {
@@ -74,7 +67,7 @@ int TileXRMoonEpLaunchDispatchKernel(
     };
 
     return LaunchRegisteredMoonEpKernel(g_dispatchRegistration,
-        TileXRMoonEpDispatchKernelBinaryData, TileXRMoonEpDispatchKernelBinarySize,
+        "tilexr_moonep_dispatch_kernel.o",
         KernelSignature(kDispatchKernelSignature),
         kDispatchKernelName, "dispatch", static_cast<uint32_t>(context.layout.blockDim),
         &args, sizeof(args), static_cast<rtStream_t>(params.stream));

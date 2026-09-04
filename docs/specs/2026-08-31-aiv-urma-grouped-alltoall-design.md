@@ -1,11 +1,17 @@
 # A5 AllToAll Internal Optimization Design
 
+> **Packaging update (2026-09-03):** The embedding details in this historical
+> design are superseded by
+> `2026-09-03-external-aicore-kernel-packaging-design.md`. The A5 objects remain
+> owned by Collectives but are installed under `tilexr/kernels` and loaded on
+> first use.
+
 ## Goal
 
 Integrate the validated grouped AIV URMA algorithm as an internal A5/Ascend950
 optimization of the existing `TileXRAllToAll()` API. The implementation belongs
-to `src/collectives`, is embedded in `libtilexr-collectives.so`, and does not
-introduce a public prepared-handle lifecycle or a separate shared library.
+to `src/collectives` and does not introduce a public prepared-handle lifecycle
+or a separate Host shared library.
 
 Callers continue to use:
 
@@ -79,8 +85,8 @@ agreed grouped-route capability is a local check. Profile validation happens
 when the cached runtime is created or replaced.
 
 `collective_kernel.*` owns registration and launch of the A5 binaries. The
-generic binary and the A5 64P/128P binaries may be compiled separately, but all
-are embedded in the same Host library and launched with `rtKernelLaunchWithFlagV2`.
+generic binary and the A5 64P/128P binaries are external artifacts owned by the
+same Host library and launched with `rtKernelLaunchWithFlagV2`.
 
 ## Communicator Lifetime
 
@@ -171,7 +177,7 @@ coverage, Credit closure, and fixed trace slots.
 
 Target validation then covers:
 
-1. CANN 9.1 Host and both A5 kernel builds with final embedded symbols;
+1. CANN 9.1 Host and both A5 kernel builds with staged external objects;
 2. generic AllToAll regression on supported existing topology;
 3. A5 correctness and repeated-call reuse at 2x8, 4x8, and 8x8 ranks;
 4. a larger request after reuse to exercise workspace/profile expansion;

@@ -1,15 +1,8 @@
 #include "planner_launch.h"
 
-#include <cstddef>
-
 #include "moonep_kernel_launch.h"
 #include "moonep_kernel_registration.h"
 #include "tilexr_types.h"
-
-extern "C" {
-extern const unsigned char TileXRMoonEpPlannerV2KernelBinaryData[];
-extern const std::size_t TileXRMoonEpPlannerV2KernelBinarySize;
-}
 
 namespace TileXREp {
 namespace Plan {
@@ -95,7 +88,7 @@ int LaunchPlanKernel(
 
     constexpr uint32_t kPlanBlockDim = 1;
     return TileXRMoonEp::LaunchRegisteredMoonEpKernel(g_plannerV2Registration,
-        TileXRMoonEpPlannerV2KernelBinaryData, TileXRMoonEpPlannerV2KernelBinarySize,
+        "tilexr_moonep_planner_v2_kernel.o",
         TileXRMoonEp::KernelSignature(TileXRMoonEp::kPlannerV2KernelSignature),
         kPlannerV2KernelName, "planner v2", kPlanBlockDim, &args, sizeof(args),
         static_cast<rtStream_t>(arguments.stream));

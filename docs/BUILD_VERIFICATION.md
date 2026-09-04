@@ -10,7 +10,7 @@
 > reproduction to confirm that device error 259 is absent and correctness
 > passes.
 
-**Updated:** 2026-09-02
+**Updated:** 2026-09-04
 
 This checklist reflects the current TileXR codebase. The core runtime builds `libtile-comm.so` without a compile-time or link-time shmem dependency.
 
@@ -77,6 +77,56 @@ test -f install/lib/libtilexr_udma_demo_kernel.so
 ```
 
 If `bisheng` is unavailable, `build.sh` may skip only the demo target while still building host-only tests.
+
+## Build SDMA Tests
+
+```bash
+cd tests/sdma
+bash build.sh
+```
+
+Standalone SDMA tests that compile a production `.cpp` directly must define
+the capability state they exercise and provide test doubles for every runtime
+or backend boundary referenced by that translation unit. A disabled branch at
+runtime does not remove unresolved symbols from the linker input.
+
+## Build Expert Parallelism Package
+
+EP uses one installation layout for every deployment environment. Do not pass
+`TILEXR_SOC_NAME` or an EP SoC CMake option when configuring:
+
+```bash
+cmake -S . -B /tmp/tilexr-ep-build \
+  -DTILEXR_BUILD_EP=ON \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build /tmp/tilexr-ep-build --target tilexr-ep -j"$(nproc)"
+cmake --install /tmp/tilexr-ep-build
+```
+
+The four EP kernels are A5-only objects even when the compiler runs on a 910B
+host. The package must contain exactly these EP artifacts and no EP kernel
+shared libraries or 910B variants:
+
+```bash
+ep_lib_dir="$(dirname "$(find install/lib* -maxdepth 1 -type f \
+  -name 'libtilexr-ep.so' -print -quit)")"
+test -f "${ep_lib_dir}/libtilexr-ep.so"
+for object in \
+  tilexr_ep_dispatch_kernel.o \
+  tilexr_ep_combine_kernel.o \
+  tilexr_ep_dispatch_memory_kernel.o \
+  tilexr_ep_combine_memory_kernel.o; do
+  test -f "${ep_lib_dir}/tilexr/kernels/${object}"
+done
+! find "${ep_lib_dir}" -maxdepth 1 -type f \
+  \( -name 'libtilexr_ep_dispatch_kernel.so' -o \
+     -name 'libtilexr_ep_combine_kernel.so' \) | grep -q .
+```
+
+Building on 910B proves cross-compilation and packaging only. Host tests must
+also verify that every public EP entry returns `TILEXR_ERROR_NOT_SUPPORT` there
+before loading an object or advancing communicator magic; only an A5 hardware
+run proves kernel execution.
 
 ## Qualify EP Compile-Time Specialization
 
@@ -145,10 +195,27 @@ cmake --install build-moonep
 
 MoonEP custom-kernel commands must list the implementation header selected by
 the kernel entry in `DEPENDS`. Otherwise an implementation-header edit can
-leave a stale embedded kernel object during an incremental build. Verify this
-through an incremental target-toolchain rebuild and the resulting embedded
-binary; production-source substring checks are not accepted as a substitute
-for compile, link, or behavior evidence.
+leave a stale installed kernel object during an incremental build. Verify this
+through an incremental target-toolchain rebuild, then compare the rebuilt and
+staged objects under the owning library's `tilexr/kernels` directory;
+production-source substring checks are not accepted as a substitute for
+compile, link, or behavior evidence.
+
+After installation, require the production kernel directory and verify that
+every enabled component installed its objects:
+
+```bash
+find install/lib*/tilexr/kernels -maxdepth 1 -type f -name '*.o' -print
+```
+
+Moving or packaging a TileXR Host library without its sibling
+`tilexr/kernels` directory is unsupported and must fail before kernel
+registration.
+
+When staging a generated kernel from another CMake directory, make the staging
+target depend on the kernel's producer target rather than only on the generated
+file path. File-only cross-directory dependencies can leave Make without a
+visible generation rule or trigger the same kernel command concurrently.
 
 For Combine V2 schedule, workspace, Host validation, launch ABI, and public ABI,
 run:

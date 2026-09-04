@@ -1,20 +1,38 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <iostream>
 
 #include "acl/acl_rt.h"
 #include "dispatch_launch.h"
 #include "dispatch_layout.h"
 #include "runtime/kernel.h"
+#include "tilexr_kernel_binary_loader.h"
 #include "tilexr_types.h"
 
-extern "C" {
-extern const unsigned char TileXRMoonEpDispatchUrmaKernelBinaryData[] = {
+namespace {
+
+const unsigned char kDispatchUrmaKernelBinary[] = {
     0x7f, 'E', 'L', 'F'};
-extern const std::size_t TileXRMoonEpDispatchUrmaKernelBinarySize =
-    sizeof(TileXRMoonEpDispatchUrmaKernelBinaryData);
+
+} // namespace
+
+namespace TileXR {
+
+bool LoadKernelBinary(const void *, const char *fileName,
+    KernelBinaryView *binary)
+{
+    if (fileName == nullptr || binary == nullptr ||
+        std::strcmp(fileName, "tilexr_moonep_dispatch_urma_kernel.o") != 0) {
+        return false;
+    }
+    binary->data = kDispatchUrmaKernelBinary;
+    binary->size = sizeof(kDispatchUrmaKernelBinary);
+    return true;
 }
+
+} // namespace TileXR
 
 namespace {
 
@@ -72,7 +90,7 @@ void TestPairedAndHiddenOnly()
     Check(magicCalls == 1 && launchCalls == 1,
         "paired launcher must take one magic and launch once");
     Check(binaryRegisterCalls == 1 && functionRegisterCalls == 1,
-        "paired launcher did not register the embedded kernel once");
+        "paired launcher did not register the external kernel once");
     Check(launchedArgsSize == sizeof(TileXRMoonEp::DispatchKernelArgs) &&
         launchedBlockDim == TileXRMoonEp::kDispatchAivCoreCount,
         "paired launch metadata mismatch");

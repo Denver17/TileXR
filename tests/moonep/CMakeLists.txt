@@ -104,6 +104,7 @@ file(WRITE "${TILEXR_MOONEP_FAKE_INCLUDE_DIR}/tilexr_api.h"
 set(TILEXR_MOONEP_TEST_INCLUDE_DIRS
     ${TILEXR_MOONEP_FAKE_INCLUDE_DIR}
     ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/src/common
 )
 
 add_executable(test_tilexr_moonep_c_header
@@ -117,6 +118,17 @@ add_executable(test_tilexr_moonep_abi_layout
 )
 target_include_directories(test_tilexr_moonep_abi_layout PRIVATE
     ${TILEXR_MOONEP_TEST_INCLUDE_DIRS})
+
+add_executable(test_tilexr_moonep_kernel_registration
+    unit/test_moonep_kernel_registration.cpp
+    ${TILEXR_ROOT}/src/moonep/common/moonep_kernel_registration.cpp
+    ${TILEXR_ROOT}/src/common/tilexr_kernel_binary_loader.cpp
+)
+target_include_directories(test_tilexr_moonep_kernel_registration PRIVATE
+    ${TILEXR_MOONEP_TEST_INCLUDE_DIRS}
+    ${TILEXR_ROOT}/src/moonep/common)
+target_link_libraries(test_tilexr_moonep_kernel_registration PRIVATE
+    ${CMAKE_DL_LIBS})
 
 add_executable(test_tilexr_moonep_host
     unit/test_tilexr_moonep_host.cpp
@@ -239,6 +251,8 @@ target_include_directories(test_tilexr_moonep_reduce_grad_launch PRIVATE
 
 add_test(NAME test_tilexr_moonep_c_header COMMAND test_tilexr_moonep_c_header)
 add_test(NAME test_tilexr_moonep_abi_layout COMMAND test_tilexr_moonep_abi_layout)
+add_test(NAME test_tilexr_moonep_kernel_registration
+    COMMAND test_tilexr_moonep_kernel_registration)
 add_test(NAME test_tilexr_moonep_host COMMAND test_tilexr_moonep_host)
 add_test(NAME test_tilexr_moonep_stage_layout COMMAND test_tilexr_moonep_stage_layout)
 add_test(NAME test_tilexr_moonep_stage_reference COMMAND test_tilexr_moonep_stage_reference)

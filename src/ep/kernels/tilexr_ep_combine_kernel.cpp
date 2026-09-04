@@ -315,33 +315,3 @@ extern "C" __global__ __aicore__ void tilexr_ep_combine_cross_node_drain_kernel(
         }
     }
 }
-
-void launch_tilexr_ep_combine_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs, GM_ADDR expertOut,
-    GM_ADDR assistInfoForCombine, GM_ADDR epRecvCounts, GM_ADDR yOut, int64_t bs, int64_t h, int64_t topK,
-    int64_t moeExpertNum, int64_t dtype, int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes,
-    int64_t payloadBytesPerSlot, int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes, int64_t magic)
-{
-    tilexr_ep_combine_kernel<<<blockDim, nullptr, stream>>>(commArgs, expertOut, assistInfoForCombine, epRecvCounts,
-        yOut, bs, h, topK, moeExpertNum, dtype, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadBytesPerSlot,
-        assistBytesPerSlot, slotBytes, totalBytes, magic);
-}
-
-void launch_tilexr_ep_combine_cross_node_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs, GM_ADDR expertOut,
-    GM_ADDR assistInfoForCombine, GM_ADDR epRecvCounts, GM_ADDR yOut, GM_ADDR workspace, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, int64_t dtype, int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes,
-    int64_t payloadBytesPerSlot, int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes, int64_t magic)
-{
-    tilexr_ep_combine_cross_node_kernel<<<blockDim, nullptr, stream>>>(commArgs, expertOut, assistInfoForCombine,
-        epRecvCounts, yOut, workspace, bs, h, topK, moeExpertNum, dtype, dtypeBytes, maxRoutesPerSrc, rowBytes,
-        payloadBytesPerSlot, assistBytesPerSlot, slotBytes, totalBytes, magic);
-}
-
-void launch_tilexr_ep_combine_cross_node_drain_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs,
-    GM_ADDR yOut, GM_ADDR workspace, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t dtype,
-    int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes, int64_t payloadBytesPerSlot,
-    int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes)
-{
-    tilexr_ep_combine_cross_node_drain_kernel<<<blockDim, nullptr, stream>>>(commArgs, yOut, workspace, bs, h, topK,
-        moeExpertNum, dtype, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadBytesPerSlot, assistBytesPerSlot,
-        slotBytes, totalBytes);
-}

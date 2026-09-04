@@ -5,6 +5,7 @@ if(NOT BISHENG_EXECUTABLE)
     message(FATAL_ERROR "bisheng not found; source the CANN environment before configuring MoonEP dispatch")
 endif()
 include(${CMAKE_SOURCE_DIR}/src/moonep/cmake/MoonEpKernel.cmake)
+include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
 option(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING
     "Enable per-AIV profiling in the URMA MoonEP Dispatch kernel" OFF)
@@ -38,8 +39,6 @@ set(TILEXR_MOONEP_DISPATCH_KERNEL_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_moonep_dispatch_kernel.cpp")
 set(TILEXR_MOONEP_DISPATCH_KERNEL_BINARY
     "${CMAKE_CURRENT_BINARY_DIR}/tilexr_moonep_dispatch_kernel.o")
-set(TILEXR_MOONEP_DISPATCH_KERNEL_EMBED_CPP
-    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_moonep_dispatch_kernel_embed.cpp")
 set(TILEXR_MOONEP_DISPATCH_KERNEL_OPTIONS
     -xcce
     -mllvm -cce-aicore-stack-size=0x8000
@@ -67,9 +66,6 @@ set(TILEXR_MOONEP_DISPATCH_KERNEL_INCLUDES
 tilexr_add_moonep_kernel(tilexr_moonep_dispatch_kernel
     SOURCE "${TILEXR_MOONEP_DISPATCH_KERNEL_SOURCE}"
     BINARY "${TILEXR_MOONEP_DISPATCH_KERNEL_BINARY}"
-    EMBED_CPP "${TILEXR_MOONEP_DISPATCH_KERNEL_EMBED_CPP}"
-    DATA_SYMBOL TileXRMoonEpDispatchKernelBinaryData
-    SIZE_SYMBOL TileXRMoonEpDispatchKernelBinarySize
     OPTIONS ${TILEXR_MOONEP_DISPATCH_KERNEL_OPTIONS}
     INCLUDES ${TILEXR_MOONEP_DISPATCH_KERNEL_INCLUDES}
     DEPENDS
@@ -83,8 +79,6 @@ set(TILEXR_MOONEP_DISPATCH_URMA_KERNEL_SOURCE
     "${CMAKE_CURRENT_SOURCE_DIR}/urma/kernels/tilexr_moonep_dispatch_kernel.cpp")
 set(TILEXR_MOONEP_DISPATCH_URMA_KERNEL_BINARY
     "${CMAKE_CURRENT_BINARY_DIR}/tilexr_moonep_dispatch_urma_kernel.o")
-set(TILEXR_MOONEP_DISPATCH_URMA_KERNEL_EMBED_CPP
-    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_moonep_dispatch_urma_kernel_embed.cpp")
 set(TILEXR_MOONEP_DISPATCH_URMA_KERNEL_OPTIONS
     -xcce
     -O2
@@ -123,9 +117,6 @@ set(TILEXR_MOONEP_DISPATCH_URMA_KERNEL_INCLUDES
 tilexr_add_moonep_kernel(tilexr_moonep_dispatch_urma_kernel
     SOURCE "${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_SOURCE}"
     BINARY "${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_BINARY}"
-    EMBED_CPP "${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_EMBED_CPP}"
-    DATA_SYMBOL TileXRMoonEpDispatchUrmaKernelBinaryData
-    SIZE_SYMBOL TileXRMoonEpDispatchUrmaKernelBinarySize
     OPTIONS ${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_OPTIONS}
     INCLUDES ${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_INCLUDES}
     DEPENDS
@@ -144,6 +135,7 @@ tilexr_add_moonep_kernel(tilexr_moonep_dispatch_urma_kernel
 
 add_library(tilexr-moonep-dispatch SHARED
     ${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_kernel_registration.cpp
+    ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp
     host/dispatch_layout.cpp
     host/dispatch_host.cpp
     host/dispatch_launch.cpp
@@ -151,10 +143,14 @@ add_library(tilexr-moonep-dispatch SHARED
     urma/host/dispatch_layout.cpp
     urma/host/dispatch_host.cpp
     urma/host/dispatch_launch.cpp
-    ${TILEXR_MOONEP_DISPATCH_KERNEL_EMBED_CPP}
-    ${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_EMBED_CPP}
 )
 add_dependencies(tilexr-moonep-dispatch
+    tilexr_moonep_dispatch_kernel
+    tilexr_moonep_dispatch_urma_kernel)
+tilexr_attach_kernel_artifacts(tilexr-moonep-dispatch FILES
+    ${TILEXR_MOONEP_DISPATCH_KERNEL_BINARY}
+    ${TILEXR_MOONEP_DISPATCH_URMA_KERNEL_BINARY}
+    TARGETS
     tilexr_moonep_dispatch_kernel
     tilexr_moonep_dispatch_urma_kernel)
 target_compile_features(tilexr-moonep-dispatch PRIVATE cxx_std_14)
@@ -162,6 +158,7 @@ target_include_directories(tilexr-moonep-dispatch
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../../include
     PRIVATE
         ${CMAKE_SOURCE_DIR}/src/moonep/common
+        ${CMAKE_SOURCE_DIR}/src/common
         ${CMAKE_CURRENT_SOURCE_DIR}/common
         ${CMAKE_CURRENT_SOURCE_DIR}/host
         ${CMAKE_CURRENT_SOURCE_DIR}/urma/common
@@ -177,7 +174,7 @@ target_link_directories(tilexr-moonep-dispatch PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
 )
 target_link_libraries(tilexr-moonep-dispatch PRIVATE
-    tile-comm ascendcl runtime
+    tile-comm ascendcl runtime ${CMAKE_DL_LIBS}
 )
 set_target_properties(tilexr-moonep-dispatch PROPERTIES
     BUILD_WITH_INSTALL_RPATH TRUE

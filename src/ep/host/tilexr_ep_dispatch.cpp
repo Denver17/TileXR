@@ -7,6 +7,9 @@ namespace {
 
 int LaunchEpDispatch(const TileXREp::EpDispatchParams &params)
 {
+    if (!TileXREp::TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     int ret = TileXREp::TileXREpValidateBasicDispatchParams(params);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
@@ -23,6 +26,9 @@ int LaunchEpDispatch(const TileXREp::EpDispatchParams &params)
 
 int LaunchEpCombine(const TileXREp::EpCombineParams &params)
 {
+    if (!TileXREp::TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     int ret = TileXREp::TileXREpValidateBasicCombineParams(params);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;

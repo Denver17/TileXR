@@ -8,21 +8,7 @@ include(GNUInstallDirs)
 if(TILEXR_BUILD_COLLECTIVES)
 add_subdirectory(kernels)
 include(cmake/alltoall_a5.cmake)
-
-set(TILEXR_COLLECTIVES_KERNEL_EMBED_CPP
-        ${CMAKE_CURRENT_BINARY_DIR}/tilexr_collectives_kernel_embed.cpp
-)
-
-add_custom_command(
-        OUTPUT ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
-        COMMAND ${CMAKE_COMMAND}
-                -DTILEXR_COLLECTIVES_OP=${TILEXR_COLLECTIVES_OP}
-                -DTILEXR_COLLECTIVES_KERNEL_EMBED_CPP=${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_collectives_kernel.cmake
-        DEPENDS tilexr_collectives_op ${TILEXR_COLLECTIVES_OP}
-                ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_collectives_kernel.cmake
-        VERBATIM
-)
+include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
 set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/collective_backend.cpp
@@ -31,20 +17,23 @@ set(TILEXR_COLLECTIVES_SOURCE_FILE
         host/collective_kernel.cpp
         host/tilexr_collectives.cpp
         host/collective_backend.h
-        ${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
-        ${TILEXR_GROUPED_KERNEL_EMBED_CPP}
-        ${TILEXR_GROUPED_KERNEL_128_EMBED_CPP}
+        ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp
 )
 
 add_library(tilexr-collectives SHARED ${TILEXR_COLLECTIVES_SOURCE_FILE})
 add_dependencies(tilexr-collectives tilexr_collectives_op
         tilexr_alltoall_a5_kernel tilexr_alltoall_a5_kernel_128)
+tilexr_attach_kernel_artifacts(tilexr-collectives FILES
+        ${TILEXR_COLLECTIVES_OP}
+        ${TILEXR_GROUPED_KERNEL_BINARY}
+        ${TILEXR_GROUPED_KERNEL_128_BINARY}
+    TARGETS
+        tilexr_collectives_op
+        tilexr_alltoall_a5_kernel
+        tilexr_alltoall_a5_kernel_128)
 if(TILEXR_COLLECTIVES_ENABLE_PROFILING)
     target_compile_definitions(tilexr-collectives PRIVATE TILEXR_ENABLE_PROFILING=1)
 endif()
-set_source_files_properties(${TILEXR_COLLECTIVES_KERNEL_EMBED_CPP}
-        PROPERTIES OBJECT_DEPENDS "${TILEXR_COLLECTIVES_OP}"
-)
 if(TILEXR_COLLECTIVES_AICORE_ARCH STREQUAL "dav-c310-vec")
     target_compile_definitions(tilexr-collectives PUBLIC TILEXR_COLLECTIVES_C310_ATOMIC_LIMITS=1)
 endif()
@@ -61,6 +50,7 @@ target_include_directories(tilexr-collectives
         ${CMAKE_CURRENT_SOURCE_DIR}/host
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels
         ${CMAKE_CURRENT_SOURCE_DIR}/../comm
+        ${CMAKE_SOURCE_DIR}/src/common
 )
 
 target_link_directories(tilexr-collectives
@@ -77,7 +67,7 @@ target_link_libraries(tilexr-collectives
         runtime
         profapi
         ascend_hal
-        dl
+        ${CMAKE_DL_LIBS}
 )
 
 install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})

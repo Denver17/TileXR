@@ -1854,9 +1854,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::ExpIdsCop
         }
         SyncFunc<AscendC::HardEvent::S_V>();
     }
-    EndProfileMetric(TileXREp::EP_DISPATCH_MEMORY_METRIC_ROUTE_PREPARE,
-        prepareStart);
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_ROUTE_PREPARE_END);
     SyncFunc<AscendC::HardEvent::MTE2_S>();
 }
 

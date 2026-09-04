@@ -12,13 +12,13 @@
 namespace TileXRMoonEp {
 
 inline int LaunchRegisteredMoonEpKernel(KernelRegistrationState &state,
-    const unsigned char *binaryData, std::size_t binarySize,
-    const void *signature, const char *kernelName, const char *stageName,
+    const char *binaryFileName, const void *signature,
+    const char *kernelName, const char *stageName,
     uint32_t blockDim, void *args, std::size_t argsSize, rtStream_t stream,
     const rtTaskCfgInfo_t *taskCfgInfo = nullptr)
 {
     const int registerRet = EnsureMoonEpKernelRegistered(
-        state, binaryData, binarySize, signature, kernelName);
+        state, binaryFileName, signature, kernelName);
     if (registerRet != TileXR::TILEXR_SUCCESS) {
         return registerRet;
     }

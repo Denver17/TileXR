@@ -4,7 +4,7 @@
 
 The optional collectives component builds `libtilexr-collectives.so` on top of
 the core `libtile-comm.so` communicator. It owns collective algorithm dispatch,
-embedded AICore binaries, launch validation, and generic profiling markers.
+external AICore binaries, launch validation, and generic profiling markers.
 The core communicator remains independently usable.
 
 The public operations in `src/include/tilexr_collectives.h` are AllGather,
@@ -14,15 +14,17 @@ library accepts a TileXR communicator and an ACL stream; it does not own either.
 ## Build and Launch
 
 - `TILEXR_BUILD_COLLECTIVES` controls the optional target.
-- AICore binaries are built as device artifacts, embedded in the Host library,
-  registered with the runtime, and launched through the registered signature.
+- AICore binaries are built as device artifacts, installed under the library's
+  `tilexr/kernels` directory, loaded on first use, registered with the runtime,
+  and launched through the registered signature.
 - Host dispatch validates datatype, count, topology, rank size, buffer contract,
   and algorithm support before launching.
 - Multi-rank AllToAll retains the generic `TOPO_910_93` implementation. On
   Ascend950/A5, `TileXRAllToAll` may internally select the grouped kernel for
   `int32`, rank sizes 8/16/32/64/128, and eight local ranks. Both generic and
-  A5 binaries are embedded in `libtilexr-collectives.so`; there is no separate
-  grouped public API or library.
+  A5 binaries are external runtime artifacts owned by
+  `libtilexr-collectives.so`; there is no separate grouped public API or Host
+  library.
 - Sources under `reference/` are comparison-only and are never linked into the
   active target.
 

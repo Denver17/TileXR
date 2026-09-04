@@ -24,7 +24,7 @@ Instead of stalling every rank at coarse barriers, TileXR splits a phase into ti
 
 - **Core communication runtime**: `libtile-comm.so` initializes ranks, shared buffers, peer memory mappings, socket exchange, device `CommArgs`, and DFX state. It builds only against CANN runtime/ACL/driver APIs and TileXR-owned types; it does not include or link HCCL, shmem, or reference-only source trees.
 - **Optional TileXR collectives**: `libtilexr-collectives.so`, built only when `TILEXR_BUILD_COLLECTIVES=ON`, layers standalone `TileXRAllGather` and equal-size `TileXRAllToAll` APIs on top of `libtile-comm.so`.
-- **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so`, `libtilexr_ep_dispatch_kernel.so`, and `libtilexr_ep_combine_kernel.so` provide TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from HCCL window helpers, `ops-transformer`, and shmem. The peer-memory backend supports both same-node and cross-node dispatch/combine; the UDMA backend uses TileXR-registered workspaces.
+- **Standalone EP dispatch/combine MVP**: `libtilexr-ep.so` provides TileXR-native MoE EP dispatch/combine routes under `src/ep`, independent from HCCL window helpers, `ops-transformer`, and shmem. Its four A5-only AICore objects are installed under `lib/tilexr/kernels` and registered at runtime; the Host library remains loadable on non-A5 systems and returns `TILEXR_ERROR_NOT_SUPPORT` from every EP entry point.
 - **Tile-level synchronization**: device-side flag regions and magic values support reusable fine-grained synchronization rounds.
 - **Registered-memory UDMA path**: host code registers ordinary `aclrtMalloc` device memory with `TileXRUDMARegister`; device kernels use `tilexr_udma.h` wrappers for put/get/signal.
 - **On-card SDMA transport**: an opt-in (`TILEXR_ENABLE_SDMA=1`) local GM-to-GM copy path. Host code queries it with `TileXRSDMAAvailable` / `TileXRGetSDMAWorkspaceDev`; device kernels use `tilexr_sdma.h` (`SDMACopyNbi`, `SDMAWait`). Separate from UDMA: SDMA is local to one device, UDMA targets registered remote memory.
@@ -197,7 +197,7 @@ The runtime allocates shared IPC buffers, exchanges peer mappings, uploads `Comm
 `src/collectives/` builds `libtilexr-collectives.so` when `TILEXR_BUILD_COLLECTIVES=ON`. The split is intentional:
 
 - `libtile-comm.so` owns communicator setup, peer memory, `CommArgs`, UDMA metadata, and the infra public API in `tilexr_api.h`.
-- `libtilexr-collectives.so` owns collectives host validation, launch, embedded CCE kernel registration, and the public collectives API in `tilexr_collectives.h`.
+- `libtilexr-collectives.so` owns collectives host validation, launch, external CCE kernel registration, and the public collectives API in `tilexr_collectives.h`; its kernel objects are installed under `lib/tilexr/kernels` (or the configured install libdir).
 - Installing only the default core runtime does not install `tilexr_collectives.h`.
 
 Initial collectives APIs:
@@ -212,8 +212,8 @@ Initial collectives APIs:
 `src/ep/` builds the first TileXR-native Expert Parallelism dispatch path:
 
 - `libtilexr-ep.so` exposes the canonical `TileXRMoeEpDispatch`, `TileXRMoeEpCombine`, `TileXRMoeEpDispatchMemory`, and `TileXRMoeEpCombineMemory` entries through `src/include/tilexr_ep.h`.
-- `libtilexr_ep_dispatch_kernel.so` contains the Ascend C dispatch kernels.
-- `libtilexr_ep_combine_kernel.so` contains the Ascend C combine kernels, including the cross-node UDMA combine path.
+- `tilexr_ep_dispatch_kernel.o`, `tilexr_ep_combine_kernel.o`, `tilexr_ep_dispatch_memory_kernel.o`, and `tilexr_ep_combine_memory_kernel.o` contain the A5 Ascend C kernels and are installed under `lib/tilexr/kernels`.
+- EP does not use a configure-time SoC selector and does not build 910B kernel variants. The same installation can be loaded on 910B and A5; all four public EP entry points return `TILEXR_ERROR_NOT_SUPPORT` on non-A5 hardware before loading a kernel or consuming a communicator magic value.
 - Host code validates MoE shape, dtype, communicator state, and IPC window size before launch.
 - The memory route uses `CommArgs::peerMems[]`, `TileXR::IPC_DATA_OFFSET`, and `SyncCollectives` for peer-memory communication across both same-node and cross-node peers. Each rank writes its own peer-memory window, and peers read from that window after synchronization.
 - The UDMA route uses a workspace registered with `TileXRUDMARegister`; remote ranks exchange window slots and ready values through the UDMA registry.

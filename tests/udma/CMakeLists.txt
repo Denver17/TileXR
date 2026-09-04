@@ -278,10 +278,10 @@ if(BUILD_TILEXR_UDMA_DEMO)
                     -DTILEXR_MOONEP_KERNEL_EMBED_CPP=${TILEXR_UDMA_PROFILE_PROBE_KERNEL_EMBED}
                     -DTILEXR_MOONEP_KERNEL_DATA_SYMBOL=TileXRUDMAProfileProbeKernelBinaryData
                     -DTILEXR_MOONEP_KERNEL_SIZE_SYMBOL=TileXRUDMAProfileProbeKernelBinarySize
-                    -P "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_aicore_kernel.cmake"
                 DEPENDS
                     "${TILEXR_UDMA_PROFILE_PROBE_KERNEL_BINARY}"
-                    "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_aicore_kernel.cmake"
                 VERBATIM
                 COMMENT "Embedding pure AICore TileXR UDMA profile probe kernel"
             )
@@ -349,10 +349,10 @@ if(BUILD_TILEXR_UDMA_DEMO)
                     -DTILEXR_MOONEP_KERNEL_EMBED_CPP=${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_EMBED}
                     -DTILEXR_MOONEP_KERNEL_DATA_SYMBOL=TileXRUDMAPeerMemProbeKernelBinaryData
                     -DTILEXR_MOONEP_KERNEL_SIZE_SYMBOL=TileXRUDMAPeerMemProbeKernelBinarySize
-                    -P "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                    -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_aicore_kernel.cmake"
                 DEPENDS
                     "${TILEXR_UDMA_PEERMEM_PROBE_KERNEL_BINARY}"
-                    "${TILEXR_ROOT}/src/moonep/cmake/embed_moonep_kernel.cmake"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_aicore_kernel.cmake"
                 VERBATIM
                 COMMENT "Embedding pure AICore TileXR UDMA peer-memory probe kernel"
             )

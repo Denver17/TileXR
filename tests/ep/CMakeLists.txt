@@ -59,6 +59,7 @@ set(ASCEND_DRIVER_PATH "${_tilexr_default_ascend_driver_path}" CACHE PATH "Ascen
 
 set(TILEXR_EP_TEST_INCLUDE_DIRS
     ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/src/common
     ${TILEXR_ROOT}/src/ep/common
     ${TILEXR_ROOT}/src/ep/host
     ${TILEXR_ROOT}/src/moonep/common
@@ -97,6 +98,7 @@ extern "C" {
 #endif
 aclError aclrtGetDevice(int32_t *deviceId);
 aclError aclrtGetDeviceInfo(uint32_t deviceId, aclrtDevAttr attr, int64_t *value);
+const char *aclrtGetSocName(void);
 aclError aclrtSynchronizeStream(aclrtStream stream);
 aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
     size_t count, aclrtMemcpyKind kind);
@@ -135,6 +137,7 @@ typedef struct rtTaskCfgInfo {
 extern "C" {
 #endif
 rtError_t rtDevBinaryRegister(const rtDevBinary_t *binary, void **handle);
+rtError_t rtDevBinaryUnRegister(void *handle);
 rtError_t rtFunctionRegister(void *handle, const void *signature,
     const char_t *name, const void *kernelInfoExt, uint32_t flags);
 rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim,
@@ -295,12 +298,6 @@ add_executable(test_tilexr_ep_kernel_launch
     ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
 )
 
-add_executable(test_tilexr_ep_memory_unsupported
-    unit/test_tilexr_ep_memory_unsupported.cpp
-    ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_dispatch.cpp
-    ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_combine.cpp
-)
-
 target_include_directories(test_tilexr_ep_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
     ${CMAKE_CURRENT_SOURCE_DIR}/demo
@@ -318,13 +315,6 @@ target_include_directories(test_tilexr_ep_kernel_launch BEFORE PRIVATE
     ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
 )
-
-target_include_directories(test_tilexr_ep_memory_unsupported BEFORE PRIVATE
-    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}
-    ${TILEXR_EP_TEST_INCLUDE_DIRS}
-)
-target_compile_definitions(test_tilexr_ep_memory_unsupported PRIVATE
-    TILEXR_EP_MEMORY_SUPPORTED=0)
 
 target_include_directories(test_tilexr_ep_plan_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}
@@ -358,7 +348,6 @@ add_test(NAME test_tilexr_ep_layout COMMAND test_tilexr_ep_layout)
 add_test(NAME test_tilexr_ep_expert_ids COMMAND test_tilexr_ep_expert_ids)
 add_test(NAME test_tilexr_ep_host_validation COMMAND test_tilexr_ep_host_validation)
 add_test(NAME test_tilexr_ep_kernel_launch COMMAND test_tilexr_ep_kernel_launch)
-add_test(NAME test_tilexr_ep_memory_unsupported COMMAND test_tilexr_ep_memory_unsupported)
 add_test(NAME test_tilexr_moonep_planner_public_abi COMMAND test_tilexr_moonep_planner_public_abi)
 add_test(NAME test_tilexr_ep_plan_layout COMMAND test_tilexr_ep_plan_layout)
 add_test(NAME test_tilexr_ep_plan_reference COMMAND test_tilexr_ep_plan_reference)
@@ -372,7 +361,6 @@ install(TARGETS
     test_tilexr_ep_expert_ids
     test_tilexr_ep_host_validation
     test_tilexr_ep_kernel_launch
-    test_tilexr_ep_memory_unsupported
     test_tilexr_ep_plan_layout
     test_tilexr_ep_plan_reference
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}

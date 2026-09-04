@@ -1,13 +1,6 @@
 #include "prefetch_weight_launch.h"
 
-#include <cstddef>
-
 #include "moonep_kernel_launch.h"
-
-extern "C" {
-extern const unsigned char TileXRMoonEpPrefetchWeightKernelBinaryData[];
-extern const std::size_t TileXRMoonEpPrefetchWeightKernelBinarySize;
-}
 
 namespace TileXRMoonEp {
 namespace {
@@ -58,8 +51,7 @@ int TileXRMoonEpLaunchPrefetchWeightKernel(
         "PrefetchWeight kernel argument ABI changed");
 
     return LaunchRegisteredMoonEpKernel(g_prefetchWeightRegistration,
-        TileXRMoonEpPrefetchWeightKernelBinaryData,
-        TileXRMoonEpPrefetchWeightKernelBinarySize,
+        "tilexr_moonep_prefetch_weight_kernel.o",
         KernelSignature(kPrefetchWeightKernelSignature),
         kPrefetchWeightKernelName, "prefetch-weight",
         static_cast<uint32_t>(context.layout.blockDim), &args, sizeof(args),

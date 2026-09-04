@@ -8,12 +8,8 @@
 
 #include "reduce_grad_common.h"
 #include "runtime/kernel.h"
+#include "tilexr_kernel_binary_loader.h"
 #include "tilexr_types.h"
-
-extern "C" {
-extern const unsigned char TileXRMoonEpReduceGradKernelBinaryData[];
-extern const std::size_t TileXRMoonEpReduceGradKernelBinarySize;
-}
 
 namespace TileXRMoonEp {
 namespace {
@@ -29,13 +25,15 @@ int EnsureReduceGradKernelRegistered()
     if (g_reduceGradRegistered) {
         return TileXR::TILEXR_SUCCESS;
     }
-    if (TileXRMoonEpReduceGradKernelBinarySize == 0) {
+    TileXR::KernelBinaryView kernelBinary {};
+    if (!TileXR::LoadKernelBinary(&g_reduceGradRegistrationMutex,
+            "tilexr_moonep_reduce_grad_kernel.o", &kernelBinary)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
 
     rtDevBinary_t binary {};
-    binary.data = TileXRMoonEpReduceGradKernelBinaryData;
-    binary.length = static_cast<uint64_t>(TileXRMoonEpReduceGradKernelBinarySize);
+    binary.data = kernelBinary.data;
+    binary.length = static_cast<uint64_t>(kernelBinary.size);
     binary.magic = RT_DEV_BINARY_MAGIC_ELF_AIVEC;
     binary.version = 0;
 

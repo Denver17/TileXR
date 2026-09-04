@@ -31,14 +31,12 @@ int CheckFunctionPointers()
     auto allReduce = &TileXRAllReduceEx;
     auto reduceScatter = &TileXRReduceScatterEx;
     auto broadcast = &TileXRBroadcastEx;
-    auto profileProbe = &TileXRProfileProbeEx;
 
     (void)allGather;
     (void)allToAll;
     (void)allReduce;
     (void)reduceScatter;
     (void)broadcast;
-    (void)profileProbe;
     return 0;
 }
 

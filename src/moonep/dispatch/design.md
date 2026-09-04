@@ -37,10 +37,11 @@ exchanges parent offsets, builds group-contiguous `dupLoffs` slices in two passe
 expands primary rows to all duplicate offsets. Saved-plan Dispatch skips the build and
 does not mutate `dupGroups`, `dupLoffs`, or `dupCounts`.
 
-The kernel is compiled as a pure AICore ELF, embedded and registered with
+The kernel is compiled as a pure AICore ELF, installed in `tilexr/kernels`,
+loaded relative to the owning Host library, registered with
 `rtDevBinaryRegister`/`rtFunctionRegister`, and launched by
-`rtKernelLaunchWithFlagV2`. Host wrapper launches are prohibited. Success status is
-2000; invalid route, remote failure, and timeout ranges are defined in
+`rtKernelLaunchWithFlagV2`. Host wrapper launches are prohibited. Success status
+is 2000; invalid route, remote failure, and timeout ranges are defined in
 `moonep_peer_window.h`.
 
 Validation includes Host/layout/source tests, a K=4 multi-duplicate hardware

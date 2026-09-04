@@ -135,18 +135,12 @@ extern "C" aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
 }
 
 namespace TileXRMoonEp {
-int EnsureMoonEpKernelRegistered(KernelRegistrationState &, const unsigned char *,
-    std::size_t, const void *, const char *)
+int EnsureMoonEpKernelRegistered(KernelRegistrationState &, const char *,
+    const void *, const char *)
 {
     return TileXR::TILEXR_SUCCESS;
 }
 } // namespace TileXRMoonEp
-
-extern "C" {
-extern const unsigned char TileXRMoonEpPlannerV2KernelBinaryData[] = {0};
-extern const std::size_t TileXRMoonEpPlannerV2KernelBinarySize =
-    sizeof(TileXRMoonEpPlannerV2KernelBinaryData);
-}
 
 rtError_t rtKernelLaunchWithFlagV2(const void *func, uint32_t blockDim,
     rtArgsEx_t *argsInfo, rtSmDesc_t *, rtStream_t stream, uint32_t,

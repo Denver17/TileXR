@@ -73,6 +73,7 @@ file(WRITE "${TILEXR_MOONEP_COMBINE_V2_FAKE_INCLUDE_DIR}/tilexr_api.h"
 set(TILEXR_MOONEP_COMBINE_V2_INCLUDE_DIRS
     ${TILEXR_MOONEP_COMBINE_V2_FAKE_INCLUDE_DIR}
     ${TILEXR_ROOT}/src/include
+    ${TILEXR_ROOT}/src/common
     ${TILEXR_ROOT}/src/moonep/common
     ${TILEXR_ROOT}/src/moonep/combine_v2/common
     ${TILEXR_ROOT}/src/moonep/combine_v2/host

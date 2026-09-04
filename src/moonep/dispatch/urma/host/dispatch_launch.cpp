@@ -12,16 +12,12 @@
 #include "../common/dispatch_credit.h"
 #include "../common/dispatch_schedule.h"
 #include "runtime/kernel.h"
+#include "tilexr_kernel_binary_loader.h"
 #include "tilexr_types.h"
 
 #ifndef TILEXR_MOONEP_DISPATCH_SYSTEM_CYCLES_PER_SECOND
 #define TILEXR_MOONEP_DISPATCH_SYSTEM_CYCLES_PER_SECOND UINT64_C(1000000000)
 #endif
-
-extern "C" {
-extern const unsigned char TileXRMoonEpDispatchUrmaKernelBinaryData[];
-extern const std::size_t TileXRMoonEpDispatchUrmaKernelBinarySize;
-}
 
 namespace TileXRMoonEp {
 namespace {
@@ -45,13 +41,15 @@ int EnsureDispatchKernelRegistered()
     if (gDispatchRegistered) {
         return gDispatchRegistrationStatus;
     }
-    if (TileXRMoonEpDispatchUrmaKernelBinarySize == 0 ||
-        TileXRMoonEpDispatchUrmaKernelBinarySize > UINT32_MAX) {
+    TileXR::KernelBinaryView kernelBinary {};
+    if (!TileXR::LoadKernelBinary(
+            &gDispatchRegistrationMutex,
+            "tilexr_moonep_dispatch_urma_kernel.o", &kernelBinary)) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
     rtDevBinary_t binary {};
-    binary.data = TileXRMoonEpDispatchUrmaKernelBinaryData;
-    binary.length = static_cast<uint32_t>(TileXRMoonEpDispatchUrmaKernelBinarySize);
+    binary.data = kernelBinary.data;
+    binary.length = static_cast<uint32_t>(kernelBinary.size);
     binary.magic = kAivBinaryMagic;
     binary.version = 0;
     rtError_t rtRet = rtDevBinaryRegister(&binary, &gDispatchBinaryHandle);

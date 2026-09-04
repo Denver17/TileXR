@@ -1,20 +1,16 @@
 #include "tilexr_ep.h"
 
-#ifndef TILEXR_EP_MEMORY_SUPPORTED
-#define TILEXR_EP_MEMORY_SUPPORTED 1
-#endif
-
-#if TILEXR_EP_MEMORY_SUPPORTED
 #include "ep_host.h"
 #include "ep_kernel_launch.h"
-#endif
 #include "tilexr_types.h"
 
-#if TILEXR_EP_MEMORY_SUPPORTED
 namespace {
 
 int LaunchEpDispatchMemory(const TileXREp::EpDispatchParams &params)
 {
+    if (!TileXREp::TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     int ret = TileXREp::TileXREpValidateBasicDispatchParams(params);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
@@ -30,7 +26,6 @@ int LaunchEpDispatchMemory(const TileXREp::EpDispatchParams &params)
 }
 
 } // namespace
-#endif
 
 int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
@@ -41,9 +36,6 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     int32_t *tpRecvCountsOut, void *expandScalesOut, TileXR::TileXRDataType dtype,
     TileXR::TileXRDataType expandXOutDtype, aclrtStream stream)
 {
-#if !TILEXR_EP_MEMORY_SUPPORTED
-    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
-#else
     TileXREp::EpDispatchParams params {};
     params.x = x;
     params.expertIds = expertIds;
@@ -79,5 +71,4 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     params.stream = stream;
 
     return LaunchEpDispatchMemory(params);
-#endif
 }

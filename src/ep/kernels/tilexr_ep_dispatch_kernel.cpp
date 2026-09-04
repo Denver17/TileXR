@@ -981,37 +981,3 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_cross_node_kernel(GM_AD
         TileXREpFinalizeExpertTokenNums(expertTokenNumsOutGM, localExpertNum, expertTokenNumsType);
     }
 }
-
-void launch_tilexr_ep_dispatch_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs, GM_ADDR x, GM_ADDR expertIds,
-    GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut,
-    GM_ADDR epRecvCountsOut, GM_ADDR tpRecvCountsOut, GM_ADDR assistInfoForCombineOut, GM_ADDR workspace,
-    int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes,
-    int64_t payloadRowBytes,
-    int64_t payloadBytesPerSlot, int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes,
-    int64_t expertTokenNumsType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t quantMode,
-    int64_t tpWorldSize, int64_t tpRankId, int64_t magic)
-{
-    tilexr_ep_dispatch_kernel<<<blockDim, nullptr, stream>>>(commArgs, x, expertIds, scales, xActiveMask, expandXOut,
-        dynamicScalesOut, expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, assistInfoForCombineOut, workspace,
-        bs, h, topK, moeExpertNum,
-        dtypeBytes, maxRoutesPerSrc, rowBytes, payloadRowBytes, payloadBytesPerSlot, assistBytesPerSlot, slotBytes, totalBytes,
-        expertTokenNumsType, sharedExpertNum, sharedExpertRankNum, quantMode, tpWorldSize, tpRankId, magic);
-}
-
-void launch_tilexr_ep_dispatch_cross_node_kernel(uint32_t blockDim, void *stream, GM_ADDR commArgs, GM_ADDR x,
-    GM_ADDR expertIds, GM_ADDR scales, GM_ADDR xActiveMask, GM_ADDR expandXOut, GM_ADDR dynamicScalesOut,
-    GM_ADDR expertTokenNumsOut, GM_ADDR epRecvCountsOut, GM_ADDR tpRecvCountsOut,
-    GM_ADDR assistInfoForCombineOut, GM_ADDR workspace, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, int64_t dtypeBytes, int64_t maxRoutesPerSrc, int64_t rowBytes,
-    int64_t payloadRowBytes,
-    int64_t payloadBytesPerSlot, int64_t assistBytesPerSlot, int64_t slotBytes, int64_t totalBytes,
-    int64_t expertTokenNumsType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t quantMode,
-    int64_t tpWorldSize, int64_t tpRankId, int64_t magic)
-{
-    tilexr_ep_dispatch_cross_node_kernel<<<blockDim, nullptr, stream>>>(commArgs, x, expertIds, scales, xActiveMask,
-        expandXOut, dynamicScalesOut, expertTokenNumsOut, epRecvCountsOut, tpRecvCountsOut, assistInfoForCombineOut, workspace,
-        bs, h, topK, moeExpertNum, dtypeBytes, maxRoutesPerSrc, rowBytes, payloadRowBytes, payloadBytesPerSlot, assistBytesPerSlot,
-        slotBytes, totalBytes, expertTokenNumsType, sharedExpertNum, sharedExpertRankNum, quantMode, tpWorldSize,
-        tpRankId, magic);
-}

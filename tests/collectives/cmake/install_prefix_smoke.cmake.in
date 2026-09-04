@@ -21,6 +21,8 @@ else()
     set(TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR "${TILEXR_SMOKE_INSTALL_PREFIX}/${TILEXR_SMOKE_INSTALL_LIBDIR}")
 endif()
 set(TILEXR_SMOKE_LD_LIBRARY_PATH "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}")
+set(TILEXR_SMOKE_KERNEL_DIR
+    "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}/tilexr/kernels")
 if(DEFINED ENV{LD_LIBRARY_PATH} AND NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "")
     set(TILEXR_SMOKE_LD_LIBRARY_PATH "${TILEXR_SMOKE_LD_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
 endif()
@@ -44,6 +46,16 @@ execute_process(
 if(NOT tilexr_smoke_result EQUAL 0)
     message(FATAL_ERROR "cmake --install failed for collectives install-prefix smoke")
 endif()
+
+foreach(tilexr_kernel
+    tilexr_collectives_op.o
+    tilexr_alltoall_a5_kernel.o
+    tilexr_alltoall_a5_kernel_128.o)
+    if(NOT EXISTS "${TILEXR_SMOKE_KERNEL_DIR}/${tilexr_kernel}")
+        message(FATAL_ERROR
+            "Installed collectives kernel not found: ${TILEXR_SMOKE_KERNEL_DIR}/${tilexr_kernel}")
+    endif()
+endforeach()
 
 find_program(TILEXR_READELF readelf)
 if(TILEXR_READELF)
@@ -78,6 +90,25 @@ if(TILEXR_READELF)
     endif()
 else()
     message(STATUS "readelf not found; skipping libtilexr-collectives.so DT_NEEDED smoke check")
+endif()
+
+find_program(TILEXR_NM nm)
+if(TILEXR_NM AND TILEXR_SMOKE_COLLECTIVES_LIB)
+    execute_process(
+        COMMAND "${TILEXR_NM}" -D "${TILEXR_SMOKE_COLLECTIVES_LIB}"
+        RESULT_VARIABLE tilexr_smoke_result
+        OUTPUT_VARIABLE tilexr_smoke_nm_output
+        ERROR_VARIABLE tilexr_smoke_nm_error
+    )
+    if(NOT tilexr_smoke_result EQUAL 0)
+        message(FATAL_ERROR
+            "nm -D failed for ${TILEXR_SMOKE_COLLECTIVES_LIB}: ${tilexr_smoke_nm_error}")
+    endif()
+    if(tilexr_smoke_nm_output MATCHES
+        "TileXR(Collectives|AllToAllA5Kernel|AllToAllA5Kernel128)Binary(Data|Size)")
+        message(FATAL_ERROR
+            "Installed libtilexr-collectives.so still exports embedded kernel data")
+    endif()
 endif()
 
 message(STATUS "Configuring standalone collectives tests from install prefix")

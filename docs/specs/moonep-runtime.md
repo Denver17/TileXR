@@ -18,9 +18,10 @@ facade in `integrations/moonep_torch/tilexr_moonep/`. The contract consumed by
 ## Ownership and Lifetime
 
 The caller owns tensors, ACL streams, communicators, and workspace allocations.
-Native Host entries validate arguments and launch embedded pure AICore binaries
-through `rtDevBinaryRegister`, `rtFunctionRegister`, and
-`rtKernelLaunchWithFlagV2`. Host `kernel<<<...>>>` wrappers are not supported.
+Native Host entries validate arguments, load pure AICore binaries from the
+owning library's `tilexr/kernels` directory, and launch them through
+`rtDevBinaryRegister`, `rtFunctionRegister`, and `rtKernelLaunchWithFlagV2`.
+Host `kernel<<<...>>>` wrappers are not supported.
 
 A saved plan and its backing storage remain alive through Dispatch,
 PrefetchWeight, Combine, and both backward branches. Asynchronous events guard

@@ -6,17 +6,14 @@
 #include "reduce_grad_common.h"
 #include "reduce_grad_host.h"
 #include "runtime/kernel.h"
+#include "tilexr_kernel_binary_loader.h"
 #include "tilexr_types.h"
 
 #ifndef UINTPTR_C
 #define UINTPTR_C(value) static_cast<uintptr_t>(value)
 #endif
 
-extern "C" {
-extern const unsigned char TileXRMoonEpReduceGradKernelBinaryData[] = {0x7f, 'E', 'L', 'F'};
-extern const std::size_t TileXRMoonEpReduceGradKernelBinarySize =
-    sizeof(TileXRMoonEpReduceGradKernelBinaryData);
-}
+const unsigned char kReduceGradKernelBinary[] = {0x7f, 'E', 'L', 'F'};
 
 namespace {
 
@@ -159,10 +156,10 @@ void TestLaunch()
     Check(g_binaryRegisterCalls == 3 && g_functionRegisterCalls == 2 &&
         g_launchCalls == 1 && g_magicCalls == 1,
         "successful registration/launch counts mismatch");
-    Check(g_binary.data == TileXRMoonEpReduceGradKernelBinaryData &&
-        g_binary.length == TileXRMoonEpReduceGradKernelBinarySize &&
+    Check(g_binary.data == kReduceGradKernelBinary &&
+        g_binary.length == sizeof(kReduceGradKernelBinary) &&
         g_binary.magic == RT_DEV_BINARY_MAGIC_ELF_AIVEC,
-        "embedded pure-AIV binary descriptor mismatch");
+        "external pure-AIV binary descriptor mismatch");
     Check(g_functionStub != nullptr &&
         g_functionStubName == "tilexr_moonep_reduce_grad_kernel" &&
         g_functionKernelInfo == "tilexr_moonep_reduce_grad_kernel",
@@ -220,6 +217,22 @@ void TestLaunch()
 }
 
 } // namespace
+
+namespace TileXR {
+
+bool LoadKernelBinary(const void *, const char *fileName,
+    KernelBinaryView *binary)
+{
+    if (fileName == nullptr || binary == nullptr ||
+        std::string(fileName) != "tilexr_moonep_reduce_grad_kernel.o") {
+        return false;
+    }
+    binary->data = kReduceGradKernelBinary;
+    binary->size = sizeof(kReduceGradKernelBinary);
+    return true;
+}
+
+} // namespace TileXR
 
 extern "C" int TileXRCommNextMagic(TileXRCommPtr, int64_t *magic)
 {
