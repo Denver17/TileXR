@@ -40,7 +40,7 @@ TileXRCollectives::Host::HostLaunchContext MakeContext(int rankSize)
 
 int main()
 {
-    for (const int rankSize : {8, 16, 32, 64, 128}) {
+    for (int rankSize = 8; rankSize <= 128; rankSize += 8) {
         auto context = MakeContext(rankSize);
         CHECK_TRUE(TileXRCollectives::Host::IsA5AllToAllCandidate(
             context, TileXR::TILEXR_DATA_TYPE_INT32));
@@ -50,6 +50,9 @@ int main()
     CHECK_TRUE(!TileXRCollectives::Host::IsA5AllToAllCandidate(
         context, TileXR::TILEXR_DATA_TYPE_FP32));
     context = MakeContext(4);
+    CHECK_TRUE(!TileXRCollectives::Host::IsA5AllToAllCandidate(
+        context, TileXR::TILEXR_DATA_TYPE_INT32));
+    context = MakeContext(63);
     CHECK_TRUE(!TileXRCollectives::Host::IsA5AllToAllCandidate(
         context, TileXR::TILEXR_DATA_TYPE_INT32));
     context = MakeContext(16);

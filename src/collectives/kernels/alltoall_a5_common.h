@@ -141,7 +141,7 @@ inline bool AlignUp(uint64_t value, uint64_t &out)
 TILEXR_GROUPED_HOST_DEVICE_INLINE bool ValidRankSize(uint32_t rankSize)
 {
     return rankSize >= kMinRankSize && rankSize <= kMaxRankSize &&
-        (rankSize & (rankSize - 1U)) == 0U;
+        rankSize % kRanksPerNode == 0U;
 }
 
 enum class KernelVariant : uint32_t {
@@ -155,7 +155,7 @@ TILEXR_GROUPED_HOST_DEVICE_INLINE KernelVariant SelectKernelVariant(uint32_t ran
     if (!ValidRankSize(rankSize)) {
         return KernelVariant::Invalid;
     }
-    return rankSize == 128U ? KernelVariant::Rank128 : KernelVariant::Rank64;
+    return rankSize <= 64U ? KernelVariant::Rank64 : KernelVariant::Rank128;
 }
 
 TILEXR_GROUPED_HOST_DEVICE_INLINE bool SupportedQpCount(uint32_t qpCount)

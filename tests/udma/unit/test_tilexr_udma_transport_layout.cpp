@@ -305,7 +305,7 @@ int main()
     TestRejectsInvalidLayouts();
     TestRejectsDeviceAddressOverflow();
     TestProfileControlledRemoteQpMapping();
-    for (uint32_t rankSize : {16U, 32U, 64U, 128U}) {
+    for (uint32_t rankSize = 8U; rankSize <= 128U; rankSize += 8U) {
         TestGroupedSharedQpLaneMatchesPeerSchedule(rankSize);
         TestGroupedRemoteQpMappingIsPermutation(rankSize);
         TestGroupedDirectQpMapping(rankSize);

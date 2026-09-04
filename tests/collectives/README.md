@@ -70,7 +70,9 @@ Main options are `--op allgather|alltoall|allreduce|reducescatter|broadcast|noop
 `--max-latency-us` are available but are not set by default.
 
 Use `--comm-mode shared-qp --comm-domain N` to initialize the shared-QP
-communicator required by the A5 grouped AllToAll path.
+communicator required by the A5 grouped AllToAll path. That path supports
+uniform eight-rank nodes and global rank sizes divisible by eight from 8 through
+128; include a 24-rank run when validating non-power-of-two scale support.
 
 Use `--batch-timing 1` to enqueue all measured iterations after warmup and
 synchronize the stream once at the end. The reported average is the batch Host

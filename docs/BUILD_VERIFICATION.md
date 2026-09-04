@@ -377,6 +377,12 @@ dependencies during compilation. Test targets that directly consume private Host
 headers must declare the private include directories required by those headers;
 linking `tilexr-collectives` does not propagate its `PRIVATE` include paths.
 
+The full `tilexr-collectives` target is the compile gate: it must rebuild both the
+generic collective binary and every grouped A5 binary from a clean directory.
+Compiling only a grouped binary can miss shared-header API drift in the generic
+kernel, including profiling recorder signature changes, because all embedded
+binaries are required inputs of the same Host library.
+
 Expected artifact and removed-surface checks:
 
 ```bash
@@ -391,7 +397,8 @@ Host tests establish layout, exact profile classification, and communicator
 resource teardown only. They do not prove A5 UDMA transfers.
 
 For data-plane qualification, retain the matching one-time HCCL Test baseline,
-then validate 2x8, 4x8, and 8x8 in that order. For every scale cover generic
+then validate 2x8, 3x8, 4x8, and 8x8 in that order. The 3x8 run is the required
+non-power-of-two rank-count gate. For every scale cover generic
 AllToAll regression, repeated A5 calls, a larger call that grows the workspace,
 communicator teardown, and profiling with complete fixed-slot rounds for every
 active core. Record correctness and performance per rank; do not claim an
@@ -409,7 +416,7 @@ for the grouped path. The multi-host profiling suite applies these settings
 automatically to int32 AllToAll cases while leaving generic cases unchanged.
 
 After changing UDMA teardown, validate lifecycle reuse rather than accepting a
-single clean data transfer. At 16P, 32P, and 64P, run at least 20 consecutive
+single clean data transfer. At 16P, 24P, 32P, and 64P, run at least 20 consecutive
 `init -> run -> destroy -> init` cycles with the grouped shared-QP profile. Every
 destroy and immediate reinitialization must succeed, logs must contain no TileXR
 `unimport failed`, `cleanup incomplete`, `128103`, double-free, or invalid-pointer

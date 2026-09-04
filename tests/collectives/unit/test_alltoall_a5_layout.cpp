@@ -163,6 +163,16 @@ void TestLayout()
     assert(layout128.signalPlaneBytes ==
         128U * TileXRGrouped::kSignalPeerStrideBytes);
 
+    const auto layout24 = TileXRGrouped::BuildLayout(24U, 1024U);
+    assert(layout24.valid);
+    assert(layout24.bytesPerRank == 96U * 1024U);
+    assert(layout24.groupCount == 2U);
+
+    const auto layout72 = TileXRGrouped::BuildLayout(72U, 1024U);
+    assert(layout72.valid);
+    assert(layout72.bytesPerRank == 288U * 1024U);
+    assert(layout72.groupCount == 5U);
+
     assert(TileXRGrouped::BuildLayout(8U, 1U).valid);
     assert(!TileXRGrouped::BuildLayout(136U, 1U).valid);
     assert(!TileXRGrouped::BuildLayout(16U, 0U).valid);
@@ -171,18 +181,17 @@ void TestLayout()
 
 void TestSupportedRanksAndKernelDispatch()
 {
-    constexpr uint32_t supported[] = {8U, 16U, 32U, 64U, 128U};
-    for (uint32_t rankSize : supported) {
+    for (uint32_t rankSize = 8U; rankSize <= 128U; rankSize += 8U) {
         assert(TileXRGrouped::ValidRankSize(rankSize));
         assert(TileXRGrouped::BuildLayout(rankSize, 1U).valid);
-        const auto expected = rankSize == 128U ?
-            TileXRGrouped::KernelVariant::Rank128 :
-            TileXRGrouped::KernelVariant::Rank64;
+        const auto expected = rankSize <= 64U ?
+            TileXRGrouped::KernelVariant::Rank64 :
+            TileXRGrouped::KernelVariant::Rank128;
         assert(TileXRGrouped::SelectKernelVariant(rankSize) == expected);
     }
     constexpr uint32_t unsupported[] = {
-        0U, 1U, 2U, 4U, 7U, 9U, 15U, 24U, 48U,
-        72U, 80U, 96U, 120U, 127U, 129U, 136U,
+        0U, 1U, 2U, 4U, 7U, 9U, 15U, 23U, 25U,
+        63U, 65U, 127U, 129U, 136U,
     };
     for (uint32_t rankSize : unsupported) {
         assert(!TileXRGrouped::ValidRankSize(rankSize));
@@ -225,21 +234,11 @@ void TestProfilingLaunchCapacity()
 
 int main()
 {
-    TestCoverage(8U);
-    TestCoverage(16U);
-    TestCoverage(32U);
-    TestCoverage(64U);
-    TestCoverage(128U);
-    TestInverse(8U);
-    TestInverse(16U);
-    TestInverse(32U);
-    TestInverse(64U);
-    TestInverse(128U);
-    TestCreditRing(8U);
-    TestCreditRing(16U);
-    TestCreditRing(32U);
-    TestCreditRing(64U);
-    TestCreditRing(128U);
+    for (uint32_t rankSize = 8U; rankSize <= 128U; rankSize += 8U) {
+        TestCoverage(rankSize);
+        TestInverse(rankSize);
+        TestCreditRing(rankSize);
+    }
     Test128PartitionBalancedSchedule();
     TestLayout();
     TestSupportedRanksAndKernelDispatch();

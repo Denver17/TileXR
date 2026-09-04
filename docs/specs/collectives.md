@@ -21,10 +21,9 @@ library accepts a TileXR communicator and an ACL stream; it does not own either.
   and algorithm support before launching.
 - Multi-rank AllToAll retains the generic `TOPO_910_93` implementation. On
   Ascend950/A5, `TileXRAllToAll` may internally select the grouped kernel for
-  `int32`, rank sizes 8/16/32/64/128, and eight local ranks. Both generic and
-  A5 binaries are external runtime artifacts owned by
-  `libtilexr-collectives.so`; there is no separate grouped public API or Host
-  library.
+  `int32`, rank sizes from 8 through 128 that are divisible by 8, and eight
+  local ranks. Rank sizes through 64 use the 64-rank binary; larger sizes use
+  the 128-rank binary. there is no separate grouped public API or library.
 - Sources under `reference/` are comparison-only and are never linked into the
   active target.
 
@@ -43,6 +42,9 @@ The A5 path requires UDMA shared-QP, SDMA, and Credit readiness plus the exact
 validated 39-QP grouped route descriptor. A raw QP count is not an algorithm
 selector. Its registered workspace profile is explicitly classified as the A5
 grouped AllToAll profile and binds all 39 QPs to the single workspace region.
+The eight-rank divisibility requirement preserves complete, uniform local
+nodes; non-multiples such as 63 remain unsupported because the communicator
+does not represent uneven per-node rank counts.
 
 The communicator owns the private A5 runtime. The first launch allocates and
 registers its workspace; equal or smaller calls reuse it without Host

@@ -20,6 +20,12 @@ For every non-empty route, the send core uses one selected QP and publishes:
 3. one doorbell after both WQEs are in the SQ;
 4. one quiet through the signal WQE completion frontier.
 
+Both WQEs are assembled completely in UB and copied to the SQ with MTE3. The
+doorbell is rung with `st_dev` only after both MTE3 copies complete. Direct GM
+construction is unsafe here: it does not provide the publication ordering that
+the device consumes, and larger peer schedules can expose that as a vector-core
+exception before a device status record is visible.
+
 The signal WQE, rather than an MTE write after quiet, makes payload visibility
 and readiness one ordered transport operation. Receive cores poll the registered
 signal plane. Credit remains in the communicator's dedicated IPC Credit buffer.

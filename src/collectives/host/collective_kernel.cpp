@@ -281,7 +281,8 @@ int LaunchA5AllToAllKernel(uint32_t rankSize,
     if (configRet != TileXR::TILEXR_SUCCESS) {
         return configRet;
     }
-    const void *stub = rankSize == 128U ?
+    const void *stub = TileXRGrouped::SelectKernelVariant(rankSize) ==
+        TileXRGrouped::KernelVariant::Rank128 ?
         static_cast<const void *>(&g_a5Kernel128Stub) :
         static_cast<const void *>(&g_a5KernelStub);
     const rtError_t ret = rtKernelLaunchWithFlagV2(stub,

@@ -498,10 +498,10 @@ void TestDeferredProfilePutUsesBoundRegions()
         "profile PUT uses the registered local source offset");
 }
 
-void TestProfileRawPayloadThenOrderedSignalImmediatePosts()
+void TestProfileRawPayloadThenOrderedSignalBatch()
 {
     Fixture fixture;
-    AscendC::LocalTensor<uint8_t> scratch;
+    auto scratch = fixture.Scratch();
     const size_t remoteBase = TILEXR_UDMA_PROFILE_MAX_REGIONS;
     fixture.profileRegistry.qpBindings[0] = {0U, 0U};
     fixture.profileRegistry.regions[remoteBase].base = fixture.remoteRegion.data();
@@ -509,23 +509,38 @@ void TestProfileRawPayloadThenOrderedSignalImmediatePosts()
     fixture.sqDoorbell[0] = 73U;
     const uint8_t* rawPayload = fixture.remoteRegionThree.data() + 24U;
 
+    AscendC::LocalTensor<uint8_t> missingScratch;
     Check(UDMAProfilePutRawLocalNbiOnQp(
+        &fixture.args, &fixture.info, &fixture.profileRegistry, missingScratch,
+        1, 0U, rawPayload, 0U, 0U, 32U, 64U,
+        TILEXR_UDMA_SQE_FLAG_COMPLETION) == TILEXR_UDMA_STATUS_INVALID,
+        "raw-local immediate PUT rejects missing MTE scratch");
+    Check(UDMAProfilePutNbiOnQpWithFlag(
+        &fixture.args, &fixture.info, &fixture.profileRegistry, missingScratch,
+        1, 0U, 0U, 8U, 0U, 128U, sizeof(uint64_t),
+        TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION) == TILEXR_UDMA_STATUS_INVALID,
+        "registered immediate PUT rejects missing MTE scratch");
+    Check(fixture.sqHead[0] == 0U && fixture.wqeCount[0] == 0U &&
+        fixture.sqDoorbell[0] == 73U,
+        "invalid scratch cannot publish or ring a profile WQE");
+
+    Check(UDMAProfilePutRawLocalNbiOnQpDeferred(
         &fixture.args, &fixture.info, &fixture.profileRegistry, scratch,
         1, 0U, rawPayload, 0U, 0U, 32U, 64U,
         TILEXR_UDMA_SQE_FLAG_COMPLETION) == TILEXR_UDMA_STATUS_SUCCESS,
-        "raw-local profile payload PUT succeeds without MTE scratch");
+        "raw-local profile payload PUT succeeds through MTE scratch");
     Check(fixture.sqHead[0] == 1U && fixture.wqeCount[0] == 1U &&
-        fixture.sqDoorbell[0] == 1U,
-        "payload PUT immediately publishes its SQ entry");
-    Check(UDMAProfilePutNbiOnQpWithFlag(
+        fixture.sqDoorbell[0] == 73U,
+        "payload PUT defers its doorbell");
+    Check(UDMAProfilePutNbiOnQpWithFlagDeferred(
         &fixture.args, &fixture.info, &fixture.profileRegistry, scratch,
         1, 0U, 0U, 8U, 0U, 128U, sizeof(uint64_t),
         TILEXR_UDMA_SQE_FLAG_ORDERED_COMPLETION) == TILEXR_UDMA_STATUS_SUCCESS,
         "registered ordered signal PUT succeeds");
     Check(fixture.sqHead[0] == 2U && fixture.wqeCount[0] == 2U,
         "payload and signal occupy two ordered SQ entries");
-    Check(fixture.sqDoorbell[0] == 2U,
-        "signal PUT immediately publishes the ordered completion frontier");
+    Check(fixture.sqDoorbell[0] == 73U,
+        "signal PUT also defers its doorbell");
 
     const UDMASqeCtx* payloadSqe = fixture.Sqe(0U, 0U);
     const UDMASqeCtx* signalSqe = fixture.Sqe(0U, 1U);
@@ -543,13 +558,22 @@ void TestProfileRawPayloadThenOrderedSignalImmediatePosts()
         payloadSge->tokenId == fixture.wq[Fixture::kQpNum].localTokenId,
         "payload and signal use the same QP local registration token");
 
+    const uint32_t frontier = UDMAProfileCompletionFrontier(&fixture.args,
+        &fixture.info, &fixture.profileRegistry, 1, 0U);
+    Check(frontier == 2U, "batch frontier covers payload and signal");
+    Check(UDMAProfileFlushQpDoorbell(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U) == TILEXR_UDMA_STATUS_SUCCESS,
+        "one doorbell publishes the payload and signal batch");
+    Check(fixture.sqDoorbell[0] == frontier,
+        "doorbell publishes the final SQ head");
+
     fixture.Cqe(0U, 0U)->owner = 1U;
     fixture.Cqe(0U, 0U)->entryIdx = 0U;
     fixture.Cqe(0U, 1U)->owner = 1U;
     fixture.Cqe(0U, 1U)->entryIdx = 1U;
-    Check(UDMAProfileQuietStatusOnQp(&fixture.args, &fixture.info,
-        &fixture.profileRegistry, 1, 0U) == TILEXR_UDMA_STATUS_SUCCESS,
-        "quiet consumes payload and ordered signal completions");
+    Check(UDMAProfileQuietStatusOnQpUntil(&fixture.args, &fixture.info,
+        &fixture.profileRegistry, 1, 0U, frontier) == TILEXR_UDMA_STATUS_SUCCESS,
+        "quiet consumes payload and ordered signal through the batch frontier");
     Check(fixture.sqTail[0] == 2U && fixture.cqTail[0] == 2U,
         "completion-count quiet reclaims both SQ entries");
 }
@@ -819,7 +843,7 @@ int main()
     TestGetAndLegacyQp0Wrappers();
     TestDeferredProfileGetAndCompletionFrontier();
     TestDeferredProfilePutUsesBoundRegions();
-    TestProfileRawPayloadThenOrderedSignalImmediatePosts();
+    TestProfileRawPayloadThenOrderedSignalBatch();
     TestProfileQuietUsesSqFrontierAcrossNonCompletionGap();
     TestExplicitCompletionTargetDoesNotRereadPublishedCount();
     TestWriteNotifyWrapsWithinSqRing();

@@ -303,7 +303,7 @@ __aicore__ inline bool SendRoute(const KernelContext &ctx, uint32_t core,
         static_cast<uint64_t>(peer) * ctx.bytesPerPeer + routeOffset;
     const uint64_t remotePayloadOffset = ctx.payloadOffset[plane] +
         static_cast<uint64_t>(ctx.rank) * ctx.bytesPerPeer + routeOffset;
-    const uint32_t post = TileXR::UDMAProfilePutRawLocalNbiOnQp(
+    const uint32_t post = TileXR::UDMAProfilePutRawLocalNbiOnQpDeferred(
         ctx.comm, ctx.profileInfo, ctx.registry, wqeLocal,
         static_cast<int32_t>(peer), qp, localPayload,
         TileXRGrouped::kWorkspaceRegion, TileXRGrouped::kWorkspaceRegion,
@@ -325,7 +325,7 @@ __aicore__ inline bool SendRoute(const KernelContext &ctx, uint32_t core,
         reinterpret_cast<__gm__ uint8_t *>(signalSource), sizeof(uint64_t));
     const uint64_t remoteSignalOffset = ctx.signalOffset[plane] +
         TileXRGrouped::SignalByteOffset(ctx.rank, route);
-    const uint32_t signalPost = TileXR::UDMAProfilePutNbiOnQpWithFlag(
+    const uint32_t signalPost = TileXR::UDMAProfilePutNbiOnQpWithFlagDeferred(
         ctx.comm, ctx.profileInfo, ctx.registry, wqeLocal,
         static_cast<int32_t>(peer), qp,
         TileXRGrouped::kWorkspaceRegion, localSignalOffset,
@@ -338,12 +338,23 @@ __aicore__ inline bool SendRoute(const KernelContext &ctx, uint32_t core,
             static_cast<int32_t>(peer), signalPost);
         return false;
     }
+    const uint32_t completionFrontier = TileXR::UDMAProfileCompletionFrontier(
+        ctx.comm, ctx.profileInfo, ctx.registry, static_cast<int32_t>(peer), qp);
+    const uint32_t flush = TileXR::UDMAProfileFlushQpDoorbell(
+        ctx.comm, ctx.profileInfo, ctx.registry, static_cast<int32_t>(peer), qp);
+    if (flush != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
+        RecordPeerInterval(profiler, kEventSendPutSignalBase, peer,
+            putBegin, ProfilingCycle());
+        RecordStatus(ctx.status, core, kStatusPostFailed, group,
+            static_cast<int32_t>(peer), flush);
+        return false;
+    }
     RecordPeerInterval(profiler, kEventSendPutSignalBase, peer,
         putBegin, ProfilingCycle());
     const uint64_t quietBegin = ProfilingCycle();
-    const uint32_t quiet = TileXR::UDMAProfileQuietStatusOnQp(
+    const uint32_t quiet = TileXR::UDMAProfileQuietStatusOnQpUntil(
         ctx.comm, ctx.profileInfo, ctx.registry,
-        static_cast<int32_t>(peer), qp);
+        static_cast<int32_t>(peer), qp, completionFrontier);
     if (quiet != TileXR::TILEXR_UDMA_STATUS_SUCCESS) {
         RecordPeerInterval(profiler, kEventSendQuietBase, peer,
             quietBegin, ProfilingCycle());

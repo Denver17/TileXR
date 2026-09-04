@@ -28,7 +28,7 @@ The A5 path is a candidate only when all of the following are true:
 
 - the communicator reports Ascend950/A5 capability;
 - `dataType` is `int32`;
-- rank size is one of 8, 16, 32, 64, or 128;
+- rank size is between 8 and 128 inclusive and divisible by eight;
 - local rank size is eight;
 - UDMA, shared QP, SDMA, and Credit resources are available;
 - the runtime owns a complete grouped profile with exactly 39 QPs, the expected
@@ -127,7 +127,8 @@ The kernel implementation lives under `src/collectives/kernels` as
 
 - 32 send AIV cores and one SDMA receive/copyout core;
 - ordered payload and signal publication, Credit closure, and bounded waits;
-- dedicated 64P and 128P variants, with 8/16/32/64 using the former;
+- dedicated 64P and 128P variants, with rank sizes through 64 using the former
+  and larger rank sizes using the latter;
 - the established balanced 128-rank partition schedule.
 
 Profiling uses a fixed per-invocation slot from the communicator runtime. It
@@ -179,7 +180,7 @@ Target validation then covers:
 
 1. CANN 9.1 Host and both A5 kernel builds with staged external objects;
 2. generic AllToAll regression on supported existing topology;
-3. A5 correctness and repeated-call reuse at 2x8, 4x8, and 8x8 ranks;
+3. A5 correctness and repeated-call reuse at 2x8, 3x8, 4x8, and 8x8 ranks;
 4. a larger request after reuse to exercise workspace/profile expansion;
 5. communicator destruction with resource-release evidence;
 6. trace completeness for every active core;
