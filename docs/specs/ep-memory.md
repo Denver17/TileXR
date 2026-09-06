@@ -7,6 +7,9 @@ The optional EP library exports Dispatch and Combine interfaces from
 same-node and cross-node traffic. It is distinct from the UDMA backend and must
 not be selected solely from topology.
 
+The in-progress [server deduplication design](ep-memory-server-dedup.md) records
+forwarding metadata for a future mode; it is not part of the implemented ABI.
+
 The Host layer validates public arguments, builds a round-specific window
 layout, loads the selected kernel from the Host library's `tilexr/kernels`
 directory, and launches through the registered AICore signature. The
