@@ -1,98 +1,81 @@
-# Expert-Parallel Memory Backend Specification
+# EP Memory 后端规格
 
-## Scope
+## 范围
 
-The optional EP library exports Dispatch and Combine interfaces from
-`src/include/tilexr_ep.h`. Its memory backend uses communicator peer mappings for
-same-node and cross-node traffic. It is distinct from the UDMA backend and must
-not be selected solely from topology.
+可选 EP 库通过 `src/include/tilexr_ep.h` 导出 Dispatch 和 Combine 接口。
+Memory 后端使用 communicator 的 peer 映射承载同节点和跨节点通信。
+它与 UDMA 后端相互独立，不能仅根据拓扑选择后端。
 
-The in-progress [server deduplication design](ep-memory-server-dedup.md) records
-forwarding metadata for a future mode; it is not part of the implemented ABI.
+正在讨论的[服务器级去重设计](ep-memory-server-dedup.md)记录了未来模式所需的转发元数据，
+尚不属于已实现的 ABI。
 
-The Host layer validates public arguments, builds a round-specific window
-layout, loads the selected kernel from the Host library's `tilexr/kernels`
-directory, and launches through the registered AICore signature. The
-communicator and stream are borrowed; EP owns only its launch metadata and
-kernel registration.
+Host 层负责校验公共参数、构建当前轮次的窗口布局，从 Host 库的 `tilexr/kernels`
+目录加载所选 kernel，并通过已注册的 AICore signature 发起 launch。
+Communicator 和 stream 由调用方提供，EP 不拥有它们；EP 仅拥有自身的 launch 元数据和 kernel 注册资源。
 
-EP packaging is SoC-independent at configure time. Ordinary Dispatch/Combine
-and their Memory variants are all A5-only and are shipped as four external
-AICore objects in one installation; no 910B EP kernel variant is produced.
-`libtilexr-ep.so` checks `aclrtGetSocName()` at each public entry point and
-returns `TILEXR_ERROR_NOT_SUPPORT` on non-A5 hardware before context preparation,
-kernel loading, registration, or magic-value advancement.
+EP 打包在 configure 阶段不依赖具体 SoC。普通 Dispatch/Combine 及其 Memory 变体均仅支持 A5，
+同一次安装交付四个外置 AICore object，不生成 910B EP kernel 变体。
+`libtilexr-ep.so` 在每个公共入口调用 `aclrtGetSocName()` 检查 SoC；
+对于非 A5 硬件，在准备 context、加载或注册 kernel、推进 magic 值之前，
+返回 `TILEXR_ERROR_NOT_SUPPORT`。
 
-## Dispatch Contract
+## Dispatch 契约
 
-Dispatch routes input rows to expert owners and returns expert-local payload,
-combine-assist metadata, and receive counts according to the selected API
-version. V2 additionally preserves active-mask, quantization, scale, and expanded
-output contracts declared in `tilexr_ep.h`.
+Dispatch 将输入行路由到 expert owner，并按所选 API 版本返回 expert 本地 payload、
+Combine 所需的 assist 元数据和接收计数。V2 还保留 `tilexr_ep.h` 声明的
+active-mask、量化、scale 和展开输出契约。
 
-The memory kernel uses a generation-tagged round in the peer window. Sender,
-count/cumsum, local-copy, and receiver stages have disjoint state and workspace
-regions. Every state cell has a unique writer, and consumers wait for the
-generation associated with the current launch.
+Memory kernel 在 peer window 中使用带 generation 标记的轮次。
+发送、count/cumsum、本地 copy 和接收阶段使用互不重叠的状态及 workspace 区域。
+每个状态单元只有一个写入者，消费者等待当前 launch 对应的 generation。
 
-MXFP8 modes preserve the public E4M3/E5M2 selection, packed-row format, and
-dynamic-scale output. Unsupported quantization or dtype combinations fail Host
-validation.
+MXFP8 模式保留公共接口中的 E4M3/E5M2 选择、打包行格式和动态 scale 输出。
+不受支持的量化或 dtype 组合会在 Host 校验阶段失败。
 
-## Combine Contract
+## Combine 契约
 
-Combine consumes expert output plus Dispatch-produced assist/count metadata and
-restores token order, applying expert weights where required by the selected
-entry point. The memory kernel follows the same generation and peer-window
-ownership model as Dispatch while keeping Dispatch and Combine buffers separate.
+Combine 消费 expert 输出以及 Dispatch 生成的 assist/count 元数据，恢复 token 顺序，
+并按所选入口的要求应用 expert weight。Memory kernel 与 Dispatch 遵循相同的
+generation 和 peer window 所有权模型，同时将 Dispatch 与 Combine buffer 分开。
 
-Accumulation order and precision are part of the API behavior. Empty routes and
-inactive tokens remain valid inputs and must not read uninitialized peer-window
-rows.
+累加顺序和精度属于 API 行为的一部分。空 route 和 inactive token 都是有效输入，
+不得读取 peer window 中未初始化的行。
 
-## Window and Round Ownership
+## 窗口与轮次所有权
 
-`src/ep/common/ep_memory_window.h` and the Host layout helpers define the
-authoritative window partition. Payload, status, count, synchronization,
-profiling, and scratch regions do not overlap. A round is reusable only after
-all producers and consumers have crossed its completion boundary; a new
-generation distinguishes stale state without bulk-clearing the shared window.
+`src/ep/common/ep_memory_window.h` 和 Host 布局 helper 定义了权威的窗口分区。
+Payload、status、count、同步、profiling 和 scratch 区域互不重叠。
+只有所有生产者和消费者都越过该轮次的完成边界后，轮次资源才可复用；
+新 generation 用于区分过期状态，无需批量清空共享窗口。
 
-Memory supports cross-node mapped peer traffic. UDMA is selected only when the
-specific entry point, communicator capability, payload, and registered workspace
-contract require it.
+Memory 支持跨节点的映射 peer 通信。只有具体入口、communicator 能力、
+payload 和已注册 workspace 契约要求使用 UDMA 时，才选择 UDMA。
 
 ## Profiling
 
-Dispatch and Combine use separate fixed-size profiling records declared in
-`src/ep/common/ep_dispatch_memory_profile.h` and
-`src/ep/common/ep_combine_memory_profile.h`. Profiling is compile-time opt-in,
-does not alter the public ABI, and writes only the owning core's record.
-Every profiling call must reference a timestamp or metric that exists in the
-matching record definition and has a live start value in the same feature
-configuration. Removing a profiling field therefore requires removing its
-producer call as well; the default profiling-off CCE build is the minimum
-validation boundary for such cleanup.
+Dispatch 和 Combine 使用各自独立的定长 profiling record，分别声明于
+`src/ep/common/ep_dispatch_memory_profile.h` 和
+`src/ep/common/ep_combine_memory_profile.h`。
+Profiling 在编译期显式启用，不改变公共 ABI，每个核只写自己拥有的 record。
+每次 profiling 调用引用的时间戳或指标都必须存在于对应的 record 定义中，
+且在相同功能配置下具有有效的起始值。因此，删除 profiling 字段时必须同时删除其生产端调用；
+对此类清理，至少需要完成默认关闭 profiling 的 CCE 构建验证。
 
-The generic profiling report path consumes versioned stage timestamps and
-accumulated metrics. Incomplete ranks or records are labeled explicitly. The
-64-rank runner unifies functional, performance, and breakdown modes but does not
-make profiler/diagnostic configuration part of normal operator semantics.
+通用 profiling 报告流程消费带版本的阶段时间戳和累积指标。
+不完整的 rank 或 record 必须明确标注。
+64-rank runner 统一了功能、性能和 breakdown 模式，但 profiler/诊断配置不属于正常算子语义。
 
-## Failure and Compatibility
+## 失败行为与兼容性
 
-- Invalid shapes, layouts, datatypes, modes, or communicator capabilities fail
-  before launch.
-- Kernel status identifies the first protocol failure; Host collection must not
-  replace it with a later timeout symptom.
-- Public V1/V2 entry points remain stable unless a separate ABI change is
-  approved.
-- Active code never includes or links comparison sources from `reference/`.
+- 非法 shape、layout、datatype、mode 或 communicator 能力必须在 launch 前被拒绝。
+- Kernel status 标识首个协议失败；Host 收集结果时不得用后续 timeout 症状覆盖它。
+- 公共 V1/V2 入口保持稳定，除非另行批准 ABI 变更。
+- 活跃代码不得 include 或链接 `reference/` 中仅用于对比的源码。
 
-## Verification Boundary
+## 验证边界
 
-Host tests cover layouts, validation, quantization helpers, registration, and
-runtime rejection behavior. Functional multi-rank runs verify the selected memory
-path and shapes. Performance reports must state backend, native status, kernel
-version, data volume, latency, bandwidth where applicable, and rank median/min/
-max. Results on one rank count or topology do not validate another.
+Host 测试覆盖布局、参数校验、量化 helper、注册和运行时拒绝行为。
+多 rank 功能测试验证所选 memory 路径及 shape。
+性能报告必须注明 backend、native status、kernel version、数据量、latency、
+适用时的 bandwidth，以及跨 rank 的 median/min/max。
+某一 rank 数量或拓扑上的结果不能证明其他配置也已通过验证。
