@@ -312,7 +312,7 @@ class ProcessTests(TemporaryRoot):
         self.fail(f"本次命令的子进程 {pid} 在清理后仍运行")
 
 
-FAKE_TRANSPORT = r'''import os, pathlib, shlex, shutil, subprocess, sys
+FAKE_TRANSPORT = r'''import os, pathlib, shlex, shutil, subprocess, sys, time
 
 kind = pathlib.Path(sys.argv[0]).name
 root = pathlib.Path(os.environ["FAKE_ROOT"])
@@ -338,6 +338,8 @@ if kind == "ssh":
     if action == "node" and scenario == "ssh-fail":
         print("injected SSH connection failure", file=sys.stderr)
         sys.exit(255)
+    if action == "node" and scenario == "delayed-node":
+        time.sleep(5)
     if action == "node" and scenario in ("exit-after-start", "no-completion", "bad-completion"):
         print("NODE_STARTED run_id=" + command[5])
         if scenario == "bad-completion":
@@ -535,6 +537,140 @@ class WorkflowIntegrationTests(TemporaryRoot):
                                           "TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("LOG_PARSE_FAILED", result.stdout)
+
+    def enable_dry_run(self, injected_rank_code=""):
+        self.hostfile.write_text("localhost devices=7,2,5,0,6,1,4,3\nnode-b\n", encoding="utf-8")
+        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DRY_RUN_CHECKPOINT
+        self.manifest["checkpoint"] = workflow.DRY_RUN_CHECKPOINT
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        if injected_rank_code:
+            # 只改临时部署夹具；生产入口不增加故障开关。
+            original = self.script.read_text(encoding="utf-8")
+            wrapper = ("\n_original_rank = dry_run_rank\n"
+                       "def dry_run_rank(config, run_id, build_id, rank):\n" +
+                       injected_rank_code +
+                       "\n    return _original_rank(config, run_id, build_id, rank)\n")
+            self.script.write_text(original.replace('if __name__ == "__main__":',
+                                                   wrapper + '\nif __name__ == "__main__":'), encoding="utf-8")
+
+    def test_dry_run_sync_run_and_collect_all_16_rank_records(self):
+        self.enable_dry_run()
+        self.prepare_sync()
+        command = self.invoke("run")
+        self.assert_success(command)
+        summary = self.summary()
+        self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
+        self.assertIn("ranks=16/16", command.stdout)
+        self.assertIn("不创建设备上下文或 communicator", summary["scope"])
+        self.assertEqual([item["device"] for item in summary["rank_mapping"][:8]], [7, 2, 5, 0, 6, 1, 4, 3])
+        records = [rank for node in summary["nodes"] for rank in node["reported_result"]["ranks"]]
+        workflow.validate_dry_run_records(records, summary["rank_mapping"], summary["run_id"], self.manifest)
+        run_log = self.config_instance.logs / summary["run_id"]
+        self.assertEqual(len(list(run_log.glob("rank-*.log"))), 8)
+        self.assertEqual(len(list((run_log / "nodes/1").glob("rank-*.log"))), 8)
+        self.assertEqual(list(self.root.rglob("pid.json")) + list(self.remote.rglob("pid.json")), [])
+
+    def test_dry_run_rank_failure_preserves_first_rank_and_cancels_siblings(self):
+        self.enable_dry_run(
+            "    if int(rank) == 8:\n"
+            "        print('injected rank failure', flush=True)\n"
+            "        return 9\n"
+            "    time.sleep(60)\n")
+        self.prepare_sync()
+        command = self.invoke("run")
+        self.assertNotEqual(command.returncode, 0)
+        summary = self.summary()
+        self.assertEqual(summary["primary_error"]["rank"], 8)
+        self.assertEqual(summary["primary_error"]["returncode"], 9)
+        self.assertEqual(summary["primary_error"]["host"], "node-b")
+        self.assertTrue(all(node["reported_result"]["cleanup"] == "complete" for node in summary["nodes"]))
+        self.assertEqual(list(self.root.rglob("pid.json")) + list(self.remote.rglob("pid.json")), [])
+
+    def test_dry_run_delayed_ssh_cannot_extend_cluster_execution_deadline(self):
+        # TIMEOUT=30 给执行阶段 10 秒。远端延迟 5 秒，再运行 7 秒；必须取消，不能 PASS。
+        self.enable_dry_run("    time.sleep(7)\n")
+        self.prepare_sync()
+        command = self.invoke("run", environment={"FAKE_SCENARIO": "delayed-node"})
+        self.assertNotEqual(command.returncode, 0)
+        summary = self.summary()
+        self.assertTrue(summary["primary_error"]["timeout"])
+        self.assertEqual(summary["primary_error"]["stage"], "execution")
+        self.assertEqual(summary["primary_error"]["rank"], "unknown")
+        self.assertTrue(all(node["reported_result"]["cleanup"] == "complete" for node in summary["nodes"]))
+        self.assertEqual(list(self.root.rglob("pid.json")) + list(self.remote.rglob("pid.json")), [])
+
+    def test_dry_run_rejects_missing_duplicate_malformed_and_stale_markers(self):
+        self.enable_dry_run(
+            "    if int(rank) == 0:\n"
+            "        behavior = os.environ['RANK_TEST_BEHAVIOR']\n"
+            "        if behavior == 'duplicate':\n"
+            "            _original_rank(config, run_id, build_id, rank)\n"
+            "            return _original_rank(config, run_id, build_id, rank)\n"
+            "        if behavior == 'stale':\n"
+            "            return _original_rank(config, 'old-run', build_id, rank)\n"
+            "        if behavior == 'malformed':\n"
+            "            print(DRY_RUN_MARKER + '{bad JSON}')\n"
+            "        return 0\n"
+            "    time.sleep(60)\n")
+        for behavior in ("missing", "duplicate", "malformed", "stale"):
+            with self.subTest(behavior=behavior):
+                command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "0",
+                                      environment={"RANK_TEST_BEHAVIOR": behavior})
+                self.assertNotEqual(command.returncode, 0)
+                result = workflow.read_json(self.config_instance.logs / behavior / "result.json")
+                self.assertEqual(result["errors"][0]["rank"], 0)
+                self.assertEqual(result["errors"][0]["type"],
+                                 "RESULT_FAILED" if behavior == "stale" else "LOG_PARSE_FAILED")
+                self.assertEqual(result["cleanup"], "complete")
+
+    def start_hanging_dry_run(self, run_id, budget):
+        self.enable_dry_run(
+            "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+            "    child = subprocess.Popen([sys.executable, '-c',\n"
+            "        'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)'])\n"
+            "    (config.logs / run_id / ('worker-' + rank + '.pid')).write_text(\n"
+            "        str(os.getpid()) + '\\n' + str(child.pid))\n"
+            "    time.sleep(60)\n")
+        process = subprocess.Popen([self.bash, "-s", "--", str(self.root), "node", run_id,
+                                    self.manifest["build_id"], str(budget), "", "0"], cwd=self.root,
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   text=True, start_new_session=True)
+        self.addCleanup(lambda: workflow.stop_process(process))
+        process.stdin.write(workflow.REMOTE_SCRIPT)
+        process.stdin.close()
+        process.stdin = None
+        return process
+
+    def assert_hanging_ranks_cleaned(self, run_id):
+        log = self.config_instance.logs / run_id
+        pids = list(log.glob("worker-*.pid"))
+        self.assertTrue(pids, "必须实际启动会卡住的 rank")
+        for path in pids:
+            for pid in path.read_text().splitlines():
+                ProcessTests.assert_process_stopped(self, int(pid))
+        result = workflow.read_json(log / "result.json")
+        self.assertEqual((result["status"], result["cleanup"]), ("FAIL", "complete"))
+        self.assertFalse((log / "pid.json").exists())
+        self.assertFalse((self.config_instance.logs / "node.lock").exists())
+
+    def test_dry_run_watchdog_reaps_term_resistant_ranks_and_children(self):
+        process = self.start_hanging_dry_run("rank-timeout", 3)
+        stdout, stderr = process.communicate(timeout=15)
+        self.assertNotEqual(process.returncode, 0, stdout + stderr)
+        self.assert_hanging_ranks_cleaned("rank-timeout")
+
+    def test_dry_run_hangup_reaps_term_resistant_ranks_and_children(self):
+        process = self.start_hanging_dry_run("rank-hangup", 15)
+        log = self.config_instance.logs / "rank-hangup"
+        deadline = time.monotonic() + 8
+        while len(list(log.glob("worker-*.pid"))) < 8 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(list(log.glob("worker-*.pid"))), 8)
+        node_pid = workflow.read_json(log / "pid.json")["pid"]
+        os.kill(node_pid, signal.SIGHUP)  # 模拟控制连接断开向节点送达的 HUP。
+        stdout, stderr = process.communicate(timeout=10)
+        self.assertNotEqual(process.returncode, 0, stdout + stderr)
+        self.assert_hanging_ranks_cleaned("rank-hangup")
 
     def test_sync_failure_invalidates_previous_receipt(self):
         self.prepare_sync()
@@ -822,6 +958,24 @@ class EnvironmentEntryTests(TemporaryRoot):
         self.assertEqual(self.hostfile.read_text(), contents)
         self.assertNotIn("HOSTFILE_CREATED", result.stdout)
         self.assertIn("hosts=2", result.stdout)
+
+    def test_source_accepts_dry_run_with_eight_devices_per_host(self):
+        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.DRY_RUN_CHECKPOINT}):
+            result = self.source_real_entry()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("checkpoint=" + workflow.DRY_RUN_CHECKPOINT, result.stdout)
+        self.assertIn("hosts=2", result.stdout)
+
+    def test_bad_checkpoint_reports_literal_backticks_and_carriage_return(self):
+        value = "`ep-sdedup-p1-empty-kernel`\r"
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": value}):
+            result = self.source_real_entry()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("CONFIG_FAILED", result.stderr)
+        self.assertIn("\\r", result.stderr)
+        self.assertIn("validation.local.sh", result.stderr)
+        self.assertIn("ep-sdedup-p1-dry-run", result.stderr)
 
     def test_missing_custom_hostfile_does_not_fall_back_to_local(self):
         self.hostfile.unlink()

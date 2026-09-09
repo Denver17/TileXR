@@ -7,5 +7,6 @@ TILEXR_VALIDATION_SSH_USER=""
 TILEXR_VALIDATION_JOBS=4
 TILEXR_VALIDATION_TIMEOUT=180
 TILEXR_VALIDATION_BUILD_MODE=production
-# 第二个提交点改为 ep-sdedup-p1-empty-kernel，仍执行相同七步。
+# 第二个提交点使用 ep-sdedup-p1-empty-kernel，第三个使用 ep-sdedup-p1-dry-run，仍执行相同七步。
+# 使用完整名称，不带 Markdown 反引号；本文件保存为 LF 换行。
 TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-abi-host

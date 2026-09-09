@@ -11,7 +11,7 @@
 | --- | --- | --- | --- |
 | 1 `ep-sdedup-p1-abi-host` | 三类 metadata ABI、layout、Host 校验、错误码；七步生产构建与 Host 回归 | **已通过**，用户确认最新提交完成服务器验证 | [`acb976cb6c5527e02a0d931e20a954eb1c891d37`](https://github.com/LingquLab/TileXR/commit/acb976cb6c5527e02a0d931e20a954eb1c891d37) |
 | 2 `ep-sdedup-p1-empty-kernel` | A5 空 kernel、ELF/安装、生产库链接和相对加载、设备注册；Host 验证 launch 参数和失败返回 | **已通过**，production 模式 2/2 主机、每台 18 项测试成功 | [`eae264dc2e3d33169ffd2e78e04c3430d41b7559`](https://github.com/LingquLab/TileXR/commit/eae264dc2e3d33169ffd2e78e04c3430d41b7559) |
-| 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | 未开始 | — |
+| 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | 代码已实现，本地回归通过；目标 64P/128P 待验证 | — |
 | 4 `ep-sdedup-p1-chain-single` | 64P/128P 建链、一次空 launch、stream 完成、轮末 barrier | 未开始 | — |
 | 5 `ep-sdedup-p1-chain-multi` | 64P/128P 多轮 magic、顺序完成与资源复用 | 未开始 | — |
 | 6 `ep-sdedup-p1-profile` | FP16/BF16、warmup、完整 profile 记录和跨 rank 汇总，仅报告框架开销 | 未开始 | — |
@@ -46,6 +46,22 @@
 此前 `0f8f6fa` 的 ABI/Host 回归结果为
 `/home/h00580772/TileXR-git-chec/run/validation/b57e91fb58d64b8b87ac880c4322d2a0/summary.json`；
 另一次同范围 PASS 未提供路径。两次均未执行设备注册，保留为回归记录，不替代本次 empty-kernel 验收。
+
+检查点 3 的提交与测试记录：
+
+| 提交 | 修改及测试重点 | 记录 |
+| --- | --- | --- |
+| 本节所在实现提交 `feat(ep): add server dedup rank dry run checkpoint` | 复用七步入口；每台 8 个 rank、完整映射/marker 校验、共享期限和异常清理 | 本地真实进程覆盖 64/128 rank 映射；模拟双节点 16 rank 同步、运行和日志收集通过；非零退出、错误 marker、watchdog/HUP 与忽略 TERM 的进程清理通过 |
+
+本地验证在 Windows/MSYS2 POSIX Python 上执行：完整脚本回归 108 项中 105 项通过，3 项因 MSYS 未建立真实 symlink 而跳过；Shell 语法、UTF-8、Markdown 链接及差异空白检查通过。本次未改 C++，未重跑 CANN 构建或访问 NPU；64/128 rank 在本机逐节点运行，双节点 SSH/rsync 使用传输替身，不能登记为真实集群验收。此提交未修改公共 Dispatch 接口或提前实现下一检查点。
+
+| 检查点 3 必需记录 | 当前状态 | 通过 commit / 结果 |
+| --- | --- | --- |
+| 目标集群 64P（8×8） | 待执行 | — |
+| 目标集群 128P（16×8） | 待执行 | — |
+| 目标 Linux 卡住/HUP 清理演练 | 待执行；复用七步指南中的两项行为测试 | — |
+
+同一实现提交的全部必需记录通过后，再登记检查点 3 的通过 SHA；小规模 PASS、来源标签 `unverified` 和完整验收状态分别记录。
 
 ## 阶段 2：Dispatch 算子逻辑
 

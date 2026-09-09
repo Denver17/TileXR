@@ -16,6 +16,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import uuid
 
@@ -24,6 +25,8 @@ from source import inventory
 
 CHECKPOINT = "ep-sdedup-p1-abi-host"
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
+DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
+DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
@@ -128,7 +131,8 @@ def stop_process(process):
 
 
 def execute(argv, log, timeout=180, cwd=None, env=None, stdin=None,
-            start_failure="LAUNCH_FAILED", exit_failure="EXIT_FAILED", parse_failure="LOG_PARSE_FAILED"):
+            start_failure="LAUNCH_FAILED", exit_failure="EXIT_FAILED", parse_failure="LOG_PARSE_FAILED",
+            cancelled=None):
     """写原始日志；超时和异常退出均回收本次命令及其同组子进程。"""
     log = Path(log)
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -142,7 +146,22 @@ def execute(argv, log, timeout=180, cwd=None, env=None, stdin=None,
             raise Failure(start_failure, f"无法启动 {argv[0]}：{error}", log=str(log)) from error
         pending = None
         try:
-            process.communicate(input=stdin.encode() if stdin is not None else None, timeout=timeout)
+            if cancelled is None:
+                process.communicate(input=stdin.encode() if stdin is not None else None, timeout=timeout)
+            else:
+                # 并行 rank 共用取消信号；仍由本次 execute 清理自己创建的进程组。
+                deadline = time.monotonic() + timeout
+                while True:
+                    if cancelled.is_set():
+                        raise InterruptedError("本次 rank 运行已取消")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(argv, timeout)
+                    try:
+                        process.communicate(timeout=min(0.1, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
             if process.returncode:
                 pending = Failure(exit_failure, f"命令失败（exit={process.returncode}）：{argv[0]}",
                                   returncode=process.returncode, log=str(log))
@@ -202,8 +221,9 @@ class Config:
         self.user = os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
-        if self.mode not in ("host", "production") or self.checkpoint not in (CHECKPOINT, EMPTY_KERNEL_CHECKPOINT):
-            raise ValueError("当前版本仅支持 ep-sdedup-p1-abi-host 和 ep-sdedup-p1-empty-kernel")
+        if self.mode not in ("host", "production") or self.checkpoint not in (
+                CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, DRY_RUN_CHECKPOINT):
+            raise ValueError("当前版本仅支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel 和 ep-sdedup-p1-dry-run")
         if self.checkpoint == EMPTY_KERNEL_CHECKPOINT and self.mode != "production":
             raise ValueError("empty-kernel 必须使用 production 模式验证真实 A5 artifact 和设备注册")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -216,7 +236,10 @@ class Config:
         self.logs = self.root / "run/validation"
     def hosts(self):
         try:
-            return hosts_from_file(self.hostfile)
+            hosts = hosts_from_file(self.hostfile)
+            if self.checkpoint == DRY_RUN_CHECKPOINT:
+                dry_run_mapping(hosts)
+            return hosts
         except FileNotFoundError:
             raise ValueError(f"hostfile 不存在：{self.hostfile}；请按 hostfile.example 一次性配置主机清单，"
                              "或检查 validation.local.sh 中的 TILEXR_VALIDATION_HOSTFILE。") from None
@@ -520,15 +543,106 @@ def pid_identity(pid):
         return None
 
 
-def node(config, run_id, build_id, execution_budget=None, device=None):
+def dry_run_mapping(hosts):
+    if not 2 <= len(hosts) <= 16 or any(len(host["devices"]) != 8 for host in hosts):
+        raise ValueError("dry-run 要求 2 至 16 台主机，每台恰好 8 个 device ID；完整验收分别使用 64P 和 128P")
+    return [{"host": host["host"], "host_index": index, "local_rank": local_rank,
+             "device": device, "rank": index * 8 + local_rank, "rank_size": len(hosts) * 8}
+            for index, host in enumerate(hosts) for local_rank, device in enumerate(host["devices"])]
+
+
+def dry_run_record(mapping, run_id, manifest):
+    return dict(mapping, run_id=run_id, build_id=manifest["build_id"], commit=manifest["source"]["commit"],
+                checkpoint=DRY_RUN_CHECKPOINT, status="PASS")
+
+
+def dry_run_rank(config, run_id, build_id, rank):
+    # 每 rank 一个普通进程，只验证分配的身份；不加载 ACL、不设置设备、不创建 communicator。
+    if config.checkpoint != DRY_RUN_CHECKPOINT:
+        raise ValueError("rank 入口只用于 dry-run")
+    mappings = dry_run_mapping(config.hosts())
+    rank = int(rank)
+    if not 0 <= rank < len(mappings):
+        raise ValueError("dry-run rank 超出 hostfile 范围")
+    # 安装产物已由节点核对一次；逐 rank 只读取调用身份，不重复摘要/运行库预检。
+    manifest = read_json(config.install / "manifest.json")
+    if (manifest["build_id"] != build_id or manifest["checkpoint"] != config.checkpoint
+            or manifest["mode"] != config.mode):
+        raise Failure("RESULT_FAILED", "rank 的构建或配置不属于本次运行")
+    record = dry_run_record(mappings[rank], identifier(run_id), manifest)
+    record["pid"] = os.getpid()
+    print(DRY_RUN_MARKER + json.dumps(record, ensure_ascii=False), flush=True)
+    return 0
+
+
+def validate_dry_run_records(records, expected, run_id, manifest):
+    if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
+        raise Failure("LOG_PARSE_FAILED", "dry-run rank 记录格式错误")
+    actual = [record.get("rank") for record in records]
+    if (len(records) != len(expected) or any(type(rank) is not int for rank in actual)
+            or set(actual) != {mapping["rank"] for mapping in expected}):
+        raise Failure("RESULT_FAILED", "dry-run rank 缺失、重复或不属于本节点")
+    for record, mapping in zip(sorted(records, key=lambda item: item["rank"]), expected):
+        wanted = dry_run_record(mapping, run_id, manifest)
+        if any(record.get(key) != value for key, value in wanted.items()):
+            raise Failure("RESULT_FAILED", "dry-run rank 身份或设备映射不一致", rank=mapping["rank"])
+        if type(record.get("pid")) is not int or record["pid"] <= 0:
+            raise Failure("LOG_PARSE_FAILED", "dry-run 缺少有效的进程 PID", rank=mapping["rank"])
+
+
+def run_dry_run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
+    def launch(mapping):
+        rank = mapping["rank"]
+        log = config.logs / run_id / f"rank-{rank}.log"
+        try:
+            if cancelled.is_set():
+                return None
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Failure("EXIT_FAILED", "rank 启动前已超过节点执行期限", timeout=True)
+            output = execute([sys.executable, Path(__file__), "rank", run_id, manifest["build_id"], str(rank)],
+                             log, timeout=remaining, cwd=config.root, cancelled=cancelled)
+            markers = [line[len(DRY_RUN_MARKER):] for line in output.splitlines() if line.startswith(DRY_RUN_MARKER)]
+            if len(markers) != 1:
+                raise Failure("LOG_PARSE_FAILED", "缺少或重复 dry-run rank marker")
+            try:
+                record = json.loads(markers[0])
+            except ValueError as error:
+                raise Failure("LOG_PARSE_FAILED", "无法解析 dry-run rank marker") from error
+            validate_dry_run_records([record], [mapping], run_id, manifest)
+            return record
+        except Exception as error:
+            failures = failure_records(error, "LAUNCH_FAILED", rank=rank, log=str(log))
+            # 保留第一个观察到的失败；其他 rank 的取消/清理错误作为后续证据。
+            with error_lock:
+                result["errors"].extend(failures)
+                cancelled.set()
+            return None
+
+    result["ranks"] = []
+    error_lock = threading.Lock()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(launch, mapping) for mapping in mappings]
+        for future in concurrent.futures.as_completed(futures):
+            record = future.result()
+            if record is not None:
+                result["ranks"].append(record)
+    result["ranks"].sort(key=lambda record: record["rank"])
+
+
+def node(config, run_id, build_id, execution_budget=None, device=None, host_index=None):
     log = config.logs / identifier(run_id)
     log.mkdir(parents=True, exist_ok=True)
     result = {"run_id": run_id, "build_id": build_id, "host": socket.gethostname(),
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL", "tests": [], "errors": []}
     write_json(log / "pid.json", {"pid": os.getpid(), "start": pid_identity(os.getpid())})
     print(f"NODE_STARTED run_id={run_id}", flush=True)
+    cancelled = threading.Event()
 
     def interrupted(signum, frame):
+        if config.checkpoint == DRY_RUN_CHECKPOINT:
+            cancelled.set()
+            return
         raise InterruptedError(f"节点收到停止信号 {signum}")
 
     signal.signal(signal.SIGTERM, interrupted)
@@ -546,6 +660,8 @@ def node(config, run_id, build_id, execution_budget=None, device=None):
             raise Failure("RESULT_FAILED", "远端 build_id 与本次请求不一致")
         for test in manifest["tests"]:
             current_test = test["name"]
+            if cancelled.is_set():
+                raise InterruptedError("节点已收到取消信号")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise Failure("EXIT_FAILED", "节点测试超过执行期限", timeout=True)
@@ -558,7 +674,8 @@ def node(config, run_id, build_id, execution_budget=None, device=None):
                 env = dict(os.environ, TILEXR_EP_SERVER_DEDUP_TEST_DEVICE=str(device))
                 env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
                 result["device"] = int(device)
-            output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root, env=env)
+            output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root, env=env,
+                             cancelled=cancelled if config.checkpoint == DRY_RUN_CHECKPOINT else None)
             prefix = "test_tilexr_ep_server_dedup_"
             marker = None
             if current_test == REGISTRATION_TEST:
@@ -575,7 +692,18 @@ def node(config, run_id, build_id, execution_budget=None, device=None):
                     raise Failure("LOG_PARSE_FAILED", "缺少或无法解析唯一的 PASS/FAIL marker",
                                   log=str(log / (current_test + ".log")))
             result["tests"].append({"name": test["name"], "status": "PASS"})
-        result["status"] = "PASS"
+        current_test = None
+        if config.checkpoint == DRY_RUN_CHECKPOINT:
+            mappings = dry_run_mapping(config.hosts())
+            index = int(host_index) if host_index is not None else -1
+            if not 0 <= index < len(mappings) // 8:
+                raise ValueError("dry-run 缺少有效的 hostfile 节点序号")
+            run_dry_run_ranks(config, run_id, manifest, mappings[index * 8:(index + 1) * 8],
+                              deadline, cancelled, result)
+        if not result["errors"] and not cancelled.is_set():
+            result["status"] = "PASS"
+        elif not result["errors"]:
+            raise InterruptedError("节点已收到取消信号")
     except Exception as error:
         kind = "EXIT_FAILED" if isinstance(error, InterruptedError) else "CONFIG_FAILED"
         result["errors"] = failure_records(error, kind, **({"test": current_test} if current_test else {}))
@@ -610,7 +738,7 @@ def cancel(config, run_id):
         raise RuntimeError("节点清理未确认，保留日志和 PID 记录")
 
 
-def validate_result(result, run_id, manifest):
+def validate_result(result, run_id, manifest, expected_ranks=None):
     fields = ("run_id", "build_id", "checkpoint", "mode", "status", "cleanup", "tests")
     if (not isinstance(result, dict) or any(field not in result for field in fields)
             or not isinstance(result["tests"], list)
@@ -638,17 +766,21 @@ def validate_result(result, run_id, manifest):
     if (result["status"] != "PASS" or len(actual) != len(expected) or set(actual) != expected
             or any(test["status"] != "PASS" for test in result["tests"])):
         raise Failure("RESULT_FAILED", "节点测试结果失败、缺失或重复")
+    if manifest["checkpoint"] == DRY_RUN_CHECKPOINT:
+        if expected_ranks is None:
+            raise Failure("RESULT_FAILED", "缺少 dry-run 预期 rank 映射")
+        validate_dry_run_records(result.get("ranks"), expected_ranks, run_id, manifest)
 
 
-def result_errors(result, run_id, manifest):
+def result_errors(result, run_id, manifest, expected_ranks=None):
     try:
-        validate_result(result, run_id, manifest)
+        validate_result(result, run_id, manifest, expected_ranks)
     except Failure as error:
         return failure_records(error, "RESULT_FAILED")
     return []
 
 
-def launch_outcome(log, execution_error, run_id, manifest):
+def launch_outcome(log, execution_error, run_id, manifest, expected_ranks=None):
     """优先采用节点记录的失败边界，SSH 包装进程的非零退出不覆盖测试原因。"""
     raw = b""
     execution = failure_records(execution_error, "EXIT_FAILED") if execution_error else []
@@ -660,7 +792,7 @@ def launch_outcome(log, execution_error, run_id, manifest):
             if len(completions) != 1:
                 raise ValueError("节点完成记录重复")
             result = json.loads(completions[0])
-            errors = result_errors(result, run_id, manifest)
+            errors = result_errors(result, run_id, manifest, expected_ranks)
             if errors:
                 if execution and execution[0].get("returncode") != FAILURE_CODES[errors[0]["type"]]:
                     return result, [*execution, *errors]
@@ -679,7 +811,12 @@ def launch_outcome(log, execution_error, run_id, manifest):
 
 def run(config):
     deadline = time.monotonic() + config.timeout
+    execution_deadline = min(deadline - 20, time.monotonic() + 120)
     hosts = config.hosts()
+    mappings = dry_run_mapping(hosts) if config.checkpoint == DRY_RUN_CHECKPOINT else None
+
+    def expected_ranks(index):
+        return mappings[index * 8:(index + 1) * 8] if mappings is not None else None
     check_coordinator(config, hosts)
     run_id = uuid.uuid4().hex
     log = config.logs / run_id
@@ -690,10 +827,12 @@ def run(config):
     print(f"开始测试：hosts={len(hosts)} checkpoint={config.checkpoint} mode={config.mode}\n日志：{log}", flush=True)
 
     def launch(index, host):
-        budget = max(1, min(120, deadline - time.monotonic() - 20))
+        budget = max(1, execution_deadline - time.monotonic())
         arguments = ["node", run_id, manifest["build_id"], str(budget)]
         if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
             arguments.append(str(host["devices"][0]))
+        elif config.checkpoint == DRY_RUN_CHECKPOINT:
+            arguments.extend(["", str(index)])
         if index == 0:
             argv = [sys.executable, Path(__file__), *arguments]
             payload = None
@@ -706,7 +845,7 @@ def run(config):
             execute(argv, launch_log, timeout=max(1, deadline - time.monotonic() - 12), stdin=payload)
         except Failure as error:
             execution_error = error
-        return launch_outcome(launch_log, execution_error, run_id, manifest)
+        return launch_outcome(launch_log, execution_error, run_id, manifest, expected_ranks(index))
 
     errors = []
     cleanup_errors = []
@@ -716,33 +855,42 @@ def run(config):
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as pool:
         futures = {pool.submit(launch, index, host): index for index, host in enumerate(hosts)}
         cancelled = False
-        for future in concurrent.futures.as_completed(futures):
-            index = futures[future]
-            try:
-                launch_results[index], launched[index] = future.result()
-            except Exception as error:
-                launch_results[index] = None
-                launched[index] = [failure_record(error, "LAUNCH_FAILED")]
-            if launched[index]:
-                if primary_error is None:
+        pending = set(futures)
+        while pending:
+            # SSH 建连时间也计入统一执行期限；不能等远端的相对 watchdog 到期才取消。
+            remaining = None if cancelled else max(0, execution_deadline - time.monotonic())
+            done, pending = concurrent.futures.wait(pending, timeout=remaining,
+                                                    return_when=concurrent.futures.FIRST_COMPLETED)
+            for future in done:
+                index = futures[future]
+                try:
+                    launch_results[index], launched[index] = future.result()
+                except Exception as error:
+                    launch_results[index] = None
+                    launched[index] = [failure_record(error, "LAUNCH_FAILED")]
+                if launched[index] and primary_error is None:
                     primary_error = dict(launched[index][0], host=hosts[index]["host"])
-                if not cancelled:
-                    cancelled = True
-                    # 独立连接通知仍在运行的节点；每个节点自身也有执行期限。
-                    def stop(index, host):
-                        try:
-                            if index == 0:
-                                cancel(config, run_id)
-                            else:
-                                execute(remote_argv(config, host["host"], "cancel", run_id),
-                                        log / f"cancel-{index}.log", timeout=10, stdin=REMOTE_SCRIPT,
-                                        start_failure="CLEANUP_FAILED", exit_failure="CLEANUP_FAILED")
-                        except Exception as failure:
-                            return failure_record(failure, "CLEANUP_FAILED", host=host["host"], stage="cleanup")
-                    with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as cleanup:
-                        for failure in cleanup.map(lambda item: stop(*item), enumerate(hosts)):
-                            if failure:
-                                cleanup_errors.append(failure)
+            if not done:
+                primary_error = Failure("EXIT_FAILED", "集群达到统一执行期限", timeout=True,
+                                        rank="unknown", stage="execution").record()
+                errors.append(primary_error)
+            if primary_error is not None and not cancelled:
+                cancelled = True
+                # 独立连接通知仍在运行的节点；每个节点自身也有执行期限。
+                def stop(index, host):
+                    try:
+                        if index == 0:
+                            cancel(config, run_id)
+                        else:
+                            execute(remote_argv(config, host["host"], "cancel", run_id),
+                                    log / f"cancel-{index}.log", timeout=10, stdin=REMOTE_SCRIPT,
+                                    start_failure="CLEANUP_FAILED", exit_failure="CLEANUP_FAILED")
+                    except Exception as failure:
+                        return failure_record(failure, "CLEANUP_FAILED", host=host["host"], stage="cleanup")
+                with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as cleanup:
+                    for failure in cleanup.map(lambda item: stop(*item), enumerate(hosts)):
+                        if failure:
+                            cleanup_errors.append(failure)
 
     def collect(index, host):
         node_log = log if index == 0 else log / "nodes" / str(index)
@@ -756,7 +904,7 @@ def run(config):
                         log / f"collect-{index}.log", timeout=max(1, deadline - time.monotonic()),
                         start_failure="LOG_COLLECT_FAILED", exit_failure="LOG_COLLECT_FAILED")
             result = read_json(node_log / "result.json")
-            failures.extend(result_errors(result, run_id, manifest))
+            failures.extend(result_errors(result, run_id, manifest, expected_ranks(index)))
         except FileNotFoundError as error:
             # 拉起/异常退出已说明为何没有完成记录，避免追加一个伪解析失败。
             if not failures:
@@ -765,7 +913,7 @@ def run(config):
             failures.append(Failure("LOG_PARSE_FAILED", str(error), log=str(node_log / "result.json")).record())
         except Failure as error:
             failures.extend(failure_records(error, "LOG_COLLECT_FAILED"))
-        unique = {(item["type"], item["message"], item.get("test")): item for item in failures}
+        unique = {(item["type"], item["message"], item.get("test"), item.get("rank")): item for item in failures}
         failures = [dict(item, host=host["host"]) for item in unique.values()]
         tests = result.get("tests", []) if isinstance(result, dict) else []
         if not isinstance(tests, list):
@@ -795,16 +943,23 @@ def run(config):
     scope = "ABI/Host"
     if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
         scope += "、A5 空 kernel 安装与设备注册"
+    elif config.checkpoint == DRY_RUN_CHECKPOINT:
+        scope += f"、{len(mappings)}P rank/device 映射与进程退出；不创建设备上下文或 communicator"
     scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
               "source_provenance": manifest["source"]["provenance"],
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL" if errors else "PASS",
               "expected_hosts": hosts, "nodes": nodes, "primary_error": primary_error, "errors": errors,
               "scope": scope}
+    rank_summary = ""
+    if mappings is not None:
+        completed = sum(len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
+        report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
+        rank_summary = f"ranks={completed}/{len(mappings)} "
     write_json(log / "summary.json", report)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
           f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
-          f"tests_per_host={len(manifest['tests'])} commit={report['commit'] or 'unknown'} (unverified)", flush=True)
+          f"tests_per_host={len(manifest['tests'])} {rank_summary}commit={report['commit'] or 'unknown'} (unverified)", flush=True)
     for error in errors:
         report_failure(error)
     print(f"结果：{log / 'summary.json'}\n范围：{scope}", flush=True)
@@ -813,7 +968,7 @@ def run(config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("env", "build", "sync", "run", "node", "verify", "cancel"))
+    parser.add_argument("action", choices=("env", "build", "sync", "run", "node", "rank", "verify", "cancel"))
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     try:
@@ -842,6 +997,8 @@ def main():
         elif args.action == "node":
             with operation_lock(config, "node.lock"):
                 return node(config, *args.arguments)
+        elif args.action == "rank":
+            return dry_run_rank(config, *args.arguments)
         elif args.action == "verify":
             manifest = verify_build(config)
             if manifest["build_id"] != args.arguments[0]:

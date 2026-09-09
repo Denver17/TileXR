@@ -2,14 +2,25 @@
 
 本流程支持 PC 普通文件同步或固定版本导出，并提供四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
 
-当前支持两个检查点，继续共用本文七步，不增加预检或额外运行入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
+当前支持三个检查点，继续共用本文七步，不增加预检或额外运行入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
 
 | checkpoint | 每台主机的测试重点 | 通过边界 |
 | --- | --- | --- |
 | `ep-sdedup-p1-abi-host` | 17 个 Host/Python 测试，含 ABI/layout/Host 校验及 runtime 替身测试 | Host 契约与回归；production 模式另含生产编译/链接 |
 | `ep-sdedup-p1-empty-kernel` | 上述测试加 1 个已安装头文件/生产库 consumer；选择该 hostfile 行的首个 device 执行真实注册 | A5 ELF、安装后相对路径加载、binary/function 注册；launch 参数及失败路径由 Host 替身覆盖 |
+| `ep-sdedup-p1-dry-run` | 17 个 Host/Python 测试后，每台并行启动 8 个独立 rank 进程 | 全量 rank/device 映射、运行身份、marker 和有界退出；不创建设备上下文或 communicator |
 
 `empty-kernel` 必须使用 `production`。只需在原 `validation.local.sh` 中将 `TILEXR_VALIDATION_CHECKPOINT` 改为 `ep-sdedup-p1-empty-kernel`，再执行相同七步。设备注册每台主机一次，不创建 communicator、不 launch 设备 kernel；空 launch、stream 完成和多 rank 建链留给后续检查点。生产公共入口现已可提交空 kernel，但不生成 Dispatch 输出或数值结果。未实现的 checkpoint 仍直接报错。进度与通过提交见[调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+
+第三个检查点只需在原 `validation.local.sh` 中写入以下赋值，并照常加载环境、构建、同步和运行。配置值不要带 Markdown 反引号，文件使用 LF 换行；若复制出了字面反引号或 CR，入口会用 `%q` 显示实际值并拒绝运行，不自动改写配置。
+
+```bash
+TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-dry-run
+```
+
+`dry-run` 接受 2 至 16 台主机，每台恰好 8 个 device ID。hostfile 行序决定 `host_index`，device 列表顺序决定 `local_rank`，连续编号为 `rank=host_index*8+local_rank`。rank_size 从清单推导，不增加第二套拓扑配置。每个 rank 只运行普通 Python 进程，记录物理 device ID；不调用 ACL、不创建 communicator，也不重复设备注册、安装产物摘要或运行库检查。
+
+完整验收需要同一实现提交分别完成 **64P（8 台）和 128P（16 台）**，各自保留 `summary.json`。切换清单后沿用七步入口重新构建、同步和运行；较小规模的 PASS 只代表该次配置成功，不能登记检查点完整通过。`bs/h/topk/dtype` 等尚无消费者的参数不在本检查点引入。
 
 ## 一次性环境配置
 
@@ -26,7 +37,7 @@ PC 需要 Git；使用 `push.ps1` 导出时另需 Python 3.9+ 和 Windows OpenSS
 | `TILEXR_VALIDATION_JOBS` | 编译并发数，默认 4 |
 | `TILEXR_VALIDATION_TIMEOUT` | 单次集群测试总期限，默认 180 秒，允许 30..180 秒；编译、源码同步单独计时 |
 | `TILEXR_VALIDATION_BUILD_MODE` | 默认 `production`；显式 `host` 只用于没有 CANN 的 Host/脚本验证，结果中单独标识 |
-| `TILEXR_VALIDATION_CHECKPOINT` | 默认 `ep-sdedup-p1-abi-host`；第二个检查点使用 `ep-sdedup-p1-empty-kernel` |
+| `TILEXR_VALIDATION_CHECKPOINT` | 默认 `ep-sdedup-p1-abi-host`；另支持 `ep-sdedup-p1-empty-kernel`、`ep-sdedup-p1-dry-run` |
 
 hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空行。第一行必须指向执行脚本的首节点，可以写 `localhost`；后续行可使用主机名、IPv4 或 SSH config 别名。主机清单只保存在此文件，不再内置另一套列表。`devices` 省略时为 0..7，重复主机和重复 device ID 会被拒绝；当前 Host checkpoint 每主机只执行一套测试，device 列表不代表执行了 NPU 测试。
 
@@ -115,7 +126,23 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 
 只有全部预期主机测试成功、退出码为 0、当前 checkpoint 必需 marker 完整、结果属于本次运行且日志汇总完成时才返回 0。`empty-kernel` 额外检查 `EP_SERVER_DEDUP_EMPTY_KERNEL_PASS test=launch` 与 `test=registration`，分别来自 Host 替身和真实设备注册。失败时返回非零，分别记录错误类别、节点、阶段、原始退出码/超时状态及日志路径，保留首个失败边界和后续收集/清理错误。结果保存在 `run/validation/<run_id>/summary.json`，原始日志按节点/测试保留；不再输出源码 SHA256。
 
-`mode=host` 的 PASS 仅证明 Host 契约；`mode=production` 增加目标环境生产编译/链接和加载依赖证据。`empty-kernel` 通过另证明真实设备注册；两个检查点都不证明 NPU launch 或去重通信。
+`dry-run` 在同一摘要中增加 `rank_size`、`completed_ranks`、`rank_mapping` 和各节点的 `reported_result.ranks`。每 rank 的 `EP_SERVER_DEDUP_DRYRUN_PASS` JSON 记录包含 `run_id/build_id/checkpoint/commit/status`、主机与 rank/device 映射及 PID；原始日志为 `rank-<rank>.log`，远端日志仍收集到 `nodes/<host_index>/`。控制端核对每台的 8 个预期 rank，拒绝缺失、重复、旧运行或错误映射；终端增加 `ranks=64/64` 或 `ranks=128/128`。仅进程 exit=0 不等于验证成功。
+
+`mode=host` 的 PASS 证明 Host 契约，以及所选 dry-run 的普通进程编排；`mode=production` 增加目标环境生产编译/链接和加载依赖证据。`empty-kernel` 通过另证明真实设备注册；三个检查点都不证明 NPU launch 或去重通信。
+
+### dry-run 退出清理回归
+
+Host 测试和本机 8 个 rank 共用节点剩余执行预算，后启动的 rank 不重新获得 120 秒。控制端统一限制执行阶段并保留清理/收集时间，总期限仍为 180 秒。首个 rank 错误先写入错误列表，再触发同节点取消，避免取消错误抢占原始故障；控制端沿用已有跨节点取消。每个启动进程拥有独立进程组，TERM 后最多等待 5 秒再 KILL，并回收；节点退出清理失败仍保留 PID/锁并使总体失败。
+
+正常七步测试不注入故障。首次在目标 Linux 环境验证本检查点时，可用已有行为测试完成一次卡住与控制连接 HUP 清理演练；它们在临时目录创建会忽略 TERM 的 rank 和子进程，分别验证本地 watchdog 与 HUP 后无运行中进程残留，不访问 NPU，也不改部署配置：
+
+```bash
+(cd tools/validation && python3 -m unittest -v \
+  test_workflow.WorkflowIntegrationTests.test_dry_run_watchdog_reaps_term_resistant_ranks_and_children \
+  test_workflow.WorkflowIntegrationTests.test_dry_run_hangup_reaps_term_resistant_ranks_and_children)
+```
+
+上述 HUP 测试模拟断连信号，SSH 传输由真实 64P/128P 运行覆盖；本地替身或单机进程测试不能替代集群验收。开发回归另覆盖单 rank 非零、缺失/重复/损坏/旧 marker、错误映射和日志收集失败，不为这些场景增加生产故障开关。
 
 ## 失败分类
 
@@ -149,6 +176,7 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 - CTest 注册不等于安装。测试构建成功但未安装时，同步后的节点不能运行；新增测试必须有安装规则，构建脚本核对全部注册命令的可分发路径。本次补齐五个已有测试的安装规则。
 - CMake 测试清单可能引用构建机绝对路径。分发时将 C++ 程序映射到安装目录、Python 测试映射到源码目录，用实际子进程执行验证，不能复制构建树后假定远端可用。
 - 父进程退出或 SSH 退出不代表测试子进程退出。节点设置自身期限，各测试使用独立进程组，TERM 后必要时 KILL；只清理本次拥有的进程。身份无法确认、清理或日志收集不完整时，整体不得输出 PASS；同时保留已完成测试状态和首个失败，不能用清理/收集错误覆盖它。
+- SSH 建连前计算相对运行预算，远端建连后才开始计时，会延长集群执行阶段。dry-run 回归曾在执行预算 10 秒、SSH 延迟 5 秒、rank 运行 7 秒时于 13.30 秒误报 PASS；控制端现在等待节点结果时同时检查统一截止时间，到期主动调用原有跨节点取消，再收敛退出和收集日志。回归使用传输替身和真实子进程，不作为目标 SSH 集群证据。
 - 退出失败与日志损坏可能同时发生：解析非 UTF-8 或损坏 JSON 时，必须附加解析错误，保留已有退出码及清理失败。构建、同步、运行任何阶段遇到清理失败都保留操作锁，避免下一轮删除仍被进程使用的固定构建目录；普通编译失败且进程已退出则释放锁。组合故障回归验证这两个边界。
 - 构建、同步和运行使用本目录锁，避免相互覆盖。异常断电可能留下锁；这种异常恢复必须先确认没有活动进程，不自动删除未知任务的锁。
 - `TILEXR_CANN_ENV_SCRIPT` 是显式环境选择，`common_env.sh` 不再用仓库内另一套 CANN 环境覆盖它。没有设置此变量的既有调用保持原来的环境发现规则。
