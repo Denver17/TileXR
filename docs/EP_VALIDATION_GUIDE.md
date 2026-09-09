@@ -125,3 +125,124 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 同日普通文件同步修复：临时子模块移除 `.git` 后复现 `fatal: not a tree object`。修复后 52 项脚本回归中 51 项通过，1 项因 MSYS 未创建真实 symlink 而跳过；包含普通同步清单跨模拟节点分发及结果摘要检查。无 `.git`、无导出清单且路径含空格的普通复制目录中，首次构建和修改源码后的重建均通过四个服务器入口，每轮 17/17 Host/Python 测试成功；用 Git 拦截程序确认两轮服务器流程均未调用 Git，hostfile 字节不变。hostfile 保持手动配置，不再自动生成。本地没有 CANN/NPU，生产编译及真实 SSH 集群验证仍需以服务器日志为准。
 
 同日可选 spdlog 修正：新增回归先复现 production 模式被空 spdlog 目录阻断，移除预检后确认能进入生产 CMake 配置调用（测试在调用边界停止，不代表生产构建成功）。52 项脚本回归中 51 项通过，1 项 symlink 跳过。在临时目录仅复制真实 `tilexr_log.h`，不提供 spdlog 头文件、不定义 `TILEXR_LOG_DISABLE_SPDLOG`，按项目默认 GNU C++14 模式编译并运行现有日志测试通过，编译断言确认使用自动替代路径；现有 fake-spdlog API 测试亦通过。MSYS 严格 `-std=c++14` 下现有测试的 POSIX `setenv`/`unsetenv` 声明不可见，故使用与 CMake 一致的 `-std=gnu++14`；未修改生产日志代码或测试源码。CANN 生产编译与 NPU 执行未在本地验证。
+
+## 七步流程检查审计（2026-09-09）
+
+审计源码版本：`04e16e98cf2c3502d765436c87be43616a172192`。以下为检查清单及精简建议，不表示已经删除这些检查。范围覆盖四个根目录入口、它们调用的环境/源码/工作流工具、可选 PC 导出入口，以及当前 CMake 配置。没有访问实际服务器、用户的 Mutagen 配置或已安装的 CANN 环境脚本，因此不能判断这些外部工具内部是否还有检查；也没有测量真实集群上的检查耗时。
+
+判定含义：**保留**表示检查支撑当前已承诺行为；**建议精简**表示当前调用路径存在明确重复或无消费者的操作；**待定**表示需要明确部署/验证范围后才能删除。表内位置指向上述源码版本的实现，不引用未来规划中的命令。
+
+### 可以优先精简的部分
+
+- 将同一安装包的 `nm`/`readelf` 检查集中到构建完成后；其他节点在产物 SHA256 一致后无需再次检查相同二进制的符号和 RUNPATH。`ldd -r` 检查的是各节点实际运行库，另行保留每节点运行前检查。
+- 当前 checkpoint 不使用 NPU，生产 EP kernel 也固定编译 A5；环境脚本探测出的 SoC、ops 名和卡数没有被当前调用路径消费。可跳过这些硬件探测，避免每次加载环境都执行三次 `npu-smi info`。未来 NPU checkpoint 另行定义设备检查。
+- 用解析后的 hostfile 内容判断是否需要重新同步。注释/空白变化不改变主机与 device 配置，不应单独阻断 `run.sh`。`validation.local.sh` 是可执行 Shell，不能用简单去注释的方式等价处理，应记录实际生效的配置。
+- 构建时保留完整来源记录，但运行前只校验参与构建/执行的源文件与产物；普通说明文档、规划文档不应因文字修改阻断运行。具体纳入哪些目录仍需制定，不能只按扩展名粗略裁剪。
+- 将 `len(tests) == 17` 改为必需测试集合/CTest label 检查，保留测试未安装、必需项缺失和结果不完整时的失败。新增一个无关测试不应使流程报“必须 17 项”。
+
+### 第 1、2 步：固定版本及 PC 同步
+
+| ID | 位置 | 当前操作或检查，失败/影响 | 判定与建议 |
+| --- | --- | --- | --- |
+| P01 | PC `git fetch`、`git switch --detach` | 获取并选择验证版本；不自动检查 PC 是否有未提交改动 | 保留版本选择。Mutagen 会同步实际工作文件，不能据此保证全是该提交的内容 |
+| P02 | [source.py:165](../tools/validation/source.py#L165) `pack` | 仅 `push.ps1` 路径执行：初始化全部递归子模块，导出 HEAD 原始字节；未提交改动不导出，子模块获取失败则停止 | 待定：完整提交导出的既有规则。用户使用 Mutagen 时完全不需要此入口，也不需要为当前算子获取可选 spdlog |
+| P03 | [push.ps1:12](../tools/validation/push.ps1#L12) | 校验 host/user 格式、Linux 绝对路径并引用 Shell 参数；禁止换行、路径越界等 | 保留参数引用和路径约束。当前不支持 `user@host`、IPv6 等写法，扩展支持需独立明确 |
+| P04 | [push.ps1:31](../tools/validation/push.ps1#L31) | 对导出、scp、SSH 返回码逐一判失败；生成并传输临时 tar.gz，最终清理临时包 | 使用该入口时保留；不应叠加到 Mutagen 流程 |
+| P05 | [push.ps1:45](../tools/validation/push.ps1#L45) | 拒绝根目录、路径中的 symlink、Git checkout、无管理标记的非空目录和活动/残留锁 | 路径越界与活动任务保护保留；非空目录必须有标记、全面禁 symlink 属于部署政策，待定 |
+| P06 | [push.ps1:61](../tools/validation/push.ps1#L61) | 校验归档是普通文件、清单与归档文件集合相等、不得覆盖 hostfile 等本地配置；移除旧清单中的退役源码 | 保留包完整性和配置保护。旧源码删除用于避免残留文件参与运行 |
+| P07 | [push.ps1:100](../tools/validation/push.ps1#L100)、[source.py:119](../tools/validation/source.py#L119) | 解包后验证每个源码文件 SHA256；首次构建开始时还会再验证一次固定提交清单 | 待定：各自覆盖“传输完成”和“准备构建”时点，不能仅因使用相同算法就认为等价 |
+
+### 第 3 步及后续入口：环境与配置
+
+| ID | 位置 | 当前操作或检查，失败/影响 | 判定与建议 |
+| --- | --- | --- | --- |
+| E01 | [set_env.sh:14](../set_env.sh#L14)、[build_all.sh:3](../build_all.sh#L3)、[sync.sh:3](../sync.sh#L3)、[run.sh:3](../run.sh#L3)、[workflow.py:30](../tools/validation/workflow.py#L30) | 显式第 3 步、三个入口和每个 SSH verify/node/cancel 会话重新 source 配置与公共环境 | 远端会话加载环境保留；本机可精简为可重复执行的轻量加载，避免重复硬件探测、PATH 增长。不能只删掉远端 source |
+| E02 | [set_env.sh:32](../set_env.sh#L32)、[workflow.py:134](../tools/validation/workflow.py#L134) | Shell 和 Python 都检查 mode/checkpoint，只允许 host/production 和已实现的 ABI/Host checkpoint | 范围检查保留，避免误报设备测试；重复实现可合并，但独立调用 Python 时仍须检查 |
+| E03 | [set_env.sh:37](../set_env.sh#L37)、[common_env.sh:55](../scripts/common_env.sh#L55) | production 检查 CANN 脚本可读并 source；可读性检查重复。`TILEXR_CANN_VER=9.1.0` 只是赋值，不是安装版本验证 | 保留环境加载；重复可读检查可合并。实际 CANN 脚本内部工作未知，不能把这里描述为已验证版本兼容 |
+| E04 | [set_env.sh:48](../set_env.sh#L48)、[workflow.py:566](../tools/validation/workflow.py#L566) | 查找 Python 并要求版本至少 3.9 | 保留，代码实际使用 Python 3.9 API；不应增加另一套手工安装/验证命令 |
+| E05 | [workflow.py:102](../tools/validation/workflow.py#L102) | hostfile 必须存在且有 1..64 台主机，检查字段、重复 host、重复 device ID 及 0..255 范围；为空/格式错误时失败 | 保留文件读取、格式及重复主机检查。64 主机上限、255 device 上限及 Host checkpoint 的 device 检查待定；这不是实际设备存在性验证 |
+| E06 | [workflow.py:136](../tools/validation/workflow.py#L136) | JOBS 限制 1..256，TIMEOUT 限制 30..180 秒；SSH_USER 必须匹配限定格式；hostfile 解析后必须在工作目录内 | 正数及输入合法性保留。数值上限和 hostfile 必须位于源码目录是工具政策，是否必要待定；后者便于自动分发配置 |
+| E07 | [common_env.sh:21](../scripts/common_env.sh#L21)、[common_util.sh:47](../scripts/common_util.sh#L47)、[common_util.sh:62](../scripts/common_util.sh#L62)、[common_util.sh:104](../scripts/common_util.sh#L104) | 探测 SoC、ops 名、设备数；每次 source 在 npu-smi 可用时执行 3 次 `npu-smi info`，解析失败可能调用 lspci；未设置单独超时 | 建议在当前 checkpoint 跳过。当前生产 EP 固定 A5 编译，这些值未被当前构建/Host 测试路径使用；设备探测不等于健康/空闲检查 |
+| E08 | [common_env.sh:26](../scripts/common_env.sh#L26)、[common_env.sh:88](../scripts/common_env.sh#L88) | 创建 env/temp/util、run/plog；设置 MPI/HCCL Test 路径并向 PATH/LD_LIBRARY_PATH 添加工具目录 | 保留实际所需日志和库路径。MPI、HCCL Test、sshpass 等路径没有当前流程消费者，建议轻量环境不再设置；没有实际执行依赖安装或 HCCL Test |
+| E09 | [common_env.sh:78](../scripts/common_env.sh#L78) | driver/kernel/inc 不可读时，用 CANN driver 头文件建立本地 driver-shim，并修改 ASCEND_DRIVER_PATH；链接仍指向真实 driver 库 | 待定：兼容已安装环境的功能，不应因当前机器不需要就删；需要服务器实际路径才能判断是否启用 |
+
+### 第 4 步：构建与安装检查
+
+| ID | 位置 | 当前操作或检查，失败/影响 | 判定与建议 |
+| --- | --- | --- | --- |
+| B01 | [workflow.py:161](../tools/validation/workflow.py#L161)、[workflow.py:573](../tools/validation/workflow.py#L573) | build/sync/run 使用目录锁，遇到活动节点锁或既有操作锁即失败；退出时释放 | 保留并发保护。断电残留锁的恢复是异常处理，当前会需要人工确认，正常路径不增加命令 |
+| B02 | [workflow.py:254](../tools/validation/workflow.py#L254) | 强制要求 cmake、ctest、g++、make，并执行 cmake/g++ `--version` 保存日志 | cmake/ctest 保留；固定 g++/make 待定，CMake 本可选其他 Host 编译器或 Ninja。版本记录不是版本兼容性测试；文档要求 CMake 3.20+，当前根 CMakeLists 声明 3.16，是否确有更高版本依赖尚未确认 |
+| B03 | [source.py:142](../tools/validation/source.py#L142)、[source.py:91](../tools/validation/source.py#L91) | 构建前读取 Git/固定导出清单，或扫描普通文件并计算 SHA256；元数据不完整时使用 commit=null，不要求服务器 Git | 保留实际源码标识。扫描普通目录还包含 docs 等不参与编译内容，建议缩小阻断检查范围 |
+| B04 | [source.py:43](../tools/validation/source.py#L43)、[source.py:119](../tools/validation/source.py#L119) | 拒绝越界/绝对路径/.git 路径、源码 symlink、非法摘要及文件缺失/变化；只检查清单中已有文件 | 越界与内容不符检查保留；全面禁 symlink 待定。该清单不检测所有额外文件，不能称为整个目录完全相等 |
+| B05 | [workflow.py:256](../tools/validation/workflow.py#L256)、[workflow.py:263](../tools/validation/workflow.py#L263) | 每次生成 UUID 新构建目录，生产包与 Host 测试各自 configure/build/install；二者均传 Debug | 待定：新目录避免旧缓存但导致每次全量编译。Host Debug 要保留断言；生产包是否也用 Debug，应按调试/性能目标决定 |
+| B06 | [src/comm/CMakeLists.txt:30](../src/comm/CMakeLists.txt#L30) | CMake 编译探测 PTO SDMA 头文件/API，检查 intrinsic 与真实 libnnopbase；不可用时关闭可选 SDMA | 保留能力探测及不可用时继续编译的行为；它没有要求必须安装 PTO。不要重演把可选 spdlog 升为硬依赖的问题 |
+| B07 | [src/ep/CMakeLists.txt:5](../src/ep/CMakeLists.txt#L5)、[CMakeDetermineCCECompiler.cmake:11](../src/collectives/kernels/cmake/CMakeDetermineCCECompiler.cmake#L11)、[TileXRKernelArtifact.cmake:4](../src/cmake/TileXRKernelArtifact.cmake#L4) | 生产 EP 查找 ccec/ld.lld、构建并安装四个 A5 kernel，检查 kernel artifact 的 CMake target/参数；CCE 测试文件仅把 WORKS 设为 1 | 生产包编译依赖保留，实际编译返回码才是证据。是否为纯 ABI/Host 阶段编译全部 kernel 待定；不能删除后仍声称验证完整生产包 |
+| B08 | [workflow.py:271](../tools/validation/workflow.py#L271) | 安装后检查 dispatch/combine/dispatch_memory/combine_memory 四个 kernel 文件存在 | 保留当前完整包检查；它不表示执行过 kernel，不是 spdlog 那样的可选依赖 |
+| B09 | [workflow.py:216](../tools/validation/workflow.py#L216) | `nm -D --defined-only -C libtilexr-ep.so`，检查两个 Dispatch 公共符号文本 | 构建后保留；相同产物在多节点重复做建议精简。不能替代完整 ABI 或实际调用测试 |
+| B10 | [workflow.py:220](../tools/validation/workflow.py#L220) | `readelf -d`，要求恰好一条 RPATH/RUNPATH 且含完整 `[$ORIGIN]` 字段 | 构建后校验外置 kernel 包的加载路径有用；重复调用建议精简。精确字符串政策待定：`$ORIGIN:$ORIGIN/extra` 也被拒绝，虽然不是 devlib |
+| B11 | [workflow.py:224](../tools/validation/workflow.py#L224) | `ldd -r` 拒绝 not found/undefined symbol/devlib，并要求 libascend_hal 解析到配置的真实 driver 路径（兼容 shim） | 每节点运行前保留；本机四次可减。真实 HAL 约束来自 AGENTS.md；不能只因链接成功就删除运行环境检查 |
+| B12 | [workflow.py:281](../tools/validation/workflow.py#L281) | `ctest --show-only=json-v1` 只列出命令；将 Python/C++ 测试映射到分发路径，检查安装文件存在；不接受其他命令形态 | 保留清单与安装检查。该命令没有执行测试；命令形态限制是当前导出器能力边界，待扩展用例出现再调整 |
+| B13 | [workflow.py:296](../tools/validation/workflow.py#L296) | 要求恰好 17 项且包含四个 Server Dedup 测试；新增无关测试同样导致构建失败 | 建议精简为必需集合/label。四项必需测试不能少，是否纳入另外 13 项是验证范围决策 |
+| B14 | [workflow.py:299](../tools/validation/workflow.py#L299) | 编译后再次读取所有记录源码并比 SHA256，防止构建过程中 Mutagen 改动源码；计算安装文件摘要，写 manifest | 保留构建前后的一致性。普通文档变化也失败属于范围过大；缩小范围前须覆盖 CMake、头文件和运行时 Python 导入 |
+| B15 | [workflow.py:306](../tools/validation/workflow.py#L306) | 拒绝 install/validation 及父目录 symlink，移除旧安装目录后以本次 stage 替换，写源码清单及管理标记 | 保留避免旧产物混入的目的；是否改为按 build_id 保留安装并切换，待定。路径保护应与删除动作一起评估 |
+
+### 第 5 步：节点同步
+
+| ID | 位置 | 当前操作或检查，失败/影响 | 判定与建议 |
+| --- | --- | --- | --- |
+| S01 | [workflow.py:177](../tools/validation/workflow.py#L177)、[workflow.py:325](../tools/validation/workflow.py#L325) | 确认 hostfile 首项是当前主机；依次尝试本机名称、IP/DNS，必要时 SSH hostname；第 6 步重复 | 保留首节点身份契约，避免把另一主机当本机跳过同步；重复远端探测可按清单缓存，必要性取决于实际 hostfile |
+| S02 | [workflow.py:326](../tools/validation/workflow.py#L326) | 多机才要求 ssh/rsync；固定 BatchMode、连接期限与保活 | 保留自动执行所需连接行为；不安装密钥、不接受未知主机密钥、不执行 NPU 空闲探测 |
+| S03 | [workflow.py:240](../tools/validation/workflow.py#L240)、[workflow.py:329](../tools/validation/workflow.py#L329) | 首节点验证 mode/checkpoint/CPU 架构、源码 SHA256、安装文件集合及 SHA256，再执行全部 runtime_check | 身份和产物变化检查保留；重复 nm/readelf 建议精简；这一时点是否还需 ldd 待定 |
+| S04 | [workflow.py:330](../tools/validation/workflow.py#L330) | 删除旧 sync.json，只在本次所有节点成功后写新记录；记录 build_id 与配置摘要 | 保留失败不能沿用旧同步成功的语义 |
+| S05 | [workflow.py:332](../tools/validation/workflow.py#L332) | 仅同步清单中源码、安装包、hostfile/local 配置和管理清单；不复制 build、历史 run 和环境 | 保留避免分发缓存；是否同步全部文档待定。这不是逐字复制整个工作目录 |
+| S06 | [workflow.py:346](../tools/validation/workflow.py#L346) | 远端只接受空目录或有 `.tilexr-validation-root` 的目录，拒绝 Git checkout/路径 symlink/活动锁 | 活动任务和越界保护保留；非空目录必须已有标记待定。其他节点若已经由 Mutagen 预置源码，会在此失败，不符合“任意已有同名工作目录都可同步”的理解 |
+| S07 | [workflow.py:360](../tools/validation/workflow.py#L360) | 同步前删除远端 install/validation；首节点没有 local 配置时删除远端同名配置，否则 rsync 覆盖配置及 hostfile | 待定：能清掉退役产物，但会强制重传整个安装包；配置必须统一由首节点管理。不能在未明确所有权时接管现有目录 |
+| S08 | [workflow.py:375](../tools/validation/workflow.py#L375) | `rsync --checksum` 以内容判断已有文件是否需要更新；之后还执行 Python SHA256 验证 | 待定，不等同于完全重复：rsync 决定“传哪些文件”，SHA256 判断“传完是否正确”。去掉 checksum 可能漏传同大小/同时间戳但内容变化的源码；已删除的安装目录则没有旧文件可比较 |
+| S09 | [workflow.py:379](../tools/validation/workflow.py#L379)、[workflow.py:587](../tools/validation/workflow.py#L587) | 每个远端重新加载环境、运行 verify_build 的全部检查，再比较请求的 build_id；任一失败则整体失败 | 传输后核验有用；相同二进制的 nm/readelf 再次重复。SHA256 与运行前检查是否两次都保留待定 |
+| S10 | [workflow.py:154](../tools/validation/workflow.py#L154)、[workflow.py:387](../tools/validation/workflow.py#L387) | 配置签名既含解析 host 列表，又包含 hostfile 原始字节 SHA256；local 配置也按原始字节摘要；含 timeout 等参数 | hostfile 双重记录建议精简，注释不应失效；local Shell 配置需按实际生效值判断。不能用简单文本删除注释处理任意 Shell |
+
+### 第 6、7 步：执行、取消与结果
+
+| ID | 位置 | 当前操作或检查，失败/影响 | 判定与建议 |
+| --- | --- | --- | --- |
+| R01 | [workflow.py:474](../tools/validation/workflow.py#L474) | 首节点再次检查自身身份与 verify_build，再要求 sync.json 的 build_id/配置完全匹配；单机也必须先 sync | 多机同步身份检查保留。单机的同步凭据只满足固定七步接口，没有网络复制；是否内部自动通过待定 |
+| R02 | [workflow.py:486](../tools/validation/workflow.py#L486) | 本机用 Python 子进程、其他节点经 SSH 启动一个 node；每主机执行一套 Host 测试 | 这是当前实现边界。device 列表不会转换成 NPU rank；是否每节点都跑整套相同 Host 测试待定，可考虑首节点全量、其他节点部署 smoke |
+| R03 | [workflow.py:399](../tools/validation/workflow.py#L399) | 每节点保存 PID/starttime，设置 TERM/HUP 处理和期限，检查取消标记，再次 verify_build 并确认 build_id | 身份、取消与节点自身期限保留；本机紧接控制端再次校验相同文件与 nm/readelf 可合并，但须保留独立 node 调用的检查能力 |
+| R04 | [workflow.py:421](../tools/validation/workflow.py#L421) | 按 manifest 逐个执行测试；非零退出失败；四个 Server Dedup 测试还要求完整 PASS marker 行 | 保留必需测试和完整结果语义；marker 是额外执行完成证据，是否只用返回码待定，不能直接假定任意程序 exit=0 就测过 checkpoint |
+| R05 | [workflow.py:64](../tools/validation/workflow.py#L64)、[workflow.py:82](../tools/validation/workflow.py#L82) | 各外部命令有独立进程组，退出/超时均执行 TERM，必要时 KILL；保留输出日志，非零显示尾部 | 保留，解决 SSH/父进程退出而子进程遗留；不要改成按程序名全局杀进程 |
+| R06 | [workflow.py:30](../tools/validation/workflow.py#L30)、[workflow.py:411](../tools/validation/workflow.py#L411)、[workflow.py:475](../tools/validation/workflow.py#L475) | 环境+远端命令 watchdog、节点最多 120 秒、控制端总期限默认 180 秒；为清理/收集预留时间；构建/同步另计 | 保留有界执行目标。具体 30..180 限制、各层预算待定；本机 source、逐文件摘要、DNS 等同步调用没有统一可中断期限，不能仅靠最终超时检查保证严格墙钟上限 |
+| R07 | [workflow.py:445](../tools/validation/workflow.py#L445)、[workflow.py:504](../tools/validation/workflow.py#L504) | 首个启动/测试失败后向所有节点发取消；核对 PID starttime 防 PID 复用误杀，最多等待清理 8 秒；取消失败也计入总失败 | 保留进程归属与清理确认。取消 SSH 仍加载完整 CANN/hostfile 环境，建议改为最小清理入口，避免环境错误阻断取消 |
+| R08 | [workflow.py:523](../tools/validation/workflow.py#L523) | 从各节点 rsync 当前 run_id 日志和 result.json；日志收集失败也使总体失败 | result.json 收集保留；完整原始日志收集是否作为 PASS 的硬条件待定，可区分“测试通过但日志不完整”，但这是结果语义变更 |
+| R09 | [workflow.py:463](../tools/validation/workflow.py#L463)、[workflow.py:543](../tools/validation/workflow.py#L543) | 检查 run_id/build_id、mode/checkpoint、PASS、cleanup、测试集合无缺失/重复且逐项通过，再检查总期限；写 summary | 保留，防止旧结果、漏主机/漏测试被误判为本次成功；这些与文件摘要解决不同问题 |
+
+### SHA256 和重复调用的具体次数
+
+当前调用链没有 `md5sum` 或 `sha256sum` 命令。源码与产物校验使用 Python `hashlib.sha256`；`rsync --checksum` 是 rsync 自己的传输选择机制，其具体算法由实际安装的 rsync 决定。`content_sha256` 只对已有“路径→文件摘要”映射做一次摘要，不再读取源码文件。
+
+下表按 **Mutagen/普通复制、production、正常成功、N 台主机、一遍第 3～7 步**统计源码调用路径。计入构建时首次计算文件摘要，不计 PC 导出、重试、失败取消、rsync 内部校验和测试程序内部工作；次数不是实测耗时。
+
+| 操作 | 首节点 | 每个其他节点 | N=8 总数 | 建议 |
+| --- | --- | --- | --- | --- |
+| 加载 set_env/common_env | 4：显式 source、build、sync、run | 2：同步 verify、运行 node | 18 次 | 保留会话环境，去掉无消费者的探测/路径设置 |
+| `npu-smi info`（命令可用时） | 12 | 6 | 54 次 | 当前 checkpoint 可跳过；临时模拟确认每次 source 为 3 次 |
+| 逐文件源码 SHA256 | 5：构建前、构建后、sync 本机、run 控制端、run 本机 node | 2：sync verify、run node | 19 次扫描 | 校验范围与时点待定，优先排除无关文档 |
+| 逐文件安装产物 SHA256 | 4：建清单、sync 本机、run 控制端、run 本机 node | 2：sync verify、run node | 18 次扫描 | 相邻控制端/本机 node 检查可合并；传输后与运行前是否都要待定 |
+| `nm` + `readelf` + `ldd -r` | 各 4 次：构建后、sync、run 控制端、run 本机 node | 各 2 次 | 18 组，即 54 个命令 | nm/readelf 建议全包只做一次；ldd 保留每节点运行前检查 |
+| Host/Python 测试 | 17 项 | 17 项 | 136 个测试进程 | 每节点重复范围待定，不是 64P NPU 测试 |
+
+源码校验的不同目的：构建前确定输入、构建后发现构建期间被同步修改、同步前防止分发过期构建、同步后确认目标内容、启动前防止沿用旧产物。这些目的应保留，但不代表每个目的都必须重读全仓库。当前只有“重读并比较”一种实现，没有版本缓存或不可变发布目录机制。
+
+### 当前 17 项测试的范围
+
+| 测试集合 | 数量 | 位置 | 对本 checkpoint 的判定 |
+| --- | --- | --- | --- |
+| `test_tilexr_ep_server_dedup_{protocol,layout,host_validation,public_abi}` | 4 | [tests/ep/CMakeLists.txt:247](../tests/ep/CMakeLists.txt#L247) | 本 checkpoint 必需，验证协议/布局/Host 参数/公共 ABI，不运行设备去重 |
+| `test_tilexr_ep_{layout,expert_ids,host_validation,kernel_launch}` | 4 | [tests/ep/CMakeLists.txt:370](../tests/ep/CMakeLists.txt#L370) | 有关 EP 既有功能回归，建议至少构建后验证一次；是否每节点重复待定 |
+| `test_tilexr_moonep_planner_public_abi`、`test_tilexr_ep_plan_{layout,reference,algorithm,downstream,host}`、`test_tilexr_moonep_planner_compat` | 7 | [tests/ep/CMakeLists.txt:374](../tests/ep/CMakeLists.txt#L374) | Planner 回归，不是当前 Server Dedup 最小必需集合；是否纳入每次交付待定 |
+| `test_dispatch_memory_trace`、`test_msprof_kernel_stats` | 2 | [tests/ep/CMakeLists.txt:27](../tests/ep/CMakeLists.txt#L27) | Python 日志/统计工具回归，不执行 profiler 或采集 NPU 性能；是否纳入每次节点验证待定 |
+
+### 已确认取消或没有执行的流程
+
+`04e16e9` 已取消 spdlog 缺失硬阻断；`67168ba` 已取消环境入口自动创建 hostfile，并支持普通复制目录不带 Git 元数据。当前正常服务器路径不执行 Git clone/submodule、HCCL Test、NPU 空闲检查、设备通信、正式 NPU profiler 或依赖安装。`common_env.sh` 定义的安装函数/权限修复函数不等于已调用，不能仅通过关键词命中把它们列成必执行步骤。
+
+本次审计的定点验证在临时目录完成：模拟 npu-smi 确认单次 source 调用三次；hostfile 只加注释导致 signature 变化；普通文档修改触发 source mismatch；模拟 readelf 输出 `$ORIGIN:$ORIGIN/extra` 被精确 RUNPATH 规则拒绝。没有执行实际 NPU 查询或远程命令，也没有删除上述待定检查。
