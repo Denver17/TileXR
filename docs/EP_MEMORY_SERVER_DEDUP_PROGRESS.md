@@ -10,7 +10,7 @@
 | 检查点 | 每次测试重点 | 当前状态 | 通过测试的 commit |
 | --- | --- | --- | --- |
 | 1 `ep-sdedup-p1-abi-host` | 三类 metadata ABI、layout、Host 校验、错误码；七步生产构建与 Host 回归 | **已通过**，用户确认最新提交完成服务器验证 | [`acb976cb6c5527e02a0d931e20a954eb1c891d37`](https://github.com/LingquLab/TileXR/commit/acb976cb6c5527e02a0d931e20a954eb1c891d37) |
-| 2 `ep-sdedup-p1-empty-kernel` | A5 空 kernel、ELF/安装、生产库链接和相对加载、设备注册；Host 验证 launch 参数和失败返回 | **代码已实现，待执行 empty-kernel**；`0f8f6fa` 的 production ABI/Host 回归已通过 | 尚无 empty-kernel 通过记录 |
+| 2 `ep-sdedup-p1-empty-kernel` | A5 空 kernel、ELF/安装、生产库链接和相对加载、设备注册；Host 验证 launch 参数和失败返回 | **已通过**，production 模式 2/2 主机、每台 18 项测试成功 | [`eae264dc2e3d33169ffd2e78e04c3430d41b7559`](https://github.com/LingquLab/TileXR/commit/eae264dc2e3d33169ffd2e78e04c3430d41b7559) |
 | 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | 未开始 | — |
 | 4 `ep-sdedup-p1-chain-single` | 64P/128P 建链、一次空 launch、stream 完成、轮末 barrier | 未开始 | — |
 | 5 `ep-sdedup-p1-chain-multi` | 64P/128P 多轮 magic、顺序完成与资源复用 | 未开始 | — |
@@ -29,21 +29,23 @@
 | `2da6d00` | 精简七步流程、统一失败分类 | 当前流程基础 |
 | `acb976c` | 按完整 C ABI 导出名检查，修复生产库误拒绝 | **检查点 1 通过提交** |
 
-检查点 2 的实现提交为 `0f8f6fa8b579b9e13f45a1d8bcbcd736a5d1c5f6`。
-本地脚本回归共 94 项，91 通过、3 项因 MSYS 无真实 symlink 支持而跳过，包含模拟双节点的设备选择和失败汇总。
-实现时本地未执行 CANN/A5 验证。用户已回传上述提交的一次服务器运行，来源标记为 `unverified`，
-run_id 为 `b57e91fb58d64b8b87ac880c4322d2a0`，结果位于
-`/home/h00580772/TileXR-git-chec/run/validation/b57e91fb58d64b8b87ac880c4322d2a0/summary.json`。
-用户补充确认该结果及另一次 summary 均为 `checkpoint=ep-sdedup-p1-abi-host`、`mode=production`、`status=PASS`。
-据此登记 `0f8f6fa` 的生产构建和 ABI/Host 回归通过；它们没有执行安装包设备注册测试，不代表检查点 2 通过。
-另一次 summary 的 run_id/路径未提供，不补写运行身份。检查点 1 原通过记录 `acb976c` 保留。
+检查点 2 的提交与测试记录：
 
-下一次在原 `validation.local.sh` 中将 checkpoint 改为 `ep-sdedup-p1-empty-kernel`，保持 `production`，
-按原流程重新 source、build_all、sync、run；构建会加入安装包注册 consumer，随后每台主机验证一次设备注册。
+| 提交 | 修改及测试重点 | 记录 |
+| --- | --- | --- |
+| `0f8f6fa` | 空 A5 kernel、安装、注册和 launch；复用七步入口 | 本地 17/17 EP 测试通过；脚本 91 项通过、3 项 MSYS symlink 跳过；服务器 production ABI/Host 回归通过 |
+| `8dcca5b` | 修正固定为 ABI/Host 的摘要范围，JSON 与终端按 checkpoint 一致显示 | 原双节点回归 2/2 通过，测试判定与七步入口不变 |
+| `eae264d` | 登记前次 ABI/Host 回归，随后切换 empty-kernel 完成服务器验证 | **检查点 2 通过提交**，2/2 主机、每台 18 项测试成功 |
 
-本次回传暴露了摘要显示遗漏：`0f8f6fa` 将 `scope` 和终端范围固定写成 ABI/Host，无法区分空 kernel 注册检查。
-现已按 checkpoint 生成同一份范围文本供 JSON 和终端使用，复用原双节点回归验证，不改变测试判定或七步入口。
-`unverified` 仍仅说明提交来源未经源码内容校验，不表示测试失败，也不为消除该标记重新引入源码摘要门禁。
+本次通过记录来自用户回传的服务器日志：`checkpoint=ep-sdedup-p1-empty-kernel`、`mode=production`、
+`status=PASS`，run_id 为 `f86df093945c42f8985be62e6e934ab9`，结果位于
+`/home/h00580772/TileXR-git-chec/run/validation/f86df093945c42f8985be62e6e934ab9/summary.json`。
+范围为 ABI/Host、A5 空 kernel 安装与设备注册；**未执行 NPU launch 或去重通信**。本地未直接读取远端 JSON。
+提交来源保留日志中的 `unverified`：它表示未校验源码与提交内容一致性，不表示测试失败，也不重新引入源码摘要门禁。
+
+此前 `0f8f6fa` 的 ABI/Host 回归结果为
+`/home/h00580772/TileXR-git-chec/run/validation/b57e91fb58d64b8b87ac880c4322d2a0/summary.json`；
+另一次同范围 PASS 未提供路径。两次均未执行设备注册，保留为回归记录，不替代本次 empty-kernel 验收。
 
 ## 阶段 2：Dispatch 算子逻辑
 
