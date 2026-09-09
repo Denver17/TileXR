@@ -11,7 +11,7 @@
 | --- | --- | --- | --- |
 | 1 `ep-sdedup-p1-abi-host` | 三类 metadata ABI、layout、Host 校验、错误码；七步生产构建与 Host 回归 | **已通过**，用户确认最新提交完成服务器验证 | [`acb976cb6c5527e02a0d931e20a954eb1c891d37`](https://github.com/LingquLab/TileXR/commit/acb976cb6c5527e02a0d931e20a954eb1c891d37) |
 | 2 `ep-sdedup-p1-empty-kernel` | A5 空 kernel、ELF/安装、生产库链接和相对加载、设备注册；Host 验证 launch 参数和失败返回 | **已通过**，production 模式 2/2 主机、每台 18 项测试成功 | [`eae264dc2e3d33169ffd2e78e04c3430d41b7559`](https://github.com/LingquLab/TileXR/commit/eae264dc2e3d33169ffd2e78e04c3430d41b7559) |
-| 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | 代码已实现，本地回归通过；目标 64P/128P 待验证 | — |
+| 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | production 16P 已通过；64P/128P 与目标清理演练待验证 | —（完整验收待完成） |
 | 4 `ep-sdedup-p1-chain-single` | 64P/128P 建链、一次空 launch、stream 完成、轮末 barrier | 未开始 | — |
 | 5 `ep-sdedup-p1-chain-multi` | 64P/128P 多轮 magic、顺序完成与资源复用 | 未开始 | — |
 | 6 `ep-sdedup-p1-profile` | FP16/BF16、warmup、完整 profile 记录和跨 rank 汇总，仅报告框架开销 | 未开始 | — |
@@ -51,9 +51,17 @@
 
 | 提交 | 修改及测试重点 | 记录 |
 | --- | --- | --- |
-| 本节所在实现提交 `feat(ep): add server dedup rank dry run checkpoint` | 复用七步入口；每台 8 个 rank、完整映射/marker 校验、共享期限和异常清理 | 本地真实进程覆盖 64/128 rank 映射；模拟双节点 16 rank 同步、运行和日志收集通过；非零退出、错误 marker、watchdog/HUP 与忽略 TERM 的进程清理通过 |
+| [`67ad16f2e917bd1e1fd17a83262c69b3d7b5680c`](https://github.com/LingquLab/TileXR/commit/67ad16f2e917bd1e1fd17a83262c69b3d7b5680c) | 复用七步入口；每台 8 个 rank、完整映射/marker 校验、共享期限和异常清理 | 本地映射与异常清理回归通过；用户回传 production 2/2 主机、每台 17 项测试、16/16 rank 通过 |
 
 本地验证在 Windows/MSYS2 POSIX Python 上执行：完整脚本回归 108 项中 105 项通过，3 项因 MSYS 未建立真实 symlink 而跳过；Shell 语法、UTF-8、Markdown 链接及差异空白检查通过。本次未改 C++，未重跑 CANN 构建或访问 NPU；64/128 rank 在本机逐节点运行，双节点 SSH/rsync 使用传输替身，不能登记为真实集群验收。此提交未修改公共 Dispatch 接口或提前实现下一检查点。
+
+用户回传的服务器 16P 结果如下，登记为该配置通过：
+
+```text
+VALIDATION_PASS checkpoint=ep-sdedup-p1-dry-run mode=production hosts=2/2 tests_per_host=17 ranks=16/16 commit=67ad16f2e917bd1e1fd17a83262c69b3d7b5680c (unverified)
+```
+
+本次覆盖 ABI/Host、16P rank/device 映射与进程退出，不创建设备上下文或 communicator，未执行 NPU launch 或去重通信。用户尚未提供该次 run_id 或 summary.json 路径，本地未直接读取远端结果。`unverified` 保留为提交来源标签，不表示测试失败；这条正常运行 PASS 不替代 64P/128P 验收或目标节点的故障清理演练。
 
 | 检查点 3 必需记录 | 当前状态 | 通过 commit / 结果 |
 | --- | --- | --- |
