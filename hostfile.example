@@ -1,5 +1,5 @@
 # 多机测试时将此示例内容保存为仓库根目录的 hostfile，填写实际服务器。
-# 首次 source set_env.sh 会自动创建缺失的默认 hostfile，仅包含 localhost。
+# 一次性填写实际清单；source set_env.sh 不会创建或修改 hostfile。
 # 首项必须指向执行 build_all.sh / sync.sh / run.sh 的当前服务器。
 # 可使用 ~/.ssh/config 中的别名；devices 省略时为 0..7。
 localhost devices=0,1,2,3,4,5,6,7

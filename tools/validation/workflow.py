@@ -19,7 +19,7 @@ import sys
 import time
 import uuid
 
-from source import snapshot, verify_source
+from source import content_sha256, snapshot, verify_source
 
 
 CHECKPOINT = "ep-sdedup-p1-abi-host"
@@ -142,7 +142,11 @@ class Config:
         self.install = self.root / "install/validation"
         self.logs = self.root / "run/validation"
     def hosts(self):
-        return hosts_from_file(self.hostfile)
+        try:
+            return hosts_from_file(self.hostfile)
+        except FileNotFoundError:
+            raise ValueError(f"hostfile 不存在：{self.hostfile}；请按 hostfile.example 一次性配置主机清单，"
+                             "或检查 validation.local.sh 中的 TILEXR_VALIDATION_HOSTFILE。") from None
 
     def target(self, host):
         return f"{self.user}@{host}" if self.user else host
@@ -187,22 +191,6 @@ def check_coordinator(config, hosts):
                          config.logs / "coordinator.log", timeout=20).strip()
         if actual != socket.gethostname():
             raise ValueError("hostfile 首项必须是当前执行脚本的服务器")
-
-
-def initialize_hostfile(config):
-    if config.hostfile == config.root / "hostfile":
-        try:
-            with config.hostfile.open("x", encoding="utf-8") as stream:
-                stream.write("localhost\n")
-        except FileExistsError:
-            pass
-        else:
-            print(f"HOSTFILE_CREATED path={config.hostfile}：默认仅本机 Host 测试，多机请编辑此文件。")
-    try:
-        return config.hosts()
-    except FileNotFoundError:
-        raise ValueError(f"hostfile 不存在：{config.hostfile}；请检查 validation.local.sh 中的 "
-                         "TILEXR_VALIDATION_HOSTFILE 并填写实际主机清单。") from None
 
 
 def require_tools(names):
@@ -264,7 +252,9 @@ def verify_build(config, log, deadline=None):
 
 def build(config):
     require_tools(["cmake", "ctest", "g++", "make"])
-    source = snapshot(config.root)
+    if config.mode == "production" and not (config.root / "3rdparty/spdlog/include/spdlog/spdlog.h").is_file():
+        raise ValueError("缺少 3rdparty/spdlog 源码；PC 同步时请包含已初始化的子模块文件，服务器无需 .git。")
+    source = snapshot(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
     build_id = uuid.uuid4().hex
     work = config.root / "build/validation" / build_id
     stage = work / "install"
@@ -323,7 +313,8 @@ def build(config):
     stage.replace(config.install)
     write_json(config.root / ".tilexr-source.json", source)
     (config.root / ".tilexr-validation-root").write_text("TileXR validation deployment\n", encoding="utf-8")
-    print(f"BUILD_PASS commit={source['commit']} mode={config.mode} tests=17\n日志：{log}", flush=True)
+    print(f"BUILD_PASS commit={source['commit'] or 'unknown'} "
+          f"source_sha256={content_sha256(source['files'])} mode={config.mode} tests=17\n日志：{log}", flush=True)
 
 
 def remote_argv(config, host, action, *arguments):
@@ -554,12 +545,14 @@ def run(config):
     if time.monotonic() > deadline:
         errors.append({"stage": "deadline", "error": "结果汇总超过总期限"})
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
+              "source_sha256": content_sha256(manifest["source"]["files"]),
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL" if errors else "PASS",
               "expected_hosts": hosts, "nodes": nodes, "errors": errors,
               "scope": "ABI/Host tests; no NPU launch or communication correctness"}
     write_json(log / "summary.json", report)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
-          f"hosts={len(nodes)}/{len(hosts)} tests_per_host=17 commit={report['commit']}", flush=True)
+          f"hosts={len(nodes)}/{len(hosts)} tests_per_host=17 commit={report['commit'] or 'unknown'} "
+          f"source_sha256={report['source_sha256']}", flush=True)
     for error in errors:
         print(json.dumps(error, ensure_ascii=False), file=sys.stderr)
     print(f"结果：{log / 'summary.json'}\n范围：ABI/Host；未执行 NPU launch 或去重通信。", flush=True)
@@ -576,7 +569,7 @@ def main():
             raise ValueError("七步验证工具要求 Python 3.9 或更新版本")
         config = Config()
         if args.action == "env":
-            hosts = initialize_hostfile(config)
+            hosts = config.hosts()
             print(f"ENV_READY checkpoint={config.checkpoint} mode={config.mode} "
                   f"hosts={len(hosts)} hostfile={config.hostfile} root={config.root}")
         elif args.action == "build":

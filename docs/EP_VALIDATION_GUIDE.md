@@ -1,14 +1,14 @@
 # EP 七步验证
 
-本流程提供固定的 PC 交付入口和四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
+本流程支持 PC 普通文件同步或固定版本导出，并提供四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
 
 当前仅支持 `ep-sdedup-p1-abi-host`：每台主机运行 17 个 EP Host/Python 测试，其中 4 个为 Server Dedup ABI/Host 测试。默认同时编译 CANN 生产库及现有四个 A5 EP kernel。生产 Server Dedup 入口仍返回 `TILEXR_ERROR_NOT_SUPPORT`；本流程不创建 NPU communicator，不执行去重 kernel，不验证多卡通信或数值正确性。未实现的 checkpoint 会直接报错。
 
 ## 一次性环境配置
 
-PC 需要 Git、Python 3.9+、Windows OpenSSH 的 ssh/scp；服务器需要 Bash、Python 3.9+、CMake 3.20+、C++14 编译器、Make 和 CANN 9.1.0 工具链。多节点还需要 rsync、SSH 免密访问及已确认的主机密钥。服务器目录必须可写，各节点必须具有兼容的 CPU 架构、CANN/driver 运行库。依赖安装和 SSH 认证属于已有服务器环境，不会由验证脚本静默修改。
+PC 需要 Git；使用 `push.ps1` 导出时另需 Python 3.9+ 和 Windows OpenSSH 的 ssh/scp。服务器需要 Bash、Python 3.9+、CMake 3.20+、C++14 编译器、Make 和 CANN 9.1.0 工具链。多节点还需要 rsync、SSH 免密访问及已确认的主机密钥。服务器目录必须可写，各节点必须具有兼容的 CPU 架构、CANN/driver 运行库。依赖安装和 SSH 认证属于已有服务器环境，不会由验证脚本静默修改。
 
-首次部署后，用编辑器将根目录 `validation.local.sh.example` 的内容保存为 `validation.local.sh`，修改 CANN 环境脚本及其他实际不同的配置。单机 Host 验证无需预建 hostfile：首次 `source set_env.sh` 自动创建缺失的默认 `hostfile`，内容为 `localhost`，并显示实际主机数。多机验证时，按 `hostfile.example` 在 `hostfile` 中填写实际服务器。已有文件不会被覆盖；显式指定的其他 hostfile 路径缺失时直接报错，不回退到单机。以后刷新代码保留这两个配置文件。
+首次部署后，用编辑器将根目录 `validation.local.sh.example` 的内容保存为 `validation.local.sh`，修改 CANN 环境脚本及其他实际不同的配置，并按 `hostfile.example` 一次性填写实际服务器清单。单机 Host 验证可以填写 `localhost`。`source set_env.sh` 只读取 hostfile 并显示实际主机数；缺失或格式错误时提示配置位置，不会创建、覆盖文件或回退到单机。使用 Mutagen 等同步工具时，由部署者管理配置文件的同步方向，避免错误清单覆盖正确清单。
 
 | 配置 | 说明 |
 | --- | --- |
@@ -36,15 +36,22 @@ hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空�
 ```powershell
 git fetch origin codex/SilentEmotion
 git switch --detach <commit>
+git submodule update --init --recursive
 ```
 
 ### 2. PC 同步到首节点
+
+可以继续使用已配置的 Mutagen 等工具同步普通源码文件：不需要同步 `.git`，但必须包含 `3rdparty/spdlog` 的实际子模块源码。保留 Shell 文件的 LF 换行，不传输 PC 编译缓存、安装产物或 CANN 环境目录；同步完成后再开始构建。服务器不需要安装 Git，也不需要额外执行 Git 命令。
+
+需要在结果中自动记录精确 Git 提交号时，可使用已有导出入口代替普通同步：
 
 ```powershell
 tools\validation\push.ps1 -Server <first-host> -RemotePath /absolute/path/TileXR -SshUser <user>
 ```
 
 此入口自动初始化递归子模块，导出固定 HEAD 的 Git 原始内容，并附上 commit 和逐文件 SHA256。PC 未提交的改动不会混入测试；Shell 文件按 Git 中的 LF 字节交付。远端无需联网拉子模块，也不需要 `.git`。
+
+普通同步目录没有 Git/导出清单时，`build_all.sh` 自动按实际文件生成 `.tilexr-source.json`，包含逐文件 SHA256 和整份清单的 `content_sha256`。提交号在终端中显示 `unknown`，JSON 中为 `null`；内容摘要标识本次构建源码，不能据此声称验证了某个 Git commit。Git 元数据不完整（包括子模块 `.git` 缺失）时也按文件处理。普通同步后直接重建会刷新文件清单，`sync.sh`/`run.sh` 继续检查构建时记录的文件摘要；由导出入口生成的固定提交清单仍严格校验，不会静默接受源码修改。
 
 目标应为新目录、空目录或本工具此前管理且不含 `.git` 的验证目录。刷新时保留配置，更新源码并删除旧来源清单中已不属于新版本的源码文件；不覆盖 Git checkout 或其他工作目录。可以通过 SSH config 管理端口和密钥，不需要把凭据写入脚本。
 
@@ -66,7 +73,7 @@ bash build_all.sh
 
 自动配置独立构建目录、构建生产包和 Host 测试、安装到 `install/validation/`。Host 测试使用 Debug，保留现有断言；要求注册和安装完整的 17 个测试，避免缺少 Python 时只运行 15 个却误报完整通过。
 
-默认 production 模式检查新增/原有公共符号、ELF `$ORIGIN`、真实 driver HAL 依赖以及四个 A5 kernel 文件。源码版本、安装文件摘要、测试命令、构建模式和工具链日志随构建保留。成功输出 `BUILD_PASS`；编译失败会显示错误摘要和日志路径。
+默认 production 模式检查新增/原有公共符号、ELF `$ORIGIN`、真实 driver HAL 依赖以及四个 A5 kernel 文件。源码来源及内容摘要、安装文件摘要、测试命令、构建模式和工具链日志随构建保留。成功输出 `BUILD_PASS`；编译失败会显示错误摘要和日志路径。缺少 spdlog 源码时会在 CMake 前提示补齐 PC 同步内容。
 
 ### 5. 同步所有节点
 
@@ -91,7 +98,7 @@ bash run.sh
 `run.sh` 阻塞到测试结束并自动收集结果。成功输出类似：
 
 ```text
-VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests_per_host=17 commit=...
+VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests_per_host=17 commit=... source_sha256=...
 ```
 
 只有全部预期主机测试成功、退出码为 0、四个 checkpoint marker 完整、结果属于本次运行且日志汇总完成时才返回 0。失败时返回非零，并显示失败节点、阶段、错误摘要和结果路径。结果保存在 `run/validation/<run_id>/summary.json`，原始日志按节点/测试保留。
@@ -100,7 +107,9 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 
 ## 维护与验证边界
 
-- 首次部署回归必须覆盖没有 hostfile 的目录。原先测试夹具预建了 hostfile，掩盖了 `source set_env.sh` 直接报文件不存在的问题；默认路径现在以独占创建方式初始化为 localhost，已有配置及错误的自定义路径均不会被单机默认值覆盖。
+- hostfile 属于一次性部署配置，环境入口只能读取和提示错误。曾自动生成 localhost 默认文件，这会在 Mutagen 等同步流程中引入错误清单传播的风险，因此已撤销自动创建；回归覆盖缺失文件不落盘、已有多机清单不变、自定义路径缺失及空文件拒绝。
+- `git -C <子模块目录>` 会向父目录查找仓库。普通同步遗漏子模块 Git 元数据时，以子模块 commit 查询父仓库会报 `fatal: not a tree object`。源码快照先检查仓库本地元数据，普通文件目录直接计算内容摘要，不要求服务器补 `.git`。回归须同时覆盖普通复制、缺失子模块元数据和固定提交导出，不能只测试带导出清单的部署目录。
+- 普通文件清单排除 `.git`、部署配置、build/install/run、Python 缓存、env、reference 等环境或生成物；包含实际子模块源码和测试脚本。构建后的同步及运行校验已记录文件的存在和字节摘要，构建缓存、日志及本地 hostfile 另行管理；内容摘要不证明 CANN 编译或 NPU 正确性。
 - CTest 注册不等于安装。测试构建成功但未安装时，同步后的节点不能运行；新增测试必须有安装规则，构建脚本核对全部注册命令的可分发路径。本次补齐五个已有测试的安装规则。
 - CMake 测试清单可能引用构建机绝对路径。分发时将 C++ 程序映射到安装目录、Python 测试映射到源码目录，用实际子进程执行验证，不能复制构建树后假定远端可用。
 - 父进程退出或 SSH 退出不代表测试子进程退出。节点设置自身期限，各测试使用独立进程组，TERM 后必要时 KILL；只清理本次拥有的进程。节点身份无法确认或清理/日志收集不完整时不得输出 PASS。
@@ -113,4 +122,4 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 
 2026-09-09 开发验证：Windows/MSYS2 上 41 项脚本行为测试中 40 项通过，1 项因文件系统未创建真实 symlink 而跳过；PowerShell 5.1 同步入口通过模拟传输执行了实际导出、Bash 解包、刷新和拒绝覆盖检查。全新且路径含空格的部署目录中，四个服务器入口以 `mode=host` 完成实际 C++14 Debug 构建、安装和 17/17 Host/Python 测试。CANN 生产构建、真实 SSH 集群同步及 NPU 执行未在本地验证。
 
-同日 hostfile 初始化修复：先用真实 `source set_env.sh` 在缺少 hostfile 时复现失败；修复后 38 项工作流回归全部通过，包含默认文件创建、保留多机清单、自定义路径缺失和空文件拒绝。此次修复不涉及算子代码，未重跑 CANN 构建或 NPU 测试。
+同日普通文件同步修复：临时子模块移除 `.git` 后复现 `fatal: not a tree object`。修复后 52 项脚本回归中 51 项通过，1 项因 MSYS 未创建真实 symlink 而跳过；包含普通同步清单跨模拟节点分发及结果摘要检查。无 `.git`、无导出清单且路径含空格的普通复制目录中，首次构建和修改源码后的重建均通过四个服务器入口，每轮 17/17 Host/Python 测试成功；用 Git 拦截程序确认两轮服务器流程均未调用 Git，hostfile 字节不变。hostfile 保持手动配置，不再自动生成。本地没有 CANN/NPU，生产编译及真实 SSH 集群验证仍需以服务器日志为准。

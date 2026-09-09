@@ -1,10 +1,12 @@
 """Behavior tests for committed exports and source integrity; no SSH required."""
 
 import os
+import json
 from pathlib import Path
 import shutil
 import shlex
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -73,6 +75,79 @@ class SourceTests(unittest.TestCase):
         verify_source(self.root, changed)
         with self.assertRaisesRegex(ValueError, "source mismatch"):
             verify_source(self.root, manifest)
+
+    def test_plain_copy_never_queries_git_even_below_another_repository(self):
+        deployed = self.root / "plain-copy"
+        deployed.mkdir()
+        (deployed / "file.txt").write_text("copied source\n")
+        with patch("source._git", side_effect=AssertionError("must not call Git")):
+            manifest = snapshot(deployed)
+        self.assertIsNone(manifest["commit"])
+        self.assertEqual(manifest["provenance"], "file-copy")
+        self.assertEqual(set(manifest["files"]), {"file.txt"})
+        verify_source(deployed, manifest)
+
+    def test_missing_submodule_git_metadata_uses_actual_copied_files(self):
+        vendor = self.repo("vendor")
+        (vendor / "file.txt").write_text("vendor-specific source\n")
+        self.commit(vendor)
+        with patch.dict(os.environ, {"GIT_ALLOW_PROTOCOL": "file"}):
+            self.git(self.root, "submodule", "add", "-q", str(vendor), "vendor")
+        self.commit(self.root)
+        (self.root / "vendor/.git").unlink()
+        manifest = snapshot(self.root)
+        self.assertIsNone(manifest["commit"])
+        self.assertIn("vendor/file.txt", manifest["files"])
+        verify_source(self.root, manifest)
+
+    def test_plain_rebuild_refreshes_content_but_verification_rejects_changes(self):
+        deployed = self.base / "plain"
+        deployed.mkdir()
+        source_file = deployed / "source.cpp"
+        source_file.write_text("original\n")
+        manifest = snapshot(deployed)
+        (deployed / ".tilexr-source.json").write_text(json.dumps(manifest))
+        source_file.write_text("updated\n")
+        with self.assertRaisesRegex(ValueError, "source mismatch"):
+            verify_source(deployed, manifest)
+        current = snapshot(deployed)
+        self.assertNotEqual(current["content_sha256"], manifest["content_sha256"])
+        verify_source(deployed, current)
+        result = subprocess.run([sys.executable,
+                                 str(Path(__file__).with_name("source.py")), "verify", str(deployed)],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0, "verify must not refresh a stale manifest")
+
+    def test_plain_copy_omits_runtime_files_and_includes_submodule_sources(self):
+        deployed = self.base / "plain"
+        deployed.mkdir()
+        sources = ("CMakeLists.txt", "src/comm/example.cpp", "tests/ep/check.py",
+                   "3rdparty/spdlog/include/spdlog/spdlog.h", "build_all.sh")
+        omitted = ("build/validation/cache", "install/validation/bin/test", "run/validation/lock",
+                   "tests/ep/__pycache__/check.pyc", "src/comm/build/CMakeCache.txt",
+                   "env/cann/header.h", "reference/upstream/source.cpp", "3rdparty/spdlog/.git",
+                   "hostfile", "validation.local.sh", "cluster/hosts", ".tilexr-validation-root")
+        for name in sources + omitted:
+            target = deployed / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("fixture\n")
+        manifest = snapshot(deployed, exclude=("cluster/hosts",))
+        self.assertEqual(set(manifest["files"]), set(sources))
+        verify_source(deployed, manifest)
+        (deployed / "install/validation/bin/test").write_text("rebuilt\n")
+        self.assertEqual(snapshot(deployed, exclude=("cluster/hosts",)), manifest)
+
+    def test_unknown_commit_requires_explicit_file_copy_provenance_and_digest(self):
+        manifest = {"commit": None, "files": {"file.txt": "0" * 64}}
+        with self.assertRaisesRegex(ValueError, "invalid source manifest"):
+            verify_source(self.root, manifest)
+        deployed = self.base / "plain"
+        deployed.mkdir()
+        (deployed / "file.txt").write_text("source\n")
+        manifest = snapshot(deployed)
+        manifest["content_sha256"] = "0" * 64
+        with self.assertRaisesRegex(ValueError, "invalid source content digest"):
+            verify_source(deployed, manifest)
 
     def test_export_initializes_and_pins_recursive_submodules(self):
         leaf = self.repo("leaf")

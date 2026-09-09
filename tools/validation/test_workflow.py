@@ -65,6 +65,13 @@ class HostfileTests(TemporaryRoot):
 
 
 class ConfigTests(TemporaryRoot):
+    def test_production_missing_spdlog_reports_source_copy_error_before_cmake(self):
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production"}), \
+                mock.patch.object(workflow, "require_tools"), mock.patch.object(workflow, "execute") as execute:
+            with self.assertRaisesRegex(ValueError, "3rdparty/spdlog"):
+                workflow.build(self.config())
+            execute.assert_not_called()
+
     def test_signature_tracks_distribution_and_runtime_configuration(self):
         baseline = self.config().signature()
         self.assertEqual(baseline, self.config().signature())
@@ -278,6 +285,23 @@ elif kind == "rsync":
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "集成回归需要 POSIX Python 和 Bash")
 class WorkflowIntegrationTests(TemporaryRoot):
+    def test_file_copy_manifest_syncs_and_runs_with_unknown_commit(self):
+        (self.root / ".tilexr-source.json").unlink()
+        self.manifest["source"] = workflow.snapshot(self.root)
+        self.assertIsNone(self.manifest["source"]["commit"])
+        workflow.write_json(self.root / ".tilexr-source.json", self.manifest["source"])
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        self.assert_success(self.invoke("sync"))
+        result = self.invoke("run")
+        self.assert_success(result)
+        self.assertIn("commit=unknown", result.stdout)
+        summary_paths = list(self.config_instance.logs.glob("*/summary.json"))
+        self.assertEqual(len(summary_paths), 1)
+        summary = workflow.read_json(summary_paths[0])
+        self.assertIsNone(summary["commit"])
+        self.assertEqual(summary["source_sha256"], self.manifest["source"]["content_sha256"])
+        self.assertEqual(len(summary["nodes"]), 2)
+
     def setUp(self):
         super().setUp()
         self.remote = Path(self.temporary.name) / "node-b"
@@ -565,13 +589,13 @@ class EnvironmentEntryTests(TemporaryRoot):
         return subprocess.run([bash, "-c", 'source "$1/set_env.sh"', "bash", str(self.root)],
                               env=environment, cwd=self.root, capture_output=True, text=True, timeout=10)
 
-    def test_first_source_creates_local_hostfile_without_extra_command(self):
+    def test_missing_default_hostfile_is_reported_without_creating_it(self):
         self.hostfile.unlink()
         result = self.source_real_entry()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertEqual(self.hostfile.read_text(), "localhost\n")
-        self.assertIn("HOSTFILE_CREATED", result.stdout)
-        self.assertIn("hosts=1", result.stdout)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertFalse(self.hostfile.exists())
+        self.assertIn("hostfile 不存在", result.stderr)
+        self.assertIn("hostfile.example", result.stderr)
 
     def test_source_preserves_configured_cluster_and_reports_size(self):
         contents = "localhost devices=0,2\nworker02 devices=1,3\n"
