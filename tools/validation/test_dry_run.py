@@ -28,7 +28,7 @@ class DryRunTests(TemporaryRoot):
         for count in (8, 16):
             self.hostfile.write_text("\n".join(f"node-{index} devices=" + ",".join(map(str, devices))
                                                for index in range(count)), encoding="utf-8")
-            mappings = workflow.dry_run_mapping(self.config().hosts())
+            mappings = workflow.rank_mapping(self.config().hosts())
             self.assertEqual([item["rank"] for item in mappings], list(range(count * 8)))
             for rank, item in enumerate(mappings):
                 self.assertEqual(item, {"host": f"node-{rank // 8}", "host_index": rank // 8,
@@ -44,8 +44,8 @@ class DryRunTests(TemporaryRoot):
                 self.config().hosts()
 
     def test_controller_rejects_incomplete_stale_duplicate_or_malformed_rank_results(self):
-        expected = workflow.dry_run_mapping(self.config().hosts())[:8]
-        records = [dict(workflow.dry_run_record(item, "run", self.manifest), pid=100 + item["rank"])
+        expected = workflow.rank_mapping(self.config().hosts())[:8]
+        records = [dict(workflow.rank_record(item, "run", self.manifest), pid=100 + item["rank"])
                    for item in expected]
         result = dict(run_id="run", build_id="dry-build", checkpoint=workflow.DRY_RUN_CHECKPOINT,
                       mode="host", status="PASS", cleanup="complete", tests=[], ranks=records)
@@ -77,23 +77,23 @@ class DryRunTests(TemporaryRoot):
         for hosts in (8, 16):
             self.hostfile.write_text("\n".join(f"node-{i}" for i in range(hosts)), encoding="utf-8")
             config = self.config()
-            mappings = workflow.dry_run_mapping(config.hosts())
+            mappings = workflow.rank_mapping(config.hosts())
             records = []
             deadline = time.monotonic() + 120
             for index in range(hosts):
                 result = {"errors": []}
-                workflow.run_dry_run_ranks(config, f"local-{hosts * 8}", self.manifest,
+                workflow.run_ranks(config, f"local-{hosts * 8}", self.manifest,
                     mappings[index * 8:(index + 1) * 8], deadline, threading.Event(), result)
                 self.assertEqual(result["errors"], [])
                 self.assertEqual(len({record["pid"] for record in result["ranks"]}), 8)
                 records.extend(result["ranks"])
-            workflow.validate_dry_run_records(records, mappings, f"local-{hosts * 8}", self.manifest)
+            workflow.validate_rank_records(records, mappings, f"local-{hosts * 8}", self.manifest)
 
     def test_expired_deadline_does_not_start_rank_or_grant_new_budget(self):
         result = {"errors": []}
         with mock.patch.object(workflow, "execute") as execute:
-            workflow.run_dry_run_ranks(self.config(), "expired", self.manifest,
-                workflow.dry_run_mapping(self.config().hosts())[:8], time.monotonic() - 1,
+            workflow.run_ranks(self.config(), "expired", self.manifest,
+                workflow.rank_mapping(self.config().hosts())[:8], time.monotonic() - 1,
                 threading.Event(), result)
         execute.assert_not_called()
         self.assertTrue(result["errors"][0]["timeout"])

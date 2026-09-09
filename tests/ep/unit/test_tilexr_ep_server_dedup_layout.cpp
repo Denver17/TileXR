@@ -21,7 +21,7 @@ int main()
             &layout) == TILEXR_SUCCESS, "supported layout");
         Check(layout.capacityRows == test.rows && layout.groupRowStrideBytes == test.stride,
             "capacity and group stride");
-        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == 256 * test.stride,
+        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == 8 * 256 * test.stride,
             "metadata byte sizes");
         Check(layout.sourceMaskBytes == 1024 && layout.xBytes == 3670016, "input and mask sizes");
         Check(layout.expertIdsBytes == 256U * test.k * 4U && layout.weightBytes == layout.expertIdsBytes,
@@ -31,7 +31,7 @@ int main()
             "count output sizes");
     }
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS &&
-        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.groupBytes == 32, "tight H tail and K=1");
+        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.groupBytes == 256, "tight H tail and K=1");
     const int64_t invalid[][5] = {
         {0, 1, 1, 1, 32}, {8, 1, 1, 1, 32}, {17, 1, 1, 1, 34}, {136, 1, 1, 1, 272},
         {16, 0, 1, 1, 32}, {16, -1, 1, 1, 32}, {16, 1, 0, 1, 32}, {16, 1, -1, 1, 32},
@@ -51,6 +51,14 @@ int main()
         "null layout rejected");
 
     alignas(32) uint8_t storage[256] = {};
+    Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS,
+        "one-token group capacity");
+    EpServerDedupAllocation group {storage, 32, layout.groupBytes, 32, 1};
+    Check(TileXREpValidateServerDedupAllocations(&group, 1, 1) == TILEXR_ERROR_PARA_CHECK_FAIL,
+        "old BS-row group allocation is insufficient");
+    group.bytes = sizeof(storage);
+    Check(TileXREpValidateServerDedupAllocations(&group, 1, 1) == TILEXR_SUCCESS,
+        "8*BS-row group allocation fits exactly");
     const EpServerDedupAllocation valid[] = {
         {storage, 64, 64, 32, 1}, {storage + 64, 32, 4, 4, 1}, {storage + 96, 160, 128, 32, 1}
     };

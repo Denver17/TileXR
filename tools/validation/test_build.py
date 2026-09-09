@@ -104,6 +104,9 @@ class BuildTests(unittest.TestCase):
                           for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup")]
             else:
                 files = ["bin/" + name for name in self.names]
+                if any("-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST=ON" in command
+                       for command, _, _ in self.commands) and getattr(self, "install_chain", True):
+                    files.append("bin/" + workflow.CHAIN_PROGRAM)
             for name in files:
                 target = stage / name
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -216,6 +219,20 @@ class BuildTests(unittest.TestCase):
         configure = [args for args, _, _ in self.commands if "-S" in args][-1]
         self.assertIn("-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST=ON", configure)
         self.assertIn(f"-DTILEXR_INSTALL_PREFIX={self.root / 'build/validation/install'}", configure)
+
+    def test_chain_build_installs_native_consumer_without_adding_per_host_test(self):
+        (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.CHAIN_CHECKPOINT,
+                                        "TILEXR_COMM_ID": "192.0.2.1:10177"}):
+            config = self.config("production")
+        self.install_chain = False
+        with self.assertRaisesRegex(ValueError, workflow.CHAIN_PROGRAM):
+            self.build_fixture(config)
+        self.install_chain = True
+        manifest, _ = self.build_fixture(config)
+        self.assertEqual(len(manifest["tests"]), len(workflow.REQUIRED_TESTS))
+        self.assertNotIn(workflow.CHAIN_PROGRAM, [test["name"] for test in manifest["tests"]])
+        self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
 
     def test_duplicate_test_name_cannot_replace_independent_execution(self):
         self.names.append(self.names[0])

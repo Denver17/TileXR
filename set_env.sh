@@ -30,11 +30,11 @@ _tilexr_validation_env() {
         export TILEXR_VALIDATION_HOSTFILE="$root/$TILEXR_VALIDATION_HOSTFILE"
     fi
     case "$TILEXR_VALIDATION_CHECKPOINT" in
-        ep-sdedup-p1-abi-host|ep-sdedup-p1-empty-kernel|ep-sdedup-p1-dry-run) ;;
-        *) printf 'type=CONFIG_FAILED 配置失败：TILEXR_VALIDATION_CHECKPOINT=%q；支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel、ep-sdedup-p1-dry-run。请检查 %s。\n' "$TILEXR_VALIDATION_CHECKPOINT" "$config" >&2; return 1 ;;
+        ep-sdedup-p1-abi-host|ep-sdedup-p1-empty-kernel|ep-sdedup-p1-dry-run|ep-sdedup-p1-chain-single) ;;
+        *) printf 'type=CONFIG_FAILED 配置失败：TILEXR_VALIDATION_CHECKPOINT=%q；支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel、ep-sdedup-p1-dry-run、ep-sdedup-p1-chain-single。请检查 %s。\n' "$TILEXR_VALIDATION_CHECKPOINT" "$config" >&2; return 1 ;;
     esac
-    if [[ "$TILEXR_VALIDATION_CHECKPOINT" == ep-sdedup-p1-empty-kernel && "$TILEXR_VALIDATION_BUILD_MODE" != production ]]; then
-        echo "type=CONFIG_FAILED 配置失败：empty-kernel 必须使用 production 模式。" >&2
+    if [[ "$TILEXR_VALIDATION_CHECKPOINT" == ep-sdedup-p1-empty-kernel || "$TILEXR_VALIDATION_CHECKPOINT" == ep-sdedup-p1-chain-single ]] && [[ "$TILEXR_VALIDATION_BUILD_MODE" != production ]]; then
+        echo "type=CONFIG_FAILED 配置失败：empty-kernel / chain-single 必须使用 production 模式。" >&2
         return 1
     fi
     case "$TILEXR_VALIDATION_BUILD_MODE" in
@@ -48,6 +48,10 @@ _tilexr_validation_env() {
         host) export TILEXR_CANN_ENV_SCRIPT= ;;
         *) echo 'type=CONFIG_FAILED 配置失败：TILEXR_VALIDATION_BUILD_MODE 必须为 production 或 host。' >&2; return 1 ;;
     esac
+    if [[ "$TILEXR_VALIDATION_CHECKPOINT" == ep-sdedup-p1-chain-single ]]; then
+        export TILEXR_COMM_ID TILEXR_DEMO_BARRIER_ADDR TILEXR_VALIDATION_BS TILEXR_VALIDATION_H
+        export TILEXR_VALIDATION_TOPK TILEXR_VALIDATION_MOE_EXPERT_NUM TILEXR_VALIDATION_DTYPE TILEXR_VALIDATION_BLOCK_DIM
+    fi
     source "$root/scripts/common_env.sh" || { echo 'type=CONFIG_FAILED 配置失败：无法加载公共环境或 CANN 环境。' >&2; return 1; }
     for tool in "$TILEXR_VALIDATION_PYTHON"; do
         command -v "$tool" >/dev/null || { echo "type=CONFIG_FAILED 配置失败：缺少依赖 $tool" >&2; return 1; }

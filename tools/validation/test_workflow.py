@@ -564,7 +564,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertIn("不创建设备上下文或 communicator", summary["scope"])
         self.assertEqual([item["device"] for item in summary["rank_mapping"][:8]], [7, 2, 5, 0, 6, 1, 4, 3])
         records = [rank for node in summary["nodes"] for rank in node["reported_result"]["ranks"]]
-        workflow.validate_dry_run_records(records, summary["rank_mapping"], summary["run_id"], self.manifest)
+        workflow.validate_rank_records(records, summary["rank_mapping"], summary["run_id"], self.manifest)
         run_log = self.config_instance.logs / summary["run_id"]
         self.assertEqual(len(list(run_log.glob("rank-*.log"))), 8)
         self.assertEqual(len(list((run_log / "nodes/1").glob("rank-*.log"))), 8)
@@ -671,6 +671,79 @@ class WorkflowIntegrationTests(TemporaryRoot):
         stdout, stderr = process.communicate(timeout=10)
         self.assertNotEqual(process.returncode, 0, stdout + stderr)
         self.assert_hanging_ranks_cleaned("rank-hangup")
+
+    def enable_chain(self):
+        self.hostfile.write_text("localhost devices=7,2,5,0,6,1,4,3\nnode-b\n", encoding="utf-8")
+        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.CHAIN_CHECKPOINT,
+                          TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
+        os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
+        entry = self.root / "set_env.sh"
+        entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
+        self.manifest.update(checkpoint=workflow.CHAIN_CHECKPOINT, mode="production")
+        program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
+        program.parent.mkdir()
+        # 传输/编排夹具使用普通进程产出原生协议，不把它作为 CANN launch 证据。
+        program.write_text("#!" + sys.executable + "\n" + r'''
+import json, os, sys
+run, build, commit, host = sys.argv[1:5]
+host_index, local_rank, device, rank, rank_size = map(int, sys.argv[5:10])
+assert os.environ['TILEXR_COMM_ID'] == '192.0.2.1:10177'
+assert os.environ['TILEXR_DEMO_BARRIER_ADDR'] == '192.0.2.1:10274'
+assert os.environ['TILEXR_VALIDATION_BS'] == '256'
+record = dict(run_id=run, build_id=build, commit=None if commit == 'unknown' else commit,
+              host=host, host_index=host_index, local_rank=local_rank, device=device,
+              rank=rank, rank_size=rank_size, pid=os.getpid(),
+              checkpoint='ep-sdedup-p1-chain-single', status='PASS')
+record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
+               for key in ('bs', 'h', 'topk', 'moe_expert_num')})
+record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
+behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
+if behavior == 'wrong-shape':
+    record['bs'] += 1
+if behavior == 'launch-failure':
+    print('stage=launch code=507000', flush=True)
+    sys.exit(9)
+if behavior != 'missing-chain':
+    print('EP_SERVER_DEDUP_CHAIN_PASS ' + json.dumps(dict(record, peer_count=rank_size, peer_mem_bytes=1048576)))
+if behavior == 'stale-round':
+    record['run_id'] = 'old-run'
+print('EP_SERVER_DEDUP_SINGLE_ROUND_PASS ' + json.dumps(dict(record, submitted=1,
+      completed=0 if behavior == 'incomplete-round' else 1, cleanup='complete')))
+''', encoding="utf-8")
+        program.chmod(0o755)
+        self.manifest["artifacts"] = workflow.artifact_files(self.config_instance.install)
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+
+    def test_chain_single_sync_run_and_collect_native_rank_protocol(self):
+        self.enable_chain()
+        self.prepare_sync()
+        command = self.invoke("run")
+        self.assert_success(command)
+        summary = self.summary()
+        self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
+        self.assertEqual(summary["chain_configuration"]["loops"], 1)
+        self.assertEqual(summary["chain_configuration"]["dtype"], "bf16")
+        self.assertIn("单轮空 Dispatch launch", summary["scope"])
+        self.assertNotIn("未执行 NPU launch", summary["scope"])
+        for node in summary["nodes"]:
+            self.assertEqual(node["tests"], len(self.manifest["tests"]))
+            for rank in node["reported_result"]["ranks"]:
+                self.assertEqual(rank["chain"]["peer_count"], 16)
+                self.assertEqual(rank["completed"], 1)
+
+    def test_chain_single_missing_stale_or_incomplete_evidence_fails(self):
+        self.enable_chain()
+        for behavior, kind in (("missing-chain", "LOG_PARSE_FAILED"), ("stale-round", "RESULT_FAILED"),
+                               ("incomplete-round", "RESULT_FAILED"), ("launch-failure", "EXIT_FAILED"),
+                               ("wrong-shape", "RESULT_FAILED")):
+            with self.subTest(behavior=behavior):
+                command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
+                                      environment={"CHAIN_TEST_BEHAVIOR": behavior})
+                self.assertNotEqual(command.returncode, 0)
+                result = workflow.read_json(self.config_instance.logs / behavior / "result.json")
+                self.assertEqual(result["errors"][0]["rank"], 8)
+                self.assertEqual(result["errors"][0]["type"], kind)
+                self.assertEqual(result["cleanup"], "complete")
 
     def test_sync_failure_invalidates_previous_receipt(self):
         self.prepare_sync()
@@ -966,6 +1039,24 @@ class EnvironmentEntryTests(TemporaryRoot):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("checkpoint=" + workflow.DRY_RUN_CHECKPOINT, result.stdout)
         self.assertIn("hosts=2", result.stdout)
+
+    def test_chain_configuration_assignments_reach_python_without_manual_export(self):
+        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
+        cann = self.root / "cann-env.sh"
+        cann.write_text("# CANN environment fixture; no hardware\n", encoding="utf-8")
+        local = self.root / "validation.local.sh"
+        config = ("TILEXR_VALIDATION_BUILD_MODE=production\n"
+                  "TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-single\n"
+                  "TILEXR_COMM_ID=192.0.2.1:10177\n"
+                  f"TILEXR_CANN_ENV_SCRIPT={shlex.quote(str(cann))}\n")
+        local.write_text(config + "TILEXR_VALIDATION_BS=0\n", encoding="utf-8")
+        result = self.source_real_entry()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("shape", result.stderr)
+        local.write_text(config + "TILEXR_VALIDATION_BS=2\n", encoding="utf-8")
+        result = self.source_real_entry()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("checkpoint=ep-sdedup-p1-chain-single", result.stdout)
 
     def test_bad_checkpoint_reports_literal_backticks_and_carriage_return(self):
         value = "`ep-sdedup-p1-empty-kernel`\r"

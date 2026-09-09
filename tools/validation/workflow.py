@@ -5,6 +5,7 @@ import argparse
 import concurrent.futures
 from contextlib import contextmanager
 import hashlib
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,11 @@ CHECKPOINT = "ep-sdedup-p1-abi-host"
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
 DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
+CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
+CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
+CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
+SINGLE_ROUND_MARKER = "EP_SERVER_DEDUP_SINGLE_ROUND_PASS "
+RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, CHAIN_CHECKPOINT)
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
@@ -222,10 +228,10 @@ class Config:
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
         if self.mode not in ("host", "production") or self.checkpoint not in (
-                CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, DRY_RUN_CHECKPOINT):
-            raise ValueError("当前版本仅支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel 和 ep-sdedup-p1-dry-run")
-        if self.checkpoint == EMPTY_KERNEL_CHECKPOINT and self.mode != "production":
-            raise ValueError("empty-kernel 必须使用 production 模式验证真实 A5 artifact 和设备注册")
+                CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
+            raise ValueError("当前版本支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel、ep-sdedup-p1-dry-run 和 ep-sdedup-p1-chain-single")
+        if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, CHAIN_CHECKPOINT) and self.mode != "production":
+            raise ValueError("empty-kernel / chain-single 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
         if self.user and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.user):
@@ -234,11 +240,18 @@ class Config:
         self.hostfile.relative_to(self.root)  # 同步契约：配置属于当前工作目录。
         self.install = self.root / "install/validation"
         self.logs = self.root / "run/validation"
+        self.chain = chain_configuration() if self.checkpoint == CHAIN_CHECKPOINT else None
+
     def hosts(self):
         try:
             hosts = hosts_from_file(self.hostfile)
-            if self.checkpoint == DRY_RUN_CHECKPOINT:
-                dry_run_mapping(hosts)
+            if self.checkpoint in RANK_CHECKPOINTS:
+                rank_mapping(hosts)
+            if self.chain is not None:
+                ranks = len(hosts) * 8
+                experts = self.chain["moe_expert_num"]
+                if experts % ranks or not 2 <= experts // ranks <= 32 or self.chain["topk"] > experts:
+                    raise ValueError("chain-single 要求 moe_expert_num=rank_size*L，2<=L<=32，topk<=moe_expert_num")
             return hosts
         except FileNotFoundError:
             raise ValueError(f"hostfile 不存在：{self.hostfile}；请按 hostfile.example 一次性配置主机清单，"
@@ -248,12 +261,45 @@ class Config:
         return f"{self.user}@{host}" if self.user else host
 
     def signature(self):
-        return {"mode": self.mode, "checkpoint": self.checkpoint, "hosts": self.hosts(),
+        signature = {"mode": self.mode, "checkpoint": self.checkpoint, "hosts": self.hosts(),
                 "ssh_user": self.user, "timeout": self.timeout,
                 "cann_script": os.environ.get("TILEXR_CANN_ENV_SCRIPT", ""),
                 "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""),
                 "python": sys.executable}
+        if self.chain is not None:
+            signature["chain"] = self.chain
+        return signature
+
+
+def chain_configuration():
+    shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
+             for name, default in (("bs", "256"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "384"))}
+    if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
+        raise ValueError("chain-single shape 必须是正 int64，topk<=32")
+    dtype = os.environ.get("TILEXR_VALIDATION_DTYPE", "bf16")
+    block_dim = os.environ.get("TILEXR_VALIDATION_BLOCK_DIM", "auto")
+    if dtype not in ("bf16", "fp16") or (block_dim != "auto" and
+            (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
+        raise ValueError("chain-single dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
+
+    def endpoint(value, name):
+        try:
+            host, port = value.split(":")
+            address = ipaddress.IPv4Address(host)
+            if address.is_loopback or address.is_unspecified or address.is_multicast or not 1 <= int(port) <= 65535:
+                raise ValueError()
+            return f"{address}:{int(port)}"
+        except ValueError:
+            raise ValueError(f"请在 validation.local.sh 配置 {name}=首节点可跨机访问的IPv4:端口") from None
+
+    comm_id = endpoint(os.environ.get("TILEXR_COMM_ID", ""), "TILEXR_COMM_ID")
+    host, port = comm_id.split(":")
+    barrier_addr = endpoint(os.environ.get("TILEXR_DEMO_BARRIER_ADDR", f"{host}:{int(port) + 97}"),
+                            "TILEXR_DEMO_BARRIER_ADDR")
+    if comm_id == barrier_addr:
+        raise ValueError("communicator 与 Host barrier 必须使用不同端口")
+    return dict(shape, dtype=dtype, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr)
 
 
 @contextmanager
@@ -404,13 +450,17 @@ def build(config):
                 raise ValueError(f"缺少 EP kernel：{kernel}")
     host_build = work / "host"
     registration = config.checkpoint == EMPTY_KERNEL_CHECKPOINT
+    chain = config.checkpoint == CHAIN_CHECKPOINT
     command(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST={'ON' if registration else 'OFF'}",
+             f"-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST={'ON' if chain else 'OFF'}",
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
     command(["cmake", "--install", host_build], log / "host-install.log")
+    if chain and not (stage / "bin" / CHAIN_PROGRAM).is_file():
+        raise ValueError(f"单轮空算子测试未安装：{CHAIN_PROGRAM}")
     try:
         listing = json.loads(command(["ctest", "--test-dir", host_build, "--show-only=json-v1"],
                                      log / "tests.json"))
@@ -543,24 +593,24 @@ def pid_identity(pid):
         return None
 
 
-def dry_run_mapping(hosts):
+def rank_mapping(hosts):
     if not 2 <= len(hosts) <= 16 or any(len(host["devices"]) != 8 for host in hosts):
-        raise ValueError("dry-run 要求 2 至 16 台主机，每台恰好 8 个 device ID；完整验收分别使用 64P 和 128P")
+        raise ValueError("多 rank 检查点要求 2 至 16 台主机，每台恰好 8 个 device ID；完整验收分别使用 64P 和 128P")
     return [{"host": host["host"], "host_index": index, "local_rank": local_rank,
              "device": device, "rank": index * 8 + local_rank, "rank_size": len(hosts) * 8}
             for index, host in enumerate(hosts) for local_rank, device in enumerate(host["devices"])]
 
 
-def dry_run_record(mapping, run_id, manifest):
+def rank_record(mapping, run_id, manifest):
     return dict(mapping, run_id=run_id, build_id=manifest["build_id"], commit=manifest["source"]["commit"],
-                checkpoint=DRY_RUN_CHECKPOINT, status="PASS")
+                checkpoint=manifest["checkpoint"], status="PASS")
 
 
 def dry_run_rank(config, run_id, build_id, rank):
     # 每 rank 一个普通进程，只验证分配的身份；不加载 ACL、不设置设备、不创建 communicator。
     if config.checkpoint != DRY_RUN_CHECKPOINT:
         raise ValueError("rank 入口只用于 dry-run")
-    mappings = dry_run_mapping(config.hosts())
+    mappings = rank_mapping(config.hosts())
     rank = int(rank)
     if not 0 <= rank < len(mappings):
         raise ValueError("dry-run rank 超出 hostfile 范围")
@@ -569,28 +619,53 @@ def dry_run_rank(config, run_id, build_id, rank):
     if (manifest["build_id"] != build_id or manifest["checkpoint"] != config.checkpoint
             or manifest["mode"] != config.mode):
         raise Failure("RESULT_FAILED", "rank 的构建或配置不属于本次运行")
-    record = dry_run_record(mappings[rank], identifier(run_id), manifest)
+    record = rank_record(mappings[rank], identifier(run_id), manifest)
     record["pid"] = os.getpid()
     print(DRY_RUN_MARKER + json.dumps(record, ensure_ascii=False), flush=True)
     return 0
 
 
-def validate_dry_run_records(records, expected, run_id, manifest):
+def validate_rank_records(records, expected, run_id, manifest, chain_config=None):
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
-        raise Failure("LOG_PARSE_FAILED", "dry-run rank 记录格式错误")
+        raise Failure("LOG_PARSE_FAILED", "rank 记录格式错误")
     actual = [record.get("rank") for record in records]
     if (len(records) != len(expected) or any(type(rank) is not int for rank in actual)
             or set(actual) != {mapping["rank"] for mapping in expected}):
-        raise Failure("RESULT_FAILED", "dry-run rank 缺失、重复或不属于本节点")
+        raise Failure("RESULT_FAILED", "rank 缺失、重复或不属于本节点")
     for record, mapping in zip(sorted(records, key=lambda item: item["rank"]), expected):
-        wanted = dry_run_record(mapping, run_id, manifest)
-        if any(record.get(key) != value for key, value in wanted.items()):
-            raise Failure("RESULT_FAILED", "dry-run rank 身份或设备映射不一致", rank=mapping["rank"])
-        if type(record.get("pid")) is not int or record["pid"] <= 0:
-            raise Failure("LOG_PARSE_FAILED", "dry-run 缺少有效的进程 PID", rank=mapping["rank"])
+        wanted = rank_record(mapping, run_id, manifest)
+        chain = manifest["checkpoint"] == CHAIN_CHECKPOINT
+        for marker in (record, record.get("chain")) if chain else (record,):
+            if not isinstance(marker, dict):
+                raise Failure("LOG_PARSE_FAILED", "缺少 rank 的建链记录", rank=mapping["rank"])
+            if any(marker.get(key) != value for key, value in wanted.items()):
+                raise Failure("RESULT_FAILED", "rank 身份或设备映射不一致", rank=mapping["rank"])
+            if type(marker.get("pid")) is not int or marker["pid"] <= 0:
+                raise Failure("LOG_PARSE_FAILED", "rank 缺少有效的进程 PID", rank=mapping["rank"])
+            if chain_config is not None and any(marker.get(key) != chain_config[key]
+                    for key in ("bs", "h", "topk", "moe_expert_num", "dtype")):
+                raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype 与本次配置不一致", rank=mapping["rank"])
+        if chain:
+            linked = record["chain"]
+            if (linked.get("peer_count") != mapping["rank_size"] or
+                    type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] <= 0 or
+                    linked["pid"] != record["pid"] or record.get("submitted") != 1 or
+                    record.get("completed") != 1 or record.get("cleanup") != "complete"):
+                raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、一次空 launch 或资源清理",
+                              rank=mapping["rank"])
 
 
-def run_dry_run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
+def parse_rank_marker(output, prefix):
+    markers = [line[len(prefix):] for line in output.splitlines() if line.startswith(prefix)]
+    if len(markers) != 1:
+        raise Failure("LOG_PARSE_FAILED", "缺少或重复 rank marker：" + prefix.strip())
+    try:
+        return json.loads(markers[0])
+    except ValueError as error:
+        raise Failure("LOG_PARSE_FAILED", "无法解析 rank marker：" + prefix.strip()) from error
+
+
+def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
     def launch(mapping):
         rank = mapping["rank"]
         log = config.logs / run_id / f"rank-{rank}.log"
@@ -600,16 +675,31 @@ def run_dry_run_ranks(config, run_id, manifest, mappings, deadline, cancelled, r
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise Failure("EXIT_FAILED", "rank 启动前已超过节点执行期限", timeout=True)
-            output = execute([sys.executable, Path(__file__), "rank", run_id, manifest["build_id"], str(rank)],
-                             log, timeout=remaining, cwd=config.root, cancelled=cancelled)
-            markers = [line[len(DRY_RUN_MARKER):] for line in output.splitlines() if line.startswith(DRY_RUN_MARKER)]
-            if len(markers) != 1:
-                raise Failure("LOG_PARSE_FAILED", "缺少或重复 dry-run rank marker")
-            try:
-                record = json.loads(markers[0])
-            except ValueError as error:
-                raise Failure("LOG_PARSE_FAILED", "无法解析 dry-run rank marker") from error
-            validate_dry_run_records([record], [mapping], run_id, manifest)
+            env = None
+            argv = [sys.executable, Path(__file__), "rank", run_id, manifest["build_id"], str(rank)]
+            if config.checkpoint == CHAIN_CHECKPOINT:
+                argv = [config.install / "bin" / CHAIN_PROGRAM, run_id, manifest["build_id"],
+                        manifest["source"]["commit"] or "unknown",
+                        *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
+                env = dict(os.environ)
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype"):
+                    env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
+                env["TILEXR_COMM_ID"] = config.chain["comm_id"]
+                env["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
+                block_dim = "TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"
+                env.pop(block_dim, None)
+                if config.chain["block_dim"] != "auto":
+                    env[block_dim] = config.chain["block_dim"]
+                env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+            output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
+            if config.checkpoint == CHAIN_CHECKPOINT:
+                record = parse_rank_marker(output, SINGLE_ROUND_MARKER)
+                if not isinstance(record, dict):
+                    raise Failure("LOG_PARSE_FAILED", "单轮记录不是 JSON 对象")
+                record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
+            else:
+                record = parse_rank_marker(output, DRY_RUN_MARKER)
+            validate_rank_records([record], [mapping], run_id, manifest, config.chain)
             return record
         except Exception as error:
             failures = failure_records(error, "LAUNCH_FAILED", rank=rank, log=str(log))
@@ -640,7 +730,7 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
     cancelled = threading.Event()
 
     def interrupted(signum, frame):
-        if config.checkpoint == DRY_RUN_CHECKPOINT:
+        if config.checkpoint in RANK_CHECKPOINTS:
             cancelled.set()
             return
         raise InterruptedError(f"节点收到停止信号 {signum}")
@@ -675,7 +765,7 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
                 env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
                 result["device"] = int(device)
             output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root, env=env,
-                             cancelled=cancelled if config.checkpoint == DRY_RUN_CHECKPOINT else None)
+                             cancelled=cancelled if config.checkpoint in RANK_CHECKPOINTS else None)
             prefix = "test_tilexr_ep_server_dedup_"
             marker = None
             if current_test == REGISTRATION_TEST:
@@ -693,12 +783,12 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
                                   log=str(log / (current_test + ".log")))
             result["tests"].append({"name": test["name"], "status": "PASS"})
         current_test = None
-        if config.checkpoint == DRY_RUN_CHECKPOINT:
-            mappings = dry_run_mapping(config.hosts())
+        if config.checkpoint in RANK_CHECKPOINTS:
+            mappings = rank_mapping(config.hosts())
             index = int(host_index) if host_index is not None else -1
             if not 0 <= index < len(mappings) // 8:
-                raise ValueError("dry-run 缺少有效的 hostfile 节点序号")
-            run_dry_run_ranks(config, run_id, manifest, mappings[index * 8:(index + 1) * 8],
+                raise ValueError("多 rank 检查点缺少有效的 hostfile 节点序号")
+            run_ranks(config, run_id, manifest, mappings[index * 8:(index + 1) * 8],
                               deadline, cancelled, result)
         if not result["errors"] and not cancelled.is_set():
             result["status"] = "PASS"
@@ -738,7 +828,7 @@ def cancel(config, run_id):
         raise RuntimeError("节点清理未确认，保留日志和 PID 记录")
 
 
-def validate_result(result, run_id, manifest, expected_ranks=None):
+def validate_result(result, run_id, manifest, expected_ranks=None, chain_config=None):
     fields = ("run_id", "build_id", "checkpoint", "mode", "status", "cleanup", "tests")
     if (not isinstance(result, dict) or any(field not in result for field in fields)
             or not isinstance(result["tests"], list)
@@ -766,21 +856,21 @@ def validate_result(result, run_id, manifest, expected_ranks=None):
     if (result["status"] != "PASS" or len(actual) != len(expected) or set(actual) != expected
             or any(test["status"] != "PASS" for test in result["tests"])):
         raise Failure("RESULT_FAILED", "节点测试结果失败、缺失或重复")
-    if manifest["checkpoint"] == DRY_RUN_CHECKPOINT:
+    if manifest["checkpoint"] in RANK_CHECKPOINTS:
         if expected_ranks is None:
-            raise Failure("RESULT_FAILED", "缺少 dry-run 预期 rank 映射")
-        validate_dry_run_records(result.get("ranks"), expected_ranks, run_id, manifest)
+            raise Failure("RESULT_FAILED", "缺少预期 rank 映射")
+        validate_rank_records(result.get("ranks"), expected_ranks, run_id, manifest, chain_config)
 
 
-def result_errors(result, run_id, manifest, expected_ranks=None):
+def result_errors(result, run_id, manifest, expected_ranks=None, chain_config=None):
     try:
-        validate_result(result, run_id, manifest, expected_ranks)
+        validate_result(result, run_id, manifest, expected_ranks, chain_config)
     except Failure as error:
         return failure_records(error, "RESULT_FAILED")
     return []
 
 
-def launch_outcome(log, execution_error, run_id, manifest, expected_ranks=None):
+def launch_outcome(log, execution_error, run_id, manifest, expected_ranks=None, chain_config=None):
     """优先采用节点记录的失败边界，SSH 包装进程的非零退出不覆盖测试原因。"""
     raw = b""
     execution = failure_records(execution_error, "EXIT_FAILED") if execution_error else []
@@ -792,7 +882,7 @@ def launch_outcome(log, execution_error, run_id, manifest, expected_ranks=None):
             if len(completions) != 1:
                 raise ValueError("节点完成记录重复")
             result = json.loads(completions[0])
-            errors = result_errors(result, run_id, manifest, expected_ranks)
+            errors = result_errors(result, run_id, manifest, expected_ranks, chain_config)
             if errors:
                 if execution and execution[0].get("returncode") != FAILURE_CODES[errors[0]["type"]]:
                     return result, [*execution, *errors]
@@ -813,7 +903,7 @@ def run(config):
     deadline = time.monotonic() + config.timeout
     execution_deadline = min(deadline - 20, time.monotonic() + 120)
     hosts = config.hosts()
-    mappings = dry_run_mapping(hosts) if config.checkpoint == DRY_RUN_CHECKPOINT else None
+    mappings = rank_mapping(hosts) if config.checkpoint in RANK_CHECKPOINTS else None
 
     def expected_ranks(index):
         return mappings[index * 8:(index + 1) * 8] if mappings is not None else None
@@ -831,7 +921,7 @@ def run(config):
         arguments = ["node", run_id, manifest["build_id"], str(budget)]
         if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
             arguments.append(str(host["devices"][0]))
-        elif config.checkpoint == DRY_RUN_CHECKPOINT:
+        elif config.checkpoint in RANK_CHECKPOINTS:
             arguments.extend(["", str(index)])
         if index == 0:
             argv = [sys.executable, Path(__file__), *arguments]
@@ -845,7 +935,7 @@ def run(config):
             execute(argv, launch_log, timeout=max(1, deadline - time.monotonic() - 12), stdin=payload)
         except Failure as error:
             execution_error = error
-        return launch_outcome(launch_log, execution_error, run_id, manifest, expected_ranks(index))
+        return launch_outcome(launch_log, execution_error, run_id, manifest, expected_ranks(index), config.chain)
 
     errors = []
     cleanup_errors = []
@@ -904,7 +994,7 @@ def run(config):
                         log / f"collect-{index}.log", timeout=max(1, deadline - time.monotonic()),
                         start_failure="LOG_COLLECT_FAILED", exit_failure="LOG_COLLECT_FAILED")
             result = read_json(node_log / "result.json")
-            failures.extend(result_errors(result, run_id, manifest, expected_ranks(index)))
+            failures.extend(result_errors(result, run_id, manifest, expected_ranks(index), config.chain))
         except FileNotFoundError as error:
             # 拉起/异常退出已说明为何没有完成记录，避免追加一个伪解析失败。
             if not failures:
@@ -945,7 +1035,10 @@ def run(config):
         scope += "、A5 空 kernel 安装与设备注册"
     elif config.checkpoint == DRY_RUN_CHECKPOINT:
         scope += f"、{len(mappings)}P rank/device 映射与进程退出；不创建设备上下文或 communicator"
-    scope += "；未执行 NPU launch 或去重通信。"
+    if config.checkpoint == CHAIN_CHECKPOINT:
+        scope += f"、{len(mappings)}P communicator/peer window、单轮空 Dispatch launch、stream 同步与 Host barrier；未执行去重算法或验证数值。"
+    else:
+        scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
               "source_provenance": manifest["source"]["provenance"],
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL" if errors else "PASS",
@@ -955,6 +1048,8 @@ def run(config):
     if mappings is not None:
         completed = sum(len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
+        if config.chain is not None:
+            report["chain_configuration"] = dict(config.chain, quant_mode=0, loops=1)
         rank_summary = f"ranks={completed}/{len(mappings)} "
     write_json(log / "summary.json", report)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "

@@ -12,7 +12,7 @@
 | 1 `ep-sdedup-p1-abi-host` | 三类 metadata ABI、layout、Host 校验、错误码；七步生产构建与 Host 回归 | **已通过**，用户确认最新提交完成服务器验证 | [`acb976cb6c5527e02a0d931e20a954eb1c891d37`](https://github.com/LingquLab/TileXR/commit/acb976cb6c5527e02a0d931e20a954eb1c891d37) |
 | 2 `ep-sdedup-p1-empty-kernel` | A5 空 kernel、ELF/安装、生产库链接和相对加载、设备注册；Host 验证 launch 参数和失败返回 | **已通过**，production 模式 2/2 主机、每台 18 项测试成功 | [`eae264dc2e3d33169ffd2e78e04c3430d41b7559`](https://github.com/LingquLab/TileXR/commit/eae264dc2e3d33169ffd2e78e04c3430d41b7559) |
 | 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | production 16P 已通过；64P/128P 与目标清理演练待验证 | —（完整验收待完成） |
-| 4 `ep-sdedup-p1-chain-single` | 64P/128P 建链、一次空 launch、stream 完成、轮末 barrier | 未开始 | — |
+| 4 `ep-sdedup-p1-chain-single` | 建链、peer window、一次空 launch、stream 完成、轮末 barrier；可先用 16P 调试 | 代码已实现，本地回归通过；16P 设备调试及 64P/128P 验收待执行 | — |
 | 5 `ep-sdedup-p1-chain-multi` | 64P/128P 多轮 magic、顺序完成与资源复用 | 未开始 | — |
 | 6 `ep-sdedup-p1-profile` | FP16/BF16、warmup、完整 profile 记录和跨 rank 汇总，仅报告框架开销 | 未开始 | — |
 
@@ -70,6 +70,22 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-dry-run mode=production hosts=2/2 tests_
 | 目标 Linux 卡住/HUP 清理演练 | 待执行；复用七步指南中的两项行为测试 | — |
 
 同一实现提交的全部必需记录通过后，再登记检查点 3 的通过 SHA；小规模 PASS、来源标签 `unverified` 和完整验收状态分别记录。
+
+检查点 4 的提交与测试记录：
+
+| 提交 | 修改及测试重点 | 记录 |
+| --- | --- | --- |
+| 本次实现提交（`feat(ep): add server dedup single round chain checkpoint`） | 七步流程启动已安装 C++ consumer；memory communicator、Host/device peer 映射、一次公开空 Dispatch、stream 完成、两次 Host barrier 和资源释放；按最新设计将 group 分配改为 8*BS 行 | C++14 Debug 17/17 EP 测试通过；脚本回归 115 项中 112 项通过、3 项 MSYS symlink 跳过；5 项 consumer 行为测试通过 |
+
+用户已说明 64P 环境受限，因此在检查点 3 的 production 16P PASS 后继续实现检查点 4，不等待扩大环境；检查点 3 未完成的验收记录继续保留。现有两台 8 卡 hostfile 可用于下一次 `chain-single` 调试，按[七步指南](EP_VALIDATION_GUIDE.md)修改 checkpoint 和首节点 `TILEXR_COMM_ID` 即可。未增加预检或额外启动入口。
+
+本地 consumer 测试编译真实 C++14 调用程序，以 ACL/communicator 替身覆盖 FP16、BF16 各 16 个独立进程、真实 TCP barrier、启动/peer 映射错误、提交/异步失败、轮末身份错误和清理失败。未在本地进行 CANN 9.1 生产编译、真实 communicator 建链或 NPU launch；替身成功不登记为设备检查点通过，也不证明去重通信或数值正确性。
+
+| 检查点 4 设备记录 | 当前状态 | 通过 commit / 结果 |
+| --- | --- | --- |
+| 当前 16P（2×8）单轮调试 | 待执行 | — |
+| 目标集群 64P（8×8） | 待环境可用后执行 | — |
+| 目标集群 128P（16×8） | 待执行 | — |
 
 ## 阶段 2：Dispatch 算子逻辑
 

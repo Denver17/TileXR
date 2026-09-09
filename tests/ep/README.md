@@ -18,7 +18,7 @@ are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
 服务器验证统一使用[EP 七步验证](../../docs/EP_VALIDATION_GUIDE.md)：PC 固定提交并同步后，
 依次执行根目录 `source set_env.sh`、`bash build_all.sh`、`bash sync.sh`、`bash run.sh`。
-当前支持 `abi-host` 和 `empty-kernel`，只需修改现有配置中的 checkpoint；脚本自动汇总各主机结果。
+当前支持 `abi-host`、`empty-kernel`、`dry-run` 和 `chain-single`；沿用现有配置，脚本自动汇总各主机结果。
 检查点状态与通过提交见[调试进度](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 From `tests/ep`:
@@ -61,13 +61,13 @@ ELF/导出/依赖检查仍只在构建完成后执行一次；同步、超时、
 维护时将新检查加入现有测试及 manifest，不另建 runner、重复预检或源码摘要门禁。
 
 容量仍为 `R*BS*min(K,L)` 行，AssistEx 每行 32B、sourceMask 每项 4B、group 每行
-`align32(4*(1+2*(K-1)))`。裸指针入口只检查可见对齐与 shape；内部 allocation helper 检查声明容量、
+`align32(4*(1+2*(K-1)))`，按最新设计预留 **8*BS 行**。裸指针入口只检查可见对齐与 shape；内部 allocation helper 检查声明容量、
 设备和区间不重叠。不能借用要求旧三字段 assist、拒绝 weight 的普通 Memory 校验器。
 空算子不扫描 route，不生成 metadata，也不确定后续通信容量或 Combine 契约。
 
-本次本地验证：MSYS2 GCC 15.2 / CMake 4.3.2 的 C++14 Debug 构建与 17/17 EP Host/Python 测试通过。
-七步脚本回归 94 项中 91 通过、3 项因 MSYS 不支持真实 symlink 而跳过。
-CANN 9.1 生产构建及 A5 注册仍待服务器七步验证；不能将 Host 替身的成功视为设备注册或 launch 证据。
+`chain-single` 在 production 模式编译安装 `test_tilexr_ep_server_dedup_chain`，由同一 controller 每台启动 8 个进程；不增加每节点 CTest 项。它创建已有 MemoryDomain communicator，验证 Host/device peer window，调用一次公开空 Dispatch，检查 stream 同步和两次 TCP Host barrier，最后检查资源释放。空 kernel 不使用旧 Dispatch 的 2 GiB 分区；窗口检查采用实际 MemoryDomain 的 8 MiB 数据区加 4 MiB flag 区。异步完成或轮末 barrier 未确认时，进程报错退出，不提前释放可能仍被使用的资源；已有 controller 负责有界退出和日志收集。
+
+本次本地验证：MSYS2 的 C++14 Debug 构建与 17/17 EP Host/Python 测试通过；七步脚本回归 115 项中 112 项通过、3 项因 MSYS symlink 限制跳过。`python3 tests/ep/integration/test_server_dedup_chain.py -v` 的 5 项行为测试编译真实 consumer，使用 ACL/communicator 替身及真实 TCP barrier，覆盖两种 dtype 的 16 进程单轮和失败路径。本次 CANN 9.1 生产构建、真实建链及 NPU launch 待服务器七步验证；设备结果按进度文档中的配置及通过提交分别记录。
 
 ## Full Hardware Demo
 

@@ -135,7 +135,7 @@ int main()
     Check(captured.dtype == TILEXR_DATA_TYPE_BFP16 && captured.expandXOutDtype == TILEXR_DATA_TYPE_BFP16 &&
         captured.assistInfoForCombineOut == nullptr, "dtype and optional legacy assist forwarded");
     Check(g_context.hostArgs == &g_commArgs && g_context.devArgs == g_devArgs &&
-        g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 256,
+        g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 2048,
         "validated context and bounded output layout forwarded");
 
     for (int test = 0; test < 28; ++test) {

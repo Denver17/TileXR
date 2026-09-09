@@ -52,6 +52,7 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 
 // 第一阶段空算子：A5 上提交独立空 kernel，成功仅表示异步提交成功。
 // Metadata 由 caller 持有；空 kernel 不读写输入、输出或通信状态。非 A5 返回 NOT_SUPPORT。
+// groupOut 预留 8*bs 行，行字节数为 align32(4*(1+2*(topK-1)))；sourceMaskOut 仍为 bs 个 uint32。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,

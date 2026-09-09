@@ -10,3 +10,14 @@ TILEXR_VALIDATION_BUILD_MODE=production
 # 第二个提交点使用 ep-sdedup-p1-empty-kernel，第三个使用 ep-sdedup-p1-dry-run，仍执行相同七步。
 # 使用完整名称，不带 Markdown 反引号；本文件保存为 LF 换行。
 TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-abi-host
+# 第四个检查点使用 ep-sdedup-p1-chain-single。将下行示例 IP 替换为首节点可跨机访问的 IPv4 后启用。
+# export TILEXR_COMM_ID=192.0.2.11:10177
+# Host barrier 默认使用同一 IP、端口 +97；需要指定时启用下行。
+# export TILEXR_DEMO_BARRIER_ADDR=192.0.2.11:10274
+# 单轮空 launch 默认参数；需要调整时启用对应行，仍沿用七步入口。
+# export TILEXR_VALIDATION_BS=256
+# export TILEXR_VALIDATION_H=7168
+# export TILEXR_VALIDATION_TOPK=6
+# export TILEXR_VALIDATION_MOE_EXPERT_NUM=384
+# export TILEXR_VALIDATION_DTYPE=bf16
+# export TILEXR_VALIDATION_BLOCK_DIM=auto

@@ -14,6 +14,7 @@ enable_testing()
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST "Build installed A5 server dedup registration consumer" OFF)
+option(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST "Build installed A5 server dedup single-round consumer" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix")
@@ -465,6 +466,29 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST)
     set_tests_properties(test_tilexr_ep_server_dedup_registration PROPERTIES
         LABELS ep-sdedup-p1-empty-kernel TIMEOUT 120)
     install(TARGETS test_tilexr_ep_server_dedup_registration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)
+    find_library(TILEXR_EP_CHAIN_INSTALLED_LIB tilexr-ep
+        PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
+    find_library(TILEXR_EP_CHAIN_COMM_LIB tile-comm
+        PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
+    add_executable(test_tilexr_ep_server_dedup_chain
+        integration/test_tilexr_ep_server_dedup_chain.cpp)
+    # 内部 layout 声明供 caller 使用；实现和公共入口均链接已安装生产库。
+    target_include_directories(test_tilexr_ep_server_dedup_chain PRIVATE
+        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}"
+        "${TILEXR_ROOT}/src/ep/host"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/include")
+    target_link_directories(test_tilexr_ep_server_dedup_chain PRIVATE
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "${ASCEND_DRIVER_PATH}/lib64/driver")
+    target_link_libraries(test_tilexr_ep_server_dedup_chain PRIVATE
+        ${TILEXR_EP_CHAIN_INSTALLED_LIB} ${TILEXR_EP_CHAIN_COMM_LIB} ascendcl)
+    set_target_properties(test_tilexr_ep_server_dedup_chain PROPERTIES
+        SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")
+    # 由现有 validation controller 按 rank 调度，不作为每节点 Host ctest。
+    install(TARGETS test_tilexr_ep_server_dedup_chain RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST)
