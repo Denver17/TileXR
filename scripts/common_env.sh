@@ -5,8 +5,8 @@ if [ -z "${BASH_SOURCE[0]}" ]; then
     return
 fi
 
-script_path=`realpath $(dirname "${BASH_SOURCE[0]}")`
-source ${script_path}/common_util.sh
+script_path=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+source "${script_path}/common_util.sh"
 
 _tilexr_os_arch() {
     case "`uname -m`" in
@@ -20,7 +20,7 @@ export TILEXR_CANN_VER="9.1.0"
 
 export TILEXR_SOC_NAME=`soc_name`
 export TILEXR_OPS_NAME=`ops_name`
-export TILEXR_HOME=`realpath ${script_path}/..`
+export TILEXR_HOME=$(realpath "${script_path}/..")
 export TILEXR_3RD_HOME=${TILEXR_HOME}/3rdparty
 export TILEXR_3RD_OPEN_HOME=${TILEXR_3RD_HOME}/open_source
 export TILEXR_ENV_HOME=${TILEXR_HOME}/env
@@ -29,9 +29,9 @@ export TILEXR_TEMP_HOME=${TILEXR_ENV_HOME}/temp
 export TILEXR_UTIL_HOME=${TILEXR_ENV_HOME}/util
 export TILEXR_DRIVER_SHIM_HOME=${TILEXR_ENV_HOME}/driver-shim
 
-mkdir -p ${TILEXR_ENV_HOME}
-mkdir -p ${TILEXR_TEMP_HOME}
-mkdir -p ${TILEXR_UTIL_HOME}
+mkdir -p "${TILEXR_ENV_HOME}"
+mkdir -p "${TILEXR_TEMP_HOME}"
+mkdir -p "${TILEXR_UTIL_HOME}"
 
 export TILEXR_HCCL_TEST_HOME=${TILEXR_CANN_HOME}/cann/tools/hccl_test
 
@@ -50,14 +50,20 @@ export TILEXR_ASCEND_DEV_NUM=`ascend_dev_num`
 date_str=`date '+%y%m%d%H%M'`
 export ASCEND_PROCESS_LOG_PATH=${TILEXR_PLOG_HOME}/$date_str
 export ASCEND_GLOBAL_LOG_LEVEL=3
-mkdir -p ${TILEXR_PLOG_HOME}
+mkdir -p "${TILEXR_PLOG_HOME}"
 
-if [ -f ${TILEXR_CANN_HOME}/cann/set_env.sh ]; then
-    source ${TILEXR_CANN_HOME}/cann/set_env.sh
+if [ -n "${TILEXR_CANN_ENV_SCRIPT:-}" ]; then
+    if [ ! -r "${TILEXR_CANN_ENV_SCRIPT}" ]; then
+        echo "CANN environment script is not readable: ${TILEXR_CANN_ENV_SCRIPT}" >&2
+        return 1
+    fi
+    source "${TILEXR_CANN_ENV_SCRIPT}" || return 1
+elif [ -f "${TILEXR_CANN_HOME}/cann/set_env.sh" ]; then
+    source "${TILEXR_CANN_HOME}/cann/set_env.sh"
 fi
 
-if [ -f ${TILEXR_CANN_HOME}/cann/vendors/custom_transformer/bin/set_env.bash ]; then
-    source ${TILEXR_CANN_HOME}/cann/vendors/custom_transformer/bin/set_env.bash
+if [ -z "${TILEXR_CANN_ENV_SCRIPT:-}" ] && [ -f "${TILEXR_CANN_HOME}/cann/vendors/custom_transformer/bin/set_env.bash" ]; then
+    source "${TILEXR_CANN_HOME}/cann/vendors/custom_transformer/bin/set_env.bash"
 fi
 
 if [ -z "${ASCEND_HOME_PATH:-}" ]; then

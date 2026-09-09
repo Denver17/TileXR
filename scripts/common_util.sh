@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-script_path=`realpath $(dirname "${BASH_SOURCE[0]}")`
+script_path=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 
 GREEN=$'\033[0;32m'
 YELLOW=$'\033[0;33m'

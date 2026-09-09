@@ -386,6 +386,11 @@ install(TARGETS
     test_tilexr_ep_kernel_launch
     test_tilexr_ep_plan_layout
     test_tilexr_ep_plan_reference
+    test_tilexr_ep_plan_algorithm
+    test_tilexr_ep_plan_downstream
+    test_tilexr_ep_plan_host
+    test_tilexr_moonep_planner_public_abi
+    test_tilexr_moonep_planner_compat
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 

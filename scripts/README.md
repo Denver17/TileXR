@@ -2,6 +2,10 @@
 
 This directory contains utility scripts for building, testing, and managing the TileXR project.
 
+EP 服务器验证的统一入口与配置见[EP 七步验证](../docs/EP_VALIDATION_GUIDE.md)。根目录提供
+`set_env.sh`、`build_all.sh`、`sync.sh`、`run.sh`，PC 首次同步使用 `tools/validation/push.ps1`。
+这些入口负责构建、分发和结果汇总；下列模块脚本保留为内部实现及单独开发入口。
+
 ## Environment Setup
 
 ### `common_env.sh`

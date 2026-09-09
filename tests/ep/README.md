@@ -16,6 +16,10 @@ are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
 ## Host Tests
 
+服务器验证统一使用[EP 七步验证](../../docs/EP_VALIDATION_GUIDE.md)：PC 固定提交并同步后，
+依次执行根目录 `source set_env.sh`、`bash build_all.sh`、`bash sync.sh`、`bash run.sh`。
+当前 Server Dedup 只支持 ABI/Host checkpoint；脚本自动汇总各主机结果，不表示已完成 NPU 去重验证。
+
 From `tests/ep`:
 
 ```bash

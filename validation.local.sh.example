@@ -1,0 +1,10 @@
+# 首次部署时用编辑器将此文件另存为根目录 validation.local.sh，并修改实际路径。
+# 该文件会自动同步到所有节点；配置应适用于各节点，必要时可按 hostname 分支。
+TILEXR_CANN_ENV_SCRIPT=/path/to/cann-9.1.0/set_env.sh
+ASCEND_DRIVER_PATH=/usr/local/Ascend/driver
+TILEXR_VALIDATION_HOSTFILE=hostfile
+TILEXR_VALIDATION_SSH_USER=""
+TILEXR_VALIDATION_JOBS=4
+TILEXR_VALIDATION_TIMEOUT=180
+TILEXR_VALIDATION_BUILD_MODE=production
+TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-abi-host
