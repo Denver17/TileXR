@@ -8,10 +8,57 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
 import workflow
+
+
+class ProductionChecksTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="tilexr-symbol-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        self.install = self.root / "install"
+        self.log = self.root / "logs"
+        self.names = ("TileXRMoeEpDispatchMemoryServerDedup", "TileXRMoeEpDispatchMemory")
+        self.symbols = "\n".join(f"{name} T 1000 10" for name in self.names)
+        patch = mock.patch.dict(os.environ, {"ASCEND_DRIVER_PATH": str(self.root / "driver")})
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def inspect_fixture(self, argv, log, **kwargs):
+        if argv[0] == "nm":
+            return self.symbols
+        if argv[0] == "readelf":
+            return "0x000000000000001d (RUNPATH) Library runpath: [$ORIGIN]\n"
+        if argv[0] == "ldd":
+            return f"libascend_hal.so => {self.root / 'driver/lib64/driver/libascend_hal.so'} (0x1000)\n"
+        self.fail(f"unexpected command: {argv}")
+
+    def check(self):
+        with mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "execute", side_effect=self.inspect_fixture) as execute:
+            workflow.runtime_check(SimpleNamespace(mode="production"), self.install, self.log)
+        return execute
+
+    def test_c_abi_functions_pass_and_remaining_library_checks_run(self):
+        execute = self.check()
+        self.assertEqual([call.args[0][0] for call in execute.call_args_list], ["nm", "readelf", "ldd"])
+
+    def test_each_required_function_must_be_defined_with_its_exact_name(self):
+        for missing in self.names:
+            other = next(name for name in self.names if name != missing)
+            for replacement in ("", f"{missing}_helper T 1000 10", f"prefix_{missing} T 1000 10",
+                                f"_Z{len(missing)}{missing}v T 1000 10", f"{missing} U",
+                                f"{missing} t 1000 10", f"{missing} D 1000 8"):
+                with self.subTest(missing=missing, replacement=replacement):
+                    self.symbols = f"{other} T 2000 10\n{replacement}"
+                    with self.assertRaisesRegex(ValueError, "生产库缺少导出符号：" + missing) as error:
+                        self.check()
+                    self.assertIn(str(self.install / "lib/libtilexr-ep.so"), str(error.exception))
+                    self.assertIn(str(self.log / "symbols.log"), str(error.exception))
 
 
 class BuildTests(unittest.TestCase):

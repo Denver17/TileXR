@@ -287,10 +287,17 @@ def runtime_check(config, install, log):
         return execute(argv, log / filename, timeout=30, env=env,
                        start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
 
-    symbols = inspect(["nm", "-D", "--defined-only", "-C", library], "symbols.log")
-    for name in ("TileXRMoeEpDispatchMemoryServerDedup(", "TileXRMoeEpDispatchMemory("):
-        if name not in symbols:
-            raise ValueError(f"生产库缺少导出符号：{name}")
+    symbols = inspect(["nm", "-D", "--defined-only", "--no-demangle", "--format=posix", library],
+                      "symbols.log")
+    # 公共接口采用 extern "C"；匹配完整动态函数符号名，不带参数列表或左括号。
+    exported = set()
+    for line in symbols.splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and fields[1] in ("T", "W"):
+            exported.add(fields[0])
+    for name in ("TileXRMoeEpDispatchMemoryServerDedup", "TileXRMoeEpDispatchMemory"):
+        if name not in exported:
+            raise ValueError(f"生产库缺少导出符号：{name}；库：{library}；日志：{log / 'symbols.log'}")
     elf = inspect(["readelf", "-d", library], "elf.log")
     paths = [line for line in elf.splitlines() if "(RPATH)" in line or "(RUNPATH)" in line]
     if len(paths) != 1 or "[$ORIGIN]" not in paths[0]:
