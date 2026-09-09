@@ -244,6 +244,29 @@ add_executable(test_tilexr_ep_layout
 
 add_executable(test_tilexr_ep_expert_ids unit/test_tilexr_ep_expert_ids.cpp)
 
+set(TILEXR_EP_SERVER_DEDUP_HOST_SOURCES
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_host.cpp
+    ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_server_dedup_dispatch.cpp)
+add_executable(test_tilexr_ep_server_dedup_protocol unit/test_tilexr_ep_server_dedup_protocol.cpp)
+add_executable(test_tilexr_ep_server_dedup_layout
+    unit/test_tilexr_ep_server_dedup_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_layout.cpp)
+add_executable(test_tilexr_ep_server_dedup_host_validation
+    unit/test_tilexr_ep_server_dedup_host_validation.cpp
+    ${TILEXR_EP_SERVER_DEDUP_HOST_SOURCES})
+add_executable(test_tilexr_ep_server_dedup_public_abi
+    unit/test_tilexr_ep_server_dedup_public_abi.cpp
+    ${TILEXR_EP_SERVER_DEDUP_HOST_SOURCES}
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_launch.cpp)
+foreach(test_name IN ITEMS protocol layout host_validation public_abi)
+    set(test_target test_tilexr_ep_server_dedup_${test_name})
+    target_include_directories(${test_target} PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
+    add_test(NAME ${test_target} COMMAND ${test_target})
+    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-p1-abi-host TIMEOUT 120)
+    install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endforeach()
+
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
 
 add_executable(test_tilexr_ep_plan_layout

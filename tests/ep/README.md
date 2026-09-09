@@ -29,6 +29,47 @@ bash build.sh source-only
 building the hardware demo. CCE compilation and hardware correctness must still
 be validated separately.
 
+## Server Dedup ABI/Host Checkpoint
+
+`ep-sdedup-p1-abi-host` adds the independent
+`TileXRMoeEpDispatchMemoryServerDedup` entry and caller-owned
+`assistExOut/sourceMaskOut/groupOut` metadata pointers. It preserves the ordinary
+Memory ABI. The production entry validates Host arguments and returns
+`TILEXR_ERROR_NOT_SUPPORT` until the next checkpoint provides the A5 artifact
+and registered launch. It writes no outputs and consumes no launch magic.
+
+Run the checkpoint without creating a communicator or using an NPU:
+
+```bash
+cmake -S tests/ep -B tests/ep/build-sdedup -DBUILD_TILEXR_EP_DEMO=OFF
+cmake --build tests/ep/build-sdedup --target test_tilexr_ep_server_dedup_protocol \
+  test_tilexr_ep_server_dedup_layout test_tilexr_ep_server_dedup_host_validation \
+  test_tilexr_ep_server_dedup_public_abi -j4
+timeout 180s ctest --test-dir tests/ep/build-sdedup -L ep-sdedup-p1-abi-host --output-on-failure
+```
+
+The Host suite uses its existing generated ACL headers when CANN is absent.
+The Host-validation executable replaces only the submission boundary and
+communicator queries; the independent public consumer links the real unsupported
+submission implementation. A test PASS is Host/ABI evidence, not A5 launch or
+Dispatch correctness. Device generation, block-dimension selection, artifact
+registration and actual communication remain later checkpoints.
+
+Capacity checks use `R*BS*min(K,L)` output rows, 32B AssistEx rows, 4B sourceMask
+elements, and `align32(4*(1+2*(K-1)))` group rows. A bare pointer cannot prove its
+allocation size or lifetime: the internal caller-side allocation helper checks
+declared sizes, device identity and disjoint ranges; the API checks visible
+alignment and shape arithmetic. Do not reuse the ordinary Memory validator:
+it requires the old three-field assist and rejects weight pointers, while this
+entry accepts a legacy assist placeholder and passes weight through unread.
+These tests do not scan routes, publish group counts, or establish future
+communication-window capacity or pending Combine contracts.
+
+Checkpoint validation on 2026-09-09: a C++14 Debug build with MSYS2 GCC 15.2
+and CMake 4.3.2 passed all 17 EP Host/Python tests, including the four new
+checkpoint tests. CANN production-library compilation and A5/NPU execution
+were not run; this record qualifies the Host contract only.
+
 ## Full Hardware Demo
 
 From `tests/ep`:
