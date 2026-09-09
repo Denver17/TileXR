@@ -59,6 +59,8 @@ for lock in ('.operation.lock', 'node.lock'):
     if (root / 'run/validation' / lock).exists():
         raise SystemExit('validation is active; refusing source refresh: ' + lock)
 def safe(name):
+    if not isinstance(name, str):
+        raise SystemExit('invalid archive filename')
     path = pathlib.PurePosixPath(name)
     if (not name or path.is_absolute() or '\\' in name or
             any(p in ('', '.', '..', '.git') or ':' in p for p in name.split('/'))):
@@ -69,6 +71,18 @@ def safe(name):
         if result.is_symlink():
             raise SystemExit('destination symlink: ' + name)
     return result
+def source_names(manifest):
+    files = manifest.get('files') if isinstance(manifest, dict) else None
+    if not isinstance(files, (list, dict)):
+        raise SystemExit('invalid source file list')
+    names = list(files)
+    for name in names:
+        safe(name)
+        if name in ('hostfile', 'validation.local.sh', '.tilexr-validation-root', '.tilexr-source.json'):
+            raise SystemExit('unexpected source entry: ' + name)
+    if len(set(names)) != len(names):
+        raise SystemExit('duplicate source entry')
+    return names
 with tarfile.open(archive, 'r:gz') as package:
     members = package.getmembers()
     for member in members:
@@ -76,14 +90,17 @@ with tarfile.open(archive, 'r:gz') as package:
         if not member.isfile() or member.name in ('hostfile', 'validation.local.sh', '.tilexr-validation-root'):
             raise SystemExit('unexpected archive entry: ' + member.name)
     manifest = json.load(package.extractfile('.tilexr-source.json'))
-    if set(manifest['files']) | {'.tilexr-source.json'} != {m.name for m in members}:
+    names = set(source_names(manifest))
+    archive_names = {m.name for m in members}
+    if (len(archive_names) != len(members) or
+            names | {'.tilexr-source.json'} != archive_names):
         raise SystemExit('archive and source manifest disagree')
     previous = root / '.tilexr-source.json'
     if previous.exists():
         old = json.loads(safe('.tilexr-source.json').read_text())
-        for name in old['files']:
+        for name in source_names(old):
             stale = safe(name)
-            if name not in manifest['files'] and stale.exists():
+            if name not in names and stale.exists():
                 if not stale.is_file() or name in ('hostfile', 'validation.local.sh', '.tilexr-validation-root'):
                     raise SystemExit('refusing to remove non-source entry: ' + name)
                 stale.unlink()
@@ -97,11 +114,10 @@ with tarfile.open(archive, 'r:gz') as package:
     marker.write_text(marker_text)
 print('Source deployed to ' + str(root))
 PY
-python3 "$target/tools/validation/source.py" verify "$target"
 '@
     $remoteCommand = "bash -s -- " + (Quote-Bash $remoteArchive) + " " + (Quote-Bash $RemotePath)
     $remoteScript.Replace("`r`n", "`n") | & ssh -- $destination $remoteCommand
-    if ($LASTEXITCODE -ne 0) { throw "Remote extraction or source verification failed" }
+    if ($LASTEXITCODE -ne 0) { throw "Remote extraction failed" }
     Write-Host "Ready: $destination at $RemotePath"
 } finally {
     $OutputEncoding = $oldOutputEncoding

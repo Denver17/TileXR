@@ -12,11 +12,11 @@
 # 该模式的 PASS 仅覆盖 Host 测试，不作为 CANN 生产构建通过证据。
 
 _tilexr_validation_env() {
-    local root config tool
+    local root config tool TILEXR_ENV_LIGHTWEIGHT=1
     root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P) || return 1
     config="$root/validation.local.sh"
     if [[ -f "$config" ]]; then
-        source "$config" || return 1
+        source "$config" || { echo "type=CONFIG_FAILED 配置失败：无法加载 $config" >&2; return 1; }
     fi
     export TILEXR_VALIDATION_ROOT="$root"
     export TILEXR_VALIDATION_BUILD_MODE="${TILEXR_VALIDATION_BUILD_MODE:-production}"
@@ -30,23 +30,23 @@ _tilexr_validation_env() {
         export TILEXR_VALIDATION_HOSTFILE="$root/$TILEXR_VALIDATION_HOSTFILE"
     fi
     if [[ "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-p1-abi-host ]]; then
-        echo "当前版本仅实现 ep-sdedup-p1-abi-host，尚未提供 Server Dedup 设备测试。" >&2
+        echo "type=CONFIG_FAILED 配置失败：当前版本仅实现 ep-sdedup-p1-abi-host，尚未提供 Server Dedup 设备测试。" >&2
         return 1
     fi
     case "$TILEXR_VALIDATION_BUILD_MODE" in
         production)
             export TILEXR_CANN_ENV_SCRIPT="${TILEXR_CANN_ENV_SCRIPT:-/usr/local/Ascend/ascend-toolkit/latest/set_env.sh}"
             if [[ ! -r "$TILEXR_CANN_ENV_SCRIPT" ]]; then
-                echo "请在 validation.local.sh 配置 CANN 9.1.0 的 TILEXR_CANN_ENV_SCRIPT：$TILEXR_CANN_ENV_SCRIPT" >&2
+                echo "type=CONFIG_FAILED 配置失败：请在 validation.local.sh 配置 CANN 9.1.0 的 TILEXR_CANN_ENV_SCRIPT：$TILEXR_CANN_ENV_SCRIPT" >&2
                 return 1
             fi
             ;;
         host) export TILEXR_CANN_ENV_SCRIPT= ;;
-        *) echo 'TILEXR_VALIDATION_BUILD_MODE 必须为 production 或 host。' >&2; return 1 ;;
+        *) echo 'type=CONFIG_FAILED 配置失败：TILEXR_VALIDATION_BUILD_MODE 必须为 production 或 host。' >&2; return 1 ;;
     esac
-    source "$root/scripts/common_env.sh" || return 1
+    source "$root/scripts/common_env.sh" || { echo 'type=CONFIG_FAILED 配置失败：无法加载公共环境或 CANN 环境。' >&2; return 1; }
     for tool in "$TILEXR_VALIDATION_PYTHON"; do
-        command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; return 1; }
+        command -v "$tool" >/dev/null || { echo "type=CONFIG_FAILED 配置失败：缺少依赖 $tool" >&2; return 1; }
     done
     "$TILEXR_VALIDATION_PYTHON" "$root/tools/validation/workflow.py" env || return 1
 }

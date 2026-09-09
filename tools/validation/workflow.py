@@ -19,14 +19,33 @@ import sys
 import time
 import uuid
 
-from source import content_sha256, snapshot, verify_source
+from source import inventory
 
 
 CHECKPOINT = "ep-sdedup-p1-abi-host"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
+REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
+    "test_dispatch_memory_trace", "test_msprof_kernel_stats", "test_tilexr_ep_layout",
+    "test_tilexr_ep_expert_ids", "test_tilexr_ep_host_validation", "test_tilexr_ep_kernel_launch",
+    "test_tilexr_moonep_planner_public_abi", "test_tilexr_ep_plan_layout", "test_tilexr_ep_plan_reference",
+    "test_tilexr_ep_plan_algorithm", "test_tilexr_ep_plan_downstream", "test_tilexr_ep_plan_host",
+    "test_tilexr_moonep_planner_compat",
+}
+FAILURE_LABELS = {
+    "CONFIG_FAILED": "配置或安装包检查失败", "BUILD_FAILED": "编译或安装失败",
+    "SYNC_FAILED": "同步失败", "LAUNCH_FAILED": "进程拉起失败", "EXIT_FAILED": "进程退出失败",
+    "RESULT_FAILED": "结果校验失败", "LOG_PARSE_FAILED": "日志解析失败",
+    "LOG_COLLECT_FAILED": "日志收集失败", "CLEANUP_FAILED": "进程清理失败",
+}
+FAILURE_CODES = {name: code for code, name in enumerate(FAILURE_LABELS, 10)}
 SSH_OPTIONS = ["-o", "BatchMode=yes", "-o", "ConnectTimeout=10",
                "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2"]
 REMOTE_SCRIPT = '''set -eo pipefail
+if [ "$2" = cancel ]; then
+    cd -- "$1"
+    shift
+    exec python3 tools/validation/workflow.py "$@"
+fi
 limit=60
 if [ "$2" = node ]; then limit=$5; fi
 exec timeout --signal=TERM --kill-after=10s "$limit" bash -c '
@@ -37,6 +56,33 @@ source ./set_env.sh
 exec "$TILEXR_VALIDATION_PYTHON" tools/validation/workflow.py "$@"
 ' bash "$@"
 '''
+
+
+class Failure(RuntimeError):
+    def __init__(self, kind, message, **details):
+        super().__init__(message)
+        self.kind = kind
+        self.details = details
+
+    def record(self, **context):
+        return {"type": self.kind, "message": str(self), **self.details, **context}
+
+
+def failure_record(error, default, **context):
+    if isinstance(error, Failure):
+        return error.record(**context)
+    return Failure(default, str(error)).record(**context)
+
+
+def failure_records(error, default, **context):
+    record = failure_record(error, default, **context)
+    additional = record.pop("additional_failures", [])
+    return [record, *additional]
+
+
+def report_failure(record):
+    print(f"VALIDATION_FAIL type={record['type']} {FAILURE_LABELS[record['type']]}："
+          + json.dumps(record, ensure_ascii=False), file=sys.stderr, flush=True)
 
 
 def digest(path):
@@ -79,24 +125,47 @@ def stop_process(process):
     process.wait()
 
 
-def execute(argv, log, timeout=180, cwd=None, env=None, stdin=None):
+def execute(argv, log, timeout=180, cwd=None, env=None, stdin=None,
+            start_failure="LAUNCH_FAILED", exit_failure="EXIT_FAILED", parse_failure="LOG_PARSE_FAILED"):
     """写原始日志；超时和异常退出均回收本次命令及其同组子进程。"""
     log = Path(log)
     log.parent.mkdir(parents=True, exist_ok=True)
     print(f"执行：{argv[0]}  日志：{log}", flush=True)
     with log.open("wb") as output:
-        process = subprocess.Popen([str(arg) for arg in argv], cwd=cwd, env=env,
-                                   stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
-                                   stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            process = subprocess.Popen([str(arg) for arg in argv], cwd=cwd, env=env,
+                                       stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+                                       stdout=output, stderr=subprocess.STDOUT, start_new_session=True)
+        except OSError as error:
+            raise Failure(start_failure, f"无法启动 {argv[0]}：{error}", log=str(log)) from error
+        pending = None
         try:
             process.communicate(input=stdin.encode() if stdin is not None else None, timeout=timeout)
-            code = process.returncode
+            if process.returncode:
+                pending = Failure(exit_failure, f"命令失败（exit={process.returncode}）：{argv[0]}",
+                                  returncode=process.returncode, log=str(log))
+        except subprocess.TimeoutExpired:
+            pending = Failure(exit_failure, f"命令超过 {timeout:.1f} 秒期限：{argv[0]}",
+                              timeout=True, log=str(log))
+        except InterruptedError as error:
+            pending = Failure(exit_failure, str(error), log=str(log))
         finally:
-            stop_process(process)
-    if code:
+            try:
+                stop_process(process)
+            except Exception as error:
+                cleanup = Failure("CLEANUP_FAILED", str(error), log=str(log))
+                if pending is not None:
+                    pending.details["additional_failures"] = [cleanup.record()]
+                    raise pending from error
+                raise cleanup from error
+    if pending is not None:
         tail = log.read_text(encoding="utf-8", errors="replace")[-4000:]
-        raise RuntimeError(f"命令失败（exit={code}）：{argv[0]}\n{tail}\n日志：{log}")
-    return log.read_text(encoding="utf-8", errors="replace")
+        pending.args = (str(pending) + f"\n日志：{log}\n" + tail,)
+        raise pending
+    try:
+        return log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise Failure(parse_failure, f"无法读取 UTF-8 日志：{error}", log=str(log)) from error
 
 
 def hosts_from_file(path):
@@ -153,9 +222,11 @@ class Config:
 
     def signature(self):
         return {"mode": self.mode, "checkpoint": self.checkpoint, "hosts": self.hosts(),
-                "hostfile": digest(self.hostfile), "ssh_user": self.user, "timeout": self.timeout,
-                "local_config": digest(self.root / "validation.local.sh")
-                if (self.root / "validation.local.sh").exists() else None}
+                "ssh_user": self.user, "timeout": self.timeout,
+                "cann_script": os.environ.get("TILEXR_CANN_ENV_SCRIPT", ""),
+                "cann": os.environ.get("ASCEND_HOME_PATH", ""),
+                "driver": os.environ.get("ASCEND_DRIVER_PATH", ""),
+                "python": sys.executable}
 
 
 @contextmanager
@@ -170,8 +241,13 @@ def operation_lock(config, name):
         raise ValueError(f"该目录已有验证任务或未确认清理的锁：{lock}")
     try:
         yield
+    except Failure as error:
+        if any(record["type"] == "CLEANUP_FAILED" for record in failure_records(error, "CLEANUP_FAILED")):
+            config.cleanup_failed = True
+        raise
     finally:
-        lock.rmdir()
+        if not getattr(config, "cleanup_failed", False):
+            lock.rmdir()
 
 
 def check_coordinator(config, hosts):
@@ -199,7 +275,7 @@ def require_tools(names):
             raise ValueError(f"缺少依赖：{name}")
 
 
-def runtime_check(config, install, log, deadline=None):
+def runtime_check(config, install, log):
     if config.mode == "host":
         return
     require_tools(["ldd", "readelf", "nm"])
@@ -208,10 +284,8 @@ def runtime_check(config, install, log, deadline=None):
     library = install / "lib/libtilexr-ep.so"
 
     def inspect(argv, filename, env=None):
-        remaining = 30 if deadline is None else min(30, deadline - time.monotonic())
-        if remaining <= 0:
-            raise TimeoutError("生产依赖检查超过节点期限")
-        return execute(argv, log / filename, timeout=remaining, env=env)
+        return execute(argv, log / filename, timeout=30, env=env,
+                       start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
 
     symbols = inspect(["nm", "-D", "--defined-only", "-C", library], "symbols.log")
     for name in ("TileXRMoeEpDispatchMemoryServerDedup(", "TileXRMoeEpDispatchMemory("):
@@ -237,49 +311,75 @@ def artifact_files(install):
             for path in sorted(install.rglob("*")) if path.is_file() and path.name != "manifest.json"}
 
 
-def verify_build(config, log, deadline=None):
+def verify_build(config):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
-    verify_source(config.root, manifest["source"])
     if artifact_files(config.install) != manifest["artifacts"]:
         raise ValueError("安装产物缺失或摘要不一致，请重新构建/同步")
-    runtime_check(config, config.install, log, deadline)
     return manifest
 
 
+def clean_build_directory(config):
+    work = config.root / "build/validation"
+    # 只删除用户授权的本工具构建目录；先检查路径，不能跟随 build symlink。
+    for path in (work.parent, work, config.install.parent, config.install):
+        if path.is_symlink():
+            raise ValueError(f"构建/安装目录不得为符号链接：{path}")
+    work.resolve().relative_to(config.root)
+    if work.exists() and not work.is_dir():
+        raise ValueError(f"构建路径不是目录：{work}")
+    (config.logs / "sync.json").unlink(missing_ok=True)
+    # 即使本次编译失败，也不能把上一轮安装包当作本次构建使用。
+    (config.install / "manifest.json").unlink(missing_ok=True)
+    if work.exists():
+        shutil.rmtree(work)
+    work.mkdir(parents=True)
+    return work
+
+
 def build(config):
-    require_tools(["cmake", "ctest", "g++", "make"])
-    source = snapshot(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
+    def command(*args, **kwargs):
+        return execute(*args, **kwargs, start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
+
     build_id = uuid.uuid4().hex
-    work = config.root / "build/validation" / build_id
+    work = clean_build_directory(config)
+    require_tools(["cmake", "ctest", "g++", "make"])
+    source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
     stage = work / "install"
     log = config.logs / ("build-" + build_id)
     print(f"开始构建 {config.checkpoint}，mode={config.mode}，日志：{log}", flush=True)
     for tool in ("cmake", "g++"):
-        execute([tool, "--version"], log / (tool + "-version.log"))
+        command([tool, "--version"], log / (tool + "-version.log"))
     common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}"]
     if config.mode == "production":
-        execute(["cmake", "-S", config.root, "-B", work / "production", *common,
+        command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF"],
                 log / "production-configure.log", timeout=600)
-        execute(["cmake", "--build", work / "production", "-j", config.jobs],
+        command(["cmake", "--build", work / "production", "-j", config.jobs],
                 log / "production-build.log", timeout=3600)
-        execute(["cmake", "--install", work / "production"], log / "production-install.log", timeout=180)
+        command(["cmake", "--install", work / "production"], log / "production-install.log", timeout=180)
         for kernel in ("dispatch", "combine", "dispatch_memory", "combine_memory"):
             if not (stage / f"lib/tilexr/kernels/tilexr_ep_{kernel}_kernel.o").is_file():
                 raise ValueError(f"缺少 EP kernel：{kernel}")
-        runtime_check(config, stage, log)
     host_build = work / "host"
-    execute(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
+    command(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
-    execute(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
-    execute(["cmake", "--install", host_build], log / "host-install.log")
-    listing = json.loads(execute(["ctest", "--test-dir", host_build, "--show-only=json-v1"],
-                                 log / "tests.json"))
+    command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
+    command(["cmake", "--install", host_build], log / "host-install.log")
+    try:
+        listing = json.loads(command(["ctest", "--test-dir", host_build, "--show-only=json-v1"],
+                                     log / "tests.json"))
+    except json.JSONDecodeError as error:
+        raise Failure("LOG_PARSE_FAILED", "无法解析 CTest 测试清单", log=str(log / "tests.json")) from error
+    if (not isinstance(listing, dict) or not isinstance(listing.get("tests"), list)
+            or any(not isinstance(test, dict) or not isinstance(test.get("name"), str)
+                   or not isinstance(test.get("command"), list) or not test["command"]
+                   or any(not isinstance(arg, str) for arg in test["command"]) for test in listing["tests"])):
+        raise Failure("LOG_PARSE_FAILED", "CTest 测试清单格式错误", log=str(log / "tests.json"))
     tests = []
     for test in listing["tests"]:
         command = test["command"]
@@ -293,10 +393,11 @@ def build(config):
         else:
             raise ValueError(f"无法导出测试命令：{command}")
         tests.append({"name": test["name"], "argv": argv})
-    expected = {f"test_tilexr_ep_server_dedup_{check}" for check in CHECKS}
-    if len(tests) != 17 or not expected.issubset({test["name"] for test in tests}):
-        raise ValueError("必须注册 17 个 EP Host/Python 测试，包括 4 个 Server Dedup 测试")
-    verify_source(config.root, source)
+    names = [test["name"] for test in tests]
+    missing = REQUIRED_TESTS - set(names)
+    if missing or len(names) != len(set(names)):
+        raise ValueError(f"必需测试缺失或重复：{sorted(missing)}")
+    runtime_check(config, stage, log)
     manifest = {"build_id": build_id, "source": source, "mode": config.mode,
                 "checkpoint": config.checkpoint, "architecture": platform.machine(),
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
@@ -312,7 +413,7 @@ def build(config):
     write_json(config.root / ".tilexr-source.json", source)
     (config.root / ".tilexr-validation-root").write_text("TileXR validation deployment\n", encoding="utf-8")
     print(f"BUILD_PASS commit={source['commit'] or 'unknown'} "
-          f"source_sha256={content_sha256(source['files'])} mode={config.mode} tests=17\n日志：{log}", flush=True)
+          f"mode={config.mode} tests={len(tests)}\n日志：{log}", flush=True)
 
 
 def remote_argv(config, host, action, *arguments):
@@ -321,15 +422,20 @@ def remote_argv(config, host, action, *arguments):
 
 
 def sync(config):
+    def command(*args, **kwargs):
+        return execute(*args, **kwargs, start_failure="SYNC_FAILED", exit_failure="SYNC_FAILED")
+
     hosts = config.hosts()
     check_coordinator(config, hosts)
     if len(hosts) > 1:
         require_tools(["ssh", "rsync"])
     log = config.logs / ("sync-" + uuid.uuid4().hex)
-    manifest = verify_build(config, log / "local")
+    manifest = verify_build(config)
     receipt = config.logs / "sync.json"
     receipt.unlink(missing_ok=True)
-    paths = set(manifest["source"]["files"])
+    source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
+    write_json(config.root / ".tilexr-source.json", source)
+    paths = set(source["files"])
     paths.update([".tilexr-source.json", ".tilexr-validation-root", "install/validation/",
                   str(config.hostfile.relative_to(config.root))])
     if (config.root / "validation.local.sh").exists():
@@ -368,15 +474,15 @@ if sys.argv[2] == 'absent' and local_config.exists():
 root.mkdir(parents=True, exist_ok=True)
 PY
 '''
-        execute(["ssh", *SSH_OPTIONS, config.target(host["host"]),
+        command(["ssh", *SSH_OPTIONS, config.target(host["host"]),
                  "bash -s -- " + shlex.quote(str(config.root)) + " " +
                  ("present" if (config.root / "validation.local.sh").exists() else "absent")],
                 node_log / "prepare.log", stdin=prepare)
-        execute(["rsync", "-a", "-r", "--checksum", "--protect-args", "--timeout=30",
+        command(["rsync", "-a", "-r", "--checksum", "--protect-args", "--timeout=30",
                  "--files-from=" + str(file_list), "-e", shlex.join(["ssh", *SSH_OPTIONS]),
                  str(config.root) + "/", config.target(host["host"]) + ":" + str(config.root) + "/"],
                 node_log / "transfer.log", timeout=180)
-        execute(remote_argv(config, host["host"], "verify", manifest["build_id"]),
+        command(remote_argv(config, host["host"], "verify", manifest["build_id"]),
                 node_log / "verify.log", timeout=60, stdin=REMOTE_SCRIPT)
         return host["host"]
 
@@ -400,8 +506,9 @@ def node(config, run_id, build_id, execution_budget=None):
     log = config.logs / identifier(run_id)
     log.mkdir(parents=True, exist_ok=True)
     result = {"run_id": run_id, "build_id": build_id, "host": socket.gethostname(),
-              "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL", "tests": []}
+              "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL", "tests": [], "errors": []}
     write_json(log / "pid.json", {"pid": os.getpid(), "start": pid_identity(os.getpid())})
+    print(f"NODE_STARTED run_id={run_id}", flush=True)
 
     def interrupted(signum, frame):
         raise InterruptedError(f"节点收到停止信号 {signum}")
@@ -412,34 +519,46 @@ def node(config, run_id, build_id, execution_budget=None):
     if execution_budget is not None:
         budget = min(budget, max(1, float(execution_budget)))
     deadline = time.monotonic() + budget
+    current_test = None
     try:
         if (log / "cancelled").exists():
-            raise InterruptedError("控制端已取消本次运行")
-        manifest = verify_build(config, log / "preflight", deadline)
+            raise Failure("EXIT_FAILED", "控制端已取消本次运行")
+        manifest = verify_build(config)
         if manifest["build_id"] != build_id:
-            raise ValueError("远端 build_id 与本次请求不一致")
+            raise Failure("RESULT_FAILED", "远端 build_id 与本次请求不一致")
         for test in manifest["tests"]:
+            current_test = test["name"]
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise TimeoutError("节点测试超过执行期限")
+                raise Failure("EXIT_FAILED", "节点测试超过执行期限", timeout=True)
             argv = [sys.executable if value == "@python" else str(config.root / value)
                     for value in test["argv"]]
             output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root)
             prefix = "test_tilexr_ep_server_dedup_"
             if test["name"].startswith(prefix):
-                marker = "EP_SERVER_DEDUP_ABI_HOST_PASS test=" + test["name"][len(prefix):]
-                if marker not in output.splitlines():
-                    raise ValueError(f"缺少本次 PASS marker：{test['name']}")
+                markers = [line for line in output.splitlines() if line.startswith("EP_SERVER_DEDUP_ABI_HOST_")]
+                suffix = " test=" + test["name"][len(prefix):]
+                if markers == ["EP_SERVER_DEDUP_ABI_HOST_FAIL" + suffix]:
+                    raise Failure("RESULT_FAILED", "测试完成但结果校验失败", log=str(log / (current_test + ".log")))
+                if markers != ["EP_SERVER_DEDUP_ABI_HOST_PASS" + suffix]:
+                    raise Failure("LOG_PARSE_FAILED", "缺少或无法解析唯一的 PASS/FAIL marker",
+                                  log=str(log / (current_test + ".log")))
             result["tests"].append({"name": test["name"], "status": "PASS"})
         result["status"] = "PASS"
     except Exception as error:
-        result["error"] = str(error)
+        kind = "EXIT_FAILED" if isinstance(error, InterruptedError) else "CONFIG_FAILED"
+        result["errors"] = failure_records(error, kind, **({"test": current_test} if current_test else {}))
+        if current_test:
+            result["tests"].append({"name": current_test, "status": "FAIL",
+                                    "failure_type": result["errors"][0]["type"]})
     finally:
-        result["cleanup"] = "complete"
+        config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in result["errors"])
+        result["cleanup"] = "failed" if config.cleanup_failed else "complete"
         write_json(log / "result.json", result)
-        (log / "pid.json").unlink(missing_ok=True)
-    print(json.dumps(result, ensure_ascii=False), flush=True)
-    return 0 if result["status"] == "PASS" else 1
+        if not config.cleanup_failed:
+            (log / "pid.json").unlink(missing_ok=True)
+    print("NODE_RESULT " + json.dumps(result, ensure_ascii=False), flush=True)
+    return 0 if result["status"] == "PASS" else FAILURE_CODES[result["errors"][0]["type"]]
 
 
 def cancel(config, run_id):
@@ -461,14 +580,70 @@ def cancel(config, run_id):
 
 
 def validate_result(result, run_id, manifest):
+    fields = ("run_id", "build_id", "checkpoint", "mode", "status", "cleanup", "tests")
+    if (not isinstance(result, dict) or any(field not in result for field in fields)
+            or not isinstance(result["tests"], list)
+            or any(not isinstance(test, dict) or not isinstance(test.get("name"), str)
+                   or test.get("status") not in ("PASS", "FAIL") for test in result["tests"])
+            or result["status"] not in ("PASS", "FAIL")):
+        raise Failure("LOG_PARSE_FAILED", "节点结果缺少字段或格式错误")
     expected = {test["name"] for test in manifest["tests"]}
-    actual = [test["name"] for test in result.get("tests", [])]
-    if (result.get("run_id") != run_id or result.get("build_id") != manifest["build_id"]
-            or result.get("status") != "PASS" or result.get("cleanup") != "complete"
-            or result.get("checkpoint") != manifest["checkpoint"] or result.get("mode") != manifest["mode"]
-            or len(actual) != len(expected) or set(actual) != expected
-            or any(test.get("status") != "PASS" for test in result.get("tests", []))):
-        raise ValueError("节点结果失败、缺失、重复或不属于本次运行：" + str(result.get("error", "")))
+    actual = [test["name"] for test in result["tests"]]
+    if (result["run_id"] != run_id or result["build_id"] != manifest["build_id"]
+            or result["checkpoint"] != manifest["checkpoint"] or result["mode"] != manifest["mode"]):
+        raise Failure("RESULT_FAILED", "节点结果不属于本次运行或构建")
+    errors = result.get("errors", [])
+    if (not isinstance(errors, list) or any(not isinstance(error, dict)
+            or error.get("type") not in FAILURE_LABELS or not isinstance(error.get("message"), str)
+            for error in errors)):
+        raise Failure("LOG_PARSE_FAILED", "节点错误记录格式错误")
+    if errors:
+        first = errors[0]
+        raise Failure(first["type"], first["message"],
+                      **{key: value for key, value in first.items() if key not in ("type", "message")},
+                      additional_failures=errors[1:])
+    if result["cleanup"] != "complete":
+        raise Failure("CLEANUP_FAILED", "节点未确认完成进程清理")
+    if (result["status"] != "PASS" or len(actual) != len(expected) or set(actual) != expected
+            or any(test["status"] != "PASS" for test in result["tests"])):
+        raise Failure("RESULT_FAILED", "节点测试结果失败、缺失或重复")
+
+
+def result_errors(result, run_id, manifest):
+    try:
+        validate_result(result, run_id, manifest)
+    except Failure as error:
+        return failure_records(error, "RESULT_FAILED")
+    return []
+
+
+def launch_outcome(log, execution_error, run_id, manifest):
+    """优先采用节点记录的失败边界，SSH 包装进程的非零退出不覆盖测试原因。"""
+    raw = b""
+    execution = failure_records(execution_error, "EXIT_FAILED") if execution_error else []
+    try:
+        raw = log.read_bytes()
+        output = raw.decode("utf-8")
+        completions = [line[len("NODE_RESULT "):] for line in output.splitlines() if line.startswith("NODE_RESULT ")]
+        if completions:
+            if len(completions) != 1:
+                raise ValueError("节点完成记录重复")
+            result = json.loads(completions[0])
+            errors = result_errors(result, run_id, manifest)
+            if errors:
+                if execution and execution[0].get("returncode") != FAILURE_CODES[errors[0]["type"]]:
+                    return result, [*execution, *errors]
+                errors.extend(error for error in execution if error["type"] == "CLEANUP_FAILED")
+                return result, errors
+            return result, execution
+        if not execution:
+            raise ValueError("进程退出成功但缺少 NODE_RESULT 完成记录")
+    except (OSError, UnicodeError, ValueError) as error:
+        if not any(record["type"] == "LOG_PARSE_FAILED" for record in execution):
+            execution.append(Failure("LOG_PARSE_FAILED", str(error), log=str(log)).record())
+    if execution[0]["type"] == "EXIT_FAILED" and not any(line.startswith(b"NODE_STARTED ") for line in raw.splitlines()):
+        execution[0]["type"] = "LAUNCH_FAILED"
+    return None, execution
 
 
 def run(config):
@@ -477,10 +652,10 @@ def run(config):
     check_coordinator(config, hosts)
     run_id = uuid.uuid4().hex
     log = config.logs / run_id
-    manifest = verify_build(config, log / "controller-preflight", deadline - 15)
+    manifest = verify_build(config)
     receipt = read_json(config.logs / "sync.json")
     if receipt != {"build_id": manifest["build_id"], "configuration": config.signature()}:
-        raise ValueError("源码/配置/产物自同步后发生变化，请重新执行 sync.sh")
+        raise ValueError("生效配置或构建版本自同步后发生变化，请重新执行 sync.sh")
     print(f"开始测试：hosts={len(hosts)} checkpoint={config.checkpoint} mode={config.mode}\n日志：{log}", flush=True)
 
     def launch(index, host):
@@ -491,18 +666,32 @@ def run(config):
         else:
             argv = remote_argv(config, host["host"], "node", run_id, manifest["build_id"], str(budget))
             payload = REMOTE_SCRIPT
-        execute(argv, log / f"launch-{index}.log", timeout=max(1, deadline - time.monotonic() - 12), stdin=payload)
+        launch_log = log / f"launch-{index}.log"
+        execution_error = None
+        try:
+            execute(argv, launch_log, timeout=max(1, deadline - time.monotonic() - 12), stdin=payload)
+        except Failure as error:
+            execution_error = error
+        return launch_outcome(launch_log, execution_error, run_id, manifest)
 
     errors = []
+    cleanup_errors = []
+    primary_error = None
+    launched = {}
+    launch_results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as pool:
         futures = {pool.submit(launch, index, host): index for index, host in enumerate(hosts)}
         cancelled = False
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             try:
-                future.result()
+                launch_results[index], launched[index] = future.result()
             except Exception as error:
-                errors.append({"host": hosts[index]["host"], "stage": "execute", "error": str(error)})
+                launch_results[index] = None
+                launched[index] = [failure_record(error, "LAUNCH_FAILED")]
+            if launched[index]:
+                if primary_error is None:
+                    primary_error = dict(launched[index][0], host=hosts[index]["host"])
                 if not cancelled:
                     cancelled = True
                     # 独立连接通知仍在运行的节点；每个节点自身也有执行期限。
@@ -512,24 +701,45 @@ def run(config):
                                 cancel(config, run_id)
                             else:
                                 execute(remote_argv(config, host["host"], "cancel", run_id),
-                                        log / f"cancel-{index}.log", timeout=10, stdin=REMOTE_SCRIPT)
+                                        log / f"cancel-{index}.log", timeout=10, stdin=REMOTE_SCRIPT,
+                                        start_failure="CLEANUP_FAILED", exit_failure="CLEANUP_FAILED")
                         except Exception as failure:
-                            return {"host": host["host"], "stage": "cleanup", "error": str(failure)}
+                            return failure_record(failure, "CLEANUP_FAILED", host=host["host"], stage="cleanup")
                     with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as cleanup:
                         for failure in cleanup.map(lambda item: stop(*item), enumerate(hosts)):
                             if failure:
-                                errors.append(failure)
+                                cleanup_errors.append(failure)
 
     def collect(index, host):
         node_log = log if index == 0 else log / "nodes" / str(index)
-        if index:
-            node_log.mkdir(parents=True, exist_ok=True)
-            execute(["rsync", "-a", "--protect-args", "--timeout=5", "-e", shlex.join(["ssh", *SSH_OPTIONS]),
-                     config.target(host["host"]) + ":" + str(log) + "/", str(node_log) + "/"],
-                    log / f"collect-{index}.log", timeout=max(1, deadline - time.monotonic()))
-        result = read_json(node_log / "result.json")
-        validate_result(result, run_id, manifest)
-        return {"host": host["host"], "status": "PASS", "tests": len(result["tests"])}
+        failures = list(launched[index])
+        result = launch_results[index]
+        try:
+            if index:
+                node_log.mkdir(parents=True, exist_ok=True)
+                execute(["rsync", "-a", "--protect-args", "--timeout=5", "-e", shlex.join(["ssh", *SSH_OPTIONS]),
+                         config.target(host["host"]) + ":" + str(log) + "/", str(node_log) + "/"],
+                        log / f"collect-{index}.log", timeout=max(1, deadline - time.monotonic()),
+                        start_failure="LOG_COLLECT_FAILED", exit_failure="LOG_COLLECT_FAILED")
+            result = read_json(node_log / "result.json")
+            failures.extend(result_errors(result, run_id, manifest))
+        except FileNotFoundError as error:
+            # 拉起/异常退出已说明为何没有完成记录，避免追加一个伪解析失败。
+            if not failures:
+                failures.append(Failure("LOG_PARSE_FAILED", str(error), log=str(node_log / "result.json")).record())
+        except (OSError, UnicodeError, ValueError) as error:
+            failures.append(Failure("LOG_PARSE_FAILED", str(error), log=str(node_log / "result.json")).record())
+        except Failure as error:
+            failures.extend(failure_records(error, "LOG_COLLECT_FAILED"))
+        unique = {(item["type"], item["message"], item.get("test")): item for item in failures}
+        failures = [dict(item, host=host["host"]) for item in unique.values()]
+        tests = result.get("tests", []) if isinstance(result, dict) else []
+        if not isinstance(tests, list):
+            tests = []
+        return {"host": host["host"], "status": "FAIL" if failures else "PASS",
+                "tests": sum(test.get("status") == "PASS" for test in tests if isinstance(test, dict)),
+                "reported_result": result,
+                "errors": failures}
 
     nodes = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as pool:
@@ -537,24 +747,30 @@ def run(config):
         for future in concurrent.futures.as_completed(futures):
             index = futures[future]
             try:
-                nodes.append(future.result())
+                collected = future.result()
+                nodes.append(collected)
+                errors.extend(collected["errors"])
             except Exception as error:
-                errors.append({"host": hosts[index]["host"], "stage": "collect/result", "error": str(error)})
+                errors.append(failure_record(error, "LOG_COLLECT_FAILED", host=hosts[index]["host"]))
     if time.monotonic() > deadline:
-        errors.append({"stage": "deadline", "error": "结果汇总超过总期限"})
+        errors.append(Failure("LOG_COLLECT_FAILED", "结果汇总超过总期限", timeout=True).record())
+    errors.extend(cleanup_errors)
+    if primary_error is None and errors:
+        primary_error = errors[0]
+    config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in errors)
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
-              "source_sha256": content_sha256(manifest["source"]["files"]),
+              "source_provenance": manifest["source"]["provenance"],
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL" if errors else "PASS",
-              "expected_hosts": hosts, "nodes": nodes, "errors": errors,
+              "expected_hosts": hosts, "nodes": nodes, "primary_error": primary_error, "errors": errors,
               "scope": "ABI/Host tests; no NPU launch or communication correctness"}
     write_json(log / "summary.json", report)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
-          f"hosts={len(nodes)}/{len(hosts)} tests_per_host=17 commit={report['commit'] or 'unknown'} "
-          f"source_sha256={report['source_sha256']}", flush=True)
+          f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
+          f"tests_per_host={len(manifest['tests'])} commit={report['commit'] or 'unknown'} (unverified)", flush=True)
     for error in errors:
-        print(json.dumps(error, ensure_ascii=False), file=sys.stderr)
+        report_failure(error)
     print(f"结果：{log / 'summary.json'}\n范围：ABI/Host；未执行 NPU launch 或去重通信。", flush=True)
-    return 1 if errors else 0
+    return FAILURE_CODES[primary_error["type"]] if errors else 0
 
 
 def main():
@@ -565,6 +781,12 @@ def main():
     try:
         if sys.version_info < (3, 9):
             raise ValueError("七步验证工具要求 Python 3.9 或更新版本")
+        if args.action == "cancel":
+            # 不解析 hostfile/CANN/运行配置；旧任务清理不能依赖已经改坏的环境。
+            class CancelConfig:
+                logs = Path(__file__).resolve().parents[2] / "run/validation"
+            cancel(CancelConfig(), *args.arguments)
+            return 0
         config = Config()
         if args.action == "env":
             hosts = config.hosts()
@@ -582,17 +804,19 @@ def main():
         elif args.action == "node":
             with operation_lock(config, "node.lock"):
                 return node(config, *args.arguments)
-        elif args.action == "cancel":
-            cancel(config, *args.arguments)
         elif args.action == "verify":
-            manifest = verify_build(config, config.logs / "sync-verify")
+            manifest = verify_build(config)
             if manifest["build_id"] != args.arguments[0]:
                 raise ValueError("同步后的 build_id 不一致")
             print("VERIFY_PASS")
         return 0
     except Exception as error:
-        print(f"VALIDATION_FAIL stage={args.action}: {error}", file=sys.stderr, flush=True)
-        return 1
+        kind = {"build": "BUILD_FAILED", "sync": "SYNC_FAILED", "cancel": "CLEANUP_FAILED",
+                "node": "LAUNCH_FAILED"}.get(args.action, "CONFIG_FAILED")
+        records = failure_records(error, kind, stage=args.action)
+        for record in records:
+            report_failure(record)
+        return FAILURE_CODES[records[0]["type"]]
 
 
 if __name__ == "__main__":

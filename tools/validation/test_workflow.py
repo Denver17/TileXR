@@ -94,9 +94,11 @@ class ConfigTests(TemporaryRoot):
         local = self.root / "validation.local.sh"
         local.write_text("export CANN_TEST_PATH=/one\n", encoding="utf-8")
         configured = self.config().signature()
-        self.assertNotEqual(baseline, configured)
+        self.assertEqual(baseline, configured)
         local.write_text("export CANN_TEST_PATH=/two\n", encoding="utf-8")
-        self.assertNotEqual(configured, self.config().signature())
+        self.assertEqual(configured, self.config().signature())
+        with mock.patch.dict(os.environ, {"ASCEND_HOME_PATH": "/cann/changed"}):
+            self.assertNotEqual(configured, self.config().signature())
         local.unlink()
         self.hostfile.write_text("localhost devices=1\n", encoding="utf-8")
         self.assertNotEqual(baseline, self.config().signature())
@@ -137,15 +139,16 @@ class ResultTests(unittest.TestCase):
                    {"tests": [{"name": "a", "status": "PASS"}, {"name": "b", "status": "FAIL"}]},
                    {"tests": [{"name": "a", "status": "PASS"}, {"name": "unknown", "status": "PASS"}]}]
         for change in changes:
-            with self.subTest(change=change), self.assertRaises(ValueError):
+            with self.subTest(change=change), self.assertRaises(workflow.Failure):
                 workflow.validate_result(dict(self.result, **change), "run-current", self.manifest)
 
     def test_rejects_absent_protocol_fields(self):
         for field in self.result:
             result = dict(self.result)
             del result[field]
-            with self.subTest(field=field), self.assertRaises(ValueError):
+            with self.subTest(field=field), self.assertRaises(workflow.Failure) as error:
                 workflow.validate_result(result, "run-current", self.manifest)
+            self.assertEqual(error.exception.kind, "LOG_PARSE_FAILED")
 
 
 class CancellationTests(TemporaryRoot):
@@ -166,8 +169,73 @@ class CancellationTests(TemporaryRoot):
                 self.assertTrue(record.exists())
 
 
+class FailureEvidenceTests(TemporaryRoot):
+    def test_parse_failure_preserves_exit_and_cleanup_evidence(self):
+        manifest = {"tests": []}
+        for output in (b"NODE_STARTED run_id=run\n\xff", b"NODE_STARTED run_id=run\nNODE_RESULT {broken\n",
+                       b"NODE_STARTED run_id=run\nNODE_RESULT null\n"):
+            with self.subTest(output=output):
+                log = self.root / "launch.log"
+                log.write_bytes(output)
+                execution = workflow.Failure("EXIT_FAILED", "exit=9", returncode=9,
+                    additional_failures=[workflow.Failure("CLEANUP_FAILED", "not stopped").record()])
+                result, errors = workflow.launch_outcome(log, execution, "run", manifest)
+                self.assertIsNone(result)
+                self.assertEqual([error["type"] for error in errors],
+                                 ["EXIT_FAILED", "CLEANUP_FAILED", "LOG_PARSE_FAILED"])
+                self.assertEqual(errors[0]["returncode"], 9)
+
+    def test_build_and_sync_keep_lock_when_process_cleanup_failed(self):
+        for kind in ("BUILD_FAILED", "SYNC_FAILED"):
+            with self.subTest(kind=kind):
+                config = self.config()
+                with self.assertRaises(workflow.Failure):
+                    with workflow.operation_lock(config, ".operation.lock"):
+                        raise workflow.Failure(kind, "command failed", additional_failures=[
+                            workflow.Failure("CLEANUP_FAILED", "not stopped").record()])
+                lock = config.logs / ".operation.lock"
+                self.assertTrue(lock.exists())
+                with self.assertRaises(ValueError):
+                    with workflow.operation_lock(self.config(), ".operation.lock"):
+                        self.fail("must not begin another operation")
+                lock.rmdir()  # 夹具未启动真实进程。
+
+    def test_normal_build_failure_releases_operation_lock(self):
+        config = self.config()
+        with self.assertRaises(workflow.Failure):
+            with workflow.operation_lock(config, ".operation.lock"):
+                raise workflow.Failure("BUILD_FAILED", "compile failed and stopped")
+        self.assertFalse((config.logs / ".operation.lock").exists())
+
+
 @unittest.skipUnless(os.name == "posix", "生产进程组契约需要 POSIX Python")
 class ProcessTests(TemporaryRoot):
+    def test_missing_executable_is_launch_failure(self):
+        with self.assertRaises(workflow.Failure) as error:
+            workflow.execute([self.root / "absent-program"], self.root / "missing.log")
+        self.assertEqual(error.exception.kind, "LAUNCH_FAILED")
+
+    def test_signal_is_exit_failure_and_preserves_return_code(self):
+        with self.assertRaises(workflow.Failure) as error:
+            workflow.execute([sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGKILL)"],
+                             self.root / "signal.log")
+        self.assertEqual(error.exception.kind, "EXIT_FAILED")
+        self.assertLess(error.exception.details["returncode"], 0)
+
+    def test_success_with_invalid_utf8_is_log_parse_failure(self):
+        with self.assertRaises(workflow.Failure) as error:
+            workflow.execute([sys.executable, "-c", "import sys; sys.stdout.buffer.write(bytes([255]))"],
+                             self.root / "invalid.log")
+        self.assertEqual(error.exception.kind, "LOG_PARSE_FAILED")
+
+    def test_cleanup_failure_preserves_original_exit_failure(self):
+        with mock.patch.object(workflow, "stop_process", side_effect=OSError("cleanup denied")), \
+                self.assertRaises(workflow.Failure) as error:
+            workflow.execute([sys.executable, "-c", "raise SystemExit(7)"], self.root / "cleanup.log")
+        self.assertEqual(error.exception.kind, "EXIT_FAILED")
+        self.assertEqual(error.exception.details["returncode"], 7)
+        self.assertEqual(error.exception.details["additional_failures"][0]["type"], "CLEANUP_FAILED")
+
     def test_success_captures_stdout_stderr_and_stdin(self):
         log = self.root / "logs/output.log"
         output = workflow.execute([sys.executable, "-c", "import sys; print(sys.stdin.read()); "
@@ -191,8 +259,10 @@ class ProcessTests(TemporaryRoot):
         parent = ("import subprocess, sys, time; "
                   f"subprocess.Popen([sys.executable, '-c', {child!r}]); time.sleep(60)")
         started = time.monotonic()
-        with self.assertRaises(subprocess.TimeoutExpired):
+        with self.assertRaises(workflow.Failure) as error:
             workflow.execute([sys.executable, "-c", parent], self.root / "timeout.log", timeout=1.5)
+        self.assertEqual(error.exception.kind, "EXIT_FAILED")
+        self.assertTrue(error.exception.details["timeout"])
         self.assertLess(time.monotonic() - started, 9)
         self.assertTrue(pid_file.exists(), "超时前应实际启动并记录子进程")
         self.assert_process_stopped(int(pid_file.read_text()))
@@ -255,20 +325,33 @@ if kind == "ssh":
     command[0] = os.environ["FAKE_BASH"]
     command[3] = str(mapped(command[3]))
     action = command[4] if len(command) > 4 else "prepare"
+    if action == "cancel" and scenario == "node-fail-cleanup-fail":
+        print("injected cancellation transport failure", file=sys.stderr)
+        sys.exit(255)
+    if action == "node" and scenario == "ssh-fail":
+        print("injected SSH connection failure", file=sys.stderr)
+        sys.exit(255)
+    if action == "node" and scenario in ("exit-after-start", "no-completion", "bad-completion"):
+        print("NODE_STARTED run_id=" + command[5])
+        if scenario == "bad-completion":
+            print("NODE_RESULT {invalid JSON}")
+        sys.exit(9 if scenario == "exit-after-start" else 0)
     if scenario == "verify-fail" and action == "verify":
         print("injected remote verification failure", file=sys.stderr)
         sys.exit(23)
     environment = dict(os.environ, TILEXR_VALIDATION_ROOT=str(remote),
                        TILEXR_VALIDATION_HOSTFILE=str(remote / "hostfile"))
-    if action == "node" and scenario == "node-fail":
+    if action == "node" and scenario in ("node-fail", "node-fail-cleanup-fail", "node-fail-collect-fail"):
         environment["TEST_PROGRAM_BEHAVIOR"] = "missing-marker"
+    if action == "node" and scenario == "result-fail":
+        environment["TEST_PROGRAM_BEHAVIOR"] = "result-fail"
     if action == "node" and scenario == "stale-result":
         command[5] = "old-run"
     sys.exit(subprocess.run(command, input=payload, text=True, env=environment).returncode)
 elif kind == "rsync":
     src, dest = args[-2:]
     if ":" in src:
-        if scenario == "collect-fail":
+        if scenario in ("collect-fail", "node-fail-collect-fail"):
             print("injected log collection failure", file=sys.stderr)
             sys.exit(24)
         src = mapped(src.split(":", 1)[1])
@@ -276,6 +359,8 @@ elif kind == "rsync":
         if scenario == "stale-result":
             src = src.parent / "old-run"
         shutil.copytree(src, dest, dirs_exist_ok=True)
+        if scenario == "corrupt-result":
+            (dest / "result.json").write_text("{invalid JSON}")
     else:
         if scenario == "transfer-fail":
             print("injected transfer failure", file=sys.stderr)
@@ -297,7 +382,7 @@ elif kind == "rsync":
 class WorkflowIntegrationTests(TemporaryRoot):
     def test_file_copy_manifest_syncs_and_runs_with_unknown_commit(self):
         (self.root / ".tilexr-source.json").unlink()
-        self.manifest["source"] = workflow.snapshot(self.root)
+        self.manifest["source"] = workflow.inventory(self.root)
         self.assertIsNone(self.manifest["source"]["commit"])
         workflow.write_json(self.root / ".tilexr-source.json", self.manifest["source"])
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
@@ -309,7 +394,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual(len(summary_paths), 1)
         summary = workflow.read_json(summary_paths[0])
         self.assertIsNone(summary["commit"])
-        self.assertEqual(summary["source_sha256"], self.manifest["source"]["content_sha256"])
+        self.assertEqual(summary["source_provenance"], "file-copy")
+        self.assertNotIn("source_sha256", summary)
         self.assertEqual(len(summary["nodes"]), 2)
 
     def setUp(self):
@@ -333,11 +419,14 @@ class WorkflowIntegrationTests(TemporaryRoot):
             "behavior = os.environ.get('TEST_PROGRAM_BEHAVIOR', 'pass')\n"
             "if behavior == 'nonzero':\n    print('operator failed'); sys.exit(9)\n"
             "if behavior == 'wait':\n    time.sleep(60)\n"
+            "if behavior == 'result-fail':\n"
+            "    print('EP_SERVER_DEDUP_ABI_HOST_FAIL test=' + sys.argv[1]); sys.exit(0)\n"
             "if behavior != 'missing-marker':\n"
             "    print('EP_SERVER_DEDUP_ABI_HOST_PASS test=' + sys.argv[1] +\n"
             "          (' unexpected-suffix' if behavior == 'decorated-marker' else ''))\n", encoding="utf-8")
-        source = {"commit": "a" * 40, "files": {str(path.relative_to(self.root)): workflow.digest(path)
-                  for path in (self.script, tool_root / "source.py", self.root / "set_env.sh", helper)}}
+        source = {"commit": "a" * 40, "provenance": "manifest-unverified",
+                  "files": [str(path.relative_to(self.root))
+                            for path in (self.script, tool_root / "source.py", self.root / "set_env.sh", helper)]}
         workflow.write_json(self.root / ".tilexr-source.json", source)
         self.config_instance = self.config()
         self.config_instance.install.mkdir(parents=True)
@@ -351,7 +440,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         for test, name in zip(self.manifest["tests"], workflow.CHECKS):
             program = self.root / ("test_" + name + ".py")
             program.write_text(helper.read_text().replace("sys.argv[1]", repr(name)), encoding="utf-8")
-            self.manifest["source"]["files"][program.name] = workflow.digest(program)
+            self.manifest["source"]["files"].append(program.name)
             test["argv"] = ["@python", program.name]
         workflow.write_json(self.root / ".tilexr-source.json", self.manifest["source"])
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
@@ -447,7 +536,10 @@ class WorkflowIntegrationTests(TemporaryRoot):
     def test_configuration_change_requires_resync(self):
         self.prepare_sync()
         (self.root / "validation.local.sh").write_text("# changed local config\n", encoding="utf-8")
-        result = self.invoke("run")
+        with self.hostfile.open("a") as output:
+            output.write("# comment only\n\n")
+        self.assert_success(self.invoke("run"))
+        result = self.invoke("run", environment={"TILEXR_VALIDATION_TIMEOUT": "60"})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("sync.sh", result.stderr)
 
@@ -458,12 +550,13 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("VALIDATION_PASS", result.stdout)
 
-    def test_modified_source_blocks_launch(self):
+    def test_modified_source_is_not_verified(self):
         self.prepare_sync()
-        (self.root / "test_protocol.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+        with (self.root / "test_protocol.py").open("a") as output:
+            output.write("\n# harmless source change after sync\n")
+        (self.root / "new-document.md").write_text("changed source inventory\n", encoding="utf-8")
         result = self.invoke("run")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("source mismatch", result.stderr)
+        self.assert_success(result)
 
     def test_remote_zero_exit_without_marker_fails_whole_run(self):
         self.prepare_sync()
@@ -472,14 +565,84 @@ class WorkflowIntegrationTests(TemporaryRoot):
         summary = self.summary()
         self.assertEqual(summary["status"], "FAIL")
         self.assertTrue(any(error.get("host") == "node-b" for error in summary["errors"]))
-        self.assertIn("PASS marker", result.stdout + result.stderr)
+        self.assertIn("PASS/FAIL marker", result.stdout + result.stderr)
+        remote_errors = [error["type"] for error in summary["errors"] if error.get("host") == "node-b"]
+        self.assertEqual(remote_errors, ["LOG_PARSE_FAILED"])
+
+    def assert_remote_failure(self, scenario, kind):
+        self.prepare_sync()
+        command = self.invoke("run", environment={"FAKE_SCENARIO": scenario})
+        self.assertNotEqual(command.returncode, 0)
+        summary = self.summary()
+        self.assertEqual(summary["primary_error"]["type"], kind, summary)
+        return summary
+
+    def test_ssh_failure_is_launch_failure(self):
+        summary = self.assert_remote_failure("ssh-fail", "LAUNCH_FAILED")
+        self.assertFalse(any(error["type"] in ("EXIT_FAILED", "RESULT_FAILED", "LOG_PARSE_FAILED")
+                             for error in summary["errors"] if error.get("host") == "node-b"))
+
+    def test_abnormal_exit_after_start_is_exit_failure(self):
+        self.assert_remote_failure("exit-after-start", "EXIT_FAILED")
+
+    def test_success_without_completion_is_log_parse_failure(self):
+        self.assert_remote_failure("no-completion", "LOG_PARSE_FAILED")
+
+    def test_invalid_completion_is_log_parse_failure(self):
+        self.assert_remote_failure("bad-completion", "LOG_PARSE_FAILED")
+
+    def test_completed_fail_marker_is_result_failure(self):
+        summary = self.assert_remote_failure("result-fail", "RESULT_FAILED")
+        self.assertEqual([error["type"] for error in summary["errors"] if error.get("host") == "node-b"],
+                         ["RESULT_FAILED"])
+
+    def test_corrupt_collected_json_is_log_parse_failure(self):
+        self.assert_remote_failure("corrupt-result", "LOG_PARSE_FAILED")
+
+    def test_collection_failure_preserves_test_failure_from_launch_log(self):
+        summary = self.assert_remote_failure("node-fail-collect-fail", "LOG_PARSE_FAILED")
+        self.assertEqual({error["type"] for error in summary["errors"] if error.get("host") == "node-b"},
+                         {"LOG_PARSE_FAILED", "LOG_COLLECT_FAILED"})
+
+    def test_cleanup_failure_keeps_primary_error_and_controller_lock(self):
+        summary = self.assert_remote_failure("node-fail-cleanup-fail", "LOG_PARSE_FAILED")
+        self.assertIn("CLEANUP_FAILED", {error["type"] for error in summary["errors"]})
+        self.assertTrue((self.config_instance.logs / ".operation.lock").exists())
+
+    def test_cleanup_failure_never_records_complete_or_removes_node_lock(self):
+        config = self.config_instance
+        handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            with mock.patch.object(workflow, "execute", side_effect=workflow.Failure("CLEANUP_FAILED", "denied")):
+                with workflow.operation_lock(config, "node.lock"):
+                    status = workflow.node(config, "cleanup-failure", self.manifest["build_id"])
+        finally:
+            for sig, handler in handlers.items():
+                signal.signal(sig, handler)
+        self.assertNotEqual(status, 0)
+        recorded = workflow.read_json(config.logs / "cleanup-failure/result.json")
+        self.assertEqual(recorded["cleanup"], "failed")
+        self.assertTrue((config.logs / "node.lock").exists())
+        self.assertTrue((config.logs / "cleanup-failure/pid.json").exists())
+
+    def test_remote_cancel_does_not_source_broken_environment_or_parse_config(self):
+        (self.root / "set_env.sh").write_text("exit 88\n", encoding="utf-8")
+        environment = dict(os.environ, TILEXR_VALIDATION_TIMEOUT="invalid", TILEXR_VALIDATION_BUILD_MODE="invalid")
+        with mock.patch.dict(os.environ, environment):
+            workflow.execute([self.bash, "-s", "--", self.root, "cancel", "minimal-cancel"],
+                             self.root / "cancel-minimal.log", stdin=workflow.REMOTE_SCRIPT)
+        self.assertTrue((self.config_instance.logs / "minimal-cancel/cancelled").exists())
 
     def test_log_collection_failure_fails_whole_run(self):
         self.prepare_sync()
         result = self.invoke("run", environment={"FAKE_SCENARIO": "collect-fail"})
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.summary()["status"], "FAIL")
-        self.assertTrue(any(error["stage"] == "collect/result" for error in self.summary()["errors"]))
+        self.assertTrue(any(error["type"] == "LOG_COLLECT_FAILED" for error in self.summary()["errors"]))
+        remote = next(node for node in self.summary()["nodes"] if node["host"] == "node-b")
+        self.assertEqual(remote["status"], "FAIL")
+        self.assertEqual(remote["reported_result"]["status"], "PASS")
+        self.assertEqual(remote["tests"], len(self.manifest["tests"]))
 
     def test_stale_remote_success_is_rejected(self):
         self.prepare_sync()
@@ -488,7 +651,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual(self.summary()["status"], "FAIL")
 
     def test_node_failure_still_records_result_and_cleanup(self):
-        for behavior in ("nonzero", "missing-marker", "decorated-marker"):
+        for behavior, kind in (("nonzero", "EXIT_FAILED"), ("missing-marker", "LOG_PARSE_FAILED"),
+                               ("decorated-marker", "LOG_PARSE_FAILED"), ("result-fail", "RESULT_FAILED")):
             with self.subTest(behavior=behavior):
                 run_id = behavior
                 result = self.invoke("node", run_id, self.manifest["build_id"],
@@ -499,7 +663,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
                 self.assertEqual(recorded["status"], "FAIL")
                 self.assertEqual(recorded["cleanup"], "complete")
                 self.assertFalse((node_log / "pid.json").exists())
-                self.assertEqual(recorded["tests"], [])
+                self.assertEqual(recorded["tests"][0]["status"], "FAIL")
+                self.assertEqual(recorded["errors"][0]["type"], kind)
 
     def test_node_rejects_request_for_different_build(self):
         result = self.invoke("node", "wrong-build-run", "another-build")
@@ -521,25 +686,21 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertFalse((node_log / "pid.json").exists())
         self.assertEqual(list(node_log.glob("test_*.log")), [])
 
-    def test_node_preflight_obeys_passed_execution_budget(self):
+    def test_node_never_repeats_production_library_checks(self):
         self.manifest["mode"] = "production"
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
         started_file = self.root / "preflight-started"
         for name in ("nm", "readelf", "ldd"):
             tool = self.fake_bin / name
             tool.write_text("#!" + sys.executable + "\nimport pathlib, time\n"
-                            f"pathlib.Path({str(started_file)!r}).touch()\ntime.sleep(60)\n", encoding="utf-8")
+                            f"pathlib.Path({str(started_file)!r}).touch()\nraise SystemExit(99)\n", encoding="utf-8")
             tool.chmod(0o755)
         started = time.monotonic()
-        result = self.invoke("node", "preflight-deadline", self.manifest["build_id"], "1",
+        result = self.invoke("node", "no-preflight", self.manifest["build_id"], "10",
                              environment={"TILEXR_VALIDATION_BUILD_MODE": "production"})
         self.assertLess(time.monotonic() - started, 6)
-        self.assertTrue(started_file.exists(), "须实际启动模拟生产检查工具")
-        self.assertNotEqual(result.returncode, 0)
-        recorded = workflow.read_json(self.config_instance.logs / "preflight-deadline/result.json")
-        self.assertEqual(recorded["status"], "FAIL")
-        self.assertEqual(recorded["tests"], [])
-        self.assertIn("timed out", recorded["error"])
+        self.assertFalse(started_file.exists(), "节点不能再次执行生产检查工具")
+        self.assert_success(result)
 
     def test_remote_watchdog_includes_slow_environment_preamble(self):
         (self.root / "set_env.sh").write_text(

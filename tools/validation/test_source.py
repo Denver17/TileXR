@@ -1,4 +1,4 @@
-"""Behavior tests for committed exports and source integrity; no SSH required."""
+"""Behavior tests for source inventories and safe committed exports; no SSH required."""
 
 import os
 import json
@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from source import pack, snapshot, verify_source
+from source import inventory, pack
 
 
 class SourceTests(unittest.TestCase):
@@ -61,31 +61,29 @@ class SourceTests(unittest.TestCase):
         self.assertFalse((deployed / "validation.local.sh").exists())
         self.assertFalse((deployed / "untracked.md").exists())
         self.assertFalse((deployed / ".git").exists())
-        self.assertEqual(snapshot(deployed), manifest)
+        self.assertEqual(inventory(deployed)["files"], manifest["files"])
+        self.assertEqual(inventory(deployed)["provenance"], "manifest-unverified")
         self.assertEqual(manifest["commit"], self.git(self.root, "rev-parse", "HEAD").decode().strip())
         self.assertEqual((self.root / "file.txt").read_bytes(), b"uncommitted\r\n")
 
-    def test_live_snapshot_records_actual_bytes_and_dirty_state(self):
-        manifest = snapshot(self.root)
-        self.assertFalse(manifest["dirty"])
+    def test_live_inventory_labels_head_without_checking_worktree_content(self):
+        manifest = inventory(self.root)
+        self.assertEqual(manifest["provenance"], "git-head-unverified")
         (self.root / "file.txt").write_bytes(b"changed\n")
-        changed = snapshot(self.root)
-        self.assertTrue(changed["dirty"])
-        self.assertNotEqual(changed["files"], manifest["files"])
-        verify_source(self.root, changed)
-        with self.assertRaisesRegex(ValueError, "source mismatch"):
-            verify_source(self.root, manifest)
+        self.assertEqual(inventory(self.root), manifest)
+        (self.root / "untracked.cpp").write_text("new source\n")
+        self.assertIn("untracked.cpp", inventory(self.root)["files"])
 
     def test_plain_copy_never_queries_git_even_below_another_repository(self):
         deployed = self.root / "plain-copy"
         deployed.mkdir()
         (deployed / "file.txt").write_text("copied source\n")
-        with patch("source._git", side_effect=AssertionError("must not call Git")):
-            manifest = snapshot(deployed)
+        with patch("source._git", side_effect=AssertionError("must not call Git")), \
+                patch.object(Path, "open", side_effect=AssertionError("must not read source bytes")):
+            manifest = inventory(deployed)
         self.assertIsNone(manifest["commit"])
         self.assertEqual(manifest["provenance"], "file-copy")
         self.assertEqual(set(manifest["files"]), {"file.txt"})
-        verify_source(deployed, manifest)
 
     def test_missing_submodule_git_metadata_uses_actual_copied_files(self):
         vendor = self.repo("vendor")
@@ -95,28 +93,28 @@ class SourceTests(unittest.TestCase):
             self.git(self.root, "submodule", "add", "-q", str(vendor), "vendor")
         self.commit(self.root)
         (self.root / "vendor/.git").unlink()
-        manifest = snapshot(self.root)
-        self.assertIsNone(manifest["commit"])
+        manifest = inventory(self.root)
+        self.assertEqual(manifest["commit"], self.git(self.root, "rev-parse", "HEAD").decode().strip())
         self.assertIn("vendor/file.txt", manifest["files"])
-        verify_source(self.root, manifest)
 
-    def test_plain_rebuild_refreshes_content_but_verification_rejects_changes(self):
+    def test_plain_rebuild_refreshes_paths_without_checking_source_changes(self):
         deployed = self.base / "plain"
         deployed.mkdir()
         source_file = deployed / "source.cpp"
         source_file.write_text("original\n")
-        manifest = snapshot(deployed)
+        manifest = inventory(deployed)
         (deployed / ".tilexr-source.json").write_text(json.dumps(manifest))
         source_file.write_text("updated\n")
-        with self.assertRaisesRegex(ValueError, "source mismatch"):
-            verify_source(deployed, manifest)
-        current = snapshot(deployed)
-        self.assertNotEqual(current["content_sha256"], manifest["content_sha256"])
-        verify_source(deployed, current)
+        self.assertEqual(inventory(deployed), manifest)
+        source_file.unlink()
+        (deployed / "replacement.cpp").write_text("replacement\n")
+        current = inventory(deployed)
+        self.assertEqual(current["files"], ["replacement.cpp"])
         result = subprocess.run([sys.executable,
-                                 str(Path(__file__).with_name("source.py")), "verify", str(deployed)],
+                                 str(Path(__file__).with_name("source.py")), "inventory", str(deployed)],
                                 capture_output=True, text=True)
-        self.assertNotEqual(result.returncode, 0, "verify must not refresh a stale manifest")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"commit": None, "files": 1, "provenance": "file-copy"})
 
     def test_plain_copy_omits_runtime_files_and_includes_submodule_sources(self):
         deployed = self.base / "plain"
@@ -131,23 +129,54 @@ class SourceTests(unittest.TestCase):
             target = deployed / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text("fixture\n")
-        manifest = snapshot(deployed, exclude=("cluster/hosts",))
+        manifest = inventory(deployed, exclude=("cluster/hosts",))
         self.assertEqual(set(manifest["files"]), set(sources))
-        verify_source(deployed, manifest)
         (deployed / "install/validation/bin/test").write_text("rebuilt\n")
-        self.assertEqual(snapshot(deployed, exclude=("cluster/hosts",)), manifest)
+        self.assertEqual(inventory(deployed, exclude=("cluster/hosts",)), manifest)
 
-    def test_unknown_commit_requires_explicit_file_copy_provenance_and_digest(self):
-        manifest = {"commit": None, "files": {"file.txt": "0" * 64}}
-        with self.assertRaisesRegex(ValueError, "invalid source manifest"):
-            verify_source(self.root, manifest)
+    def test_nested_reference_and_vendor_sources_are_included(self):
+        deployed = self.base / "plain"
+        name = "src/moonep/planner_v2/reference/ep_plan_reference.cpp"
+        target = deployed / name
+        target.parent.mkdir(parents=True)
+        shutil.copyfile(Path(__file__).resolve().parents[2] / name, target)
+        for relative in ("src/component/third_party/support.h", "tests/reference/check.py",
+                         "reference/upstream/reference.cpp", "third_party/comparison.cpp"):
+            path = deployed / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("fixture\n")
+        self.assertEqual(set(inventory(deployed)["files"]),
+                         {name, "src/component/third_party/support.h", "tests/reference/check.py"})
+
+    def test_old_or_malformed_optional_metadata_does_not_block_plain_copy(self):
         deployed = self.base / "plain"
         deployed.mkdir()
         (deployed / "file.txt").write_text("source\n")
-        manifest = snapshot(deployed)
-        manifest["content_sha256"] = "0" * 64
-        with self.assertRaisesRegex(ValueError, "invalid source content digest"):
-            verify_source(deployed, manifest)
+        for text in ('{"commit": "' + "a" * 40 + '", "files": {"missing.cpp": "invalid digest"}}',
+                     '{broken json', '["not a manifest"]', '{"commit": "invalid", "files": []}'):
+            with self.subTest(text=text):
+                (deployed / ".tilexr-source.json").write_text(text)
+                manifest = inventory(deployed)
+                self.assertIsNone(manifest["commit"])
+                self.assertEqual(manifest["files"], ["file.txt"])
+
+    def test_plain_copy_with_empty_optional_spdlog_needs_no_git_or_source_bytes(self):
+        deployed = self.base / "plain"
+        (deployed / "3rdparty/spdlog").mkdir(parents=True)
+        (deployed / "CMakeLists.txt").write_text("project(fixture)\n")
+        with patch("source._git", side_effect=AssertionError("must not call Git")), \
+                patch.object(Path, "open", side_effect=AssertionError("must not read source bytes")):
+            self.assertEqual(inventory(deployed), {"commit": None, "files": ["CMakeLists.txt"],
+                                                  "provenance": "file-copy"})
+
+    def test_unavailable_local_git_metadata_does_not_block_inventory(self):
+        deployed = self.base / "plain"
+        deployed.mkdir()
+        (deployed / "file.txt").write_text("source\n")
+        (deployed / ".git").write_text("gitdir: missing-repository\n")
+        manifest = inventory(deployed)
+        self.assertIsNone(manifest["commit"])
+        self.assertEqual(manifest["files"], ["file.txt"])
 
     def test_export_initializes_and_pins_recursive_submodules(self):
         leaf = self.repo("leaf")
@@ -166,25 +195,25 @@ class SourceTests(unittest.TestCase):
         self.assertEqual((deployed / "vendor/nested/file.txt").read_bytes(), b"committed\n")
         self.assertFalse((deployed / "vendor/.git").exists())
         self.assertFalse((deployed / "vendor/nested/.git").exists())
-        verify_source(deployed, manifest)
+        self.assertEqual(inventory(deployed)["files"], manifest["files"])
 
-    def test_tampered_or_missing_source_is_rejected(self):
+    def test_changed_export_refreshes_inventory_with_unverified_commit_label(self):
         archive = self.base / "source.tar.gz"
         manifest = pack(self.root, archive)
         deployed = self.unpack(archive)
         (deployed / "file.txt").write_bytes(b"tamper\n")
-        with self.assertRaisesRegex(ValueError, "source mismatch"):
-            snapshot(deployed)
+        current = inventory(deployed)
+        self.assertEqual(current["commit"], manifest["commit"])
+        self.assertEqual(current["provenance"], "manifest-unverified")
         (deployed / "file.txt").unlink()
-        with self.assertRaisesRegex(ValueError, "source mismatch"):
-            verify_source(deployed, manifest)
+        self.assertEqual(inventory(deployed)["files"], [])
 
-    def test_manifest_rejects_path_escape(self):
+    def test_inventory_rejects_path_escape(self):
         for name in ("../outside", "/absolute", "dir/../outside", "dir\\outside", "C:/outside", ".git/config"):
             with self.subTest(name=name), self.assertRaisesRegex(ValueError, "unsafe source path"):
-                verify_source(self.root, {"commit": "a" * 40, "files": {name: "0" * 64}})
+                inventory(self.root, exclude=(name,))
 
-    def test_manifest_rejects_symlink_components(self):
+    def test_inventory_rejects_symlink_components(self):
         link = self.root / "linked"
         external = self.base / "external"
         external.mkdir()
@@ -195,7 +224,7 @@ class SourceTests(unittest.TestCase):
         if not link.is_symlink():
             self.skipTest("runtime copied the directory instead of creating a symlink")
         with self.assertRaisesRegex(ValueError, "symlink"):
-            verify_source(self.root, {"commit": "a" * 40, "files": {"linked/file.txt": "0" * 64}})
+            inventory(self.root)
 
     @unittest.skipUnless(shutil.which("powershell.exe") and Path("/usr/bin/bash").exists(),
                          "Windows PowerShell + MSYS transport harness unavailable")
@@ -250,6 +279,12 @@ function ssh {
         self.assertTrue((deployed / ".tilexr-validation-root").is_file())
         (deployed / "validation.local.sh").write_text("retained config\n")
         (deployed / "hostfile").write_text("retained hostfile\n")
+        # A previous deployment can carry the old digest dictionary. Only its
+        # paths matter when removing stale files; its contents are not verified.
+        old_manifest = json.loads((deployed / ".tilexr-source.json").read_text())
+        old_manifest["files"] = {name: "ignored old digest" for name in old_manifest["files"]}
+        (deployed / ".tilexr-source.json").write_text(json.dumps(old_manifest))
+        (deployed / "file.txt").write_text("modified deployed source\n")
         (self.root / "file.txt").unlink()
         (self.root / "new.txt").write_text("new source\n")
         self.commit(self.root)
@@ -260,6 +295,30 @@ function ssh {
         self.assertTrue((deployed / "new.txt").is_file())
         self.assertEqual((deployed / "validation.local.sh").read_text(), "retained config\n")
         self.assertEqual((deployed / "hostfile").read_text(), "retained hostfile\n")
+        self.assertIsInstance(json.loads((deployed / ".tilexr-source.json").read_text())["files"], list)
+
+        original_archive = (capture / "source.tar.gz").read_bytes()
+        for name, reason in (("../outside", b"unsafe archive path"),
+                             ("unexpected.txt", b"archive and source manifest disagree"),
+                             ("new.txt", b"archive and source manifest disagree")):
+            with self.subTest(archive_entry=name):
+                malformed = self.base / "malformed.tar.gz"
+                with tarfile.open(capture / "source.tar.gz") as source, tarfile.open(malformed, "w:gz") as output:
+                    for member in source:
+                        output.addfile(member, source.extractfile(member))
+                    output.addfile(tarfile.TarInfo(name))
+                shutil.copyfile(malformed, capture / "source.tar.gz")
+                result = deploy()
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn(reason, result.stdout)
+                self.assertFalse((self.base / "outside").exists())
+                (capture / "source.tar.gz").write_bytes(original_archive)
+        lock = deployed / "run/validation/node.lock"
+        lock.mkdir(parents=True)
+        result = deploy()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"validation is active", result.stdout)
+        lock.rmdir()
         (deployed / ".git").mkdir()
         result = deploy()
         self.assertNotEqual(result.returncode, 0)

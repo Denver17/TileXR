@@ -1,0 +1,224 @@
+#!/usr/bin/env python3
+"""构建生命周期回归：真实文件系统与命令失败，CANN 编译使用安装产物夹具。"""
+
+from contextlib import redirect_stderr, redirect_stdout
+import io
+import json
+import os
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest import mock
+
+import workflow
+
+
+class BuildTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="tilexr-build-test-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name) / "source"
+        self.root.mkdir()
+        (self.root / "hostfile").write_text("localhost\n", encoding="utf-8")
+        (self.root / "CMakeLists.txt").write_text("# copied source without Git\n", encoding="utf-8")
+        environment = {key: value for key, value in os.environ.items()
+                       if not key.startswith("TILEXR_VALIDATION_")}
+        environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
+                           TILEXR_VALIDATION_BUILD_MODE="host",
+                           TILEXR_VALIDATION_TIMEOUT="30")
+        patch = mock.patch.dict(os.environ, environment, clear=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+        self.names = sorted(workflow.REQUIRED_TESTS)
+        self.commands = []
+        self.generation = 0
+
+    def config(self, mode="host"):
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": mode}):
+            return workflow.Config()
+
+    def compiled_command(self, argv, log, **kwargs):
+        """代替昂贵的 CMake；实际创建本次安装文件，并保留所有调用参数。"""
+        args = [str(value) for value in argv]
+        self.commands.append((args, Path(log), kwargs))
+        work = self.root / "build/validation"
+        stage = work / "install"
+        if "--install" in args:
+            if args[-1] == str(work / "production"):
+                files = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
+                files += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o"
+                          for name in ("dispatch", "combine", "dispatch_memory", "combine_memory")]
+            else:
+                files = ["bin/" + name for name in self.names]
+            for name in files:
+                target = stage / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"fixture generation {self.generation}\n", encoding="utf-8")
+        if args[0] == "ctest":
+            output = json.dumps({"tests": [{"name": name,
+                                           "command": [str(work / "host/bin" / name)]}
+                                          for name in self.names]})
+        else:
+            output = "fixture command completed\n"
+        Path(log).parent.mkdir(parents=True, exist_ok=True)
+        Path(log).write_text(output, encoding="utf-8")
+        return output
+
+    def build_fixture(self, config=None):
+        config = config or self.config()
+        self.generation += 1
+        with mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "execute", side_effect=self.compiled_command), \
+                mock.patch.object(workflow, "runtime_check") as runtime, redirect_stdout(io.StringIO()):
+            workflow.build(config)
+        return workflow.verify_build(config), runtime
+
+    def test_rebuild_reuses_fixed_path_and_discards_old_files(self):
+        config = self.config()
+        first, _ = self.build_fixture(config)
+        work = self.root / "build/validation"
+        (work / "old-object.o").write_text("old object")
+        (work / "host/cache").mkdir(parents=True)
+        (work / "host/cache/stale-config").write_text("old options")
+        old_binary = config.install / "bin/removed-test"
+        old_binary.write_text("obsolete executable")
+        second, _ = self.build_fixture(config)
+        self.assertNotEqual(first["build_id"], second["build_id"])
+        self.assertEqual(set(path.name for path in (self.root / "build").iterdir()), {"validation"})
+        self.assertFalse((work / "old-object.o").exists())
+        self.assertFalse((work / "host/cache").exists())
+        self.assertFalse(old_binary.exists())
+        self.assertEqual((config.install / "bin" / self.names[0]).read_text(), "fixture generation 2\n")
+        configurations = [args[args.index("-B") + 1] for args, _, _ in self.commands if "-B" in args]
+        self.assertEqual(configurations, [str(work / "host"), str(work / "host")])
+        self.assertEqual(len(list(config.logs.glob("build-*"))), 2)
+
+    @unittest.skipUnless(os.name == "posix", "真实命令失败和进程组清理需要 POSIX")
+    def test_failed_configuration_invalidates_previous_package_and_sync_receipt(self):
+        real_execute = workflow.execute
+        config = self.config()
+        for boundary in ("start", "exit"):
+            with self.subTest(boundary=boundary):
+                self.build_fixture(config)
+                with redirect_stdout(io.StringIO()):
+                    workflow.sync(config)
+                self.assertTrue((config.logs / "sync.json").is_file())
+
+                def fail_configuration(argv, log, **kwargs):
+                    if "-S" not in argv:
+                        return self.compiled_command(argv, log, **kwargs)
+                    self.assertEqual(kwargs["start_failure"], "BUILD_FAILED")
+                    self.assertEqual(kwargs["exit_failure"], "BUILD_FAILED")
+                    command = ([str(self.root / "missing-cmake")] if boundary == "start" else
+                               [sys.executable, "-c", "print('configure failed'); raise SystemExit(7)"])
+                    return real_execute(command, log, **kwargs)
+
+                stderr = io.StringIO()
+                with mock.patch.object(workflow, "require_tools"), \
+                        mock.patch.object(workflow, "execute", side_effect=fail_configuration), \
+                        mock.patch.object(sys, "argv", ["workflow.py", "build"]), \
+                        redirect_stdout(io.StringIO()), redirect_stderr(stderr):
+                    code = workflow.main()
+                self.assertEqual(code, workflow.FAILURE_CODES["BUILD_FAILED"])
+                self.assertIn("VALIDATION_FAIL type=BUILD_FAILED", stderr.getvalue())
+                if boundary == "exit":
+                    self.assertIn('"returncode": 7', stderr.getvalue())
+                    self.assertIn("configure failed", stderr.getvalue())
+                self.assertFalse((config.install / "manifest.json").exists())
+                self.assertFalse((config.logs / "sync.json").exists())
+                self.assertFalse((config.logs / ".operation.lock").exists())
+                self.assertTrue((config.install / "bin" / self.names[0]).is_file())
+                with self.assertRaises(FileNotFoundError):
+                    workflow.verify_build(config)
+                with mock.patch.object(workflow, "execute") as launch, self.assertRaises(FileNotFoundError):
+                    workflow.run(config)
+                launch.assert_not_called()
+
+    def test_required_test_set_accepts_additions_and_rejects_replacements(self):
+        self.names.append("test_new_additional_host_case")
+        manifest, _ = self.build_fixture()
+        self.assertEqual({test["name"] for test in manifest["tests"]}, set(self.names))
+        self.assertGreater(len(manifest["tests"]), len(workflow.REQUIRED_TESTS))
+        for missing in ("test_tilexr_ep_server_dedup_protocol", "test_tilexr_ep_layout"):
+            with self.subTest(missing=missing):
+                self.names = sorted(workflow.REQUIRED_TESTS - {missing}) + ["test_replacement"]
+                with mock.patch.object(workflow, "runtime_check") as runtime, \
+                        mock.patch.object(workflow, "require_tools"), \
+                        mock.patch.object(workflow, "execute", side_effect=self.compiled_command), \
+                        redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, missing):
+                    workflow.build(self.config())
+                runtime.assert_not_called()
+                self.assertFalse((self.config().install / "manifest.json").exists())
+
+    def test_duplicate_test_name_cannot_replace_independent_execution(self):
+        self.names.append(self.names[0])
+        with mock.patch.object(workflow, "runtime_check") as runtime, \
+                mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "execute", side_effect=self.compiled_command), \
+                redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "必需测试缺失或重复"):
+            workflow.build(self.config())
+        runtime.assert_not_called()
+
+    def test_runtime_check_occurs_once_after_production_install_and_never_during_verify_sync(self):
+        config = self.config("production")
+
+        def inspect_runtime(actual, stage, log):
+            self.assertIs(actual, config)
+            self.assertEqual(stage, self.root / "build/validation/install")
+            self.assertEqual(self.commands[-1][0][0], "ctest")
+            self.assertTrue((stage / "lib/libtilexr-ep.so").is_file())
+            self.assertTrue((stage / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_kernel.o").is_file())
+            self.assertTrue((stage / "bin" / self.names[0]).is_file())
+            self.assertFalse((stage / "manifest.json").exists())
+
+        with mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "execute", side_effect=self.compiled_command), \
+                mock.patch.object(workflow, "runtime_check", side_effect=inspect_runtime) as runtime, \
+                redirect_stdout(io.StringIO()):
+            workflow.build(config)
+            manifest = workflow.verify_build(config)
+            workflow.sync(config)
+            workflow.verify_build(config)
+            workflow.sync(config)
+        runtime.assert_called_once()
+        self.assertEqual(workflow.read_json(config.logs / "sync.json")["build_id"], manifest["build_id"])
+        production = self.root / "build/validation/production"
+        operations = [args[1] for args, _, _ in self.commands if str(production) in args]
+        self.assertEqual(operations, ["-S", "--build", "--install"])
+
+    def test_file_at_build_directory_is_preserved_and_rejected(self):
+        config = self.config()
+        work = self.root / "build/validation"
+        work.parent.mkdir()
+        work.write_text("user-owned file\n")
+        with self.assertRaisesRegex(ValueError, "构建路径不是目录"):
+            workflow.clean_build_directory(config)
+        self.assertEqual(work.read_text(), "user-owned file\n")
+
+    def test_build_and_install_symlinks_never_delete_external_content(self):
+        target = Path(self.temporary.name) / "outside"
+        target.mkdir()
+        sentinel = target / "keep.txt"
+        sentinel.write_text("outside content\n")
+        probe = self.root / "symlink-probe"
+        try:
+            probe.symlink_to(target, target_is_directory=True)
+        except OSError as error:
+            self.skipTest(f"当前平台不能创建真实 symlink: {error}")
+        if not probe.is_symlink():
+            self.skipTest("MSYS 以复制模拟 symlink，无法验证真实链接保护")
+        probe.unlink()
+        for relative in ("build", "build/validation", "install", "install/validation"):
+            with self.subTest(path=relative):
+                link = self.root / relative
+                link.parent.mkdir(parents=True, exist_ok=True)
+                link.symlink_to(target, target_is_directory=True)
+                with self.assertRaisesRegex(ValueError, "符号链接"):
+                    workflow.clean_build_directory(self.config())
+                self.assertEqual(sentinel.read_text(), "outside content\n")
+                link.unlink()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
