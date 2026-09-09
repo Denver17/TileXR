@@ -6,8 +6,8 @@ dispatch/combine, while the UDMA backend uses TileXR-registered workspaces. Memo
 small transfers, while UDMA generally performs better for large transfers.
 
 All EP Dispatch and Combine variants are supported only on A5-class SoCs
-(`Ascend950`, `Ascend910_9`, or `A5`). The build always produces the four A5
-AICore objects and never produces 910B EP kernels. The public API symbols remain
+(`Ascend950`, `Ascend910_9`, or `A5`). The build produces the four existing A5
+AICore objects plus the empty Server Dedup object, and never produces 910B EP kernels. The public API symbols remain
 available in the same Host library on non-A5 systems and return
 `TILEXR_ERROR_NOT_SUPPORT` before loading a kernel or consuming launch state.
 
@@ -18,7 +18,8 @@ are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
 服务器验证统一使用[EP 七步验证](../../docs/EP_VALIDATION_GUIDE.md)：PC 固定提交并同步后，
 依次执行根目录 `source set_env.sh`、`bash build_all.sh`、`bash sync.sh`、`bash run.sh`。
-当前 Server Dedup 只支持 ABI/Host checkpoint；脚本自动汇总各主机结果，不表示已完成 NPU 去重验证。
+当前支持 `abi-host` 和 `empty-kernel`，只需修改现有配置中的 checkpoint；脚本自动汇总各主机结果。
+检查点状态与通过提交见[调试进度](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 From `tests/ep`:
 
@@ -33,46 +34,40 @@ bash build.sh source-only
 building the hardware demo. CCE compilation and hardware correctness must still
 be validated separately.
 
-## Server Dedup ABI/Host Checkpoint
+## Server Dedup 第一阶段检查点
 
-`ep-sdedup-p1-abi-host` adds the independent
-`TileXRMoeEpDispatchMemoryServerDedup` entry and caller-owned
-`assistExOut/sourceMaskOut/groupOut` metadata pointers. It preserves the ordinary
-Memory ABI. The production entry validates Host arguments and returns
-`TILEXR_ERROR_NOT_SUPPORT` until the next checkpoint provides the A5 artifact
-and registered launch. It writes no outputs and consumes no launch magic.
+独立入口 `TileXRMoeEpDispatchMemoryServerDedup` 使用 caller-owned 的
+`assistExOut/sourceMaskOut/groupOut`，普通 Memory ABI 不变。第二个检查点已接通 A5 空 kernel：
+通过 Host 校验后注册独立 artifact，再获取一次 magic 并调用 `rtKernelLaunchWithFlagV2`。
+成功仅表示异步提交成功；空 kernel 不读取输入或 comm，不写输出、ready 或 profiling。
 
-Run the checkpoint without creating a communicator or using an NPU:
+开发者可在无 NPU 环境运行现有 Host suite；服务器交付仍使用上面的七步入口：
 
 ```bash
 cmake -S tests/ep -B tests/ep/build-sdedup -DBUILD_TILEXR_EP_DEMO=OFF
-cmake --build tests/ep/build-sdedup --target test_tilexr_ep_server_dedup_protocol \
-  test_tilexr_ep_server_dedup_layout test_tilexr_ep_server_dedup_host_validation \
-  test_tilexr_ep_server_dedup_public_abi -j4
-timeout 180s ctest --test-dir tests/ep/build-sdedup -L ep-sdedup-p1-abi-host --output-on-failure
+cmake --build tests/ep/build-sdedup -j4
+timeout 180s ctest --test-dir tests/ep/build-sdedup --output-on-failure
 ```
 
-The Host suite uses its existing generated ACL headers when CANN is absent.
-The Host-validation executable replaces only the submission boundary and
-communicator queries; the independent public consumer links the real unsupported
-submission implementation. A test PASS is Host/ABI evidence, not A5 launch or
-Dispatch correctness. Device generation, block-dimension selection, artifact
-registration and actual communication remain later checkpoints.
+Host 测试沿用已有 ACL/runtime 替身。`public_abi` 只验证公共声明与调用边界；
+`test_tilexr_ep_kernel_launch` 编译真实注册和 launch 源码，检查全部 20 个参数、默认/显式核数、
+FP16/BF16、可空 weight/旧 assist、非 A5、artifact 缺失、注册失败和提交失败。
+`TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM` 默认使用设备 Vector 核数，覆盖值范围为 `[1,Vector核数]`，
+不沿用普通 Dispatch 的双 Group 限制。注册失败不消耗 magic；提交失败已消耗本次 magic，不能回退重用。
 
-Capacity checks use `R*BS*min(K,L)` output rows, 32B AssistEx rows, 4B sourceMask
-elements, and `align32(4*(1+2*(K-1)))` group rows. A bare pointer cannot prove its
-allocation size or lifetime: the internal caller-side allocation helper checks
-declared sizes, device identity and disjoint ranges; the API checks visible
-alignment and shape arithmetic. Do not reuse the ordinary Memory validator:
-it requires the old three-field assist and rejects weight pointers, while this
-entry accepts a legacy assist placeholder and passes weight through unread.
-These tests do not scan routes, publish group counts, or establish future
-communication-window capacity or pending Combine contracts.
+`empty-kernel` 的 production 构建额外编译安装包 consumer，仅使用已安装公共头和真实 Host 库。
+它在每台主机的首个配置 device 上执行真实 binary/function 注册，复用 Host 库相对路径加载；不创建 communicator。
+ELF/导出/依赖检查仍只在构建完成后执行一次；同步、超时、清理和结果汇总复用原流程。
+维护时将新检查加入现有测试及 manifest，不另建 runner、重复预检或源码摘要门禁。
 
-Checkpoint validation on 2026-09-09: a C++14 Debug build with MSYS2 GCC 15.2
-and CMake 4.3.2 passed all 17 EP Host/Python tests, including the four new
-checkpoint tests. CANN production-library compilation and A5/NPU execution
-were not run; this record qualifies the Host contract only.
+容量仍为 `R*BS*min(K,L)` 行，AssistEx 每行 32B、sourceMask 每项 4B、group 每行
+`align32(4*(1+2*(K-1)))`。裸指针入口只检查可见对齐与 shape；内部 allocation helper 检查声明容量、
+设备和区间不重叠。不能借用要求旧三字段 assist、拒绝 weight 的普通 Memory 校验器。
+空算子不扫描 route，不生成 metadata，也不确定后续通信容量或 Combine 契约。
+
+本次本地验证：MSYS2 GCC 15.2 / CMake 4.3.2 的 C++14 Debug 构建与 17/17 EP Host/Python 测试通过。
+七步脚本回归 94 项中 91 通过、3 项因 MSYS 不支持真实 symlink 而跳过。
+CANN 9.1 生产构建及 A5 注册仍待服务器七步验证；不能将 Host 替身的成功视为设备注册或 launch 证据。
 
 ## Full Hardware Demo
 

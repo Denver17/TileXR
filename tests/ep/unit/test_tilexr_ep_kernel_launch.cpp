@@ -11,6 +11,7 @@
 #include "acl/acl_rt.h"
 #include "ep_host.h"
 #include "ep_kernel_launch.h"
+#include "ep_memory_server_dedup_launch.h"
 #include "runtime/kernel.h"
 #include "tilexr_api.h"
 #include "tilexr_kernel_binary_loader.h"
@@ -21,6 +22,7 @@ namespace {
 struct LaunchCapture {
     std::string name;
     uint32_t blockDim = 0;
+    rtStream_t stream = nullptr;
     std::vector<uint64_t> args;
 };
 
@@ -33,6 +35,10 @@ int gBinaryUnregisterCalls = 0;
 rtError_t gBinaryRegisterResult = RT_ERROR_NONE;
 rtError_t gFunctionRegisterResult = RT_ERROR_NONE;
 rtError_t gLaunchResult = RT_ERROR_NONE;
+bool gLoadResult = true;
+aclError gDeviceResult = ACL_SUCCESS;
+int64_t gVectorCores = 48;
+int gMagicResult = TileXR::TILEXR_SUCCESS;
 std::vector<std::string> gLoadedFiles;
 std::vector<std::string> gRegisteredEntries;
 std::map<const void *, std::string> gSignatureNames;
@@ -54,6 +60,10 @@ void ResetCapture()
     gBinaryRegisterResult = RT_ERROR_NONE;
     gFunctionRegisterResult = RT_ERROR_NONE;
     gLaunchResult = RT_ERROR_NONE;
+    gLoadResult = true;
+    gDeviceResult = ACL_SUCCESS;
+    gVectorCores = 48;
+    gMagicResult = TileXR::TILEXR_SUCCESS;
     gLoadedFiles.clear();
     gRegisteredEntries.clear();
     gLaunches.clear();
@@ -170,6 +180,109 @@ void TestUnsupportedSocRejectsAllKernels()
     Check(gMagicCalls == 0 && gLoadedFiles.empty() && gBinaryRegisterCalls == 0 && gLaunches.empty(),
         "unsupported SoC is rejected before state mutation or binary loading");
     gSocName = "Ascend950PR_9589";
+}
+
+void TestServerDedupRuntimeLaunch()
+{
+    TileXR::CommArgs commArgs = MakeCommArgs();
+    commArgs.rankSize = 64;
+    const auto context = MakeContext(&commArgs);
+    TileXREp::EpMemoryServerDedupParams params {};
+    auto &p = params.dispatch;
+    p.x = reinterpret_cast<void *>(0x1000);
+    p.expertIds = reinterpret_cast<int32_t *>(0x2000);
+    p.expertScales = reinterpret_cast<void *>(0x3000);
+    p.comm = reinterpret_cast<TileXRCommPtr>(0x4000);
+    p.expandXOut = reinterpret_cast<void *>(0x5000);
+    p.expertTokenNumsOut = reinterpret_cast<int64_t *>(0x6000);
+    p.epRecvCountsOut = reinterpret_cast<int32_t *>(0x7000);
+    p.bs = 256; p.h = 7168; p.topK = 6; p.moeExpertNum = 384;
+    p.expertTokenNumsType = 1;
+    p.dtype = TileXR::TILEXR_DATA_TYPE_BFP16;
+    p.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_RESERVED;
+    p.stream = reinterpret_cast<aclrtStream>(0x8000);
+    params.assistExOut = reinterpret_cast<uint32_t *>(0x9000);
+    params.sourceMaskOut = reinterpret_cast<uint32_t *>(0xa000);
+    params.groupOut = reinterpret_cast<uint32_t *>(0xb000);
+    TileXREp::EpMemoryServerDedupLayout layout {};
+    layout.globalBs = 64 * 256;
+    auto launch = [&]() { return TileXREp::TileXREpLaunchDispatchMemoryServerDedupKernel(params, context, layout); };
+    const char *overrideName = "TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM";
+    unsetenv(overrideName);
+
+    ResetCapture();
+    gSocName = "Ascend910B3";
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_SUPPORT, "server dedup rejects non-A5");
+    Check(TileXREp::TileXREpRegisterDispatchMemoryServerDedupKernel() == TileXR::TILEXR_ERROR_NOT_SUPPORT,
+        "registration-only entry rejects non-A5");
+    Check(gMagicCalls == 0 && gLoadedFiles.empty() && gLaunches.empty(), "non-A5 causes no side effects");
+    gSocName = "Ascend950PR_9589";
+
+    ResetCapture();
+    gDeviceResult = 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "device query failure propagates");
+    gDeviceResult = ACL_SUCCESS;
+    gVectorCores = 0;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "zero vector cores rejected");
+    gVectorCores = static_cast<int64_t>(UINT32_MAX) + 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "core count narrowing overflow rejected");
+    gVectorCores = 48;
+    for (const char *value : {"0", "49", "-1", "2x"}) {
+        setenv(overrideName, value, 1);
+        Check(launch() == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL, "invalid dedup block dimension rejected");
+    }
+    unsetenv(overrideName);
+    Check(gMagicCalls == 0 && gLoadedFiles.empty() && gLaunches.empty(), "bad launch settings consume no magic");
+
+    ResetCapture();
+    gLoadResult = false;
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_INITIALIZED, "missing artifact is an error");
+    Check(gMagicCalls == 0 && gBinaryRegisterCalls == 0 && gLaunches.empty(), "missing artifact does not register or launch");
+    ResetCapture();
+    gBinaryRegisterResult = -1;
+    Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "binary registration failure propagates");
+    Check(gMagicCalls == 0 && gLaunches.empty(), "binary registration failure consumes no magic");
+    ResetCapture();
+    gFunctionRegisterResult = -1;
+    Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "function registration failure propagates");
+    Check(gBinaryUnregisterCalls == 1 && gMagicCalls == 0 && gLaunches.empty(), "failed function registration rolls back binary");
+
+    ResetCapture();
+    gMagicResult = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_INITIALIZED, "magic allocation failure propagates");
+    Check(gMagicCalls == 1 && gLaunches.empty(), "failed magic allocation prevents launch");
+    Check(gLoadedFiles == std::vector<std::string>{"tilexr_ep_dispatch_memory_server_dedup_kernel.o"},
+        "dedup loads its own artifact");
+    Check(gRegisteredEntries == std::vector<std::string>{"tilexr_ep_dispatch_memory_server_dedup_kernel"},
+        "dedup registers its own signature");
+
+    ResetCapture();
+    Check(launch() == TileXR::TILEXR_SUCCESS, "empty server dedup launch succeeds");
+    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 20);
+    const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
+        0x1000, 0x2000, 0x3000, 0x5000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000,
+        256, 7168, 6, 384, 64 * 256, 1, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.dtype), kNextMagic};
+    Check(gLaunches[0].args == expected, "all twenty kernel arguments preserve order, widths and values");
+    Check(gLaunches[0].blockDim == 48 && gLaunches[0].stream == p.stream, "uses all vector cores and caller stream");
+    Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
+
+    for (const char *value : {"1", "47", "48"}) {
+        ResetCapture();
+        setenv(overrideName, value, 1);
+        p.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
+        p.expandXOutDtype = p.dtype;
+        p.expertScales = nullptr;
+        p.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0xc000);
+        Check(launch() == TileXR::TILEXR_SUCCESS, "valid block dimension needs no legacy two-group restriction");
+        Check(gLaunches[0].blockDim == std::strtoul(value, nullptr, 10) && gLaunches[0].args[3] == 0 &&
+            gLaunches[0].args[7] == 0xc000 && gLaunches[0].args[18] == static_cast<uint64_t>(p.dtype),
+            "block override, optional pointers and explicit FP16 forwarded");
+    }
+    unsetenv(overrideName);
+    ResetCapture();
+    gLaunchResult = -1;
+    Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "runtime submission failure is never PASS");
+    Check(gMagicCalls == 1 && gLaunches.size() == 1, "failed submission consumes only its own magic");
 }
 
 void TestOrdinaryDispatchRuntimeLaunch()
@@ -314,13 +427,14 @@ namespace TileXR {
 bool LoadKernelBinary(const void *, const char *fileName, KernelBinaryView *binary)
 {
     static const unsigned char kernelBinary[] = {0x01};
-    if (fileName == nullptr || binary == nullptr) {
+    if (!gLoadResult || fileName == nullptr || binary == nullptr) {
         return false;
     }
     const std::string name(fileName);
     if (name != "tilexr_ep_dispatch_kernel.o" && name != "tilexr_ep_combine_kernel.o" &&
         name != "tilexr_ep_dispatch_memory_kernel.o" &&
-        name != "tilexr_ep_combine_memory_kernel.o") {
+        name != "tilexr_ep_combine_memory_kernel.o" &&
+        name != "tilexr_ep_dispatch_memory_server_dedup_kernel.o") {
         return false;
     }
     gLoadedFiles.push_back(name);
@@ -339,7 +453,7 @@ int TileXRCommNextMagic(TileXRCommPtr, int64_t *magic)
     if (magic != nullptr) {
         *magic = kNextMagic;
     }
-    return TileXR::TILEXR_SUCCESS;
+    return gMagicResult;
 }
 
 int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&)
@@ -362,13 +476,13 @@ aclError aclrtGetDevice(int32_t *deviceId)
     if (deviceId != nullptr) {
         *deviceId = 0;
     }
-    return ACL_SUCCESS;
+    return gDeviceResult;
 }
 
 aclError aclrtGetDeviceInfo(uint32_t, aclrtDevAttr attr, int64_t *value)
 {
     if (value != nullptr) {
-        *value = attr == ACL_DEV_ATTR_VECTOR_CORE_NUM ? 48 : 192 * 1024;
+        *value = attr == ACL_DEV_ATTR_VECTOR_CORE_NUM ? gVectorCores : 192 * 1024;
     }
     return ACL_SUCCESS;
 }
@@ -412,13 +526,14 @@ rtError_t rtFunctionRegister(void *, const void *signature, const char_t *name,
 }
 
 rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim,
-    rtArgsEx_t *argsInfo, rtSmDesc_t *, rtStream_t, uint32_t,
+    rtArgsEx_t *argsInfo, rtSmDesc_t *, rtStream_t stream, uint32_t,
     const rtTaskCfgInfo_t *)
 {
     LaunchCapture capture;
     const auto nameIt = gSignatureNames.find(signature);
     capture.name = nameIt == gSignatureNames.end() ? "" : nameIt->second;
     capture.blockDim = blockDim;
+    capture.stream = stream;
     if (argsInfo != nullptr && argsInfo->args != nullptr) {
         const std::size_t fieldCount = argsInfo->argsSize / sizeof(uint64_t);
         const uint64_t *fields = static_cast<const uint64_t *>(argsInfo->args);
@@ -437,5 +552,8 @@ int main()
     TestOrdinaryCombineRuntimeLaunch();
     TestDispatchMemoryRuntimeLaunch();
     TestCombineMemoryRuntimeLaunch();
+    TestServerDedupRuntimeLaunch();
+    std::cout << "EP_SERVER_DEDUP_EMPTY_KERNEL_" << (gFailures == 0 ? "PASS" : "FAIL")
+              << " test=launch" << std::endl;
     return gFailures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

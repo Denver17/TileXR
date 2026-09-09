@@ -37,11 +37,17 @@ class ProductionChecksTests(unittest.TestCase):
             return f"libascend_hal.so => {self.root / 'driver/lib64/driver/libascend_hal.so'} (0x1000)\n"
         self.fail(f"unexpected command: {argv}")
 
-    def check(self):
+    def check(self, checkpoint=workflow.CHECKPOINT):
         with mock.patch.object(workflow, "require_tools"), \
                 mock.patch.object(workflow, "execute", side_effect=self.inspect_fixture) as execute:
-            workflow.runtime_check(SimpleNamespace(mode="production"), self.install, self.log)
+            workflow.runtime_check(SimpleNamespace(mode="production", checkpoint=checkpoint), self.install, self.log)
         return execute
+
+    def test_empty_kernel_inspects_installed_elf_once(self):
+        execute = self.check(workflow.EMPTY_KERNEL_CHECKPOINT)
+        self.assertEqual(execute.call_args_list[0].args[0],
+                         ["readelf", "-h", self.install / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"])
+        self.assertEqual(len(execute.call_args_list), 4)
 
     def test_c_abi_functions_pass_and_remaining_library_checks_run(self):
         execute = self.check()
@@ -95,7 +101,7 @@ class BuildTests(unittest.TestCase):
             if args[-1] == str(work / "production"):
                 files = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
                 files += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o"
-                          for name in ("dispatch", "combine", "dispatch_memory", "combine_memory")]
+                          for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup")]
             else:
                 files = ["bin/" + name for name in self.names]
             for name in files:
@@ -197,6 +203,19 @@ class BuildTests(unittest.TestCase):
                     workflow.build(self.config())
                 runtime.assert_not_called()
                 self.assertFalse((self.config().install / "manifest.json").exists())
+
+    def test_empty_kernel_build_requires_installed_registration_consumer(self):
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
+            config = self.config("production")
+        with self.assertRaisesRegex(ValueError, workflow.REGISTRATION_TEST):
+            self.build_fixture(config)
+        self.names.append(workflow.REGISTRATION_TEST)
+        manifest, _ = self.build_fixture(config)
+        self.assertEqual(manifest["checkpoint"], workflow.EMPTY_KERNEL_CHECKPOINT)
+        self.assertIn(workflow.REGISTRATION_TEST, [test["name"] for test in manifest["tests"]])
+        configure = [args for args, _, _ in self.commands if "-S" in args][-1]
+        self.assertIn("-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST=ON", configure)
+        self.assertIn(f"-DTILEXR_INSTALL_PREFIX={self.root / 'build/validation/install'}", configure)
 
     def test_duplicate_test_name_cannot_replace_independent_execution(self):
         self.names.append(self.names[0])

@@ -65,6 +65,13 @@ class HostfileTests(TemporaryRoot):
 
 
 class ConfigTests(TemporaryRoot):
+    def test_empty_kernel_requires_production(self):
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
+            with self.assertRaisesRegex(ValueError, "production"):
+                self.config()
+            with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production"}):
+                self.assertEqual(self.config().checkpoint, workflow.EMPTY_KERNEL_CHECKPOINT)
+
     def test_production_without_spdlog_reaches_cmake(self):
         (self.root / "CMakeLists.txt").write_text("# source fixture\n")
         (self.root / "3rdparty/spdlog").mkdir(parents=True)
@@ -489,6 +496,39 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual(summary["commit"], self.manifest["source"]["commit"])
         self.assertEqual(list(self.root.rglob("pid.json")), [])
         self.assertEqual(list(self.remote.rglob("pid.json")), [])
+
+    def test_empty_kernel_uses_first_device_per_host_with_existing_entry_points(self):
+        self.hostfile.write_text("localhost devices=2,7\nnode-b devices=3,5\n", encoding="utf-8")
+        entry = self.root / "set_env.sh"
+        entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
+        self.manifest.update(mode="production", checkpoint=workflow.EMPTY_KERNEL_CHECKPOINT)
+        program = self.root / "registration.py"
+        program.write_text("import os\n"
+                           "print('device=' + os.environ['TILEXR_EP_SERVER_DEDUP_TEST_DEVICE'])\n"
+                           "print('EP_SERVER_DEDUP_EMPTY_KERNEL_PASS test=registration')\n", encoding="utf-8")
+        self.manifest["source"]["files"].append(program.name)
+        self.manifest["tests"].append({"name": workflow.REGISTRATION_TEST, "argv": ["@python", program.name]})
+        workflow.write_json(self.root / ".tilexr-source.json", self.manifest["source"])
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",
+                                        "TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
+            self.prepare_sync()
+            self.assert_success(self.invoke("run"))
+        self.assertEqual(self.summary()["status"], "PASS")
+        for root, device in ((self.root, 2), (self.remote, 3)):
+            logs = list((root / "run/validation").glob("*/" + workflow.REGISTRATION_TEST + ".log"))
+            self.assertEqual(len(logs), 1)
+            self.assertIn(f"device={device}\n", logs[0].read_text())
+
+    def test_empty_kernel_missing_registration_marker_fails(self):
+        self.manifest.update(mode="production", checkpoint=workflow.EMPTY_KERNEL_CHECKPOINT)
+        self.manifest["tests"] = [{"name": workflow.REGISTRATION_TEST, "argv": ["@python", "test_protocol.py"]}]
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        result = self.invoke("node", "registration-marker", self.manifest["build_id"], "10", "2",
+                             environment={"TILEXR_VALIDATION_BUILD_MODE": "production",
+                                          "TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("LOG_PARSE_FAILED", result.stdout)
 
     def test_sync_failure_invalidates_previous_receipt(self):
         self.prepare_sync()

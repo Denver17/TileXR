@@ -29,8 +29,12 @@ _tilexr_validation_env() {
     if [[ "$TILEXR_VALIDATION_HOSTFILE" != /* ]]; then
         export TILEXR_VALIDATION_HOSTFILE="$root/$TILEXR_VALIDATION_HOSTFILE"
     fi
-    if [[ "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-p1-abi-host ]]; then
-        echo "type=CONFIG_FAILED 配置失败：当前版本仅实现 ep-sdedup-p1-abi-host，尚未提供 Server Dedup 设备测试。" >&2
+    case "$TILEXR_VALIDATION_CHECKPOINT" in
+        ep-sdedup-p1-abi-host|ep-sdedup-p1-empty-kernel) ;;
+        *) echo "type=CONFIG_FAILED 配置失败：当前版本仅实现 abi-host 和 empty-kernel 检查点。" >&2; return 1 ;;
+    esac
+    if [[ "$TILEXR_VALIDATION_CHECKPOINT" == ep-sdedup-p1-empty-kernel && "$TILEXR_VALIDATION_BUILD_MODE" != production ]]; then
+        echo "type=CONFIG_FAILED 配置失败：empty-kernel 必须使用 production 模式。" >&2
         return 1
     fi
     case "$TILEXR_VALIDATION_BUILD_MODE" in

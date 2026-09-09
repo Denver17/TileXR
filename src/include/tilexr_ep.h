@@ -50,8 +50,8 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
     TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype, aclrtStream stream);
 
-// ABI/Host checkpoint only: returns NOT_SUPPORT until the independent kernel is available.
-// Metadata is caller-owned. No outputs are written and no launch magic is consumed yet.
+// 第一阶段空算子：A5 上提交独立空 kernel，成功仅表示异步提交成功。
+// Metadata 由 caller 持有；空 kernel 不读写输入、输出或通信状态。非 A5 返回 NOT_SUPPORT。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,

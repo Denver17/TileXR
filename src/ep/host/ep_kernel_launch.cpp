@@ -1,4 +1,5 @@
 #include "ep_kernel_launch.h"
+#include "ep_memory_server_dedup_launch.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +33,8 @@ constexpr char kDispatchMemoryKernelFile[] = "tilexr_ep_dispatch_memory_kernel.o
 constexpr char kDispatchMemoryKernelName[] = "tilexr_ep_dispatch_memory_kernel";
 constexpr char kCombineMemoryKernelFile[] = "tilexr_ep_combine_memory_kernel.o";
 constexpr char kCombineMemoryKernelName[] = "tilexr_ep_combine_memory_kernel";
+constexpr char kServerDedupKernelFile[] = "tilexr_ep_dispatch_memory_server_dedup_kernel.o";
+constexpr char kServerDedupKernelName[] = "tilexr_ep_dispatch_memory_server_dedup_kernel";
 
 struct KernelRegistrationState {
     std::mutex mutex;
@@ -58,6 +61,8 @@ uint8_t gDispatchMemoryKernelStub = 0;
 
 KernelRegistrationState gCombineMemoryRegistration;
 uint8_t gCombineMemoryKernelStub = 0;
+KernelRegistrationState gServerDedupRegistration;
+uint8_t gServerDedupKernelStub = 0;
 
 bool HasPrefix(const char *value, const char *prefix)
 {
@@ -385,6 +390,23 @@ int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLau
     return LaunchRegisteredKernel(crossNode ? &gDispatchCrossNodeKernelStub : &gDispatchKernelStub,
         kMvpBlockDim, params.stream, &args, sizeof(args),
         crossNode ? kDispatchCrossNodeKernelName : kDispatchKernelName);
+}
+
+int TileXREpRegisterDispatchMemoryServerDedupKernel()
+{
+    if (!TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
+    const KernelEntry entry {kServerDedupKernelName, &gServerDedupKernelStub};
+    return EnsureKernelRegistered(gServerDedupRegistration, kServerDedupKernelFile,
+        &entry, 1U, &gServerDedupKernelStub);
+}
+
+int TileXREpSubmitDispatchMemoryServerDedupKernel(EpServerDedupKernelArgs &args,
+    uint32_t blockDim, aclrtStream stream)
+{
+    return LaunchRegisteredKernel(&gServerDedupKernelStub, blockDim, stream,
+        &args, sizeof(args), kServerDedupKernelName);
 }
 
 int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpHostLaunchContext &context)

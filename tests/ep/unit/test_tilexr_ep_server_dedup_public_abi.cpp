@@ -1,6 +1,7 @@
 #include <type_traits>
 
 #include "tilexr_ep.h"
+#include "ep_memory_server_dedup_launch.h"
 #include "server_dedup_test_checks.h"
 
 using DispatchMemory = int (*)(void *, int32_t *, void *, bool *, int64_t, void *, TileXRCommPtr,
@@ -20,7 +21,15 @@ TileXR::CommArgs g_args {};
 bool g_a5 = true;
 int g_magicCalls = 0;
 }
-namespace TileXREp { bool TileXREpIsA5Soc() { return g_a5; } }
+namespace TileXREp {
+bool TileXREpIsA5Soc() { return g_a5; }
+// ABI consumer 使用测试替身；生产提交行为由 kernel_launch 和安装包测试覆盖。
+int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParams &,
+    const EpHostLaunchContext &, const EpMemoryServerDedupLayout &)
+{
+    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+}
+}
 int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&args)
 {
     args = &g_args;
@@ -58,10 +67,10 @@ int main()
             output, nullptr, nullptr, expertCounts, counts, nullptr, nullptr, assist, mask, group,
             TileXR::TILEXR_DATA_TYPE_FP16, TileXR::TILEXR_DATA_TYPE_RESERVED,
             reinterpret_cast<aclrtStream>(0x2000)) == TileXR::TILEXR_ERROR_NOT_SUPPORT,
-            "production checkpoint returns unsupported on A5 and non-A5");
+            "ABI consumer propagates submit result and rejects non-A5");
     }
     Check(output[0] == 456 && assist[0] == 789 && mask[0] == 321 && group[0] == 654 &&
-        expertCounts[0] == 987 && counts[0] == 741 && x[0] == 123, "production boundary preserves outputs");
-    Check(g_magicCalls == 0, "production boundary consumes no magic");
+        expertCounts[0] == 987 && counts[0] == 741 && x[0] == 123, "ABI consumer preserves outputs");
+    Check(g_magicCalls == 0, "ABI consumer does not consume magic outside submit");
     return ServerDedupTest::Finish("public_abi");
 }

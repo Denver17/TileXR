@@ -13,6 +13,7 @@ enable_testing()
 
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
+option(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST "Build installed A5 server dedup registration consumer" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix")
@@ -257,8 +258,7 @@ add_executable(test_tilexr_ep_server_dedup_host_validation
     ${TILEXR_EP_SERVER_DEDUP_HOST_SOURCES})
 add_executable(test_tilexr_ep_server_dedup_public_abi
     unit/test_tilexr_ep_server_dedup_public_abi.cpp
-    ${TILEXR_EP_SERVER_DEDUP_HOST_SOURCES}
-    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_launch.cpp)
+    ${TILEXR_EP_SERVER_DEDUP_HOST_SOURCES})
 foreach(test_name IN ITEMS protocol layout host_validation public_abi)
     set(test_target test_tilexr_ep_server_dedup_${test_name})
     target_include_directories(${test_target} PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
@@ -315,6 +315,7 @@ add_executable(test_tilexr_ep_host_validation
 add_executable(test_tilexr_ep_kernel_launch
     unit/test_tilexr_ep_kernel_launch.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_kernel_launch.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_launch.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_dispatch_memory_host.cpp
@@ -442,6 +443,28 @@ if(BUILD_TILEXR_EP_DEMO)
     )
 
     install(TARGETS tilexr_ep_dispatch_demo RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST)
+    # 安装包 consumer 不编译 Host 实现，不引入 fake runtime 头文件。
+    find_library(TILEXR_EP_SERVER_DEDUP_INSTALLED_LIB tilexr-ep
+        PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
+    add_executable(test_tilexr_ep_server_dedup_registration
+        integration/test_tilexr_ep_server_dedup_registration.cpp)
+    target_include_directories(test_tilexr_ep_server_dedup_registration PRIVATE
+        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/include")
+    target_link_directories(test_tilexr_ep_server_dedup_registration PRIVATE
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
+        "${ASCEND_DRIVER_PATH}/lib64/driver")
+    target_link_libraries(test_tilexr_ep_server_dedup_registration PRIVATE
+        ${TILEXR_EP_SERVER_DEDUP_INSTALLED_LIB} ascendcl ${CMAKE_DL_LIBS})
+    set_target_properties(test_tilexr_ep_server_dedup_registration PROPERTIES
+        SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")
+    add_test(NAME test_tilexr_ep_server_dedup_registration COMMAND test_tilexr_ep_server_dedup_registration)
+    set_tests_properties(test_tilexr_ep_server_dedup_registration PROPERTIES
+        LABELS ep-sdedup-p1-empty-kernel TIMEOUT 120)
+    install(TARGETS test_tilexr_ep_server_dedup_registration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""七步 EP 验证：构建、分发、每主机 Host 测试与有界结果汇总。"""
+"""七步 EP 验证：构建、分发、每主机检查与有界结果汇总。"""
 
 import argparse
 import concurrent.futures
@@ -23,6 +23,8 @@ from source import inventory
 
 
 CHECKPOINT = "ep-sdedup-p1-abi-host"
+EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
+REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
     "test_dispatch_memory_trace", "test_msprof_kernel_stats", "test_tilexr_ep_layout",
@@ -200,8 +202,10 @@ class Config:
         self.user = os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
-        if self.mode not in ("host", "production") or self.checkpoint != CHECKPOINT:
-            raise ValueError("当前版本只支持 ep-sdedup-p1-abi-host；不支持设备去重测试")
+        if self.mode not in ("host", "production") or self.checkpoint not in (CHECKPOINT, EMPTY_KERNEL_CHECKPOINT):
+            raise ValueError("当前版本仅支持 ep-sdedup-p1-abi-host 和 ep-sdedup-p1-empty-kernel")
+        if self.checkpoint == EMPTY_KERNEL_CHECKPOINT and self.mode != "production":
+            raise ValueError("empty-kernel 必须使用 production 模式验证真实 A5 artifact 和设备注册")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
         if self.user and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.user):
@@ -287,6 +291,10 @@ def runtime_check(config, install, log):
         return execute(argv, log / filename, timeout=30, env=env,
                        start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
 
+    if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
+        kernel = install / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"
+        inspect(["readelf", "-h", kernel], "server-dedup-elf.log")
+
     symbols = inspect(["nm", "-D", "--defined-only", "--no-demangle", "--format=posix", library],
                       "symbols.log")
     # 公共接口采用 extern "C"；匹配完整动态函数符号名，不带参数列表或左括号。
@@ -368,12 +376,15 @@ def build(config):
         command(["cmake", "--build", work / "production", "-j", config.jobs],
                 log / "production-build.log", timeout=3600)
         command(["cmake", "--install", work / "production"], log / "production-install.log", timeout=180)
-        for kernel in ("dispatch", "combine", "dispatch_memory", "combine_memory"):
+        for kernel in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup"):
             if not (stage / f"lib/tilexr/kernels/tilexr_ep_{kernel}_kernel.o").is_file():
                 raise ValueError(f"缺少 EP kernel：{kernel}")
     host_build = work / "host"
+    registration = config.checkpoint == EMPTY_KERNEL_CHECKPOINT
     command(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
+             f"-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST={'ON' if registration else 'OFF'}",
+             f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
     command(["cmake", "--install", host_build], log / "host-install.log")
@@ -401,7 +412,7 @@ def build(config):
             raise ValueError(f"无法导出测试命令：{command}")
         tests.append({"name": test["name"], "argv": argv})
     names = [test["name"] for test in tests]
-    missing = REQUIRED_TESTS - set(names)
+    missing = (REQUIRED_TESTS | ({REGISTRATION_TEST} if registration else set())) - set(names)
     if missing or len(names) != len(set(names)):
         raise ValueError(f"必需测试缺失或重复：{sorted(missing)}")
     runtime_check(config, stage, log)
@@ -509,7 +520,7 @@ def pid_identity(pid):
         return None
 
 
-def node(config, run_id, build_id, execution_budget=None):
+def node(config, run_id, build_id, execution_budget=None, device=None):
     log = config.logs / identifier(run_id)
     log.mkdir(parents=True, exist_ok=True)
     result = {"run_id": run_id, "build_id": build_id, "host": socket.gethostname(),
@@ -540,14 +551,27 @@ def node(config, run_id, build_id, execution_budget=None):
                 raise Failure("EXIT_FAILED", "节点测试超过执行期限", timeout=True)
             argv = [sys.executable if value == "@python" else str(config.root / value)
                     for value in test["argv"]]
-            output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root)
+            env = None
+            if current_test == REGISTRATION_TEST:
+                if device is None or not str(device).isdigit() or not 0 <= int(device) <= 255:
+                    raise ValueError("设备注册检查缺少有效的 hostfile device ID")
+                env = dict(os.environ, TILEXR_EP_SERVER_DEDUP_TEST_DEVICE=str(device))
+                env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+                result["device"] = int(device)
+            output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root, env=env)
             prefix = "test_tilexr_ep_server_dedup_"
-            if test["name"].startswith(prefix):
-                markers = [line for line in output.splitlines() if line.startswith("EP_SERVER_DEDUP_ABI_HOST_")]
-                suffix = " test=" + test["name"][len(prefix):]
-                if markers == ["EP_SERVER_DEDUP_ABI_HOST_FAIL" + suffix]:
+            marker = None
+            if current_test == REGISTRATION_TEST:
+                marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=registration"
+            elif current_test.startswith(prefix):
+                marker, suffix = "EP_SERVER_DEDUP_ABI_HOST_", " test=" + current_test[len(prefix):]
+            elif current_test == "test_tilexr_ep_kernel_launch" and config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
+                marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=launch"
+            if marker:
+                markers = [line for line in output.splitlines() if line.startswith(marker)]
+                if markers == [marker + "FAIL" + suffix]:
                     raise Failure("RESULT_FAILED", "测试完成但结果校验失败", log=str(log / (current_test + ".log")))
-                if markers != ["EP_SERVER_DEDUP_ABI_HOST_PASS" + suffix]:
+                if markers != [marker + "PASS" + suffix]:
                     raise Failure("LOG_PARSE_FAILED", "缺少或无法解析唯一的 PASS/FAIL marker",
                                   log=str(log / (current_test + ".log")))
             result["tests"].append({"name": test["name"], "status": "PASS"})
@@ -667,11 +691,14 @@ def run(config):
 
     def launch(index, host):
         budget = max(1, min(120, deadline - time.monotonic() - 20))
+        arguments = ["node", run_id, manifest["build_id"], str(budget)]
+        if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
+            arguments.append(str(host["devices"][0]))
         if index == 0:
-            argv = [sys.executable, Path(__file__), "node", run_id, manifest["build_id"], str(budget)]
+            argv = [sys.executable, Path(__file__), *arguments]
             payload = None
         else:
-            argv = remote_argv(config, host["host"], "node", run_id, manifest["build_id"], str(budget))
+            argv = remote_argv(config, host["host"], *arguments)
             payload = REMOTE_SCRIPT
         launch_log = log / f"launch-{index}.log"
         execution_error = None

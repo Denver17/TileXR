@@ -2,7 +2,14 @@
 
 本流程支持 PC 普通文件同步或固定版本导出，并提供四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
 
-当前仅支持 `ep-sdedup-p1-abi-host`：每台主机保留完整的 17 个 EP Host/Python 测试，其中 4 个为 Server Dedup ABI/Host 测试；检查必需测试集合，允许以后新增测试，不再限定总数必须等于 17。测试项是否精简仍待定。默认同时编译 CANN 生产库及现有四个 A5 EP kernel。生产 Server Dedup 入口仍返回 `TILEXR_ERROR_NOT_SUPPORT`；本流程不创建 NPU communicator，不执行去重 kernel，不验证多卡通信或数值正确性。未实现的 checkpoint 会直接报错。
+当前支持两个检查点，继续共用本文七步，不增加预检或额外运行入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
+
+| checkpoint | 每台主机的测试重点 | 通过边界 |
+| --- | --- | --- |
+| `ep-sdedup-p1-abi-host` | 17 个 Host/Python 测试，含 ABI/layout/Host 校验及 runtime 替身测试 | Host 契约与回归；production 模式另含生产编译/链接 |
+| `ep-sdedup-p1-empty-kernel` | 上述测试加 1 个已安装头文件/生产库 consumer；选择该 hostfile 行的首个 device 执行真实注册 | A5 ELF、安装后相对路径加载、binary/function 注册；launch 参数及失败路径由 Host 替身覆盖 |
+
+`empty-kernel` 必须使用 `production`。只需在原 `validation.local.sh` 中将 `TILEXR_VALIDATION_CHECKPOINT` 改为 `ep-sdedup-p1-empty-kernel`，再执行相同七步。设备注册每台主机一次，不创建 communicator、不 launch 设备 kernel；空 launch、stream 完成和多 rank 建链留给后续检查点。生产公共入口现已可提交空 kernel，但不生成 Dispatch 输出或数值结果。未实现的 checkpoint 仍直接报错。进度与通过提交见[调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 ## 一次性环境配置
 
@@ -19,11 +26,11 @@ PC 需要 Git；使用 `push.ps1` 导出时另需 Python 3.9+ 和 Windows OpenSS
 | `TILEXR_VALIDATION_JOBS` | 编译并发数，默认 4 |
 | `TILEXR_VALIDATION_TIMEOUT` | 单次集群测试总期限，默认 180 秒，允许 30..180 秒；编译、源码同步单独计时 |
 | `TILEXR_VALIDATION_BUILD_MODE` | 默认 `production`；显式 `host` 只用于没有 CANN 的 Host/脚本验证，结果中单独标识 |
-| `TILEXR_VALIDATION_CHECKPOINT` | 当前固定为 `ep-sdedup-p1-abi-host` |
+| `TILEXR_VALIDATION_CHECKPOINT` | 默认 `ep-sdedup-p1-abi-host`；第二个检查点使用 `ep-sdedup-p1-empty-kernel` |
 
 hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空行。第一行必须指向执行脚本的首节点，可以写 `localhost`；后续行可使用主机名、IPv4 或 SSH config 别名。主机清单只保存在此文件，不再内置另一套列表。`devices` 省略时为 0..7，重复主机和重复 device ID 会被拒绝；当前 Host checkpoint 每主机只执行一套测试，device 列表不代表执行了 NPU 测试。
 
-64P 清单通常对应 8 台主机，每台列出 8 个实际物理 device ID。使用主机 IP 时，形式为 `192.0.2.11 devices=0,1,2,3,4,5,6,7`，其余 7 行替换为其他服务器的实际 IP（这里的地址仅作示例）。第一行是当前首节点；需要使用其余节点可访问的真实地址时，不使用 `localhost` 作为跨机通信地址。当前 checkpoint 读取这样的清单后仍只执行每主机 Host 测试，不启动 64 个 NPU rank。
+64P 清单通常对应 8 台主机，每台列出 8 个实际物理 device ID。使用主机 IP 时，形式为 `192.0.2.11 devices=0,1,2,3,4,5,6,7`，其余 7 行替换为其他服务器的实际 IP（这里的地址仅作示例）。第一行是当前首节点；需要使用其余节点可访问的真实地址时，不使用 `localhost` 作为跨机通信地址。`abi-host` 只执行每主机 Host 测试；`empty-kernel` 额外使用每台首个 device 注册。二者均不启动 64 个 NPU rank。
 
 `validation.local.sh` 与 hostfile 是本地部署配置，不提交到仓库。各主机 CANN 路径不同时，可以在同一份 `validation.local.sh` 中按 `hostname` 设置路径；工作目录仍必须相同。编译、同步、运行期间不要在同一路径同时启动其他验证任务。
 
@@ -106,9 +113,9 @@ bash run.sh
 VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests_per_host=17 commit=unknown
 ```
 
-只有全部预期主机测试成功、退出码为 0、四个 checkpoint marker 完整、结果属于本次运行且日志汇总完成时才返回 0。失败时返回非零，分别记录错误类别、节点、阶段、原始退出码/超时状态及日志路径，保留首个失败边界和后续收集/清理错误。结果保存在 `run/validation/<run_id>/summary.json`，原始日志按节点/测试保留；不再输出源码 SHA256。
+只有全部预期主机测试成功、退出码为 0、当前 checkpoint 必需 marker 完整、结果属于本次运行且日志汇总完成时才返回 0。`empty-kernel` 额外检查 `EP_SERVER_DEDUP_EMPTY_KERNEL_PASS test=launch` 与 `test=registration`，分别来自 Host 替身和真实设备注册。失败时返回非零，分别记录错误类别、节点、阶段、原始退出码/超时状态及日志路径，保留首个失败边界和后续收集/清理错误。结果保存在 `run/validation/<run_id>/summary.json`，原始日志按节点/测试保留；不再输出源码 SHA256。
 
-设备能力尚未实现不是成功结果。`mode=host` 的 PASS 仅证明 Host 契约；`mode=production` 增加目标环境生产编译/链接和加载依赖证据，也不证明 NPU launch 或去重通信。
+`mode=host` 的 PASS 仅证明 Host 契约；`mode=production` 增加目标环境生产编译/链接和加载依赖证据。`empty-kernel` 通过另证明真实设备注册；两个检查点都不证明 NPU launch 或去重通信。
 
 ## 失败分类
 

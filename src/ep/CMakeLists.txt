@@ -9,7 +9,7 @@ option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
 option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
 
-# EP is distributed as one package. All four kernels are A5-only binaries;
+# EP is distributed as one package. All kernels are A5-only binaries;
 # unsupported devices are rejected by libtilexr-ep.so at runtime.
 set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
 set(TILEXR_EP_CATLASS_ARCH "3510")
@@ -138,12 +138,21 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_kernel
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 
+set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP
+    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_dispatch_memory_server_dedup_kernel.o")
+tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"
+    "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
+    DEPENDS "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+
 set(TILEXR_EP_KERNEL_TARGETS
+    tilexr_ep_dispatch_memory_server_dedup_kernel
     tilexr_ep_dispatch_kernel
     tilexr_ep_combine_kernel
     tilexr_ep_dispatch_memory_kernel
     tilexr_ep_combine_memory_kernel)
 set(TILEXR_EP_KERNEL_OBJECTS
+    "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
     "${TILEXR_EP_DISPATCH_KERNEL_OP}"
     "${TILEXR_EP_COMBINE_KERNEL_OP}"
     "${TILEXR_EP_DISPATCH_MEMORY_OP}"
