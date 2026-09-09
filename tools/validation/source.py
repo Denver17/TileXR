@@ -111,7 +111,7 @@ def _file_snapshot(root, exclude):
                     raise ValueError("source is not a regular file: " + relative)
                 files[relative] = _digest(path)
     if not files:
-        raise ValueError("源码目录为空，请同步完整源码及 3rdparty/spdlog 子模块内容")
+        raise ValueError("源码目录为空，请同步 TileXR 源码")
     return {"commit": None, "provenance": "file-copy", "files": files,
             "content_sha256": content_sha256(files)}
 

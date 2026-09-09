@@ -36,12 +36,11 @@ hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空�
 ```powershell
 git fetch origin codex/SilentEmotion
 git switch --detach <commit>
-git submodule update --init --recursive
 ```
 
 ### 2. PC 同步到首节点
 
-可以继续使用已配置的 Mutagen 等工具同步普通源码文件：不需要同步 `.git`，但必须包含 `3rdparty/spdlog` 的实际子模块源码。保留 Shell 文件的 LF 换行，不传输 PC 编译缓存、安装产物或 CANN 环境目录；同步完成后再开始构建。服务器不需要安装 Git，也不需要额外执行 Git 命令。
+可以继续使用已配置的 Mutagen 等工具同步普通源码文件，不需要同步 `.git`。`3rdparty/spdlog` 是可选的日志后端，允许为空或缺失：`src/comm/tilexr_log.h` 用 `__has_include` 检测头文件，找不到时自动使用 `std::cout`/`std::cerr`；Server Dedup 没有新增 spdlog 依赖。若需要使用仓库固定版本的 spdlog，再在 PC 执行 `git submodule update --init --recursive` 并同步其完整源码。保留 Shell 文件的 LF 换行，不传输 PC 编译缓存、安装产物或 CANN 环境目录；同步完成后再开始构建。服务器不需要安装 Git，也不需要额外执行 Git 命令。
 
 需要在结果中自动记录精确 Git 提交号时，可使用已有导出入口代替普通同步：
 
@@ -49,7 +48,7 @@ git submodule update --init --recursive
 tools\validation\push.ps1 -Server <first-host> -RemotePath /absolute/path/TileXR -SshUser <user>
 ```
 
-此入口自动初始化递归子模块，导出固定 HEAD 的 Git 原始内容，并附上 commit 和逐文件 SHA256。PC 未提交的改动不会混入测试；Shell 文件按 Git 中的 LF 字节交付。远端无需联网拉子模块，也不需要 `.git`。
+此入口为完整导出固定 HEAD，仍会自动初始化递归子模块，并附上 commit 和逐文件 SHA256；这是完整导出的规则，不代表普通源码构建必须安装 spdlog。PC 未提交的改动不会混入测试；Shell 文件按 Git 中的 LF 字节交付。远端无需联网拉子模块，也不需要 `.git`。
 
 普通同步目录没有 Git/导出清单时，`build_all.sh` 自动按实际文件生成 `.tilexr-source.json`，包含逐文件 SHA256 和整份清单的 `content_sha256`。提交号在终端中显示 `unknown`，JSON 中为 `null`；内容摘要标识本次构建源码，不能据此声称验证了某个 Git commit。Git 元数据不完整（包括子模块 `.git` 缺失）时也按文件处理。普通同步后直接重建会刷新文件清单，`sync.sh`/`run.sh` 继续检查构建时记录的文件摘要；由导出入口生成的固定提交清单仍严格校验，不会静默接受源码修改。
 
@@ -73,7 +72,7 @@ bash build_all.sh
 
 自动配置独立构建目录、构建生产包和 Host 测试、安装到 `install/validation/`。Host 测试使用 Debug，保留现有断言；要求注册和安装完整的 17 个测试，避免缺少 Python 时只运行 15 个却误报完整通过。
 
-默认 production 模式检查新增/原有公共符号、ELF `$ORIGIN`、真实 driver HAL 依赖以及四个 A5 kernel 文件。源码来源及内容摘要、安装文件摘要、测试命令、构建模式和工具链日志随构建保留。成功输出 `BUILD_PASS`；编译失败会显示错误摘要和日志路径。缺少 spdlog 源码时会在 CMake 前提示补齐 PC 同步内容。
+默认 production 模式检查新增/原有公共符号、ELF `$ORIGIN`、真实 driver HAL 依赖以及四个 A5 kernel 文件。源码来源及内容摘要、安装文件摘要、测试命令、构建模式和工具链日志随构建保留。成功输出 `BUILD_PASS`；编译失败会显示错误摘要和日志路径。脚本不要求存在 `3rdparty/spdlog`，日志后端沿用代码中的自动检测。
 
 ### 5. 同步所有节点
 
@@ -109,6 +108,7 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 
 - hostfile 属于一次性部署配置，环境入口只能读取和提示错误。曾自动生成 localhost 默认文件，这会在 Mutagen 等同步流程中引入错误清单传播的风险，因此已撤销自动创建；回归覆盖缺失文件不落盘、已有多机清单不变、自定义路径缺失及空文件拒绝。
 - `git -C <子模块目录>` 会向父目录查找仓库。普通同步遗漏子模块 Git 元数据时，以子模块 commit 查询父仓库会报 `fatal: not a tree object`。源码快照先检查仓库本地元数据，普通文件目录直接计算内容摘要，不要求服务器补 `.git`。回归须同时覆盖普通复制、缺失子模块元数据和固定提交导出，不能只测试带导出清单的部署目录。
+- 不能由 `.gitmodules` 或 CMake include 路径推断依赖是必需的。此前源码复制预检错误地要求 spdlog 头文件，阻断了已有的无 spdlog 日志路径；应核对实际 include 条件、链接目标及替代实现。spdlog 子模块和可选日志封装分别来自 `b063b61`、`b6c88d8`（2026-05-29），均早于本次 Server Dedup。回归需覆盖空子模块仍进入生产配置阶段，并实际编译、运行日志替代实现；这不代替 CANN/NPU 验证。
 - 普通文件清单排除 `.git`、部署配置、build/install/run、Python 缓存、env、reference 等环境或生成物；包含实际子模块源码和测试脚本。构建后的同步及运行校验已记录文件的存在和字节摘要，构建缓存、日志及本地 hostfile 另行管理；内容摘要不证明 CANN 编译或 NPU 正确性。
 - CTest 注册不等于安装。测试构建成功但未安装时，同步后的节点不能运行；新增测试必须有安装规则，构建脚本核对全部注册命令的可分发路径。本次补齐五个已有测试的安装规则。
 - CMake 测试清单可能引用构建机绝对路径。分发时将 C++ 程序映射到安装目录、Python 测试映射到源码目录，用实际子进程执行验证，不能复制构建树后假定远端可用。
@@ -123,3 +123,5 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 2026-09-09 开发验证：Windows/MSYS2 上 41 项脚本行为测试中 40 项通过，1 项因文件系统未创建真实 symlink 而跳过；PowerShell 5.1 同步入口通过模拟传输执行了实际导出、Bash 解包、刷新和拒绝覆盖检查。全新且路径含空格的部署目录中，四个服务器入口以 `mode=host` 完成实际 C++14 Debug 构建、安装和 17/17 Host/Python 测试。CANN 生产构建、真实 SSH 集群同步及 NPU 执行未在本地验证。
 
 同日普通文件同步修复：临时子模块移除 `.git` 后复现 `fatal: not a tree object`。修复后 52 项脚本回归中 51 项通过，1 项因 MSYS 未创建真实 symlink 而跳过；包含普通同步清单跨模拟节点分发及结果摘要检查。无 `.git`、无导出清单且路径含空格的普通复制目录中，首次构建和修改源码后的重建均通过四个服务器入口，每轮 17/17 Host/Python 测试成功；用 Git 拦截程序确认两轮服务器流程均未调用 Git，hostfile 字节不变。hostfile 保持手动配置，不再自动生成。本地没有 CANN/NPU，生产编译及真实 SSH 集群验证仍需以服务器日志为准。
+
+同日可选 spdlog 修正：新增回归先复现 production 模式被空 spdlog 目录阻断，移除预检后确认能进入生产 CMake 配置调用（测试在调用边界停止，不代表生产构建成功）。52 项脚本回归中 51 项通过，1 项 symlink 跳过。在临时目录仅复制真实 `tilexr_log.h`，不提供 spdlog 头文件、不定义 `TILEXR_LOG_DISABLE_SPDLOG`，按项目默认 GNU C++14 模式编译并运行现有日志测试通过，编译断言确认使用自动替代路径；现有 fake-spdlog API 测试亦通过。MSYS 严格 `-std=c++14` 下现有测试的 POSIX `setenv`/`unsetenv` 声明不可见，故使用与 CMake 一致的 `-std=gnu++14`；未修改生产日志代码或测试源码。CANN 生产编译与 NPU 执行未在本地验证。

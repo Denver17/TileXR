@@ -252,8 +252,6 @@ def verify_build(config, log, deadline=None):
 
 def build(config):
     require_tools(["cmake", "ctest", "g++", "make"])
-    if config.mode == "production" and not (config.root / "3rdparty/spdlog/include/spdlog/spdlog.h").is_file():
-        raise ValueError("缺少 3rdparty/spdlog 源码；PC 同步时请包含已初始化的子模块文件，服务器无需 .git。")
     source = snapshot(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
     build_id = uuid.uuid4().hex
     work = config.root / "build/validation" / build_id

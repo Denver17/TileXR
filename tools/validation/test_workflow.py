@@ -65,12 +65,22 @@ class HostfileTests(TemporaryRoot):
 
 
 class ConfigTests(TemporaryRoot):
-    def test_production_missing_spdlog_reports_source_copy_error_before_cmake(self):
+    def test_production_without_spdlog_reaches_cmake(self):
+        (self.root / "CMakeLists.txt").write_text("# source fixture\n")
+        (self.root / "3rdparty/spdlog").mkdir(parents=True)
+
+        def configure_boundary(argv, *args, **kwargs):
+            if "-S" in argv:
+                self.assertEqual(argv[:3], ["cmake", "-S", self.root])
+                self.assertIn("-DTILEXR_BUILD_EP=ON", argv)
+                raise RuntimeError("production CMake reached")
+            return "tool version\n"
+
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production"}), \
-                mock.patch.object(workflow, "require_tools"), mock.patch.object(workflow, "execute") as execute:
-            with self.assertRaisesRegex(ValueError, "3rdparty/spdlog"):
+                mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "execute", side_effect=configure_boundary):
+            with self.assertRaisesRegex(RuntimeError, "production CMake reached"):
                 workflow.build(self.config())
-            execute.assert_not_called()
 
     def test_signature_tracks_distribution_and_runtime_configuration(self):
         baseline = self.config().signature()
