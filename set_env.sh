@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 七步验证入口。首次使用前在仓库根目录创建 validation.local.sh 和 hostfile。
+# 七步验证入口。CANN 路径等在 validation.local.sh 配置；默认 hostfile 不存在时，
+# 首次 source 自动创建仅包含 localhost 的本机配置。多机测试请先填写实际 hostfile。
 # validation.local.sh 示例（只需修改实际环境不同的项，不提交部署配置）：
 #   TILEXR_CANN_ENV_SCRIPT=/path/to/cann-9.1.0/set_env.sh
 #   ASCEND_DRIVER_PATH=/usr/local/Ascend/driver

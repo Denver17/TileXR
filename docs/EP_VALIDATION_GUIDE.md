@@ -8,7 +8,7 @@
 
 PC 需要 Git、Python 3.9+、Windows OpenSSH 的 ssh/scp；服务器需要 Bash、Python 3.9+、CMake 3.20+、C++14 编译器、Make 和 CANN 9.1.0 工具链。多节点还需要 rsync、SSH 免密访问及已确认的主机密钥。服务器目录必须可写，各节点必须具有兼容的 CPU 架构、CANN/driver 运行库。依赖安装和 SSH 认证属于已有服务器环境，不会由验证脚本静默修改。
 
-首次部署后，用编辑器将根目录 `validation.local.sh.example` 的内容保存为 `validation.local.sh`，修改 CANN 环境脚本及其他实际不同的配置；将 `hostfile.example` 保存为 `hostfile`，填写实际服务器。以后刷新代码保留这两个文件，不需要每次重新配置。四个服务器脚本都会自动加载同一份配置。
+首次部署后，用编辑器将根目录 `validation.local.sh.example` 的内容保存为 `validation.local.sh`，修改 CANN 环境脚本及其他实际不同的配置。单机 Host 验证无需预建 hostfile：首次 `source set_env.sh` 自动创建缺失的默认 `hostfile`，内容为 `localhost`，并显示实际主机数。多机验证时，按 `hostfile.example` 在 `hostfile` 中填写实际服务器。已有文件不会被覆盖；显式指定的其他 hostfile 路径缺失时直接报错，不回退到单机。以后刷新代码保留这两个配置文件。
 
 | 配置 | 说明 |
 | --- | --- |
@@ -22,6 +22,8 @@ PC 需要 Git、Python 3.9+、Windows OpenSSH 的 ssh/scp；服务器需要 Bash
 | `TILEXR_VALIDATION_CHECKPOINT` | 当前固定为 `ep-sdedup-p1-abi-host` |
 
 hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空行。第一行必须指向执行脚本的首节点，可以写 `localhost`；后续行可使用主机名、IPv4 或 SSH config 别名。主机清单只保存在此文件，不再内置另一套列表。`devices` 省略时为 0..7，重复主机和重复 device ID 会被拒绝；当前 Host checkpoint 每主机只执行一套测试，device 列表不代表执行了 NPU 测试。
+
+64P 清单通常对应 8 台主机，每台列出 8 个实际物理 device ID。使用主机 IP 时，形式为 `192.0.2.11 devices=0,1,2,3,4,5,6,7`，其余 7 行替换为其他服务器的实际 IP（这里的地址仅作示例）。第一行是当前首节点；需要使用其余节点可访问的真实地址时，不使用 `localhost` 作为跨机通信地址。当前 checkpoint 读取这样的清单后仍只执行每主机 Host 测试，不启动 64 个 NPU rank。
 
 `validation.local.sh` 与 hostfile 是本地部署配置，不提交到仓库。各主机 CANN 路径不同时，可以在同一份 `validation.local.sh` 中按 `hostname` 设置路径；工作目录仍必须相同。编译、同步、运行期间不要在同一路径同时启动其他验证任务。
 
@@ -98,6 +100,7 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 
 ## 维护与验证边界
 
+- 首次部署回归必须覆盖没有 hostfile 的目录。原先测试夹具预建了 hostfile，掩盖了 `source set_env.sh` 直接报文件不存在的问题；默认路径现在以独占创建方式初始化为 localhost，已有配置及错误的自定义路径均不会被单机默认值覆盖。
 - CTest 注册不等于安装。测试构建成功但未安装时，同步后的节点不能运行；新增测试必须有安装规则，构建脚本核对全部注册命令的可分发路径。本次补齐五个已有测试的安装规则。
 - CMake 测试清单可能引用构建机绝对路径。分发时将 C++ 程序映射到安装目录、Python 测试映射到源码目录，用实际子进程执行验证，不能复制构建树后假定远端可用。
 - 父进程退出或 SSH 退出不代表测试子进程退出。节点设置自身期限，各测试使用独立进程组，TERM 后必要时 KILL；只清理本次拥有的进程。节点身份无法确认或清理/日志收集不完整时不得输出 PASS。
@@ -109,3 +112,5 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 脚本维护测试：`python3 -m unittest discover -s tools/validation -p 'test_*.py' -v`。这些是开发者测试，不是用户七步流程之外的必执行命令。测试使用临时 Git 仓库、模拟传输及实际受控子进程；真实 CANN 构建和真实 SSH 集群通过情况必须以服务器运行日志为准。
 
 2026-09-09 开发验证：Windows/MSYS2 上 41 项脚本行为测试中 40 项通过，1 项因文件系统未创建真实 symlink 而跳过；PowerShell 5.1 同步入口通过模拟传输执行了实际导出、Bash 解包、刷新和拒绝覆盖检查。全新且路径含空格的部署目录中，四个服务器入口以 `mode=host` 完成实际 C++14 Debug 构建、安装和 17/17 Host/Python 测试。CANN 生产构建、真实 SSH 集群同步及 NPU 执行未在本地验证。
+
+同日 hostfile 初始化修复：先用真实 `source set_env.sh` 在缺少 hostfile 时复现失败；修复后 38 项工作流回归全部通过，包含默认文件创建、保留多机清单、自定义路径缺失和空文件拒绝。此次修复不涉及算子代码，未重跑 CANN 构建或 NPU 测试。

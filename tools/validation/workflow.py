@@ -189,6 +189,22 @@ def check_coordinator(config, hosts):
             raise ValueError("hostfile 首项必须是当前执行脚本的服务器")
 
 
+def initialize_hostfile(config):
+    if config.hostfile == config.root / "hostfile":
+        try:
+            with config.hostfile.open("x", encoding="utf-8") as stream:
+                stream.write("localhost\n")
+        except FileExistsError:
+            pass
+        else:
+            print(f"HOSTFILE_CREATED path={config.hostfile}：默认仅本机 Host 测试，多机请编辑此文件。")
+    try:
+        return config.hosts()
+    except FileNotFoundError:
+        raise ValueError(f"hostfile 不存在：{config.hostfile}；请检查 validation.local.sh 中的 "
+                         "TILEXR_VALIDATION_HOSTFILE 并填写实际主机清单。") from None
+
+
 def require_tools(names):
     for name in names:
         if shutil.which(name) is None:
@@ -560,8 +576,9 @@ def main():
             raise ValueError("七步验证工具要求 Python 3.9 或更新版本")
         config = Config()
         if args.action == "env":
-            config.hosts()
-            print(f"ENV_READY checkpoint={config.checkpoint} mode={config.mode} root={config.root}")
+            hosts = initialize_hostfile(config)
+            print(f"ENV_READY checkpoint={config.checkpoint} mode={config.mode} "
+                  f"hosts={len(hosts)} hostfile={config.hostfile} root={config.root}")
         elif args.action == "build":
             with operation_lock(config, ".operation.lock"):
                 build(config)

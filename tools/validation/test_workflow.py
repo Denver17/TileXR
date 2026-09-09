@@ -546,6 +546,57 @@ class WorkflowIntegrationTests(TemporaryRoot):
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "环境入口回归需要 POSIX Python 和 Bash")
 class EnvironmentEntryTests(TemporaryRoot):
+    def source_real_entry(self, hostfile=None):
+        repo = Path(workflow.__file__).resolve().parents[2]
+        for name in ("set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
+                     "tools/validation/workflow.py", "tools/validation/source.py"):
+            target = self.root / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text((repo / name).read_text(encoding="utf-8"), encoding="utf-8")
+        bundled_bash = Path(sys.executable).parent / "bash"
+        bash = str(bundled_bash) if bundled_bash.exists() else shutil.which("bash")
+        environment = dict(os.environ, TILEXR_VALIDATION_BUILD_MODE="host",
+                           TILEXR_VALIDATION_PYTHON=sys.executable,
+                           PATH=str(Path(bash).parent) + os.pathsep + os.environ["PATH"])
+        if hostfile is None:
+            environment.pop("TILEXR_VALIDATION_HOSTFILE", None)
+        else:
+            environment["TILEXR_VALIDATION_HOSTFILE"] = hostfile
+        return subprocess.run([bash, "-c", 'source "$1/set_env.sh"', "bash", str(self.root)],
+                              env=environment, cwd=self.root, capture_output=True, text=True, timeout=10)
+
+    def test_first_source_creates_local_hostfile_without_extra_command(self):
+        self.hostfile.unlink()
+        result = self.source_real_entry()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.hostfile.read_text(), "localhost\n")
+        self.assertIn("HOSTFILE_CREATED", result.stdout)
+        self.assertIn("hosts=1", result.stdout)
+
+    def test_source_preserves_configured_cluster_and_reports_size(self):
+        contents = "localhost devices=0,2\nworker02 devices=1,3\n"
+        self.hostfile.write_text(contents)
+        result = self.source_real_entry()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.hostfile.read_text(), contents)
+        self.assertNotIn("HOSTFILE_CREATED", result.stdout)
+        self.assertIn("hosts=2", result.stdout)
+
+    def test_missing_custom_hostfile_does_not_fall_back_to_local(self):
+        self.hostfile.unlink()
+        result = self.source_real_entry("custom-hosts")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("custom-hosts", result.stderr)
+        self.assertIn("TILEXR_VALIDATION_HOSTFILE", result.stderr)
+        self.assertFalse(self.hostfile.exists())
+        self.assertFalse((self.root / "custom-hosts").exists())
+
+    def test_empty_existing_hostfile_is_not_overwritten(self):
+        self.hostfile.write_text("")
+        result = self.source_real_entry()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.hostfile.read_text(), "")
+
     def test_real_environment_entry_preserves_root_with_spaces(self):
         repo = Path(workflow.__file__).resolve().parents[2]
         root = Path(self.temporary.name) / "workspace with spaces"
