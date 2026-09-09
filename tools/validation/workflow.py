@@ -792,18 +792,22 @@ def run(config):
     if primary_error is None and errors:
         primary_error = errors[0]
     config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in errors)
+    scope = "ABI/Host"
+    if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
+        scope += "、A5 空 kernel 安装与设备注册"
+    scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
               "source_provenance": manifest["source"]["provenance"],
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL" if errors else "PASS",
               "expected_hosts": hosts, "nodes": nodes, "primary_error": primary_error, "errors": errors,
-              "scope": "ABI/Host tests; no NPU launch or communication correctness"}
+              "scope": scope}
     write_json(log / "summary.json", report)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
           f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
           f"tests_per_host={len(manifest['tests'])} commit={report['commit'] or 'unknown'} (unverified)", flush=True)
     for error in errors:
         report_failure(error)
-    print(f"结果：{log / 'summary.json'}\n范围：ABI/Host；未执行 NPU launch 或去重通信。", flush=True)
+    print(f"结果：{log / 'summary.json'}\n范围：{scope}", flush=True)
     return FAILURE_CODES[primary_error["type"]] if errors else 0
 
 

@@ -494,6 +494,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertTrue(all(node["tests"] == len(self.manifest["tests"]) for node in summary["nodes"]))
         self.assertEqual(summary["errors"], [])
         self.assertEqual(summary["commit"], self.manifest["source"]["commit"])
+        self.assertEqual(summary["scope"], "ABI/Host；未执行 NPU launch 或去重通信。")
+        self.assertIn("范围：" + summary["scope"], result.stdout)
         self.assertEqual(list(self.root.rglob("pid.json")), [])
         self.assertEqual(list(self.remote.rglob("pid.json")), [])
 
@@ -513,8 +515,12 @@ class WorkflowIntegrationTests(TemporaryRoot):
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",
                                         "TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
             self.prepare_sync()
-            self.assert_success(self.invoke("run"))
+            result = self.invoke("run")
+            self.assert_success(result)
         self.assertEqual(self.summary()["status"], "PASS")
+        self.assertEqual(self.summary()["scope"],
+                         "ABI/Host、A5 空 kernel 安装与设备注册；未执行 NPU launch 或去重通信。")
+        self.assertIn("范围：" + self.summary()["scope"], result.stdout)
         for root, device in ((self.root, 2), (self.remote, 3)):
             logs = list((root / "run/validation").glob("*/" + workflow.REGISTRATION_TEST + ".log"))
             self.assertEqual(len(logs), 1)
