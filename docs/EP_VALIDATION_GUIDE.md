@@ -2,7 +2,7 @@
 
 本流程支持 PC 普通文件同步或固定版本导出，并提供四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
 
-当前支持五个检查点，继续共用本文七步，不增加预检或额外运行入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
+当前支持五个检查点，继续共用本文七步。需要组合测试项时，可用下述批次脚本调用现有入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
 
 | checkpoint | 每台主机的测试重点 | 通过边界 |
 | --- | --- | --- |
@@ -63,6 +63,23 @@ TILEXR_VALIDATION_WARMUP=0
 performance 构建关闭 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING`，只采集 msprof 的完整 kernel 耗时；breakdown 构建开启此选项，在自己 MemoryDomain 数据区按核覆盖记录，批末只检查最后一轮。切换 breakdown 与其他模式时必须重建，现有 manifest 检查会拒绝开关不匹配的安装包，防止将带打点成本的 kernel 作为性能基线。原公共接口和 20 字段 launch ABI 不变。打点不读取 route/hidden 或 Dispatch 输出，不实现 Combine 或 Dispatch/Combine 连跑。
 
 breakdown 的 `entry_checks`、`record_prepare`、`empty_total` 分别为入口参数检查、记录寻址准备和二者总计，不含最终记录写出/cache clean。保留原始 ticks，并按 A5/950 的 1000 ticks/us 输出微秒；依据为官方 [asc-devkit 9.1.0 GetSystemCycle](https://gitcode.com/cann/asc-devkit/blob/91c03327210113585f52739a6c85c35ece492970/docs/api/SIMD-API/基础API/工具接口/系统资源与变量/GetSystemCycle_ISASI.md)。每段先取各核最大值，再做跨 rank median/min/max；不同阶段最大值可能来自不同核，不保证可相加。性能报告同时记录 backend、空 kernel 状态、artifact SHA、算法通信量 0B、带宽 N/A，以及 Host 测量批提交/同步/barrier/总耗时，不能当作真实去重性能。
+
+## 当前提交点的批量测试
+
+当前最低补测项为 **functional 连续 50 轮（无预热）** 和 **performance 预热 50 轮、测量 50 轮**。
+PC 同步本次代码到首节点、配好原 `validation.local.sh` 和 hostfile 后，在服务器仓库根目录执行：
+
+```bash
+bash run_batch.sh
+```
+
+[run_batch.sh](../run_batch.sh) 是针对 `e5a4bdb` 补测需求的简短清单，后续提交点可直接改末尾的 `run_case` 调用，或注释不需要的项；使用单次入口时仍按原七步运行 `bash run.sh`。批次本身负责第一次构建以及每项的同步、运行，不必在批次前另跑 build/sync/run。
+
+当前两项共用关闭打点的构建，继承原 hostfile、shape、dtype、CANN 和 msprof 路径。脚本临时覆盖 `validation.local.sh` 中的 checkpoint、模式和轮数，经原 `sync.sh` 分发到所有节点；结束或失败时恢复首节点原配置。后续切回单测，仍按原流程同步配置后运行。测试期间不要同时修改该配置或启动其他验证任务。
+
+任一步失败立即停止，保留原退出码；两项均成功才输出 `BATCH_PASS cases=2`。终端汇总在 `run/validation/batch-*/`，每项日志包含原 `summary.json` 路径和性能统计。登记通过仍以各项 summary 的实际模式、轮数、rank 与 commit 为准；批次成功不覆盖 breakdown 或其他规模。
+
+维护批次时，仅在 checkpoint 和设备打点编译开关相同的测试间复用构建。只在本机 export 轮数会被配置文件覆盖，也不会自动传到 SSH 节点；应通过现有同步路径分发实际配置。不要为了临时清单增加新的 runner 或通用配置层。
 
 ## 一次性环境配置
 
