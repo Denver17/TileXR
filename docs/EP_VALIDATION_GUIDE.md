@@ -2,7 +2,7 @@
 
 本流程支持 PC 普通文件同步或固定版本导出，并提供四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
 
-当前支持四个检查点，继续共用本文七步，不增加预检或额外运行入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
+当前支持五个检查点，继续共用本文七步，不增加预检或额外运行入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
 
 | checkpoint | 每台主机的测试重点 | 通过边界 |
 | --- | --- | --- |
@@ -10,6 +10,7 @@
 | `ep-sdedup-p1-empty-kernel` | 上述测试加 1 个已安装头文件/生产库 consumer；选择该 hostfile 行的首个 device 执行真实注册 | A5 ELF、安装后相对路径加载、binary/function 注册；launch 参数及失败路径由 Host 替身覆盖 |
 | `ep-sdedup-p1-dry-run` | 17 个 Host/Python 测试后，每台并行启动 8 个独立 rank 进程 | 全量 rank/device 映射、运行身份、marker 和有界退出；不创建设备上下文或 communicator |
 | `ep-sdedup-p1-chain-single` | 17 个 Host/Python 测试后，每台并行启动 8 个已安装 C++ consumer | A5 communicator/peer window、一次空 Dispatch 提交、stream 完成及两次 Host barrier；不验证去重算法 |
+| `ep-sdedup-p1-chain-multi` | Dispatch 单算子，复用 communicator、stream 和同批 buffer；功能模式默认 1 轮，可选 performance/breakdown | 连续提交后整批同步、Host barrier 和清理；按模式校验 msprof 样本或设备打点 |
 
 `empty-kernel` 必须使用 `production`。只需在原 `validation.local.sh` 中将 `TILEXR_VALIDATION_CHECKPOINT` 改为 `ep-sdedup-p1-empty-kernel`，再执行相同七步。设备注册每台主机一次，不创建 communicator、不 launch 设备 kernel；空 launch、stream 完成和多 rank 建链留给后续检查点。生产公共入口现已可提交空 kernel，但不生成 Dispatch 输出或数值结果。未实现的 checkpoint 仍直接报错。进度与通过提交见[调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
@@ -38,6 +39,31 @@ TILEXR_COMM_ID=192.0.2.11:10177
 
 最新设计已将 `group` 容量改为 **8*BS 行**，每行仍为 `align32(4*(1+2*(K-1)))` 字节；本次更新内部 layout helper 和 caller 分配校验，公共函数签名不变。`assistEx` 仍按 capacityRows 预分配，`sourceMask` 仍为 BS 个元素。较早验证流程里的 `BS` 行分配已经过时，按当前主设计和 helper 分配；不为此提前实现 relay 结果槽位或 Combine。
 
+第五个检查点仍使用 production 和原有建链配置，将 checkpoint 改为 `ep-sdedup-p1-chain-multi`，再执行相同七步。当前只支持 **Dispatch 单算子**，三种模式共用同一 consumer：
+
+| `TILEXR_VALIDATION_RUN_MODE` | 默认 `LOOPS / WARMUP` | 测试重点及输出 |
+| --- | --- | --- |
+| `functional`（默认） | `1 / 0` | 可指定轮数；验证建链、提交、整批完成和资源复用，不采集 profiling、不统计性能 |
+| `performance` | `50 / 50` | 每 rank 使用 CANN `msprof` 采集目标 kernel 耗时，排除 warmup，统计每 rank 测量轮次中位数及其跨 rank median/min/max |
+| `breakdown` | `50 / 50` | 构建时启用专用设备打点，批末读取最后一轮全部核记录，输出入口框架耗时拆解 |
+
+例如功能模式连续提交 5 轮：
+
+```bash
+TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-multi
+TILEXR_VALIDATION_RUN_MODE=functional
+TILEXR_VALIDATION_LOOPS=5
+TILEXR_VALIDATION_WARMUP=0
+```
+
+测量模式只需修改 `RUN_MODE` 并按需设置轮数，仍执行原七步。`LOOPS` 为正 uint32，`WARMUP` 为非负 uint32；功能模式要求 warmup=0。`chain-single` 固定 functional/1/0，不受三项配置影响。performance 默认调用 PATH 中的 `msprof`，也可通过 `TILEXR_VALIDATION_MSPROF` 指定路径；每个 rank 的独立输出目录随原日志收集。
+
+执行策略与 [Memory demo 调用循环](../tests/ep/demo/tilexr_ep_dispatch_demo.cpp) 相同：同一 stream **连续提交整批，再执行一次 stream 同步和 Host barrier**。有预热时先完成独立预热批，再运行测量批；批内没有同步/barrier，不清零共享 Flag，也不额外获取 magic。所有轮次共享原有总期限。空 kernel 尚无通信协议，不能由连续提交成功推断通信区轮转、旧 ready 隔离或数值正确。
+
+performance 构建关闭 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING`，只采集 msprof 的完整 kernel 耗时；breakdown 构建开启此选项，在自己 MemoryDomain 数据区按核覆盖记录，批末只检查最后一轮。切换 breakdown 与其他模式时必须重建，现有 manifest 检查会拒绝开关不匹配的安装包，防止将带打点成本的 kernel 作为性能基线。原公共接口和 20 字段 launch ABI 不变。打点不读取 route/hidden 或 Dispatch 输出，不实现 Combine 或 Dispatch/Combine 连跑。
+
+breakdown 的 `entry_checks`、`record_prepare`、`empty_total` 分别为入口参数检查、记录寻址准备和二者总计，不含最终记录写出/cache clean。保留原始 ticks，并按 A5/950 的 1000 ticks/us 输出微秒；依据为官方 [asc-devkit 9.1.0 GetSystemCycle](https://gitcode.com/cann/asc-devkit/blob/91c03327210113585f52739a6c85c35ece492970/docs/api/SIMD-API/基础API/工具接口/系统资源与变量/GetSystemCycle_ISASI.md)。每段先取各核最大值，再做跨 rank median/min/max；不同阶段最大值可能来自不同核，不保证可相加。性能报告同时记录 backend、空 kernel 状态、artifact SHA、算法通信量 0B、带宽 N/A，以及 Host 测量批提交/同步/barrier/总耗时，不能当作真实去重性能。
+
 ## 一次性环境配置
 
 PC 需要 Git；使用 `push.ps1` 导出时另需 Python 3.9+ 和 Windows OpenSSH 的 ssh/scp。服务器需要 Bash、Python 3.9+、CMake 3.20+、C++14 编译器、Make 和 CANN 9.1.0 工具链。多节点还需要 rsync、SSH 免密访问及已确认的主机密钥。服务器目录必须可写，各节点必须具有兼容的 CPU 架构、CANN/driver 运行库。依赖安装和 SSH 认证属于已有服务器环境，不会由验证脚本静默修改。
@@ -53,10 +79,14 @@ PC 需要 Git；使用 `push.ps1` 导出时另需 Python 3.9+ 和 Windows OpenSS
 | `TILEXR_VALIDATION_JOBS` | 编译并发数，默认 4 |
 | `TILEXR_VALIDATION_TIMEOUT` | 单次集群测试总期限，默认 180 秒，允许 30..180 秒；编译、源码同步单独计时 |
 | `TILEXR_VALIDATION_BUILD_MODE` | 默认 `production`；显式 `host` 只用于没有 CANN 的 Host/脚本验证，结果中单独标识 |
-| `TILEXR_VALIDATION_CHECKPOINT` | 默认 `ep-sdedup-p1-abi-host`；另支持 `ep-sdedup-p1-empty-kernel`、`ep-sdedup-p1-dry-run`、`ep-sdedup-p1-chain-single` |
-| `TILEXR_COMM_ID` / `TILEXR_DEMO_BARRIER_ADDR` | chain-single 的 communicator / TCP Host barrier endpoint，格式 IPv4:port；后者默认使用前者端口 +97 |
-| `TILEXR_VALIDATION_BS/H/TOPK/MOE_EXPERT_NUM` | chain-single 默认 256/7168/6/384，正整数；expert 数要求 `R*L`、`2<=L<=32`，topk<=32 |
-| `TILEXR_VALIDATION_DTYPE` / `TILEXR_VALIDATION_BLOCK_DIM` | chain-single 默认 bf16 / auto；dtype 支持 bf16、fp16，显式核数须为正且不超过实际设备 Vector 核数 |
+| `TILEXR_VALIDATION_CHECKPOINT` | 默认 `ep-sdedup-p1-abi-host`；另支持 `ep-sdedup-p1-empty-kernel`、`ep-sdedup-p1-dry-run`、`ep-sdedup-p1-chain-single`、`ep-sdedup-p1-chain-multi` |
+| `TILEXR_COMM_ID` / `TILEXR_DEMO_BARRIER_ADDR` | 两个 chain 检查点的 communicator / TCP Host barrier endpoint，格式 IPv4:port；后者默认使用前者端口 +97 |
+| `TILEXR_VALIDATION_BS/H/TOPK/MOE_EXPERT_NUM` | 两个 chain 检查点默认 256/7168/6/384，正整数；expert 数要求 `R*L`、`2<=L<=32`，topk<=32 |
+| `TILEXR_VALIDATION_DTYPE` / `TILEXR_VALIDATION_BLOCK_DIM` | 两个 chain 检查点默认 bf16 / auto；dtype 支持 bf16、fp16，显式核数须为正且不超过实际设备 Vector 核数 |
+| `TILEXR_VALIDATION_RUN_MODE` | 仅用于 chain-multi：functional（默认）、performance、breakdown |
+| `TILEXR_VALIDATION_LOOPS` | chain-multi 测量/功能批轮数，1..4294967295；functional 默认 1，其余默认 50 |
+| `TILEXR_VALIDATION_WARMUP` | chain-multi 预热轮数，0..4294967295；functional 固定 0，其余默认 50 |
+| `TILEXR_VALIDATION_MSPROF` | performance 使用的 CANN msprof 可执行文件，默认 `msprof` |
 
 hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空行。第一行必须指向执行脚本的首节点，可以写 `localhost`；后续行可使用主机名、IPv4 或 SSH config 别名。主机清单只保存在此文件，不再内置另一套列表。`devices` 省略时为 0..7，重复主机和重复 device ID 会被拒绝；当前 Host checkpoint 每主机只执行一套测试，device 列表不代表执行了 NPU 测试。
 
@@ -149,7 +179,9 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests
 
 `mode=host` 的 PASS 证明 Host 契约，以及所选 dry-run 的普通进程编排；`mode=production` 增加目标环境生产编译/链接和加载依赖证据。`empty-kernel` 通过另证明真实设备注册；前三个检查点都不证明 NPU launch 或去重通信。
 
-`chain-single` 的每个 rank 必须同时提供 `EP_SERVER_DEDUP_CHAIN_PASS` 和 `EP_SERVER_DEDUP_SINGLE_ROUND_PASS` JSON。前者记录 peer 数量与 window 字节数，后者必须是 `submitted=1/completed=1/cleanup=complete`；两者的运行/构建/提交/rank/device/PID 和 shape/dtype 必须与本次配置一致。控制端仍收集 `rank-<rank>.log`，在节点 `ranks` 的最终记录内保留 `chain` 证据，并在摘要中记录 `chain_configuration`。成功只证明本次空 kernel 的提交、设备完成和框架生命周期，不证明 Dispatch 数值或通信数据面；不会将后续多轮/profile 检查点当作已实现。
+`chain-single` 的每个 rank 必须同时提供 `EP_SERVER_DEDUP_CHAIN_PASS` 和 `EP_SERVER_DEDUP_SINGLE_ROUND_PASS` JSON。前者记录 peer 数量与 window 字节数，后者必须是 `submitted=1/completed=1/cleanup=complete`；两者的运行/构建/提交/rank/device/PID 和 shape/dtype 必须与本次配置一致。控制端仍收集 `rank-<rank>.log`，在节点 `ranks` 的最终记录内保留 `chain` 证据，并在摘要中记录 `chain_configuration`。
+
+`chain-multi` 使用同一 CHAIN marker 和 `EP_SERVER_DEDUP_MULTI_ROUND_PASS`；两者的 `run_mode/loops/warmup` 必须匹配本次配置。最终记录要求 `submitted=completed=loops`、`warmup_submitted=warmup_completed=warmup`、`cleanup=complete`。submitted 统计成功提交，completed 仅在整批 stream 同步和 Host barrier 均成功后一次确认；中途失败保留 batch/submission 和实际计数。Host 测试验证连续 magic 及提交失败后不回退；breakdown 另核对 `EP_SERVER_DEDUP_BREAKDOWN_PASS` 的运行身份、全部核和最后一轮 generation=`warmup+loops`。performance 要求每 rank 恰有 `warmup+loops` 个有效目标 kernel 样本，最后 loops 个用于统计。缺失、过期、重复或错误样本不能代替成功。两个检查点均不证明 Dispatch 数值或通信数据面。
 
 ### dry-run 退出清理回归
 
@@ -199,6 +231,8 @@ Host 测试和本机 8 个 rank 共用节点剩余执行预算，后启动的 ra
 - 父进程退出或 SSH 退出不代表测试子进程退出。节点设置自身期限，各测试使用独立进程组，TERM 后必要时 KILL；只清理本次拥有的进程。身份无法确认、清理或日志收集不完整时，整体不得输出 PASS；同时保留已完成测试状态和首个失败，不能用清理/收集错误覆盖它。
 - `chain-single` 使用 MemoryDomain 的实际 8MiB 数据区加 4MiB flag 区，不能套用旧 Dispatch 的 2GiB 双分区公式拒绝有效 communicator。测试比较真实 Host/device CommArgs 的身份、peer 指针和分配边界；这不证明 peer-memory 数据传输。launch 或同步失败且轮末完成未确认时，不手工释放仍可能被设备引用的 buffer/comm/stream；进程非零退出，由现有有界进程组清理回收，不能打印单轮 PASS。
 - 最新设计可能在工程验证期间继续更新。此次 `group` 从 BS 扩至 8*BS 行后，旧 helper 会少分配 7/8；容量测试先复现旧实现失败，再核对 K=1/6/8/16/32 的字节数及旧容量被 caller helper 拒绝。只同步已确认的公共容量，后续返回槽位、超限策略和 Combine 算法仍不提前实现。
+- 连续多轮测试不能以成功提交次数代替完成证据。批内保持连续提交，只有批末同步和 Host barrier 均成功才确认整批 completed；中途失败停止提交并保留预热/测量计数，不提前释放可能在用的资源。consumer 行为测试检查同批资源复用、无中间同步、提交/同步失败和旧 barrier 报文；Host runtime 测试单独验证 magic，breakdown 再核对设备最后一轮 generation。
+- 空 kernel 的多轮打点覆盖同一批记录，只能汇总最后一轮，不能伪称多轮设备样本统计。performance 从每 rank 独立 msprof 目录检查样本数、正耗时与单 stream 唯一开始时间，再剔除预热；仅检查数量会让重复样本补掉缺失轮次。breakdown 的 ticks 换算必须有目标平台官方依据，不能套用其他芯片频率。替身检查覆盖字段/统计和失败行为，实际采集与打点可见性仍需 CANN/A5 验证。
 - SSH 建连前计算相对运行预算，远端建连后才开始计时，会延长集群执行阶段。dry-run 回归曾在执行预算 10 秒、SSH 延迟 5 秒、rank 运行 7 秒时于 13.30 秒误报 PASS；控制端现在等待节点结果时同时检查统一截止时间，到期主动调用原有跨节点取消，再收敛退出和收集日志。回归使用传输替身和真实子进程，不作为目标 SSH 集群证据。
 - 退出失败与日志损坏可能同时发生：解析非 UTF-8 或损坏 JSON 时，必须附加解析错误，保留已有退出码及清理失败。构建、同步、运行任何阶段遇到清理失败都保留操作锁，避免下一轮删除仍被进程使用的固定构建目录；普通编译失败且进程已退出则释放锁。组合故障回归验证这两个边界。
 - 构建、同步和运行使用本目录锁，避免相互覆盖。异常断电可能留下锁；这种异常恢复必须先确认没有活动进程，不自动删除未知任务的锁。
@@ -333,7 +367,7 @@ Host 测试和本机 8 个 rank 共用节点剩余执行预算，后启动的 ra
 
 ### 已确认取消或没有执行的流程
 
-`04e16e9` 已取消 spdlog 缺失硬阻断；`67168ba` 已取消环境入口自动创建 hostfile，并支持普通复制目录不带 Git 元数据。当前正常服务器路径不执行 Git clone/submodule、HCCL Test、NPU 空闲检查、设备通信、正式 NPU profiler 或依赖安装。`common_env.sh` 定义的安装函数/权限修复函数不等于已调用，不能仅通过关键词命中把它们列成必执行步骤。
+`04e16e9` 已取消 spdlog 缺失硬阻断；`67168ba` 已取消环境入口自动创建 hostfile，并支持普通复制目录不带 Git 元数据。正常服务器路径不执行 Git clone/submodule、HCCL Test、NPU 空闲检查或依赖安装。当前空算子不执行算法通信，只有 performance 模式调用 msprof。`common_env.sh` 定义的安装函数/权限修复函数不等于已调用，不能仅通过关键词命中把它们列成必执行步骤。
 
 原审计的定点验证在临时目录完成：模拟 npu-smi 确认旧版单次 source 调用三次；hostfile 只加注释导致旧 signature 变化；普通文档修改触发旧 source mismatch；模拟 readelf 输出 `$ORIGIN:$ORIGIN/extra` 被既有 RUNPATH 规则拒绝。这些是 `04e16e9` 的历史证据，前三项行为已在本次精简中移除。
 

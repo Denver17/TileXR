@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """无 NPU/真实 SSH 的七步验证行为回归：python3 tools/validation/test_workflow.py。"""
 
+import contextlib
 import errno
+import io
 import os
 from pathlib import Path
 import shlex
@@ -413,8 +415,12 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.hostfile.write_text("localhost devices=0\nnode-b devices=2,3\n", encoding="utf-8")
         tool_root = self.root / "tools/validation"
         tool_root.mkdir(parents=True)
-        for name in ("workflow.py", "source.py"):
+        for name in ("workflow.py", "source.py", "measurements.py"):
             shutil.copy2(Path(workflow.__file__).with_name(name), tool_root / name)
+        profiler_source = Path(workflow.__file__).resolve().parents[1] / "ep/msprof_kernel_stats.py"
+        profiler_target = self.root / "tools/ep/msprof_kernel_stats.py"
+        profiler_target.parent.mkdir()
+        shutil.copy2(profiler_source, profiler_target)
         self.script = tool_root / "workflow.py"
         (self.root / "set_env.sh").write_text(
             'export TILEXR_VALIDATION_ROOT="$PWD"\n'
@@ -435,7 +441,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
             "          (' unexpected-suffix' if behavior == 'decorated-marker' else ''))\n", encoding="utf-8")
         source = {"commit": "a" * 40, "provenance": "manifest-unverified",
                   "files": [str(path.relative_to(self.root))
-                            for path in (self.script, tool_root / "source.py", self.root / "set_env.sh", helper)]}
+                            for path in (self.script, tool_root / "source.py", tool_root / "measurements.py",
+                                         profiler_target, self.root / "set_env.sh", helper)]}
         workflow.write_json(self.root / ".tilexr-source.json", source)
         self.config_instance = self.config()
         self.config_instance.install.mkdir(parents=True)
@@ -672,14 +679,15 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertNotEqual(process.returncode, 0, stdout + stderr)
         self.assert_hanging_ranks_cleaned("rank-hangup")
 
-    def enable_chain(self):
+    def enable_chain(self, checkpoint=workflow.CHAIN_CHECKPOINT, run_mode="functional"):
         self.hostfile.write_text("localhost devices=7,2,5,0,6,1,4,3\nnode-b\n", encoding="utf-8")
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.CHAIN_CHECKPOINT,
-                          TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
+        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=checkpoint,
+                          TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177",
+                          TILEXR_VALIDATION_RUN_MODE=run_mode)
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
         entry = self.root / "set_env.sh"
         entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
-        self.manifest.update(checkpoint=workflow.CHAIN_CHECKPOINT, mode="production")
+        self.manifest.update(checkpoint=checkpoint, mode="production", server_dedup_profiling=run_mode == "breakdown")
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.parent.mkdir()
         # 传输/编排夹具使用普通进程产出原生协议，不把它作为 CANN launch 证据。
@@ -690,10 +698,15 @@ host_index, local_rank, device, rank, rank_size = map(int, sys.argv[5:10])
 assert os.environ['TILEXR_COMM_ID'] == '192.0.2.1:10177'
 assert os.environ['TILEXR_DEMO_BARRIER_ADDR'] == '192.0.2.1:10274'
 assert os.environ['TILEXR_VALIDATION_BS'] == '256'
+checkpoint = os.environ['TILEXR_VALIDATION_CHECKPOINT']
+multi = checkpoint == 'ep-sdedup-p1-chain-multi'
+loops = int(os.environ['TILEXR_VALIDATION_LOOPS'])
+warmup = int(os.environ['TILEXR_VALIDATION_WARMUP'])
+run_mode = os.environ['TILEXR_VALIDATION_RUN_MODE']
 record = dict(run_id=run, build_id=build, commit=None if commit == 'unknown' else commit,
               host=host, host_index=host_index, local_rank=local_rank, device=device,
               rank=rank, rank_size=rank_size, pid=os.getpid(),
-              checkpoint='ep-sdedup-p1-chain-single', status='PASS')
+              checkpoint=checkpoint, status='PASS', loops=loops, warmup=warmup, run_mode=run_mode)
 record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
                for key in ('bs', 'h', 'topk', 'moe_expert_num')})
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
@@ -707,10 +720,28 @@ if behavior != 'missing-chain':
     print('EP_SERVER_DEDUP_CHAIN_PASS ' + json.dumps(dict(record, peer_count=rank_size, peer_mem_bytes=1048576)))
 if behavior == 'stale-round':
     record['run_id'] = 'old-run'
-print('EP_SERVER_DEDUP_SINGLE_ROUND_PASS ' + json.dumps(dict(record, submitted=1,
-      completed=0 if behavior == 'incomplete-round' else 1, cleanup='complete')))
+if run_mode != 'functional':
+    record['timing_us'] = dict(submit=4, sync=3, barrier=2, batch_total=10)
+if run_mode == 'breakdown':
+    profile = dict(record, generation=warmup+loops, block_dim=2,
+                   records=[dict(core=core, start=100, checked=110, end=125) for core in range(2)])
+    if behavior == 'stale-breakdown':
+        profile['generation'] -= 1
+    if behavior != 'missing-breakdown':
+        print('EP_SERVER_DEDUP_BREAKDOWN_PASS ' + json.dumps(profile))
+if behavior == 'wrong-loops':
+    record['loops'] = loops - 1
+prefix = 'EP_SERVER_DEDUP_MULTI_ROUND_PASS ' if multi else 'EP_SERVER_DEDUP_SINGLE_ROUND_PASS '
+if behavior == 'single-marker':
+    prefix = 'EP_SERVER_DEDUP_SINGLE_ROUND_PASS '
+print(prefix + json.dumps(dict(record, submitted=loops,
+      completed=loops - 1 if behavior == 'incomplete-round' else loops,
+      warmup_submitted=warmup, warmup_completed=warmup, cleanup='complete')))
 ''', encoding="utf-8")
         program.chmod(0o755)
+        kernel = self.config_instance.install / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"
+        kernel.parent.mkdir(parents=True)
+        kernel.write_bytes(b"fake kernel artifact for workflow only")
         self.manifest["artifacts"] = workflow.artifact_files(self.config_instance.install)
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
 
@@ -744,6 +775,118 @@ print('EP_SERVER_DEDUP_SINGLE_ROUND_PASS ' + json.dumps(dict(record, submitted=1
                 self.assertEqual(result["errors"][0]["rank"], 8)
                 self.assertEqual(result["errors"][0]["type"], kind)
                 self.assertEqual(result["cleanup"], "complete")
+
+    def test_chain_multi_sync_run_and_collect_all_rounds(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT)
+        os.environ["TILEXR_VALIDATION_LOOPS"] = "7"
+        self.prepare_sync()
+        command = self.invoke("run")
+        self.assert_success(command)
+        summary = self.summary()
+        self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
+        self.assertEqual(summary["chain_configuration"]["loops"], 7)
+        self.assertNotIn("measurements", summary)
+        self.assertIn("7 轮空 Dispatch launch", summary["scope"])
+        for node in summary["nodes"]:
+            for rank in node["reported_result"]["ranks"]:
+                self.assertEqual((rank["submitted"], rank["completed"], rank["loops"]), (7, 7, 7))
+                self.assertEqual(rank["chain"]["checkpoint"], workflow.CHAIN_MULTI_CHECKPOINT)
+
+    def test_chain_multi_rejects_missing_rounds_or_single_marker(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT)
+        for behavior, kind in (("incomplete-round", "RESULT_FAILED"), ("single-marker", "LOG_PARSE_FAILED"),
+                               ("wrong-loops", "RESULT_FAILED"), ("stale-round", "RESULT_FAILED")):
+            with self.subTest(behavior=behavior):
+                command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
+                                      environment={"CHAIN_TEST_BEHAVIOR": behavior})
+                self.assertNotEqual(command.returncode, 0)
+                result = workflow.read_json(self.config_instance.logs / behavior / "result.json")
+                self.assertEqual(result["errors"][0]["rank"], 8)
+                self.assertEqual(result["errors"][0]["type"], kind)
+                self.assertEqual(result["cleanup"], "complete")
+
+    def enable_msprof(self):
+        profiler = self.fake_bin / "msprof"
+        profiler.write_text("#!" + sys.executable + "\n" + r'''
+import csv, os, pathlib, shlex, subprocess, sys
+args = dict(arg[2:].split('=', 1) for arg in sys.argv[1:])
+command = shlex.split(args['application'])
+subprocess.run(command, check=True)
+output = pathlib.Path(args['output']) / 'PROF_test/mindstudio_profiler_output/op_summary_test.csv'
+output.parent.mkdir(parents=True)
+count = int(os.environ['TILEXR_VALIDATION_LOOPS']) + int(os.environ['TILEXR_VALIDATION_WARMUP'])
+if os.environ.get('PROFILE_TEST_BEHAVIOR') == 'missing-sample' and command[-2] == '8':
+    count -= 1
+with output.open('w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerow(['Op Name', 'Task Start Time(us)', 'Task Duration(us)'])
+    for index in range(count):
+        writer.writerow(['tilexr_ep_dispatch_memory_server_dedup_kernel', index * 10, index + 1])
+''', encoding="utf-8")
+        profiler.chmod(0o755)
+
+    def test_dispatch_performance_collects_msprof_and_excludes_warmup(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT, "performance")
+        self.enable_msprof()
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
+        self.prepare_sync()
+        command = self.invoke("run")
+        self.assert_success(command)
+        summary = self.summary()
+        self.assertEqual(summary["measurements"]["run_mode"], "performance")
+        for node in summary["nodes"]:
+            for rank in node["reported_result"]["ranks"]:
+                self.assertEqual(rank["performance"]["sample_us"], [3, 4, 5])
+                self.assertEqual(rank["performance"]["median_us"], 4)
+
+    def test_dispatch_performance_missing_profiler_samples_fails(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT, "performance")
+        self.enable_msprof()
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
+        command = self.invoke("node", "missing-sample", self.manifest["build_id"], "10", "", "1",
+                              environment={"PROFILE_TEST_BEHAVIOR": "missing-sample"})
+        self.assertNotEqual(command.returncode, 0)
+        result = workflow.read_json(self.config_instance.logs / "missing-sample/result.json")
+        self.assertEqual(result["errors"][0]["type"], "RESULT_FAILED")
+        self.assertEqual(result["errors"][0]["rank"], 8)
+
+    def test_dispatch_breakdown_collects_all_rank_records(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT, "breakdown")
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
+        self.prepare_sync()
+        self.assert_success(self.invoke("run"))
+        summary = self.summary()
+        self.assertEqual(summary["measurements"]["run_mode"], "breakdown")
+        for node in summary["nodes"]:
+            for rank in node["reported_result"]["ranks"]:
+                self.assertEqual(rank["breakdown"]["generation"], 5)
+
+    def test_dispatch_breakdown_missing_or_stale_record_fails(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT, "breakdown")
+        os.environ["TILEXR_VALIDATION_RUN_MODE"] = "breakdown"
+        for behavior in ("missing-breakdown", "stale-breakdown"):
+            with self.subTest(behavior=behavior):
+                command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
+                                      environment={"CHAIN_TEST_BEHAVIOR": behavior})
+                self.assertNotEqual(command.returncode, 0)
+
+    def test_measurement_aggregation_failure_preserves_summary_and_exit_code(self):
+        self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT, "breakdown")
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
+        self.prepare_sync()
+        with mock.patch.object(workflow.measurements, "summarize_measurements",
+                               side_effect=ValueError("invalid measurement aggregate")), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = workflow.run(workflow.Config())
+        self.assertEqual(code, workflow.FAILURE_CODES["RESULT_FAILED"])
+        summary = self.summary()
+        self.assertEqual(summary["status"], "FAIL")
+        self.assertEqual(summary["primary_error"]["type"], "RESULT_FAILED")
+        self.assertNotIn("measurements", summary)
 
     def test_sync_failure_invalidates_previous_receipt(self):
         self.prepare_sync()
@@ -999,7 +1142,8 @@ class EnvironmentEntryTests(TemporaryRoot):
     def source_real_entry(self, hostfile=None):
         repo = Path(workflow.__file__).resolve().parents[2]
         for name in ("set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
-                     "tools/validation/workflow.py", "tools/validation/source.py"):
+                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py",
+                     "tools/ep/msprof_kernel_stats.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text((repo / name).read_text(encoding="utf-8"), encoding="utf-8")
@@ -1057,6 +1201,24 @@ class EnvironmentEntryTests(TemporaryRoot):
         result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("checkpoint=ep-sdedup-p1-chain-single", result.stdout)
+
+    def test_chain_multi_loops_assignment_reaches_python(self):
+        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
+        cann = self.root / "cann-env.sh"
+        cann.write_text("# CANN environment fixture; no hardware\n", encoding="utf-8")
+        local = self.root / "validation.local.sh"
+        config = ("TILEXR_VALIDATION_BUILD_MODE=production\n"
+                  "TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-multi\n"
+                  "TILEXR_COMM_ID=192.0.2.1:10177\n"
+                  f"TILEXR_CANN_ENV_SCRIPT={shlex.quote(str(cann))}\n")
+        local.write_text(config + "TILEXR_VALIDATION_LOOPS=0\n", encoding="utf-8")
+        result = self.source_real_entry()
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("loops", result.stderr)
+        local.write_text(config + "TILEXR_VALIDATION_LOOPS=3\n", encoding="utf-8")
+        result = self.source_real_entry()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("checkpoint=ep-sdedup-p1-chain-multi", result.stdout)
 
     def test_bad_checkpoint_reports_literal_backticks_and_carriage_return(self):
         value = "`ep-sdedup-p1-empty-kernel`\r"

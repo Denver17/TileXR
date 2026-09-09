@@ -14,7 +14,7 @@ enable_testing()
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST "Build installed A5 server dedup registration consumer" OFF)
-option(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST "Build installed A5 server dedup single-round consumer" OFF)
+option(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST "Build installed A5 server dedup chain consumer" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix")
@@ -479,6 +479,7 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)
     target_include_directories(test_tilexr_ep_server_dedup_chain PRIVATE
         "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}"
         "${TILEXR_ROOT}/src/ep/host"
+        "${TILEXR_ROOT}/src/ep/common"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/include")
     target_link_directories(test_tilexr_ep_server_dedup_chain PRIVATE
         "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"

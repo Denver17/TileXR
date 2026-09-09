@@ -16,6 +16,13 @@ import msprof_kernel_stats as stats  # noqa: E402
 
 
 class MsprofKernelStatsTest(unittest.TestCase):
+    def test_custom_sample_count_is_positive_and_does_not_change_default(self):
+        self.assertEqual(stats.LAST_SAMPLE_COUNT, 50)
+        for value in (0, -1, True, 1.5):
+            for reader in (stats.extract_csv_series, stats.extract_sqlite_series):
+                with self.subTest(value=value, reader=reader), self.assertRaisesRegex(ValueError, "sample_count"):
+                    reader(Path("unused"), stats.DEFAULT_KERNEL_NAME, value)
+
     def test_matches_exact_and_static_hash_kernel_names(self):
         canonical = "tilexr_ep_dispatch_memory_kernel"
         self.assertTrue(stats.kernel_name_matches(canonical, canonical))

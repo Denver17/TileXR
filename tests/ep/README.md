@@ -39,7 +39,7 @@ be validated separately.
 独立入口 `TileXRMoeEpDispatchMemoryServerDedup` 使用 caller-owned 的
 `assistExOut/sourceMaskOut/groupOut`，普通 Memory ABI 不变。第二个检查点已接通 A5 空 kernel：
 通过 Host 校验后注册独立 artifact，再获取一次 magic 并调用 `rtKernelLaunchWithFlagV2`。
-成功仅表示异步提交成功；空 kernel 不读取输入或 comm，不写输出、ready 或 profiling。
+成功仅表示异步提交成功；默认空 kernel 不读取输入或 comm，不写输出、ready 或 profiling。breakdown 构建只增加自己数据区的逐核计时记录。
 
 开发者可在无 NPU 环境运行现有 Host suite；服务器交付仍使用上面的七步入口：
 
@@ -67,7 +67,19 @@ ELF/导出/依赖检查仍只在构建完成后执行一次；同步、超时、
 
 `chain-single` 在 production 模式编译安装 `test_tilexr_ep_server_dedup_chain`，由同一 controller 每台启动 8 个进程；不增加每节点 CTest 项。它创建已有 MemoryDomain communicator，验证 Host/device peer window，调用一次公开空 Dispatch，检查 stream 同步和两次 TCP Host barrier，最后检查资源释放。空 kernel 不使用旧 Dispatch 的 2 GiB 分区；窗口检查采用实际 MemoryDomain 的 8 MiB 数据区加 4 MiB flag 区。异步完成或轮末 barrier 未确认时，进程报错退出，不提前释放可能仍被使用的资源；已有 controller 负责有界退出和日志收集。
 
-本次本地验证：MSYS2 的 C++14 Debug 构建与 17/17 EP Host/Python 测试通过；七步脚本回归 115 项中 112 项通过、3 项因 MSYS symlink 限制跳过。`python3 tests/ep/integration/test_server_dedup_chain.py -v` 的 5 项行为测试编译真实 consumer，使用 ACL/communicator 替身及真实 TCP barrier，覆盖两种 dtype 的 16 进程单轮和失败路径。本次 CANN 9.1 生产构建、真实建链及 NPU launch 待服务器七步验证；设备结果按进度文档中的配置及通过提交分别记录。
+`chain-multi` 只运行 Dispatch 单算子，与 Memory 连续多轮策略相同：同一 stream 连续提交，整批结束后才同步和 Host barrier。functional 默认 1 轮且不计时；performance 使用 msprof，breakdown 使用 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING` 独立编译开关；两种测量模式默认预热 50 轮、测量 50 轮，均可配置。预热和测量分别为独立批次，completed 只在整批完成后确认。配置和输出解释见[七步指南](../../docs/EP_VALIDATION_GUIDE.md)。
+
+breakdown 的 64B/核记录位于自己 MemoryDomain 数据区，连续覆盖后仅读取最后一轮；核对 marker/版本/身份/核数/generation 和时间戳，再汇总入口框架耗时。CANN 9.1.0 官方 950 计数器为 1000 ticks/us，原始 ticks 保留。记录写出不在打点区间，不能把最后一轮拆解当成多轮均值，也不能当作去重通信性能；performance 构建关闭设备打点。
+
+开发者行为回归不加入每节点 CTest，也不增加服务器入口：
+
+```bash
+python3 tests/ep/integration/test_server_dedup_chain.py -v
+python3 tests/ep/integration/test_server_dedup_kernel_profile.py -v
+python3 -m unittest discover -s tools/validation -p 'test_*.py'
+```
+
+这些测试编译真实 C++14 consumer/kernel，以 ACL/communicator/API 替身及真实 TCP barrier 覆盖两种 dtype、16 进程连续批次、profile ON/OFF、坏记录和失败清理；脚本用 msprof CSV/SQLite 样本验证统计。CANN 9.1 生产编译和 A5 三模式验证仍需服务器七步流程；设备结果按[进度文档](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md)中的配置和通过提交分别登记。
 
 ## Full Hardware Demo
 

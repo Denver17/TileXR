@@ -2,6 +2,8 @@
 #include <type_traits>
 
 #include "ep_memory_server_dedup_protocol.h"
+#include "ep_memory_server_dedup_profile.h"
+#include "tilexr_types.h"
 #include "server_dedup_test_checks.h"
 
 int main()
@@ -32,5 +34,20 @@ int main()
     Check(members[0].recvSlot == 99U && members[0].weightBits == 0x3F800000U, "first dense member");
     Check(members[1].recvSlot == 101U && members[1].weightBits == 0x80000000U, "second member preserves negative zero");
     Check((uint32_t(1) << 31U) == 0x80000000U, "sourceMask includes original k=31");
+
+    static_assert(std::is_standard_layout<EpServerDedupProfileRecord>::value, "Profile record is a wire record");
+    static_assert(std::is_trivially_copyable<EpServerDedupProfileRecord>::value, "Profile record permits bit copies");
+    static_assert(kEpServerDedupProfileOffset + kEpServerDedupProfileMaxCores *
+        sizeof(EpServerDedupProfileRecord) <=
+        static_cast<uint64_t>(TileXR::TILEXR_MEMORY_DOMAIN_BUFFER_SIZE) * 1024U * 1024U,
+        "Profile records must remain before MemoryDomain flags");
+    const EpServerDedupProfileRecord profile {kEpServerDedupProfileMarker, kEpServerDedupProfileVersion,
+        sizeof(EpServerDedupProfileRecord), 127U, 199U, 200U, 0U, UINT64_C(0x100000002),
+        UINT64_C(0x100000004), UINT64_C(0x100000008), UINT64_C(0x10000000c), 0U};
+    uint64_t profileWords[8] = {};
+    std::memcpy(profileWords, &profile, sizeof(profile));
+    Check(profileWords[3] == UINT64_C(0x100000002) && profileWords[4] == UINT64_C(0x100000004) &&
+        profileWords[5] == UINT64_C(0x100000008) && profileWords[6] == UINT64_C(0x10000000c),
+        "Profile generation and raw ticks preserve their 64-bit positions");
     return ServerDedupTest::Finish("protocol");
 }

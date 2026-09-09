@@ -21,3 +21,11 @@ TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-abi-host
 # export TILEXR_VALIDATION_MOE_EXPERT_NUM=384
 # export TILEXR_VALIDATION_DTYPE=bf16
 # export TILEXR_VALIDATION_BLOCK_DIM=auto
+# 第五个检查点使用 ep-sdedup-p1-chain-multi，仅运行 Dispatch 单算子。
+# 同一 stream 连续提交，整批结束后才同步和 Host barrier。
+# functional 默认 loops=1/warmup=0；performance、breakdown 默认 loops=50/warmup=50。
+# TILEXR_VALIDATION_RUN_MODE=functional
+# TILEXR_VALIDATION_LOOPS=1
+# TILEXR_VALIDATION_WARMUP=0
+# performance 使用 CANN 的 msprof；不在 PATH 时填写可执行文件绝对路径。
+# TILEXR_VALIDATION_MSPROF=msprof

@@ -222,17 +222,18 @@ class BuildTests(unittest.TestCase):
 
     def test_chain_build_installs_native_consumer_without_adding_per_host_test(self):
         (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.CHAIN_CHECKPOINT,
-                                        "TILEXR_COMM_ID": "192.0.2.1:10177"}):
-            config = self.config("production")
-        self.install_chain = False
-        with self.assertRaisesRegex(ValueError, workflow.CHAIN_PROGRAM):
-            self.build_fixture(config)
-        self.install_chain = True
-        manifest, _ = self.build_fixture(config)
-        self.assertEqual(len(manifest["tests"]), len(workflow.REQUIRED_TESTS))
-        self.assertNotIn(workflow.CHAIN_PROGRAM, [test["name"] for test in manifest["tests"]])
-        self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
+        for checkpoint in workflow.CHAIN_CHECKPOINTS:
+            with self.subTest(checkpoint=checkpoint), mock.patch.dict(os.environ, {
+                    "TILEXR_VALIDATION_CHECKPOINT": checkpoint, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
+                config = self.config("production")
+                self.install_chain = False
+                with self.assertRaisesRegex(ValueError, workflow.CHAIN_PROGRAM):
+                    self.build_fixture(config)
+                self.install_chain = True
+                manifest, _ = self.build_fixture(config)
+                self.assertEqual(len(manifest["tests"]), len(workflow.REQUIRED_TESTS))
+                self.assertNotIn(workflow.CHAIN_PROGRAM, [test["name"] for test in manifest["tests"]])
+                self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
 
     def test_duplicate_test_name_cannot_replace_independent_execution(self):
         self.names.append(self.names[0])
@@ -242,6 +243,22 @@ class BuildTests(unittest.TestCase):
                 redirect_stdout(io.StringIO()), self.assertRaisesRegex(ValueError, "必需测试缺失或重复"):
             workflow.build(self.config())
         runtime.assert_not_called()
+
+    def test_only_breakdown_build_enables_device_instrumentation(self):
+        (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
+        for mode in ("functional", "performance", "breakdown"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, {
+                    "TILEXR_VALIDATION_CHECKPOINT": workflow.CHAIN_MULTI_CHECKPOINT,
+                    "TILEXR_VALIDATION_RUN_MODE": mode, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
+                self.commands.clear()
+                self.build_fixture(self.config("production"))
+                configure = next(args for args, _, _ in self.commands
+                                 if "-S" in args and str(self.root) in args)
+                enabled = "ON" if mode == "breakdown" else "OFF"
+                self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=" + enabled, configure)
+                os.environ["TILEXR_VALIDATION_RUN_MODE"] = "performance" if mode == "breakdown" else "breakdown"
+                with self.assertRaisesRegex(ValueError, "设备打点开关"):
+                    workflow.verify_build(self.config("production"))
 
     def test_runtime_check_occurs_once_after_production_install_and_never_during_verify_sync(self):
         config = self.config("production")

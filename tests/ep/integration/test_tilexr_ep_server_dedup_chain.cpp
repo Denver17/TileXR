@@ -22,7 +22,9 @@
 
 #include "acl/acl.h"
 #include "tilexr_ep.h"
+#include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
+#include "ep_memory_server_dedup_profile.h"
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -51,8 +53,10 @@ int64_t Number(const char *text, const char *name)
 }
 
 struct Config {
-    std::string run, build, commit, host;
+    std::string run, build, commit, host, checkpoint, runMode;
     int hostIndex, localRank, device, rank, rankSize;
+    uint32_t loops = 1;
+    uint32_t warmup = 0;
     int64_t bs, h, topK, experts;
     TileXR::TileXRDataType dtype;
     sockaddr_in barrier {};
@@ -80,6 +84,27 @@ Config Parse(int argc, char **argv)
     Require(argc == 10, "expected run build commit host host_index local_rank device rank rank_size");
     Config c {};
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p1-chain-single" : checkpoint;
+    Require(c.checkpoint == "ep-sdedup-p1-chain-single" || c.checkpoint == "ep-sdedup-p1-chain-multi",
+        "unsupported TILEXR_VALIDATION_CHECKPOINT");
+    const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
+    c.runMode = mode == nullptr ? "functional" : mode;
+    Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
+        "unsupported TILEXR_VALIDATION_RUN_MODE");
+    const char *loopsText = std::getenv("TILEXR_VALIDATION_LOOPS");
+    const char *warmupText = std::getenv("TILEXR_VALIDATION_WARMUP");
+    const int64_t loops = loopsText == nullptr ? (c.runMode == "functional" ? 1 : 50) :
+        Number(loopsText, "TILEXR_VALIDATION_LOOPS");
+    const int64_t warmup = warmupText == nullptr ? (c.runMode == "functional" ? 0 : 50) :
+        Number(warmupText, "TILEXR_VALIDATION_WARMUP");
+    Require(loops > 0 && loops <= UINT32_MAX, "TILEXR_VALIDATION_LOOPS must be in [1, UINT32_MAX]");
+    Require(warmup <= UINT32_MAX, "TILEXR_VALIDATION_WARMUP must be in [0, UINT32_MAX]");
+    c.loops = static_cast<uint32_t>(loops);
+    c.warmup = static_cast<uint32_t>(warmup);
+    Require(c.checkpoint != "ep-sdedup-p1-chain-single" ||
+        (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
+        "chain-single requires functional mode, loops=1, warmup=0");
     Require(!c.run.empty() && c.run.size() < 128 && !c.build.empty() && c.build.size() < 128 &&
         !c.host.empty(), "invalid run/build/host identity");
     int *fields[] = {&c.hostIndex, &c.localRank, &c.device, &c.rank, &c.rankSize};
@@ -121,7 +146,8 @@ void Marker(const Config &c, const char *name, const std::string &details)
 {
     std::cout << name << " {\"run_id\":" << Json(c.run) << ",\"build_id\":" << Json(c.build)
         << ",\"commit\":" << (c.commit == "unknown" ? "null" : Json(c.commit))
-        << ",\"checkpoint\":\"ep-sdedup-p1-chain-single\",\"status\":\"PASS\",\"host\":" << Json(c.host)
+        << ",\"checkpoint\":" << Json(c.checkpoint) << ",\"status\":\"PASS\",\"host\":" << Json(c.host)
+        << ",\"run_mode\":" << Json(c.runMode) << ",\"loops\":" << c.loops << ",\"warmup\":" << c.warmup
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
         << ",\"backend\":\"memory\",\"bs\":" << c.bs << ",\"h\":" << c.h << ",\"topk\":" << c.topK
@@ -168,7 +194,7 @@ void Transfer(int fd, void *data, std::size_t bytes, bool sendData, Deadline dea
     }
 }
 
-// 两个阶段复用监听 socket；报文核对 run/build/rank/phase，不读取设备通信状态。
+// 建链、预热批和测量批共用监听 socket 及总期限；报文核对 run/build/rank/phase。
 class Barrier {
 public:
     Barrier(const Config &config, Deadline deadline) : c_(config), deadline_(deadline) {}
@@ -266,6 +292,47 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
     }
 }
 
+uint32_t ProfileBlockDim(const Config &c)
+{
+    int64_t vectorCores = 0;
+    Check(aclrtGetDeviceInfo(static_cast<uint32_t>(c.device), ACL_DEV_ATTR_VECTOR_CORE_NUM, &vectorCores),
+        "aclrtGetDeviceInfo");
+    Require(vectorCores > 0 && vectorCores <= UINT32_MAX, "invalid vector core count");
+    uint32_t blockDim = 0;
+    Check(TileXREp::TileXREpResolveMemoryBlockDim(static_cast<uint32_t>(vectorCores), 1U,
+        std::getenv("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"), &blockDim), "profile block dimension");
+    Require(blockDim <= TileXREp::kEpServerDedupProfileMaxCores, "profile core capacity exceeded");
+    return blockDim;
+}
+
+std::string ReadProfile(const Config &c, const TileXR::CommArgs &args, uint32_t blockDim)
+{
+    using namespace TileXREp;
+    const uint64_t bytes = static_cast<uint64_t>(blockDim) * sizeof(EpServerDedupProfileRecord);
+    const uint64_t dataBytes = static_cast<uint64_t>(TileXR::TILEXR_MEMORY_DOMAIN_BUFFER_SIZE) * 1024U * 1024U;
+    Require(kEpServerDedupProfileOffset <= dataBytes && bytes <= dataBytes - kEpServerDedupProfileOffset &&
+        kEpServerDedupProfileOffset <= args.peerMemBytes && bytes <= args.peerMemBytes - kEpServerDedupProfileOffset,
+        "profile records exceed own peer data region");
+    std::array<EpServerDedupProfileRecord, kEpServerDedupProfileMaxCores> records {};
+    Check(aclrtMemcpy(records.data(), sizeof(records), args.peerMems[c.rank] + kEpServerDedupProfileOffset,
+        static_cast<std::size_t>(bytes), ACL_MEMCPY_DEVICE_TO_HOST), "read device breakdown records");
+    const uint64_t generation = static_cast<uint64_t>(c.warmup) + c.loops;
+    std::ostringstream out;
+    out << ",\"generation\":" << generation << ",\"block_dim\":" << blockDim << ",\"records\":[";
+    for (uint32_t core = 0; core < blockDim; ++core) {
+        const auto &record = records[core];
+        Require(record.marker == kEpServerDedupProfileMarker && record.version == kEpServerDedupProfileVersion &&
+            record.recordBytes == sizeof(EpServerDedupProfileRecord) && record.rank == static_cast<uint32_t>(c.rank) &&
+            record.core == core && record.blockDim == blockDim && record.generation == generation &&
+            record.start > 0 && record.checked >= record.start && record.end >= record.checked,
+            "invalid breakdown record core=" + std::to_string(core));
+        if (core != 0) { out << ','; }
+        out << "{\"core\":" << core << ",\"start\":" << record.start << ",\"checked\":" << record.checked
+            << ",\"end\":" << record.end << '}';
+    }
+    return out.str() + ']';
+}
+
 int Run(const Config &c)
 {
     TileXREp::EpMemoryServerDedupLayout layout {};
@@ -275,7 +342,9 @@ int Run(const Config &c)
     aclrtStream stream = nullptr;
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
-    std::string stage = "acl-init";
+    uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
+    std::string stage = "acl-init", batch = "initialization", breakdown;
+    std::array<double, 4> timing {};
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
         Check(aclInit(nullptr), "aclInit"); initialized = true;
@@ -284,6 +353,7 @@ int Run(const Config &c)
         const char *soc = aclrtGetSocName();
         Require(soc != nullptr && (std::strncmp(soc, "Ascend950", 9) == 0 ||
             std::strncmp(soc, "Ascend910_9", 11) == 0 || std::strncmp(soc, "A5", 2) == 0), "A5 required");
+        const uint32_t profileCores = c.runMode == "breakdown" ? ProfileBlockDim(c) : 0;
         Check(aclrtCreateStream(&stream), "aclrtCreateStream");
         stage = "communicator";
         Check(TileXRCommInitRankMemoryDomain(0, c.rankSize, c.rank, &comm), "TileXRCommInitRankMemoryDomain");
@@ -323,31 +393,63 @@ int Run(const Config &c)
         barrier.Run(0);
         Marker(c, "EP_SERVER_DEDUP_CHAIN_PASS", ",\"peer_count\":" + std::to_string(c.rankSize) +
             ",\"peer_mem_bytes\":" + std::to_string(host->peerMemBytes));
-        stage = "launch";
-        Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
-            nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, nullptr, comm, c.bs, c.h, c.topK, c.experts,
-            c.rankSize, c.rank, 1, 0, 0, 0, 0, 0, static_cast<int64_t>(layout.globalBs), 0, buffers[2],
-            nullptr, nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
-            nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
-            static_cast<uint32_t *>(buffers[7]), c.dtype, TileXR::TILEXR_DATA_TYPE_RESERVED, stream),
-            "TileXRMoeEpDispatchMemoryServerDedup");
-        stage = "stream-sync";
-        Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
-        stage = "round-barrier";
-        barrier.Run(1);
+        auto runBatch = [&](uint32_t count, uint32_t phase, uint64_t &batchSubmitted, uint64_t &batchCompleted) {
+            const bool measured = phase == 2 && c.runMode != "functional";
+            Deadline totalStart {}, intervalStart {};
+            auto elapsedUs = [](Deadline start) {
+                return std::chrono::duration<double, std::micro>(Clock::now() - start).count();
+            };
+            if (measured) { totalStart = Clock::now(); intervalStart = Clock::now(); }
+            for (submission = 1; submission <= count; ++submission) {
+                stage = "launch";
+                Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
+                    nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, nullptr, comm, c.bs, c.h, c.topK, c.experts,
+                    c.rankSize, c.rank, 1, 0, 0, 0, 0, 0, static_cast<int64_t>(layout.globalBs), 0, buffers[2],
+                    nullptr, nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
+                    nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
+                    static_cast<uint32_t *>(buffers[7]), c.dtype, TileXR::TILEXR_DATA_TYPE_RESERVED, stream),
+                    "TileXRMoeEpDispatchMemoryServerDedup");
+                ++batchSubmitted;
+            }
+            submission = count;
+            if (measured) { timing[0] = elapsedUs(intervalStart); intervalStart = Clock::now(); }
+            stage = "stream-sync";
+            Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
+            if (measured) { timing[1] = elapsedUs(intervalStart); intervalStart = Clock::now(); }
+            stage = "batch-barrier";
+            barrier.Run(phase);
+            if (measured) { timing[2] = elapsedUs(intervalStart); timing[3] = elapsedUs(totalStart); }
+            batchCompleted = count;
+        };
+        if (c.warmup != 0) {
+            batch = "warmup";
+            runBatch(c.warmup, 1, warmupSubmitted, warmupCompleted);
+        }
+        batch = "measurement";
+        runBatch(c.loops, 2, submitted, completed);
         safeCleanup = true;
+        if (c.runMode == "breakdown") {
+            stage = "breakdown-read";
+            breakdown = ReadProfile(c, *host, profileCores);
+        }
         success = true;
     } catch (const std::exception &error) {
-        std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " " << error.what() << std::endl;
+        std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
+            << " submission=" << submission << " submitted=" << submitted << " completed=" << completed
+            << " warmup_submitted=" << warmupSubmitted << " warmup_completed=" << warmupCompleted
+            << " " << error.what() << std::endl;
     }
     if (!safeCleanup) {
-        std::cerr << "rank=" << c.rank << " cleanup=deferred-to-process-exit: round completion unconfirmed" << std::endl;
+        std::cerr << "rank=" << c.rank << " cleanup=deferred-to-process-exit: batch completion unconfirmed" << std::endl;
         return 1;
     }
     auto cleanup = [&](int code, const char *name) {
         if (code != 0) {
             success = false;
-            std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=cleanup " << name << " ret=" << code << std::endl;
+            std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=cleanup batch=" << batch
+                << " submission=" << submission
+                << " submitted=" << submitted << " completed=" << completed << " warmup_submitted=" << warmupSubmitted
+                << " warmup_completed=" << warmupCompleted << " " << name << " ret=" << code << std::endl;
         }
     };
     for (auto data : buffers) { cleanup(aclrtFree(data), "aclrtFree"); }
@@ -356,7 +458,17 @@ int Run(const Config &c)
     if (deviceSet) { cleanup(aclrtResetDevice(c.device), "aclrtResetDevice"); }
     if (initialized) { cleanup(aclFinalize(), "aclFinalize"); }
     if (success) {
-        Marker(c, "EP_SERVER_DEDUP_SINGLE_ROUND_PASS", ",\"submitted\":1,\"completed\":1,\"cleanup\":\"complete\"");
+        std::string details = ",\"submitted\":" + std::to_string(submitted) + ",\"completed\":" +
+            std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
+            ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
+        const bool multi = c.checkpoint == "ep-sdedup-p1-chain-multi";
+        if (c.runMode != "functional") {
+            details += ",\"timing_us\":{\"submit\":" + std::to_string(timing[0]) +
+                ",\"sync\":" + std::to_string(timing[1]) + ",\"barrier\":" + std::to_string(timing[2]) +
+                ",\"batch_total\":" + std::to_string(timing[3]) + '}';
+        }
+        if (!breakdown.empty()) { Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown); }
+        Marker(c, multi ? "EP_SERVER_DEDUP_MULTI_ROUND_PASS" : "EP_SERVER_DEDUP_SINGLE_ROUND_PASS", details);
     }
     return success ? 0 : 1;
 }

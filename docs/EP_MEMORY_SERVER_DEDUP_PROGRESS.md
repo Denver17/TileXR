@@ -12,9 +12,9 @@
 | 1 `ep-sdedup-p1-abi-host` | 三类 metadata ABI、layout、Host 校验、错误码；七步生产构建与 Host 回归 | **已通过**，用户确认最新提交完成服务器验证 | [`acb976cb6c5527e02a0d931e20a954eb1c891d37`](https://github.com/LingquLab/TileXR/commit/acb976cb6c5527e02a0d931e20a954eb1c891d37) |
 | 2 `ep-sdedup-p1-empty-kernel` | A5 空 kernel、ELF/安装、生产库链接和相对加载、设备注册；Host 验证 launch 参数和失败返回 | **已通过**，production 模式 2/2 主机、每台 18 项测试成功 | [`eae264dc2e3d33169ffd2e78e04c3430d41b7559`](https://github.com/LingquLab/TileXR/commit/eae264dc2e3d33169ffd2e78e04c3430d41b7559) |
 | 3 `ep-sdedup-p1-dry-run` | 64P/128P 全量 rank/device 映射及有界退出，不建 communicator | production 16P 已通过；64P/128P 与目标清理演练待验证 | —（完整验收待完成） |
-| 4 `ep-sdedup-p1-chain-single` | 建链、peer window、一次空 launch、stream 完成、轮末 barrier；可先用 16P 调试 | 代码已实现，本地回归通过；16P 设备调试及 64P/128P 验收待执行 | — |
-| 5 `ep-sdedup-p1-chain-multi` | 64P/128P 多轮 magic、顺序完成与资源复用 | 未开始 | — |
-| 6 `ep-sdedup-p1-profile` | FP16/BF16、warmup、完整 profile 记录和跨 rank 汇总，仅报告框架开销 | 未开始 | — |
+| 4 `ep-sdedup-p1-chain-single` | 建链、peer window、一次空 launch、stream 完成、轮末 barrier | production 16P 已通过；64P/128P 完整验收待执行 | —（16P 通过 SHA 见下） |
+| 5 `ep-sdedup-p1-chain-multi` | Dispatch 连续批次提交、批末同步/barrier、magic 与资源复用；功能默认 1 轮、可配置 | 代码已实现，本地行为验证通过；16P 调试及 64P/128P 验收待执行 | — |
+| 6 profile（通过 `chain-multi` 的 performance/breakdown 模式运行） | FP16/BF16、warmup、msprof 样本或最后一轮设备打点、跨 rank 汇总，仅报告框架开销 | 三模式代码已实现；实际 CANN/A5 采集待验证 | — |
 
 检查点 1 的提交记录如下；中间提交不单独视为服务器验收通过。
 
@@ -75,15 +75,43 @@ VALIDATION_PASS checkpoint=ep-sdedup-p1-dry-run mode=production hosts=2/2 tests_
 
 | 提交 | 修改及测试重点 | 记录 |
 | --- | --- | --- |
-| 本次实现提交（`feat(ep): add server dedup single round chain checkpoint`） | 七步流程启动已安装 C++ consumer；memory communicator、Host/device peer 映射、一次公开空 Dispatch、stream 完成、两次 Host barrier 和资源释放；按最新设计将 group 分配改为 8*BS 行 | C++14 Debug 17/17 EP 测试通过；脚本回归 115 项中 112 项通过、3 项 MSYS symlink 跳过；5 项 consumer 行为测试通过 |
+| [`f5bfa58e93ba7b8d7103c67fc20b9ae08044fb09`](https://github.com/LingquLab/TileXR/commit/f5bfa58e93ba7b8d7103c67fc20b9ae08044fb09) | 七步流程启动已安装 C++ consumer；memory communicator、Host/device peer 映射、一次公开空 Dispatch、stream 完成、两次 Host barrier 和资源释放；按最新设计将 group 分配改为 8*BS 行 | 本地 17/17 EP 测试、112 项脚本测试（另 3 项跳过）及 5 项 consumer 测试通过；用户回传 production 16P 通过 |
 
-用户已说明 64P 环境受限，因此在检查点 3 的 production 16P PASS 后继续实现检查点 4，不等待扩大环境；检查点 3 未完成的验收记录继续保留。现有两台 8 卡 hostfile 可用于下一次 `chain-single` 调试，按[七步指南](EP_VALIDATION_GUIDE.md)修改 checkpoint 和首节点 `TILEXR_COMM_ID` 即可。未增加预检或额外启动入口。
+用户已说明 64P 环境受限，因此在检查点 3 的 production 16P PASS 后继续实现检查点 4，并在检查点 4 的 production 16P PASS 后继续实现检查点 5；各检查点未完成的大规模验收继续保留。下一次调试复用当前两台 8 卡 hostfile 和建链配置，按[七步指南](EP_VALIDATION_GUIDE.md)修改 checkpoint 即可，不增加预检或额外启动入口。
 
 本地 consumer 测试编译真实 C++14 调用程序，以 ACL/communicator 替身覆盖 FP16、BF16 各 16 个独立进程、真实 TCP barrier、启动/peer 映射错误、提交/异步失败、轮末身份错误和清理失败。未在本地进行 CANN 9.1 生产编译、真实 communicator 建链或 NPU launch；替身成功不登记为设备检查点通过，也不证明去重通信或数值正确性。
 
 | 检查点 4 设备记录 | 当前状态 | 通过 commit / 结果 |
 | --- | --- | --- |
-| 当前 16P（2×8）单轮调试 | 待执行 | — |
+| 当前 16P（2×8）单轮调试 | **已通过**，用户回传 production 2/2 主机、每台 17 项测试、16/16 rank | `f5bfa58e93ba7b8d7103c67fc20b9ae08044fb09` |
+| 目标集群 64P（8×8） | 待环境可用后执行 | — |
+| 目标集群 128P（16×8） | 待执行 | — |
+
+用户回传的检查点 4 结果：
+
+```text
+VALIDATION_PASS checkpoint=ep-sdedup-p1-chain-single mode=production hosts=2/2 tests_per_host=17 ranks=16/16 commit=f5bfa58e93ba7b8d7103c67fc20b9ae08044fb09 (unverified)
+```
+
+此结果覆盖该配置下的生产构建、真实建链/peer 映射检查、一次空 NPU launch、stream 完成和 Host barrier，不证明去重数据传输或数值。用户未提供 run_id/summary.json 路径，本地未直接读取远端结果；保留 `unverified` 来源标签，不额外引入源码校验。
+
+检查点 5 的提交与测试记录：
+
+| 提交 | 修改及测试重点 | 记录 |
+| --- | --- | --- |
+| 本次实现提交（`feat(ep): add server dedup dispatch validation modes`） | 复用已安装 consumer、communicator/stream/8 个 buffer；同一 stream 连续批次提交，批末同步/barrier；支持 functional/performance/breakdown；Host 测试检查 magic 和失败后不回退 | 本地行为验证通过，服务器待测 |
+
+按用户确认的 Memory 测试策略，所有模式均在同一 stream 连续提交整批，批末同步并做 Host barrier；有预热时先完成独立预热批。functional 默认 loops=1/warmup=0，不采集 profiling 或性能；performance/breakdown 默认 50/50，可在原配置中调整。只有 Dispatch 单算子，不实现 Combine 或两算子连跑。profile 测试纳入现有 chain-multi 模式，原规划名 `ep-sdedup-p1-profile` 不作为额外入口。
+
+performance 使用每 rank 独立 msprof 目录，目标样本总数必须为 warmup+loops，排除预热后统计跨 rank median/min/max。breakdown 通过独立编译开关读取最后一轮全部核的 generation 和三个原始时间戳，按官方 CANN 9.1.0 的 950 1GHz 计数器换算 us。仅拆解入口检查与记录准备，最终记录写出/cache clean 不在打点区间；算法通信量为 0B、带宽 N/A。以上均不证明真实去重通信、通信区轮转或旧 ready 隔离。
+
+本地验证：17/17 EP Host/Python、8/8 真实 C++14 consumer 行为测试、3/3 真实 kernel 的默认 OFF/显式 OFF/ON 行为编译测试通过；完整脚本回归 144 项中 141 项通过，3 项因 MSYS symlink 限制跳过。审查补充重复样本拒绝后，测量 20/20、原 msprof parser 7/7、performance 流程 2/2 复验通过。测试使用 ACL/API、进程/传输与 msprof 替身检查批次、样本、记录和失败汇总；真实 CANN 生产构建、A5 多轮 launch、msprof 采集和设备打点可见性仍待服务器。新增开发者行为测试不增加服务器每节点 17 项流程。
+
+| 检查点 5 设备记录 | 当前状态 | 通过 commit / 结果 |
+| --- | --- | --- |
+| 当前 16P（2×8）多轮调试 | 待执行 | — |
+| 当前 16P performance（FP16/BF16） | 待执行，沿用同一 checkpoint 和七步流程 | — |
+| 当前 16P breakdown（FP16/BF16） | 待执行，沿用同一 checkpoint 和七步流程 | — |
 | 目标集群 64P（8×8） | 待环境可用后执行 | — |
 | 目标集群 128P（16×8） | 待执行 | — |
 

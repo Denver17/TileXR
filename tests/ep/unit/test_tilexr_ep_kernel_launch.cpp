@@ -266,6 +266,19 @@ void TestServerDedupRuntimeLaunch()
     Check(gLaunches[0].blockDim == 48 && gLaunches[0].stream == p.stream, "uses all vector cores and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
+    ResetCapture();
+    const int rounds = static_cast<int>(TileXR::PING_PONG_SIZE) + 3;
+    for (int round = 0; round < rounds; ++round) {
+        Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
+        auto roundArgs = expected;
+        roundArgs.back() = kNextMagic + round;
+        Check(gLaunches.size() == static_cast<std::size_t>(round + 1) &&
+            gLaunches.back().args == roundArgs && gLaunches.back().stream == p.stream,
+            "each round forwards its new magic and reuses all pointers and the stream");
+    }
+    Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
+        "multiple rounds consume exactly one magic each without reloading the artifact");
+
     for (const char *value : {"1", "47", "48"}) {
         ResetCapture();
         setenv(overrideName, value, 1);
@@ -283,6 +296,10 @@ void TestServerDedupRuntimeLaunch()
     gLaunchResult = -1;
     Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "runtime submission failure is never PASS");
     Check(gMagicCalls == 1 && gLaunches.size() == 1, "failed submission consumes only its own magic");
+    gLaunchResult = RT_ERROR_NONE;
+    Check(launch() == TileXR::TILEXR_SUCCESS && gMagicCalls == 2 &&
+        gLaunches.back().args.back() == static_cast<uint64_t>(kNextMagic + 1),
+        "a later invocation cannot reuse a failed submission's magic");
 }
 
 void TestOrdinaryDispatchRuntimeLaunch()
@@ -451,7 +468,7 @@ int TileXRCommNextMagic(TileXRCommPtr, int64_t *magic)
 {
     ++gMagicCalls;
     if (magic != nullptr) {
-        *magic = kNextMagic;
+        *magic = kNextMagic + gMagicCalls - 1;
     }
     return gMagicResult;
 }

@@ -94,8 +94,11 @@ def kernel_name_matches(actual_name: str, kernel_name: str) -> bool:
 
 
 def extract_csv_series(
-    path: Path, kernel_name: str
+    path: Path, kernel_name: str, sample_count: int = LAST_SAMPLE_COUNT,
+    *, strict_samples: bool = False,
 ) -> tuple[list[float], int, list[str]]:
+    if type(sample_count) is not int or sample_count <= 0:
+        raise ValueError("sample_count must be a positive integer")
     matches: list[tuple[float, float]] = []
     matched_kernel_names: set[str] = set()
     with path.open("r", encoding="utf-8-sig", newline="") as csv_file:
@@ -114,24 +117,31 @@ def extract_csv_series(
             duration = finite_number(
                 row["Task Duration(us)"], f"{path}:{row_number}: Task Duration(us)"
             )
+            if strict_samples and (start < 0 or duration <= 0):
+                raise ValueError(f"{path}:{row_number}: invalid kernel start or duration")
             matches.append((start, duration))
 
     matches.sort(key=lambda item: item[0])
-    if len(matches) < LAST_SAMPLE_COUNT:
+    if strict_samples and any(left[0] == right[0] for left, right in zip(matches, matches[1:])):
+        raise ValueError(f"{path}: duplicate kernel start time")
+    if len(matches) < sample_count:
         raise ValueError(
-            f"{path}: expected at least {LAST_SAMPLE_COUNT} kernel samples, "
+            f"{path}: expected at least {sample_count} kernel samples, "
             f"matched={len(matches)}"
         )
     return (
-        [duration for _, duration in matches[-LAST_SAMPLE_COUNT:]],
+        [duration for _, duration in matches[-sample_count:]],
         len(matches),
         sorted(matched_kernel_names),
     )
 
 
 def extract_sqlite_series(
-    path: Path, kernel_name: str
+    path: Path, kernel_name: str, sample_count: int = LAST_SAMPLE_COUNT,
+    *, strict_samples: bool = False,
 ) -> tuple[list[float], int, list[str]]:
+    if type(sample_count) is not int or sample_count <= 0:
+        raise ValueError("sample_count must be a positive integer")
     matches: list[tuple[float, float]] = []
     matched_kernel_names: set[str] = set()
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
@@ -169,6 +179,8 @@ def extract_sqlite_series(
             duration_ns = finite_number(
                 duration_value, f"{path}:row {row_number}: duration_time"
             )
+            if strict_samples and (start < 0 or duration_ns <= 0):
+                raise ValueError(f"{path}:row {row_number}: invalid kernel start or duration")
             if start < 0 or duration_ns < 0:
                 continue
             matched_kernel_names.add(actual_name)
@@ -177,13 +189,15 @@ def extract_sqlite_series(
         connection.close()
 
     matches.sort(key=lambda item: item[0])
-    if len(matches) < LAST_SAMPLE_COUNT:
+    if strict_samples and any(left[0] == right[0] for left, right in zip(matches, matches[1:])):
+        raise ValueError(f"{path}: duplicate kernel start time")
+    if len(matches) < sample_count:
         raise ValueError(
-            f"{path}: expected at least {LAST_SAMPLE_COUNT} valid kernel samples, "
+            f"{path}: expected at least {sample_count} valid kernel samples, "
             f"matched={len(matches)}"
         )
     return (
-        [duration for _, duration in matches[-LAST_SAMPLE_COUNT:]],
+        [duration for _, duration in matches[-sample_count:]],
         len(matches),
         sorted(matched_kernel_names),
     )
@@ -262,14 +276,19 @@ def expand_inputs(inputs: list[Path]) -> list[Path]:
     return expanded
 
 
-def series_from_input(path: Path, kernel_name: str) -> tuple[list[float], dict]:
+def series_from_input(
+    path: Path, kernel_name: str, sample_count: int = LAST_SAMPLE_COUNT,
+    *, strict_samples: bool = False,
+) -> tuple[list[float], dict]:
     suffix = path.suffix.lower()
     if suffix == ".csv":
-        series, matched, matched_kernel_names = extract_csv_series(path, kernel_name)
+        series, matched, matched_kernel_names = extract_csv_series(
+            path, kernel_name, sample_count, strict_samples=strict_samples
+        )
         source_type = "op_summary_csv"
     elif suffix == ".db":
         series, matched, matched_kernel_names = extract_sqlite_series(
-            path, kernel_name
+            path, kernel_name, sample_count, strict_samples=strict_samples
         )
         source_type = "ai_core_op_summary_db"
     else:

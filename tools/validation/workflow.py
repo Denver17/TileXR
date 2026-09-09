@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 import uuid
+import measurements
 
 from source import inventory
 
@@ -29,10 +30,14 @@ EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
 DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
 CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
+CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
+CHAIN_CHECKPOINTS = (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
 SINGLE_ROUND_MARKER = "EP_SERVER_DEDUP_SINGLE_ROUND_PASS "
-RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, CHAIN_CHECKPOINT)
+MULTI_ROUND_MARKER = "EP_SERVER_DEDUP_MULTI_ROUND_PASS "
+BREAKDOWN_MARKER = "EP_SERVER_DEDUP_BREAKDOWN_PASS "
+RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, *CHAIN_CHECKPOINTS)
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
@@ -229,9 +234,9 @@ class Config:
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
-            raise ValueError("当前版本支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel、ep-sdedup-p1-dry-run 和 ep-sdedup-p1-chain-single")
-        if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, CHAIN_CHECKPOINT) and self.mode != "production":
-            raise ValueError("empty-kernel / chain-single 必须使用 production 模式验证真实 A5 artifact 和设备调用")
+            raise ValueError("当前版本支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel、ep-sdedup-p1-dry-run、ep-sdedup-p1-chain-single 和 ep-sdedup-p1-chain-multi")
+        if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
+            raise ValueError("empty-kernel / chain-single / chain-multi 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
         if self.user and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.user):
@@ -240,7 +245,7 @@ class Config:
         self.hostfile.relative_to(self.root)  # 同步契约：配置属于当前工作目录。
         self.install = self.root / "install/validation"
         self.logs = self.root / "run/validation"
-        self.chain = chain_configuration() if self.checkpoint == CHAIN_CHECKPOINT else None
+        self.chain = chain_configuration(self.checkpoint) if self.checkpoint in CHAIN_CHECKPOINTS else None
 
     def hosts(self):
         try:
@@ -251,7 +256,7 @@ class Config:
                 ranks = len(hosts) * 8
                 experts = self.chain["moe_expert_num"]
                 if experts % ranks or not 2 <= experts // ranks <= 32 or self.chain["topk"] > experts:
-                    raise ValueError("chain-single 要求 moe_expert_num=rank_size*L，2<=L<=32，topk<=moe_expert_num")
+                    raise ValueError("chain 检查点要求 moe_expert_num=rank_size*L，2<=L<=32，topk<=moe_expert_num")
             return hosts
         except FileNotFoundError:
             raise ValueError(f"hostfile 不存在：{self.hostfile}；请按 hostfile.example 一次性配置主机清单，"
@@ -272,16 +277,27 @@ class Config:
         return signature
 
 
-def chain_configuration():
+def chain_configuration(checkpoint):
     shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
              for name, default in (("bs", "256"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "384"))}
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
-        raise ValueError("chain-single shape 必须是正 int64，topk<=32")
+        raise ValueError("chain 检查点 shape 必须是正 int64，topk<=32")
     dtype = os.environ.get("TILEXR_VALIDATION_DTYPE", "bf16")
     block_dim = os.environ.get("TILEXR_VALIDATION_BLOCK_DIM", "auto")
     if dtype not in ("bf16", "fp16") or (block_dim != "auto" and
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
-        raise ValueError("chain-single dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
+        raise ValueError("chain 检查点 dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
+    run_mode, loops, warmup = "functional", 1, 0
+    if checkpoint == CHAIN_MULTI_CHECKPOINT:
+        run_mode = os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional")
+        if run_mode not in ("functional", "performance", "breakdown"):
+            raise ValueError("RUN_MODE 必须为 functional/performance/breakdown")
+        loops = int(os.environ.get("TILEXR_VALIDATION_LOOPS", "1" if run_mode == "functional" else "50"))
+        warmup = int(os.environ.get("TILEXR_VALIDATION_WARMUP", "0" if run_mode == "functional" else "50"))
+        if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
+            raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
+        if run_mode == "functional" and warmup != 0:
+            raise ValueError("functional 模式不执行 warmup，请使用 warmup=0")
 
     def endpoint(value, name):
         try:
@@ -299,7 +315,13 @@ def chain_configuration():
                             "TILEXR_DEMO_BARRIER_ADDR")
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
-    return dict(shape, dtype=dtype, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr)
+    chain = dict(shape, dtype=dtype, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
+                 run_mode=run_mode, loops=loops, warmup=warmup)
+    if run_mode == "performance":
+        chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
+        if not chain["msprof"]:
+            raise ValueError("TILEXR_VALIDATION_MSPROF 不能为空")
+    return chain
 
 
 @contextmanager
@@ -399,6 +421,9 @@ def verify_build(config):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
+    if (config.checkpoint == CHAIN_MULTI_CHECKPOINT and
+            manifest.get("server_dedup_profiling") is not (config.chain["run_mode"] == "breakdown")):
+        raise ValueError("设备打点开关与运行模式不一致，请重新执行 build_all.sh 和 sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -439,8 +464,10 @@ def build(config):
         command([tool, "--version"], log / (tool + "-version.log"))
     common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}"]
     if config.mode == "production":
+        profiling = config.chain is not None and config.chain["run_mode"] == "breakdown"
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
-                 "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF"],
+                 "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
+                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if profiling else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs],
                 log / "production-build.log", timeout=3600)
@@ -450,7 +477,7 @@ def build(config):
                 raise ValueError(f"缺少 EP kernel：{kernel}")
     host_build = work / "host"
     registration = config.checkpoint == EMPTY_KERNEL_CHECKPOINT
-    chain = config.checkpoint == CHAIN_CHECKPOINT
+    chain = config.checkpoint in CHAIN_CHECKPOINTS
     command(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST={'ON' if registration else 'OFF'}",
@@ -460,7 +487,7 @@ def build(config):
     command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
     command(["cmake", "--install", host_build], log / "host-install.log")
     if chain and not (stage / "bin" / CHAIN_PROGRAM).is_file():
-        raise ValueError(f"单轮空算子测试未安装：{CHAIN_PROGRAM}")
+        raise ValueError(f"空算子测试未安装：{CHAIN_PROGRAM}")
     try:
         listing = json.loads(command(["ctest", "--test-dir", host_build, "--show-only=json-v1"],
                                      log / "tests.json"))
@@ -494,6 +521,8 @@ def build(config):
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""), "tests": tests,
                 "artifacts": artifact_files(stage)}
+    if config.checkpoint == CHAIN_MULTI_CHECKPOINT:
+        manifest["server_dedup_profiling"] = config.chain["run_mode"] == "breakdown"
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
@@ -634,7 +663,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         raise Failure("RESULT_FAILED", "rank 缺失、重复或不属于本节点")
     for record, mapping in zip(sorted(records, key=lambda item: item["rank"]), expected):
         wanted = rank_record(mapping, run_id, manifest)
-        chain = manifest["checkpoint"] == CHAIN_CHECKPOINT
+        chain = manifest["checkpoint"] in CHAIN_CHECKPOINTS
         for marker in (record, record.get("chain")) if chain else (record,):
             if not isinstance(marker, dict):
                 raise Failure("LOG_PARSE_FAILED", "缺少 rank 的建链记录", rank=mapping["rank"])
@@ -647,11 +676,27 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                 raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype 与本次配置不一致", rank=mapping["rank"])
         if chain:
             linked = record["chain"]
+            loops = 1
+            if manifest["checkpoint"] == CHAIN_MULTI_CHECKPOINT:
+                if chain_config is None:
+                    raise Failure("RESULT_FAILED", "缺少本次多轮配置", rank=mapping["rank"])
+                loops = chain_config["loops"]
+                for marker in (record, linked):
+                    if any(marker.get(key) != chain_config[key] for key in ("run_mode", "loops", "warmup")):
+                        raise Failure("RESULT_FAILED", "rank 的模式或批次配置不一致", rank=mapping["rank"])
+                if any(type(record.get(key)) is not int or record[key] != chain_config["warmup"]
+                       for key in ("warmup_submitted", "warmup_completed")):
+                    raise Failure("RESULT_FAILED", "rank 未完成指定预热批次", rank=mapping["rank"])
+                if chain_config["run_mode"] != "functional":
+                    try:
+                        measurements.validate_rank_measurements(record, chain_config)
+                    except (ValueError, TypeError, KeyError) as error:
+                        raise Failure("RESULT_FAILED", f"rank 测量记录无效：{error}", rank=mapping["rank"]) from error
             if (linked.get("peer_count") != mapping["rank_size"] or
                     type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] <= 0 or
-                    linked["pid"] != record["pid"] or record.get("submitted") != 1 or
-                    record.get("completed") != 1 or record.get("cleanup") != "complete"):
-                raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、一次空 launch 或资源清理",
+                    linked["pid"] != record["pid"] or any(type(record.get(key)) is not int or record[key] != loops
+                        for key in ("submitted", "completed")) or record.get("cleanup") != "complete"):
+                raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、指定轮数空 launch 或资源清理",
                               rank=mapping["rank"])
 
 
@@ -677,12 +722,13 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 raise Failure("EXIT_FAILED", "rank 启动前已超过节点执行期限", timeout=True)
             env = None
             argv = [sys.executable, Path(__file__), "rank", run_id, manifest["build_id"], str(rank)]
-            if config.checkpoint == CHAIN_CHECKPOINT:
+            if config.checkpoint in CHAIN_CHECKPOINTS:
                 argv = [config.install / "bin" / CHAIN_PROGRAM, run_id, manifest["build_id"],
                         manifest["source"]["commit"] or "unknown",
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
-                for key in ("bs", "h", "topk", "moe_expert_num", "dtype"):
+                env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "loops", "warmup", "run_mode"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
                 env["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 env["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
@@ -691,12 +737,30 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if config.chain["block_dim"] != "auto":
                     env[block_dim] = config.chain["block_dim"]
                 env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+                if config.chain["run_mode"] == "performance":
+                    profile_dir = log.parent / f"msprof-rank-{rank}"
+                    argv = [config.chain["msprof"], "--application=" + shlex.join([str(arg) for arg in argv]),
+                            "--output=" + str(profile_dir)]
             output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
-            if config.checkpoint == CHAIN_CHECKPOINT:
-                record = parse_rank_marker(output, SINGLE_ROUND_MARKER)
+            if config.checkpoint in CHAIN_CHECKPOINTS:
+                marker = MULTI_ROUND_MARKER if config.checkpoint == CHAIN_MULTI_CHECKPOINT else SINGLE_ROUND_MARKER
+                record = parse_rank_marker(output, marker)
                 if not isinstance(record, dict):
-                    raise Failure("LOG_PARSE_FAILED", "单轮记录不是 JSON 对象")
+                    raise Failure("LOG_PARSE_FAILED", "轮次记录不是 JSON 对象")
                 record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
+                if config.chain["run_mode"] == "performance":
+                    try:
+                        record["performance"] = measurements.performance_record(profile_dir,
+                            config.chain["loops"], config.chain["warmup"])
+                    except (ValueError, OSError) as error:
+                        raise Failure("RESULT_FAILED", f"msprof 测量记录无效：{error}", rank=rank) from error
+                elif config.chain["run_mode"] == "breakdown":
+                    breakdown = parse_rank_marker(output, BREAKDOWN_MARKER)
+                    wanted = rank_record(mapping, run_id, manifest)
+                    if (not isinstance(breakdown, dict) or any(breakdown.get(key) != value for key, value in wanted.items())
+                            or breakdown.get("pid") != record.get("pid")):
+                        raise Failure("RESULT_FAILED", "breakdown 的 rank/运行身份不一致", rank=rank)
+                    record["breakdown"] = breakdown
             else:
                 record = parse_rank_marker(output, DRY_RUN_MARKER)
             validate_rank_records([record], [mapping], run_id, manifest, config.chain)
@@ -1035,8 +1099,9 @@ def run(config):
         scope += "、A5 空 kernel 安装与设备注册"
     elif config.checkpoint == DRY_RUN_CHECKPOINT:
         scope += f"、{len(mappings)}P rank/device 映射与进程退出；不创建设备上下文或 communicator"
-    if config.checkpoint == CHAIN_CHECKPOINT:
-        scope += f"、{len(mappings)}P communicator/peer window、单轮空 Dispatch launch、stream 同步与 Host barrier；未执行去重算法或验证数值。"
+    if config.checkpoint in CHAIN_CHECKPOINTS:
+        rounds = "单轮" if config.checkpoint == CHAIN_CHECKPOINT else f"{config.chain['loops']} 轮"
+        scope += f"、{len(mappings)}P communicator/peer window、{rounds}空 Dispatch launch、整批 stream 同步与 Host barrier；未执行去重算法或验证数值。"
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
@@ -1049,9 +1114,22 @@ def run(config):
         completed = sum(len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
-            report["chain_configuration"] = dict(config.chain, quant_mode=0, loops=1)
+            report["chain_configuration"] = dict(config.chain, quant_mode=0)
+            if not errors and config.chain["run_mode"] != "functional":
+                try:
+                    records = [rank for node in nodes for rank in node["reported_result"]["ranks"]]
+                    kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
+                    report["measurements"] = measurements.summarize_measurements(records,
+                        dict(config.chain, rank_size=len(mappings)), kernel_sha)
+                except (ValueError, TypeError, KeyError) as error:
+                    failure = Failure("RESULT_FAILED", f"测量汇总失败：{error}").record()
+                    errors.append(failure)
+                    primary_error = failure
+                    report.update(status="FAIL", primary_error=failure)
         rank_summary = f"ranks={completed}/{len(mappings)} "
     write_json(log / "summary.json", report)
+    if "measurements" in report:
+        print(measurements.render_measurements(report["measurements"]), flush=True)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
           f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
           f"tests_per_host={len(manifest['tests'])} {rank_summary}commit={report['commit'] or 'unknown'} (unverified)", flush=True)
