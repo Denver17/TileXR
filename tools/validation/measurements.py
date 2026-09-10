@@ -11,6 +11,23 @@ import msprof_kernel_stats as profiler
 
 
 KERNEL_NAME = "tilexr_ep_dispatch_memory_server_dedup_kernel"
+RESULT_SEPARATOR = "=" * 32
+
+
+def render_case_description(report):
+    """Describe the effective case from its result, rather than guessed CLI defaults."""
+    config = report.get("chain_configuration")
+    if not config:
+        return "checkpoint=" + report.get("checkpoint", "unknown")
+    return (
+        f"Dispatch server-dedup（空 kernel） mode={config['run_mode']} "
+        f"loops={config['loops']} warmup={config['warmup']}\n"
+        f"BS={config['bs']} H={config['h']} TopK={config['topk']} "
+        f"experts={config['moe_expert_num']} dtype={config['dtype']} "
+        f"cards={report.get('rank_size', 'unknown')} quant_mode={config.get('quant_mode', 0)}"
+    )
+
+
 BREAKDOWN_STAGES = ("entry_checks", "record_prepare", "empty_total")
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。
 A5_SYSTEM_TICKS_PER_US = 1000

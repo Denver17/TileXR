@@ -2,7 +2,7 @@
 # 单用例核心入口。参数以 key=value 传入；构建和同步由调用方决定。
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-if [[ ! -f validation.local.sh ]]; then printf '\n==========\nFailed\n==========\n\n' ; exit 2; fi
+if [[ ! -f validation.local.sh ]]; then printf '\n================================\nFailed\n================================\n\n' ; exit 2; fi
 case_id="case-$(date +%Y%m%d-%H%M%S)-$$"
 result_root="${TILEXR_VALIDATION_RESULT_ROOT:-$PWD/run/$case_id}"
 mkdir -p "$result_root"
@@ -21,7 +21,7 @@ for argument in "$@"; do
                 barrier_addr) assignments+=("TILEXR_DEMO_BARRIER_ADDR=$value");; msprof) assignments+=("TILEXR_VALIDATION_MSPROF=$value");;
                 hostfile) assignments+=("TILEXR_VALIDATION_HOSTFILE=$value");;
             esac;;
-        *) printf '\n==========\nFailed\n==========\n\n' ; exit 2;;
+        *) printf '\n================================\nFailed\n================================\n\n' ; exit 2;;
     esac
 done
 for assignment in "${assignments[@]}"; do export "$assignment"; done
@@ -36,18 +36,30 @@ export TILEXR_DIRECT_RUN=1
 if bash ./run.sh >"$result_root/workflow.log" 2>&1; then status=PASS; else status=FAIL; fi
 summary_json=$(find "$result_root" -name summary.json -type f -print -quit || true)
 if [[ -n "$summary_json" ]]; then cp -- "$summary_json" "$result_root/summary.json"; fi
-if [[ "$status" == PASS ]]; then
-    average=$("${TILEXR_VALIDATION_PYTHON:-python3}" - "$result_root/summary.json" <<'PY'
-import json,sys
+"${TILEXR_VALIDATION_PYTHON:-python3}" - "$result_root" "$status" <<'PY'
+import json
+from pathlib import Path
+import sys
+sys.path.insert(0, 'tools/validation')
+from measurements import RESULT_SEPARATOR, render_case_description
+root = Path(sys.argv[1])
+status = sys.argv[2]
 try:
- d=json.load(open(sys.argv[1],encoding='utf-8')); print(d.get('measurements',{}).get('performance',{}).get('mean_us',''))
-except Exception: print('')
+    report = json.loads((root / 'summary.json').read_text(encoding='utf-8'))
+    description = render_case_description(report)
+except (OSError, ValueError, KeyError) as error:
+    report = {}
+    description = 'Case configuration unavailable'
+    status = 'FAIL'
+    with (root / 'workflow.log').open('a', encoding='utf-8') as log:
+        log.write(f'\nERROR summary: {error}\n')
+result = 'PASS' if status == 'PASS' else 'Failed'
+if status == 'PASS':
+    average = report.get('measurements', {}).get('performance', {}).get('mean_us')
+    if average is not None:
+        result += f' kernel average_us={average:.3f}'
+text = f'\n{RESULT_SEPARATOR}\n{description}\n{result}\n{RESULT_SEPARATOR}\n\n'
+(root / 'summary.log').write_text(text, encoding='utf-8')
+print(text, end='')
+sys.exit(0 if status == 'PASS' else 1)
 PY
-)
-    echo status=PASS >"$result_root/summary.log"
-    if [[ -n "$average" ]]; then echo "average_us=$average" >>"$result_root/summary.log"; printf '\n==========\nPASS kernel average_us=%s\n==========\n\n' "$average"; else printf '\n==========\nPASS\n==========\n\n' ; fi
-    exit 0
-fi
-echo status=FAIL >"$result_root/summary.log"
-printf '\n==========\nFailed\n==========\n\n'
-exit 1
