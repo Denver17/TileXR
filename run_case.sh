@@ -67,6 +67,17 @@ if status == 'PASS':
         result += f' kernel average_us={average:.3f}'
 if report.get('chain_configuration', {}).get('run_mode') == 'breakdown':
     result += f'\nJSON: {(root / "summary.json").resolve()}'
+    if status == 'PASS':
+        traces = report.get('traces', {})
+        if not traces.get('all_ranks'):
+            status = 'FAIL'
+            result = result.replace('PASS', 'Failed', 1)
+            with (root / 'workflow.log').open('a', encoding='utf-8') as log:
+                log.write('\nERROR breakdown trace output missing\n')
+        else:
+            result += f'\nTrace (all cards): {traces["all_ranks"]}'
+            for role, path in traces['selected'].items():
+                result += f'\nTrace ({role}, rank={traces["selected_ranks"][role]}): {path}'
 text = f'\n{RESULT_SEPARATOR}\n{description}\n{result}\n{RESULT_SEPARATOR}\n\n'
 (root / 'summary.log').write_text(text, encoding='utf-8')
 print(text, end='')

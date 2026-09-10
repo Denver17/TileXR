@@ -38,6 +38,27 @@ breakdown 的设备打点是编译期开关。切换至 breakdown 或从 breakdo
 
 ## 输出和验收范围
 
+### breakdown Chrome Trace
+
+breakdown 成功后自动生成 `run/case-<时间>-<PID>/<run_id>/traces/`：
+
+- `all-ranks.trace.json`：全部卡，每 rank 一个 process，每 AIV core 一个 thread。
+- `rank-N.trace.json`：每张卡的独立 trace，所有卡均保留。
+- `fastest.trace.json`、`p50.trace.json`、`slowest.trace.json`：按 Memory 版本相同规则筛选的三张代表卡。
+- `index.json`：全卡排序、筛选结果和文件路径，也写入 summary.json 的 traces 字段。
+
+将 `.trace.json` 拖入 Chrome tracing；summary.json/index.json 是汇总索引，不能当作 trace 导入。核心结果区打印全卡和三份筛选 trace 的绝对路径，人工批测和提交验收复用同一导出流程。
+
+筛选依据为每 rank 的 `max_core(end-start)`，按耗时升序、同耗时按 rank 排序；p50 选择 `ceil(N/2)-1` 的实际卡，不平均两张卡。各 rank 时间戳先以本卡最早 start 做整数减法，再按 1000 ticks/us 转换；不同卡不具备同步时钟，合并图不能用来判断跨卡先后关系。每核输出 entry_checks、record_prepare 两段，完整区间为二者之和。当前仅保存最后一轮打点，空 kernel 也必须有有效事件；不声称输出所有轮次或算子算法阶段。
+
+已有成功 breakdown summary 可以离线导出，不重新编译或启动 NPU：
+
+```bash
+python3 tools/validation/measurements.py run/case-实际目录/summary.json
+```
+
+可用 `--output-dir run/trace-review` 指定输出目录。缺卡、缺核、错误 generation 或非法时间戳使导出失败；自动导出失败不能将该 breakdown case 标为 PASS。当前验证重点是解析、Chrome Trace 序列化、全卡覆盖和筛选，不重复旧硬件检查点；后续算子内容增加时再扩展设备打点。
+
 breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`，指向 `run/case-<时间>-<PID>/summary.json`。其中 `measurements.breakdown.stages_us` 为微秒汇总，`stages` 为原始 ticks 汇总，`rank_stages` 为每 rank 各段的跨核最大值；各核原始时间戳与 generation 位于 `nodes[].reported_result.ranks[].breakdown`。若未完成汇总，measurements 可能缺失，应查看 errors 和节点记录。
 
 每次运行在仓库 `run/` 下生成独立目录，保留节点/rank 日志、summary.json 与 summary.log。关键输出使用空行和 32 个 `=` 分隔，在 PASS 或 kernel 性能之前展示两行实际 case 参数。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。

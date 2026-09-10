@@ -327,6 +327,9 @@ def mapped(value):
 
 if kind == "ssh":
     command = shlex.split(args[-1])
+    direct = None
+    if command[0].startswith("TILEXR_DIRECT_CONFIG="):
+        direct = command.pop(0).split("=", 1)[1].replace(str(root), str(remote))
     payload = sys.stdin.read()
     if command == ["hostname"]:
         print("node-b")
@@ -352,6 +355,8 @@ if kind == "ssh":
         sys.exit(23)
     environment = dict(os.environ, TILEXR_VALIDATION_ROOT=str(remote),
                        TILEXR_VALIDATION_HOSTFILE=str(remote / "hostfile"))
+    if direct is not None:
+        environment["TILEXR_DIRECT_CONFIG"] = direct
     if action == "node" and scenario in ("node-fail", "node-fail-cleanup-fail", "node-fail-collect-fail"):
         environment["TEST_PROGRAM_BEHAVIOR"] = "missing-marker"
     if action == "node" and scenario == "result-fail":
@@ -860,6 +865,9 @@ with output.open('w', newline='') as f:
         self.assert_success(self.invoke("run"))
         summary = self.summary()
         self.assertEqual(summary["measurements"]["run_mode"], "breakdown")
+        self.assertEqual(len(summary["traces"]["ranks"]), 16)
+        trace = workflow.read_json(Path(summary["traces"]["all_ranks"]))
+        self.assertEqual({event["pid"] for event in trace["traceEvents"] if event["ph"] == "X"}, set(range(16)))
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["breakdown"]["generation"], 5)

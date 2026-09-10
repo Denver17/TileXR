@@ -2,6 +2,7 @@
 """读取单算子测量证据；不启动 profiler、设备进程或通信。"""
 
 import math
+import json
 from pathlib import Path
 import statistics
 import sys
@@ -201,3 +202,74 @@ def render_measurements(summary):
             append("最后一轮各核最大值 " + name, breakdown["stages_us"][name], "us")
         lines.append("breakdown 仅为空入口检查和记录准备，未计量最终记录写出；各段最大值不保证可相加。")
     return "\n".join(lines)
+
+
+def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kernel_sha):
+    """Export every card and Memory-style fastest/p50/slowest Chrome traces."""
+    summary = summarize_measurements(rank_records, chain_config, kernel_sha)
+    if summary["run_mode"] != "breakdown":
+        raise ValueError("trace export requires breakdown records")
+    ranks = sorted(rank_records, key=lambda row: row["rank"])
+    order = sorted((max(core["end"] - core["start"] for core in row["breakdown"]["records"])
+                    / A5_SYSTEM_TICKS_PER_US, row["rank"]) for row in ranks)
+    selected = dict(fastest=order[0][1], p50=order[(len(order) - 1) // 2][1], slowest=order[-1][1])
+    output_dir = Path(output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    provenance = dict(run_id=run_id, kernel_sha256=kernel_sha, configuration=chain_config,
+                      selection="final_measured_iteration", generation=chain_config["warmup"] + chain_config["loops"],
+                      clock_alignment="each rank normalized to its earliest core start; not synchronized across NPUs",
+                      selection_rule="max core end-start per rank; ascending duration, ties by rank; p50=ceil(N/2)-1",
+                      clock=SYSTEM_CLOCK_SOURCE, native_status="empty",
+                      scope="entry checks and record preparation only; final record write excluded")
+
+    def write(name, events, **extra):
+        path = output_dir / name
+        path.write_text(json.dumps(dict(traceEvents=events, displayTimeUnit="ns",
+                                        otherData=dict(provenance, **extra)), indent=2) + "\n", encoding="utf-8")
+        return str(path)
+
+    per_rank, rank_events, all_events = {}, {}, []
+    for row in ranks:
+        rank = row["rank"]
+        cores = sorted(row["breakdown"]["records"], key=lambda core: core["core"])
+        origin = min(core["start"] for core in cores)
+        events = [dict(ph="M", name="process_name", pid=rank, tid=0,
+                       args=dict(name=f"Dispatch rank {rank} host={row.get('host', 'unknown')} device={row.get('device', 'unknown')}"))]
+        for core in cores:
+            tid = core["core"]
+            events.append(dict(ph="M", name="thread_name", pid=rank, tid=tid, args=dict(name=f"AIV core {tid}")))
+            for name, begin, end in (("entry_checks", core["start"], core["checked"]),
+                                     ("record_prepare", core["checked"], core["end"])):
+                events.append(dict(ph="X", cat="kernel", name=name, pid=rank, tid=tid,
+                                   ts=(begin - origin) / A5_SYSTEM_TICKS_PER_US,
+                                   dur=(end - begin) / A5_SYSTEM_TICKS_PER_US,
+                                   args=dict(start_ticks=begin, end_ticks=end, generation=row["breakdown"]["generation"])))
+        rank_events[rank] = events
+        all_events.extend(events)
+        per_rank[str(rank)] = write(f"rank-{rank}.trace.json", events, rank=rank, origin_ticks=origin)
+    selection_files = {role: write(f"{role}.trace.json", rank_events[rank], role=role, rank=rank)
+                       for role, rank in selected.items()}
+    index = dict(all_ranks=write("all-ranks.trace.json", all_events), ranks=per_rank,
+                 selected_ranks=selected, selected=selection_files,
+                 rank_order=[dict(rank=rank, elapsed_us=elapsed) for elapsed, rank in order])
+    (output_dir / "index.json").write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+    return index
+
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Export Chrome traces from an existing breakdown summary; no NPU launch.")
+    parser.add_argument("summary", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    args = parser.parse_args()
+    try:
+        report = json.loads(args.summary.read_text(encoding="utf-8"))
+        if report["status"] != "PASS" or report.get("errors"):
+            raise ValueError("requires a successful breakdown summary")
+        records = [rank for node in report["nodes"] for rank in node["reported_result"]["ranks"]]
+        index = export_breakdown_traces(records, dict(report["chain_configuration"], rank_size=report["rank_size"]),
+            args.output_dir or args.summary.parent / "traces", report["run_id"], report["measurements"]["kernel_sha256"])
+        print("\n" + RESULT_SEPARATOR + "\nPASS\nTrace: " + index["all_ranks"] + "\n" + RESULT_SEPARATOR + "\n")
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print(f"ERROR trace export: {error}", file=sys.stderr)
+        sys.exit(1)

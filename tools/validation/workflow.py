@@ -1170,7 +1170,10 @@ def run(config):
                     kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
                     report["measurements"] = measurements.summarize_measurements(records,
                         dict(config.chain, rank_size=len(mappings)), kernel_sha)
-                except (ValueError, TypeError, KeyError) as error:
+                    if config.chain["run_mode"] == "breakdown":
+                        report["traces"] = measurements.export_breakdown_traces(records,
+                            dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha)
+                except (ValueError, TypeError, KeyError, OSError) as error:
                     failure = Failure("RESULT_FAILED", f"测量汇总失败：{error}").record()
                     errors.append(failure)
                     primary_error = failure
