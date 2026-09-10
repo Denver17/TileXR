@@ -77,6 +77,14 @@ root.mkdir(parents=True)
             self.assertEqual(self.local.read_bytes(), before)
             self.assertFalse(list(output.glob("*.bak")))
 
+        stub.write_text(stub.read_text().replace("status='PASS'", "status='FAIL'"))
+        result = subprocess.run([str(self.bash), "run.sh", "run_mode=functional"], cwd=self.root,
+                                env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(self.root / "run/failed")),
+                                text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Failed", result.stdout)
+        self.assertNotIn("PASS", result.stdout)
+
     def test_manual_checkpoint_comes_from_install_and_commit_override_wins(self):
         target = self.root / "install/validation/manifest.json"
         target.parent.mkdir(parents=True)

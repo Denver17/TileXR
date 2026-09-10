@@ -52,6 +52,8 @@ status = sys.argv[2]
 try:
     report = json.loads((root / 'summary.json').read_text(encoding='utf-8'))
     description = render_case_description(report)
+    if report.get('status') != 'PASS' or report.get('errors'):
+        status = 'FAIL'
 except (OSError, ValueError, KeyError) as error:
     report = {}
     description = 'Case configuration unavailable'
