@@ -64,7 +64,13 @@ performance 构建关闭 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING`，只采集 m
 
 breakdown 的 `entry_checks`、`record_prepare`、`empty_total` 分别为入口参数检查、记录寻址准备和二者总计，不含最终记录写出/cache clean。保留原始 ticks，并按 A5/950 的 1000 ticks/us 输出微秒；依据为官方 [asc-devkit 9.1.0 GetSystemCycle](https://gitcode.com/cann/asc-devkit/blob/91c03327210113585f52739a6c85c35ece492970/docs/api/SIMD-API/基础API/工具接口/系统资源与变量/GetSystemCycle_ISASI.md)。每段先取各核最大值，再做跨 rank median/min/max；不同阶段最大值可能来自不同核，不保证可相加。性能报告同时记录 backend、空 kernel 状态、artifact SHA、算法通信量 0B、带宽 N/A，以及 Host 测量批提交/同步/barrier/总耗时，不能当作真实去重性能。
 
-## 当前提交点的批量测试
+## 三层测试脚本与结果目录
+
+测试入口分为三层：`run_case.sh` 是接受详细 `key=value` 参数的单用例核心入口，复用已安装产物且不负责编译和同步；`run_batch.sh` 面向人工探索，只重复调用核心入口并汇总多个 BS、模式或轮数；`run_commit_validation.sh` 面向提交验收，只列出本提交实际影响的 case，必要时统一构建和同步。之前已通过且未受影响的检查点不重复回归。
+
+每次核心运行在当前目录的 `run/` 下创建独立目录，保留 workflow、节点和 rank 日志，生成 `summary.json` 与 `summary.log`。终端只打印 `PASS`，失败只打印 `Failed`；性能 case 额外打印跨 rank 的 `average_us`，错误信息从日志中查找。
+
+人工批测前应先完成一次构建和同步；同一 checkpoint、同一设备打点开关下，BS、模式和轮数变化不需要重新编译。批测脚本本身不增加编译或同步步骤。
 
 当前最低补测项为 **functional 连续 50 轮（无预热）** 和 **performance 预热 50 轮、测量 50 轮**。
 PC 同步本次代码到首节点、配好原 `validation.local.sh` 和 hostfile 后，在服务器仓库根目录执行：
@@ -73,13 +79,13 @@ PC 同步本次代码到首节点、配好原 `validation.local.sh` 和 hostfile
 bash run_batch.sh
 ```
 
-[run_batch.sh](../run_batch.sh) 是针对 `e5a4bdb` 补测需求的简短清单，后续提交点可直接改末尾的 `run_case` 调用，或注释不需要的项；使用单次入口时仍按原七步运行 `bash run.sh`。批次本身负责第一次构建以及每项的同步、运行，不必在批次前另跑 build/sync/run。
+[run_batch.sh](../run_batch.sh) 是人工批测清单，只调用 `run_case.sh`；运行前应完成一次构建和同步。
 
-当前两项共用关闭打点的构建，继承原 hostfile、shape、dtype、CANN 和 msprof 路径。脚本临时覆盖 `validation.local.sh` 中的 checkpoint、模式和轮数，经原 `sync.sh` 分发到所有节点；结束或失败时恢复首节点原配置。后续切回单测，仍按原流程同步配置后运行。测试期间不要同时修改该配置或启动其他验证任务。
+BS、模式和轮数的变化由核心入口作为本次运行参数传递；同一 checkpoint 和设备打点开关下无需重新编译。测试期间不要同时启动其他验证任务。
 
-任一步失败立即停止，保留原退出码；两项均成功才输出 `BATCH_PASS cases=2`。终端汇总在 `run/validation/batch-*/`，每项日志包含原 `summary.json` 路径和性能统计。登记通过仍以各项 summary 的实际模式、轮数、rank 与 commit 为准；批次成功不覆盖 breakdown 或其他规模。
+每个 case 独立写入 `run/` 结果目录；批次只汇总 PASS/Failed 和性能 average，登记仍以各 case 的 summary 为准。
 
-维护批次时，仅在 checkpoint 和设备打点编译开关相同的测试间复用构建。只在本机 export 轮数会被配置文件覆盖，也不会自动传到 SSH 节点；应通过现有同步路径分发实际配置。不要为了临时清单增加新的 runner 或通用配置层。
+提交验收应只包含本提交涉及的检查点；已通过且未受影响的检查点不重复回归。
 
 ## 一次性环境配置
 

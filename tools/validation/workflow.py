@@ -69,6 +69,9 @@ set -eo pipefail
 cd -- "$1"
 shift
 source ./set_env.sh
+if [ -n "${TILEXR_DIRECT_CONFIG:-}" ]; then
+    eval "${TILEXR_DIRECT_CONFIG}"
+fi
 exec "$TILEXR_VALIDATION_PYTHON" tools/validation/workflow.py "$@"
 ' bash "$@"
 '''
@@ -223,6 +226,24 @@ def hosts_from_file(path):
     return hosts
 
 
+def hosts_from_json(raw):
+    try:
+        hosts = json.loads(raw)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise ValueError("直接运行的 hostfile 配置不是有效 JSON") from error
+    if not isinstance(hosts, list):
+        raise ValueError("直接运行的 hostfile 配置必须是数组")
+    for item in hosts:
+        if (not isinstance(item, dict) or not isinstance(item.get("host"), str)
+                or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", item["host"])
+                or not isinstance(item.get("devices"), list)
+                or any(type(device) is not int or not 0 <= device <= 255 for device in item["devices"])):
+            raise ValueError("直接运行的 hostfile 配置无效")
+    if not 1 <= len(hosts) <= 64 or len({item["host"] for item in hosts}) != len(hosts):
+        raise ValueError("直接运行的 hostfile 主机数量或主机重复")
+    return hosts
+
+
 class Config:
     def __init__(self):
         self.root = Path(os.environ.get("TILEXR_VALIDATION_ROOT", Path(__file__).resolve().parents[2])).resolve()
@@ -244,12 +265,14 @@ class Config:
         self.hostfile = self.hostfile.resolve()
         self.hostfile.relative_to(self.root)  # 同步契约：配置属于当前工作目录。
         self.install = self.root / "install/validation"
-        self.logs = self.root / "run/validation"
+        self.logs = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", self.root / "run/validation")).resolve()
         self.chain = chain_configuration(self.checkpoint) if self.checkpoint in CHAIN_CHECKPOINTS else None
 
     def hosts(self):
         try:
-            hosts = hosts_from_file(self.hostfile)
+            hosts = (hosts_from_json(os.environ["TILEXR_DIRECT_HOSTS_JSON"])
+                     if os.environ.get("TILEXR_DIRECT_HOSTS_JSON")
+                     else hosts_from_file(self.hostfile))
             if self.checkpoint in RANK_CHECKPOINTS:
                 rank_mapping(hosts)
             if self.chain is not None:
@@ -538,6 +561,27 @@ def build(config):
 
 def remote_argv(config, host, action, *arguments):
     command = "bash -s -- " + " ".join(shlex.quote(str(value)) for value in (config.root, action, *arguments))
+    if os.environ.get("TILEXR_DIRECT_RUN"):
+        values = {
+            "TILEXR_VALIDATION_CHECKPOINT": config.checkpoint,
+            "TILEXR_VALIDATION_BUILD_MODE": config.mode,
+            "TILEXR_VALIDATION_BS": config.chain.get("bs") if config.chain else None,
+            "TILEXR_VALIDATION_H": config.chain.get("h") if config.chain else None,
+            "TILEXR_VALIDATION_TOPK": config.chain.get("topk") if config.chain else None,
+            "TILEXR_VALIDATION_MOE_EXPERT_NUM": config.chain.get("moe_expert_num") if config.chain else None,
+            "TILEXR_VALIDATION_DTYPE": config.chain.get("dtype") if config.chain else None,
+            "TILEXR_VALIDATION_LOOPS": config.chain.get("loops") if config.chain else None,
+            "TILEXR_VALIDATION_WARMUP": config.chain.get("warmup") if config.chain else None,
+            "TILEXR_VALIDATION_RUN_MODE": config.chain.get("run_mode") if config.chain else None,
+            "TILEXR_COMM_ID": config.chain.get("comm_id") if config.chain else None,
+            "TILEXR_DEMO_BARRIER_ADDR": config.chain.get("barrier_addr") if config.chain else None,
+            "TILEXR_VALIDATION_MSPROF": config.chain.get("msprof") if config.chain else None,
+            "TILEXR_VALIDATION_RESULT_ROOT": str(config.logs),
+            "TILEXR_DIRECT_HOSTS_JSON": json.dumps(config.hosts(), separators=(",", ":")),
+        }
+        exports = "; ".join("export " + key + "=" + shlex.quote(str(value))
+                             for key, value in values.items() if value is not None)
+        command = "TILEXR_DIRECT_CONFIG=" + shlex.quote(exports) + " " + command
     return ["ssh", *SSH_OPTIONS, config.target(host), command]
 
 
@@ -975,8 +1019,8 @@ def run(config):
     run_id = uuid.uuid4().hex
     log = config.logs / run_id
     manifest = verify_build(config)
-    receipt = read_json(config.logs / "sync.json")
-    if receipt != {"build_id": manifest["build_id"], "configuration": config.signature()}:
+    receipt = read_json(config.logs / "sync.json") if (config.logs / "sync.json").exists() else None
+    if not os.environ.get("TILEXR_DIRECT_RUN") and receipt != {"build_id": manifest["build_id"], "configuration": config.signature()}:
         raise ValueError("生效配置或构建版本自同步后发生变化，请重新执行 sync.sh")
     print(f"开始测试：hosts={len(hosts)} checkpoint={config.checkpoint} mode={config.mode}\n日志：{log}", flush=True)
 
