@@ -92,6 +92,10 @@ runtime does not remove unresolved symbols from the linker input.
 
 ## Build Expert Parallelism Package
 
+仅在 A5 环境验证的 EP Memory Server Dedup 分阶段开发计划及六个上机验证 checkpoint，
+见 [EP Memory Server Dedup 验证流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md)。
+该文档记录开发与验证计划；其中的 checkpoint 名称和命令需在对应代码实现并交付后才能使用。
+
 EP uses one installation layout for every deployment environment. Do not pass
 `TILEXR_SOC_NAME` or an EP SoC CMake option when configuring:
 
