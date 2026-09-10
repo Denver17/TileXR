@@ -5,7 +5,8 @@
 #define __aicore__
 #define __global__
 #define __gm__
-using GM_ADDR = uint8_t *;
+// Match CANN's pointer macro: `const GM_ADDR` qualifies the pointee, not the pointer.
+#define GM_ADDR __gm__ uint8_t *
 namespace AscendC {
 extern uint32_t testCore;
 extern uint32_t testCores;

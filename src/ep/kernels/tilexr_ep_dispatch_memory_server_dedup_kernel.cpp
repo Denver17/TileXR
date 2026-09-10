@@ -38,7 +38,8 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_memory_server_dedup_ker
         blockDim == 0U || blockDim > TileXREp::kEpServerDedupProfileMaxCores || core >= blockDim) {
         return;
     }
-    const GM_ADDR localData = args->peerMems[args->rank];
+    // Keep the pointer fixed while allowing writes to this rank's profile region.
+    __gm__ uint8_t *const localData = args->peerMems[args->rank];
     const uint64_t profileBytes = static_cast<uint64_t>(blockDim) *
         sizeof(TileXREp::EpServerDedupProfileRecord);
     if (localData == nullptr || reinterpret_cast<uint64_t>(localData) % 64U != 0U ||

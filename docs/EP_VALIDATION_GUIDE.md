@@ -46,6 +46,8 @@ breakdown 的设备打点是编译期开关。切换至 breakdown 或从 breakdo
 
 ## 后续维护约束
 
+breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CANN 将 `GM_ADDR` 定义为指针宏，`const GM_ADDR` 实际限定指向的数据为只读；CPU 替身的 `using` 定义却限定指针本身，掩盖了问题。可写 profile 区应显式使用 `__gm__ uint8_t *const`，替身同步采用指针宏语义。此回归验证限定符和记录写入行为，不能代替 CANN 编译或设备 breakdown 验收。
+
 - 环境配置只读，不用追加参数/备份恢复方式传递 case；那会造成双份配置、覆盖用户修改和多机不一致。
 - 核心参数由调用方提供，批测只组合 case，不隐式编译或同步。提交验收按实际需要决定部署步骤。
 - checkpoint 只在提交验收入口选择；人工运行继承安装产物身份，结果仍记录 checkpoint。
