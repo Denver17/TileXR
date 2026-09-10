@@ -174,11 +174,7 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["loops"], count)
                         self.assertEqual(record["warmup"], warmup_count)
                         self.assertEqual(record["run_mode"], run_mode)
-                    if run_mode == "functional":
-                        self.assertNotIn("timing_us", final[0])
-                    else:
-                        self.assertEqual(set(final[0]["timing_us"]), {"submit", "sync", "barrier", "batch_total"})
-                        self.assertTrue(all(value >= 0 for value in final[0]["timing_us"].values()))
+                    self.assertNotIn("timing_us", final[0])
                     breakdown = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")
                     self.assertEqual(len(breakdown), 1 if run_mode == "breakdown" else 0)
                     if breakdown:

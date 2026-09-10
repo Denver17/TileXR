@@ -6,4 +6,4 @@ run_case() { bash ./run_case.sh "$@"; }
 run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=performance loops=50 warmup=50 bs=128
 run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=performance loops=50 warmup=50 bs=256
 run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=performance loops=50 warmup=50 bs=512
-echo PASS
+printf '\n==========\nPASS\n==========\n\n'

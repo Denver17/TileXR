@@ -62,7 +62,7 @@ TILEXR_VALIDATION_WARMUP=0
 
 performance 构建关闭 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING`，只采集 msprof 的完整 kernel 耗时；breakdown 构建开启此选项，在自己 MemoryDomain 数据区按核覆盖记录，批末只检查最后一轮。切换 breakdown 与其他模式时必须重建，现有 manifest 检查会拒绝开关不匹配的安装包，防止将带打点成本的 kernel 作为性能基线。原公共接口和 20 字段 launch ABI 不变。打点不读取 route/hidden 或 Dispatch 输出，不实现 Combine 或 Dispatch/Combine 连跑。
 
-breakdown 的 `entry_checks`、`record_prepare`、`empty_total` 分别为入口参数检查、记录寻址准备和二者总计，不含最终记录写出/cache clean。保留原始 ticks，并按 A5/950 的 1000 ticks/us 输出微秒；依据为官方 [asc-devkit 9.1.0 GetSystemCycle](https://gitcode.com/cann/asc-devkit/blob/91c03327210113585f52739a6c85c35ece492970/docs/api/SIMD-API/基础API/工具接口/系统资源与变量/GetSystemCycle_ISASI.md)。每段先取各核最大值，再做跨 rank median/min/max；不同阶段最大值可能来自不同核，不保证可相加。性能报告同时记录 backend、空 kernel 状态、artifact SHA、算法通信量 0B、带宽 N/A，以及 Host 测量批提交/同步/barrier/总耗时，不能当作真实去重性能。
+breakdown 的 `entry_checks`、`record_prepare`、`empty_total` 分别为入口参数检查、记录寻址准备和二者总计，不含最终记录写出/cache clean。保留原始 ticks，并按 A5/950 的 1000 ticks/us 输出微秒；依据为官方 [asc-devkit 9.1.0 GetSystemCycle](https://gitcode.com/cann/asc-devkit/blob/91c03327210113585f52739a6c85c35ece492970/docs/api/SIMD-API/基础API/工具接口/系统资源与变量/GetSystemCycle_ISASI.md)。每段先取各核最大值，再做跨 rank median/min/max；不同阶段最大值可能来自不同核，不保证可相加。性能报告同时记录 backend、空 kernel 状态、artifact SHA、算法通信量 0B、带宽 N/A，仅保留 kernel 耗时统计，不能当作真实去重性能。
 
 ## 三层测试脚本与结果目录
 
@@ -399,3 +399,7 @@ Host 测试和本机 8 个 rank 共用节点剩余执行预算，后启动的 ra
 无 `.git`、无来源清单、空 spdlog 且路径含空格的普通复制目录中，两轮 `source set_env.sh` → `build_all.sh` → `sync.sh` → `run.sh` 完成真实 C++14 Debug 编译，每轮 17/17 Host/Python 测试通过；第二轮清除固定目录旧产物，build_id 改变，Git 拦截器确认服务器流程未调用 Git，hostfile 字节不变。向真实参与构建的 `tests/ep/unit/test_tilexr_ep_server_dedup_layout.cpp` 注入编译错误后，报告 `BUILD_FAILED`，旧 manifest/同步记录失效，sync/run 均拒绝旧包。CANN 生产编译、真实 SSH 集群、Linux 真实 symlink 和 NPU 验证仍未在本地执行。
 
 同日 C ABI 导出检查修复：正确 C 符号的命令输出夹具先复现旧检查误报，修复后完整脚本回归 89 项中 86 项通过、3 项因 MSYS symlink 限制跳过。新用例覆盖两个接口独立缺失、相似名称、C++ mangled 名、未定义/局部/数据符号及正确导出后继续检查 RUNPATH/HAL。另使用现有测试 ACL 头文件夹具，以 C++14 重新编译当前两个 Dispatch Host 源文件；真实 `nm --defined-only --no-demangle --format=posix` 的对象符号均为不带括号的 `T` 函数名。该对象编译证据不代表 CANN 生产共享库的链接、动态符号表或 NPU 执行已在本地验证。
+
+### Kernel 计时与关键结果输出
+
+人工测试与提交验收只采集和统计 kernel 耗时，不采集、校验或输出 Host submit/sync/barrier/batch_total 时间。stream 同步与 Host barrier 仍按整批执行，只移除计时。成功/失败与 kernel 统计前后使用空行和 `==========` 分隔；functional 不输出耗时。performance 的现有 mean_us 是各 rank 样本中位数的算术平均，统计口径保持不变。此变更仅需验证结果解析和输出，不重复执行已通过的硬件检查点。

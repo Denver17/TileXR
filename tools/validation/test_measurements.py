@@ -49,12 +49,10 @@ class MeasurementTests(unittest.TestCase):
 
     def performance_rank(self, rank, durations=(1000, 2, 4, 9)):
         path = self.csv_profile(durations, name=f"PROF_rank{rank}")
-        return {"rank": rank, "performance": measure.performance_record(path.parents[1], 3, 1),
-                "timing_us": {"submit": rank + 1, "sync": 3 * (rank + 1),
-                              "barrier": 2 * (rank + 1), "batch_total": 8 * (rank + 1)}}
+        return {"rank": rank, "performance": measure.performance_record(path.parents[1], 3, 1)}
 
     def breakdown_rank(self, rank):
-        return {"rank": rank, "timing_us": {key: rank + 1 for key in measure.HOST_TIMINGS},
+        return {"rank": rank,
                 "breakdown": {"run_mode": "breakdown", "loops": 3, "warmup": 1,
                               "generation": 4, "block_dim": 2, "records": [
                     {"core": 1, "start": 1000, "checked": 1004 + rank * 2, "end": 1010 + rank * 10},
@@ -153,12 +151,12 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(summary["performance"]["median_us"], 7.5)
         self.assertEqual(summary["performance"]["minimum_us"], 5)
         self.assertEqual(summary["performance"]["maximum_us"], 10)
-        self.assertEqual(summary["host_batch_us"]["sync"]["median"], 4.5)
-        self.assertEqual(summary["host_batch_us"]["batch_total"]["median"], 12)
+        self.assertNotIn("host_batch_us", summary)
         self.assertEqual(summary["algorithm_communication_bytes"], 0)
         self.assertEqual(summary["native_status"], "empty")
         report = measure.render_measurements(summary)
         self.assertIn("median=7.500 us min=5.000 us max=10.000 us", report)
+        self.assertNotIn("Host 测量批", report)
         self.assertIn("backend=memory", report)
         self.assertIn("带宽=N/A", report)
         self.assertIn("sha256=" + "a" * 64, report)
@@ -171,7 +169,7 @@ class MeasurementTests(unittest.TestCase):
 
     def test_corrupted_performance_evidence_is_rejected(self):
         original = self.performance_rank(0)
-        invalid = [dict(original, timing_us={}), dict(original, performance={})]
+        invalid = [dict(original, performance={})]
         for key, value in (("samples", 2), ("matched_samples", 9), ("sample_us", [1, 2]),
                            ("sample_us", [0, 4, 9]), ("sample_us", [float("nan"), 4, 9]),
                            ("median_us", 123), ("kernel", "wrong"), ("source", {})):
@@ -179,14 +177,6 @@ class MeasurementTests(unittest.TestCase):
         for record in invalid:
             with self.subTest(record=record), self.assertRaises(ValueError):
                 measure.validate_rank_measurements(record, self.config)
-
-    def test_negative_or_nonfinite_host_timing_is_rejected(self):
-        original = self.performance_rank(0)
-        for key in measure.HOST_TIMINGS:
-            for invalid in (-1, float("nan"), "1", True):
-                record = dict(original, timing_us=dict(original["timing_us"], **{key: invalid}))
-                with self.subTest(key=key, invalid=invalid), self.assertRaises(ValueError):
-                    measure.validate_rank_measurements(record, self.config)
 
     def test_breakdown_uses_independent_core_maxima_and_raw_ticks(self):
         config = dict(self.config, run_mode="breakdown")

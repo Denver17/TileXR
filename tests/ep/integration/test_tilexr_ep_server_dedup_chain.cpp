@@ -344,7 +344,6 @@ int Run(const Config &c)
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
     std::string stage = "acl-init", batch = "initialization", breakdown;
-    std::array<double, 4> timing {};
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
         Check(aclInit(nullptr), "aclInit"); initialized = true;
@@ -394,12 +393,6 @@ int Run(const Config &c)
         Marker(c, "EP_SERVER_DEDUP_CHAIN_PASS", ",\"peer_count\":" + std::to_string(c.rankSize) +
             ",\"peer_mem_bytes\":" + std::to_string(host->peerMemBytes));
         auto runBatch = [&](uint32_t count, uint32_t phase, uint64_t &batchSubmitted, uint64_t &batchCompleted) {
-            const bool measured = phase == 2 && c.runMode != "functional";
-            Deadline totalStart {}, intervalStart {};
-            auto elapsedUs = [](Deadline start) {
-                return std::chrono::duration<double, std::micro>(Clock::now() - start).count();
-            };
-            if (measured) { totalStart = Clock::now(); intervalStart = Clock::now(); }
             for (submission = 1; submission <= count; ++submission) {
                 stage = "launch";
                 Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
@@ -412,13 +405,10 @@ int Run(const Config &c)
                 ++batchSubmitted;
             }
             submission = count;
-            if (measured) { timing[0] = elapsedUs(intervalStart); intervalStart = Clock::now(); }
             stage = "stream-sync";
             Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
-            if (measured) { timing[1] = elapsedUs(intervalStart); intervalStart = Clock::now(); }
             stage = "batch-barrier";
             barrier.Run(phase);
-            if (measured) { timing[2] = elapsedUs(intervalStart); timing[3] = elapsedUs(totalStart); }
             batchCompleted = count;
         };
         if (c.warmup != 0) {
@@ -462,11 +452,6 @@ int Run(const Config &c)
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
         const bool multi = c.checkpoint == "ep-sdedup-p1-chain-multi";
-        if (c.runMode != "functional") {
-            details += ",\"timing_us\":{\"submit\":" + std::to_string(timing[0]) +
-                ",\"sync\":" + std::to_string(timing[1]) + ",\"barrier\":" + std::to_string(timing[2]) +
-                ",\"batch_total\":" + std::to_string(timing[3]) + '}';
-        }
         if (!breakdown.empty()) { Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown); }
         Marker(c, multi ? "EP_SERVER_DEDUP_MULTI_ROUND_PASS" : "EP_SERVER_DEDUP_SINGLE_ROUND_PASS", details);
     }

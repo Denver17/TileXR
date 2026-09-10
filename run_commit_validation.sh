@@ -6,4 +6,4 @@ bash ./build_all.sh >/dev/null
 bash ./sync.sh >/dev/null
 run_case() { bash ./run_case.sh "$@"; }
 run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=functional loops=50 warmup=0
-echo PASS
+printf '\n==========\nPASS\n==========\n\n'

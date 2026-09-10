@@ -1172,11 +1172,13 @@ def run(config):
                     report.update(status="FAIL", primary_error=failure)
         rank_summary = f"ranks={completed}/{len(mappings)} "
     write_json(log / "summary.json", report)
+    print("\n==========", flush=True)
     if "measurements" in report:
         print(measurements.render_measurements(report["measurements"]), flush=True)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
           f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
           f"tests_per_host={len(manifest['tests'])} {rank_summary}commit={report['commit'] or 'unknown'} (unverified)", flush=True)
+    print("==========\n", flush=True)
     for error in errors:
         report_failure(error)
     print(f"结果：{log / 'summary.json'}\n范围：{scope}", flush=True)

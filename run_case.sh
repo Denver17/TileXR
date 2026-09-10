@@ -2,7 +2,7 @@
 # 单用例核心入口。参数以 key=value 传入；构建和同步由调用方决定。
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-if [[ ! -f validation.local.sh ]]; then echo "Failed"; exit 2; fi
+if [[ ! -f validation.local.sh ]]; then printf '\n==========\nFailed\n==========\n\n' ; exit 2; fi
 case_id="case-$(date +%Y%m%d-%H%M%S)-$$"
 result_root="${TILEXR_VALIDATION_RESULT_ROOT:-$PWD/run/$case_id}"
 mkdir -p "$result_root"
@@ -21,7 +21,7 @@ for argument in "$@"; do
                 barrier_addr) assignments+=("TILEXR_DEMO_BARRIER_ADDR=$value");; msprof) assignments+=("TILEXR_VALIDATION_MSPROF=$value");;
                 hostfile) assignments+=("TILEXR_VALIDATION_HOSTFILE=$value");;
             esac;;
-        *) echo "Failed"; exit 2;;
+        *) printf '\n==========\nFailed\n==========\n\n' ; exit 2;;
     esac
 done
 for assignment in "${assignments[@]}"; do export "$assignment"; done
@@ -45,9 +45,9 @@ except Exception: print('')
 PY
 )
     echo status=PASS >"$result_root/summary.log"
-    if [[ -n "$average" ]]; then echo "average_us=$average" >>"$result_root/summary.log"; echo "PASS average_us=$average"; else echo PASS; fi
+    if [[ -n "$average" ]]; then echo "average_us=$average" >>"$result_root/summary.log"; printf '\n==========\nPASS kernel average_us=%s\n==========\n\n' "$average"; else printf '\n==========\nPASS\n==========\n\n' ; fi
     exit 0
 fi
 echo status=FAIL >"$result_root/summary.log"
-echo Failed
+printf '\n==========\nFailed\n==========\n\n'
 exit 1

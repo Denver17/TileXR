@@ -11,7 +11,6 @@ import msprof_kernel_stats as profiler
 
 
 KERNEL_NAME = "tilexr_ep_dispatch_memory_server_dedup_kernel"
-HOST_TIMINGS = ("submit", "sync", "barrier", "batch_total")
 BREAKDOWN_STAGES = ("entry_checks", "record_prepare", "empty_total")
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。
 A5_SYSTEM_TICKS_PER_US = 1000
@@ -90,11 +89,6 @@ def validate_rank_measurements(record, chain_config):
         raise ValueError("未知测量模式")
     loops = _integer(chain_config["loops"], "loops", 1)
     warmup = _integer(chain_config["warmup"], "warmup")
-    timing = record.get("timing_us")
-    if not isinstance(timing, dict):
-        raise ValueError("缺少 Host 测量批计时")
-    for name in HOST_TIMINGS:
-        _number(timing.get(name), "timing_us." + name)
     if mode == "breakdown":
         _breakdown_values(record)
         evidence = record["breakdown"]
@@ -148,8 +142,6 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     if mode == "functional":
         return summary
     summary.update(algorithm_communication_bytes=0, bandwidth="N/A")
-    summary["host_batch_us"] = {name: _statistics([row["timing_us"][name] for row in ranks])
-                                for name in HOST_TIMINGS}
     if mode == "performance":
         medians = [row["performance"]["median_us"] for row in ranks]
         summary["performance"] = {"unit": "us", "selection": "last_loops_after_warmup",
@@ -191,6 +183,4 @@ def render_measurements(summary):
         for name in BREAKDOWN_STAGES:
             append("最后一轮各核最大值 " + name, breakdown["stages_us"][name], "us")
         lines.append("breakdown 仅为空入口检查和记录准备，未计量最终记录写出；各段最大值不保证可相加。")
-    for name in HOST_TIMINGS:
-        append("Host 测量批 " + name, summary["host_batch_us"][name], "us")
     return "\n".join(lines)
