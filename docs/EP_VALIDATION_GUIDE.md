@@ -38,6 +38,8 @@ breakdown 的设备打点是编译期开关。切换至 breakdown 或从 breakdo
 
 ## 输出和验收范围
 
+breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`，指向 `run/case-<时间>-<PID>/summary.json`。其中 `measurements.breakdown.stages_us` 为微秒汇总，`stages` 为原始 ticks 汇总，`rank_stages` 为每 rank 各段的跨核最大值；各核原始时间戳与 generation 位于 `nodes[].reported_result.ranks[].breakdown`。若未完成汇总，measurements 可能缺失，应查看 errors 和节点记录。
+
 每次运行在仓库 `run/` 下生成独立目录，保留节点/rank 日志、summary.json 与 summary.log。关键输出使用空行和 32 个 `=` 分隔，在 PASS 或 kernel 性能之前展示两行实际 case 参数。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
 
 同一 stream 连续提交整批，批末才 stream 同步与 Host barrier；删除 Host 计时不改变同步策略。functional 不采集 profiling；performance 使用 msprof；breakdown 读取最后一轮各核的设备记录。

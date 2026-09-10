@@ -63,6 +63,8 @@ if status == 'PASS':
     average = report.get('measurements', {}).get('performance', {}).get('mean_us')
     if average is not None:
         result += f' kernel average_us={average:.3f}'
+if report.get('chain_configuration', {}).get('run_mode') == 'breakdown':
+    result += f'\nJSON: {(root / "summary.json").resolve()}'
 text = f'\n{RESULT_SEPARATOR}\n{description}\n{result}\n{RESULT_SEPARATOR}\n\n'
 (root / 'summary.log').write_text(text, encoding='utf-8')
 print(text, end='')
