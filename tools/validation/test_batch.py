@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -18,7 +19,11 @@ class BatchTests(unittest.TestCase):
                 "#!/usr/bin/env bash\nset -e\nprintf '%s\n' \"$*\" >> calls\n",
                 encoding="utf-8")
             (root / "run_case.sh").chmod(0o755)
-            result = subprocess.run(["bash", "run_batch.sh"], cwd=root,
+            bash = Path(sys.executable).parent / "bash"
+            if not bash.exists():
+                bash = Path(shutil.which("bash"))
+            result = subprocess.run([str(bash), "run_batch.sh"], cwd=root,
+                                    env=dict(os.environ, PATH=str(bash.parent) + os.pathsep + os.environ["PATH"]),
                                     capture_output=True, check=False)
             output = result.stdout.decode("utf-8", errors="replace")
             self.assertEqual(result.returncode, 0, output + result.stderr.decode("utf-8", errors="replace"))

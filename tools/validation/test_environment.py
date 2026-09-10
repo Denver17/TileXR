@@ -129,6 +129,7 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(entries[0]["PATH"].split(":").count(cmake_path), 1)
 
     def test_production_reloads_configuration_and_preserves_unique_paths(self):
+        self.environment["TILEXR_VALIDATION_BUILD_MODE"] = "production"
         cann, toolkit, driver = self.fake_cann()
         local = self.root / "validation.local.sh"
         local.write_text(f'TILEXR_VALIDATION_BUILD_MODE=production\n'
@@ -145,7 +146,7 @@ class EnvironmentTests(unittest.TestCase):
                                 'bash -c \'source "$1/set_env.sh"; '
                                 '"$TILEXR_VALIDATION_PYTHON" "$1/snapshot.py"\' bash "$1"\n')
         entries = self.snapshots(result)
-        self.assertEqual([entry["TILEXR_VALIDATION_TIMEOUT"] for entry in entries], ["30", "30", "60", "60"])
+        self.assertEqual([entry["TILEXR_VALIDATION_TIMEOUT"] for entry in entries], ["180", "180", "180", "180"])
         self.assertEqual([entry["CANN_LOAD_COUNT"] for entry in entries], ["1", "2", "3", "4"])
         for name in ("PATH", "LD_LIBRARY_PATH", "ASCEND_HOME_PATH", "ASCEND_DRIVER_PATH"):
             self.assertEqual(len({entry[name] for entry in entries}), 1, name)
@@ -170,18 +171,16 @@ class EnvironmentTests(unittest.TestCase):
         self.assertLess(entry["PATH"].split(":").index(str(toolkit / "bin")),
                         entry["PATH"].split(":").index(str(self.root / "first-toolkit/bin")))
 
-    def test_missing_hostfile_is_reported_without_creating_it(self):
+    def test_environment_load_does_not_require_or_create_hostfile(self):
         self.hostfile.unlink()
         result = self.run_shell('source "$1/set_env.sh"\n')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("hostfile 不存在", result.stderr)
+        self.assertEqual(result.returncode, 0)
         self.assertFalse(self.hostfile.exists())
 
     def test_shell_configuration_failures_have_explicit_category(self):
         failing_cann = self.root / "failing-cann.sh"
         self.executable(failing_cann, "return 7\n")
         cases = ({"TILEXR_VALIDATION_BUILD_MODE": "wrong"},
-                 {"TILEXR_VALIDATION_CHECKPOINT": "unknown"},
                  {"TILEXR_VALIDATION_BUILD_MODE": "production", "TILEXR_CANN_ENV_SCRIPT": str(self.root / "missing")},
                  {"TILEXR_VALIDATION_BUILD_MODE": "production", "TILEXR_CANN_ENV_SCRIPT": str(failing_cann)},
                  {"TILEXR_VALIDATION_PYTHON": "missing-tilexr-test-python"})

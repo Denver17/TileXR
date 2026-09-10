@@ -1159,13 +1159,11 @@ class EnvironmentEntryTests(TemporaryRoot):
         return subprocess.run([bash, "-c", 'source "$1/set_env.sh"', "bash", str(self.root)],
                               env=environment, cwd=self.root, capture_output=True, text=True, timeout=10)
 
-    def test_missing_default_hostfile_is_reported_without_creating_it(self):
+    def test_environment_load_does_not_create_missing_hostfile(self):
         self.hostfile.unlink()
         result = self.source_real_entry()
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.hostfile.exists())
-        self.assertIn("hostfile 不存在", result.stderr)
-        self.assertIn("hostfile.example", result.stderr)
 
     def test_source_preserves_configured_cluster_and_reports_size(self):
         contents = "localhost devices=0,2\nworker02 devices=1,3\n"
@@ -1174,75 +1172,34 @@ class EnvironmentEntryTests(TemporaryRoot):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(self.hostfile.read_text(), contents)
         self.assertNotIn("HOSTFILE_CREATED", result.stdout)
-        self.assertIn("hosts=2", result.stdout)
+        self.assertIn("ENV_READY", result.stdout)
 
     def test_source_accepts_dry_run_with_eight_devices_per_host(self):
         self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.DRY_RUN_CHECKPOINT}):
             result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("checkpoint=" + workflow.DRY_RUN_CHECKPOINT, result.stdout)
-        self.assertIn("hosts=2", result.stdout)
+        self.assertNotIn("checkpoint=", result.stdout)
+        self.assertIn("ENV_READY", result.stdout)
 
-    def test_chain_configuration_assignments_reach_python_without_manual_export(self):
-        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
-        cann = self.root / "cann-env.sh"
-        cann.write_text("# CANN environment fixture; no hardware\n", encoding="utf-8")
-        local = self.root / "validation.local.sh"
-        config = ("TILEXR_VALIDATION_BUILD_MODE=production\n"
-                  "TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-single\n"
-                  "TILEXR_COMM_ID=192.0.2.1:10177\n"
-                  f"TILEXR_CANN_ENV_SCRIPT={shlex.quote(str(cann))}\n")
-        local.write_text(config + "TILEXR_VALIDATION_BS=0\n", encoding="utf-8")
-        result = self.source_real_entry()
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("shape", result.stderr)
-        local.write_text(config + "TILEXR_VALIDATION_BS=2\n", encoding="utf-8")
+    def test_source_ignores_legacy_case_settings_in_environment_file(self):
+        (self.root / "validation.local.sh").write_text(
+            "TILEXR_VALIDATION_CHECKPOINT=obsolete\nTILEXR_VALIDATION_LOOPS=0\n")
         result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("checkpoint=ep-sdedup-p1-chain-single", result.stdout)
-
-    def test_chain_multi_loops_assignment_reaches_python(self):
-        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
-        cann = self.root / "cann-env.sh"
-        cann.write_text("# CANN environment fixture; no hardware\n", encoding="utf-8")
-        local = self.root / "validation.local.sh"
-        config = ("TILEXR_VALIDATION_BUILD_MODE=production\n"
-                  "TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-multi\n"
-                  "TILEXR_COMM_ID=192.0.2.1:10177\n"
-                  f"TILEXR_CANN_ENV_SCRIPT={shlex.quote(str(cann))}\n")
-        local.write_text(config + "TILEXR_VALIDATION_LOOPS=0\n", encoding="utf-8")
-        result = self.source_real_entry()
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("loops", result.stderr)
-        local.write_text(config + "TILEXR_VALIDATION_LOOPS=3\n", encoding="utf-8")
-        result = self.source_real_entry()
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("checkpoint=ep-sdedup-p1-chain-multi", result.stdout)
-
-    def test_bad_checkpoint_reports_literal_backticks_and_carriage_return(self):
-        value = "`ep-sdedup-p1-empty-kernel`\r"
-        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": value}):
-            result = self.source_real_entry()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("CONFIG_FAILED", result.stderr)
-        self.assertIn("\\r", result.stderr)
-        self.assertIn("validation.local.sh", result.stderr)
-        self.assertIn("ep-sdedup-p1-dry-run", result.stderr)
+        self.assertIn("ENV_READY", result.stdout)
 
     def test_missing_custom_hostfile_does_not_fall_back_to_local(self):
         self.hostfile.unlink()
         result = self.source_real_entry("custom-hosts")
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("custom-hosts", result.stderr)
-        self.assertIn("TILEXR_VALIDATION_HOSTFILE", result.stderr)
+        self.assertEqual(result.returncode, 0)
         self.assertFalse(self.hostfile.exists())
         self.assertFalse((self.root / "custom-hosts").exists())
 
     def test_empty_existing_hostfile_is_not_overwritten(self):
         self.hostfile.write_text("")
         result = self.source_real_entry()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.returncode, 0)
         self.assertEqual(self.hostfile.read_text(), "")
 
     def test_real_environment_entry_preserves_root_with_spaces(self):
@@ -1273,7 +1230,7 @@ class EnvironmentEntryTests(TemporaryRoot):
                                  "bash", str(root)], env=environment, cwd=self.root,
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("ENV_STUB_PASS", result.stdout.splitlines())
+        self.assertNotIn("ENV_STUB_PASS", result.stdout)
         reported = dict(line.split("=", 1) for line in result.stdout.splitlines()
                         if line.startswith(("ROOT=", "HOME=")))
         self.assertTrue(root.samefile(reported["ROOT"]))

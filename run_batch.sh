@@ -3,7 +3,7 @@
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 run_case() { bash ./run_case.sh "$@"; }
-run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=performance loops=50 warmup=50 bs=128
-run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=performance loops=50 warmup=50 bs=256
-run_case checkpoint=ep-sdedup-p1-chain-multi run_mode=performance loops=50 warmup=50 bs=512
+run_case run_mode=performance loops=50 warmup=50 bs=128
+run_case run_mode=performance loops=50 warmup=50 bs=256
+run_case run_mode=performance loops=50 warmup=50 bs=512
 printf '\n================================\nPASS\n================================\n\n'

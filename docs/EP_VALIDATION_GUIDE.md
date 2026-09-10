@@ -1,242 +1,57 @@
-# EP 七步验证
+# EP 验证与人工测试
 
-本流程支持 PC 普通文件同步或固定版本导出，并提供四个服务器入口。脚本负责 CMake、安装检查、同步、SSH 启动、超时清理和结果汇总，正常测试无需手动检查符号、执行 ctest 或拼接日志。
+## 配置职责
 
-当前支持五个检查点，继续共用本文七步。需要组合测试项时，可用下述批次脚本调用现有入口。生产构建统一生成 Host 库、原有四个 A5 kernel 及新增空 Server Dedup kernel。
+`validation.local.sh` 只保存一次性环境配置：CANN/driver、Python/msprof、三方库搜索路径、SSH 用户、hostfile 和主节点通信地址。首次部署填写后，只有环境变化才修改；测试脚本始终只读该文件。参考根目录 `validation.local.sh.example`。
 
-| checkpoint | 每台主机的测试重点 | 通过边界 |
+模式、loops/warmup、BS/H/TopK/专家数/dtype/block_dim 属于 case 参数，只在调用脚本中填写。旧环境文件遗留的测试参数在加载时隔离，不覆盖调用方参数；可一次性删除这些旧项，不必每轮修改。
+
+checkpoint 的选择只出现在 `run_commit_validation.sh` 一处，以环境变量供构建、同步和验收 case 继承。人工核心/批测不接收 checkpoint 参数，直接使用已安装 manifest 的 checkpoint。内部检查点定义和结果中的 checkpoint 字段仍用于识别实际测试范围，不是第二处用户配置。
+
+## 三个入口
+
+| 入口 | 用途 | 修改位置 |
 | --- | --- | --- |
-| `ep-sdedup-p1-abi-host` | 17 个 Host/Python 测试，含 ABI/layout/Host 校验及 runtime 替身测试 | Host 契约与回归；production 模式另含生产编译/链接 |
-| `ep-sdedup-p1-empty-kernel` | 上述测试加 1 个已安装头文件/生产库 consumer；选择该 hostfile 行的首个 device 执行真实注册 | A5 ELF、安装后相对路径加载、binary/function 注册；launch 参数及失败路径由 Host 替身覆盖 |
-| `ep-sdedup-p1-dry-run` | 17 个 Host/Python 测试后，每台并行启动 8 个独立 rank 进程 | 全量 rank/device 映射、运行身份、marker 和有界退出；不创建设备上下文或 communicator |
-| `ep-sdedup-p1-chain-single` | 17 个 Host/Python 测试后，每台并行启动 8 个已安装 C++ consumer | A5 communicator/peer window、一次空 Dispatch 提交、stream 完成及两次 Host barrier；不验证去重算法 |
-| `ep-sdedup-p1-chain-multi` | Dispatch 单算子，复用 communicator、stream 和同批 buffer；功能模式默认 1 轮，可选 performance/breakdown | 连续提交后整批同步、Host barrier 和清理；按模式校验 msprof 样本或设备打点 |
+| `run_case.sh`（`run.sh` 为别名） | 单 case 核心；不编译、不分发代码、不修改环境文件 | 命令的 key=value 参数 |
+| `run_batch.sh` | 人工参数扫描；仅重复调用核心 | run_case 行中的参数组合 |
+| `run_commit_validation.sh` | 当前提交验收；仅包含本提交影响的 case，可按需统一构建和同步 | 一处 checkpoint、运行模式变量和 case 清单 |
 
-`empty-kernel` 必须使用 `production`。只需在原 `validation.local.sh` 中将 `TILEXR_VALIDATION_CHECKPOINT` 改为 `ep-sdedup-p1-empty-kernel`，再执行相同七步。设备注册每台主机一次，不创建 communicator、不 launch 设备 kernel；空 launch、stream 完成和多 rank 建链留给后续检查点。生产公共入口现已可提交空 kernel，但不生成 Dispatch 输出或数值结果。未实现的 checkpoint 仍直接报错。进度与通过提交见[调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
-
-第三个检查点只需在原 `validation.local.sh` 中写入以下赋值，并照常加载环境、构建、同步和运行。配置值不要带 Markdown 反引号，文件使用 LF 换行；若复制出了字面反引号或 CR，入口会用 `%q` 显示实际值并拒绝运行，不自动改写配置。
+例如单次测试：
 
 ```bash
-TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-dry-run
+bash run.sh run_mode=performance loops=50 warmup=50 bs=256 h=7168 topk=6 moe_expert_num=384 dtype=bf16
 ```
 
-`dry-run` 接受 2 至 16 台主机，每台恰好 8 个 device ID。hostfile 行序决定 `host_index`，device 列表顺序决定 `local_rank`，连续编号为 `rank=host_index*8+local_rank`。rank_size 从清单推导，不增加第二套拓扑配置。每个 rank 只运行普通 Python 进程，记录物理 device ID；不调用 ACL、不创建 communicator，也不重复设备注册、安装产物摘要或运行库检查。
-
-完整验收需要同一实现提交分别完成 **64P（8 台）和 128P（16 台）**，各自保留 `summary.json`。切换清单后沿用七步入口重新构建、同步和运行；较小规模的 PASS 只代表该次配置成功，不能登记检查点完整通过。`bs/h/topk/dtype` 等尚无消费者的参数不在本检查点引入。
-
-第四个检查点 `chain-single` 必须使用 `production`，仍接受 2 至 16 台主机、每台 8 个 device ID。当前用户确认 64P 环境受限，允许在第三检查点 production 16P 通过后继续开发和进行 16P 调试；64P/128P 的完整验收继续保留为待完成，不因规模受限增加 runner 或改变 PASS 判据。
-
-在原 `validation.local.sh` 中设置以下两项，将示例 IP 替换为首节点各主机均可访问的 IPv4，然后执行相同七步：
+人工批测示例（编辑 `run_batch.sh`，直接调用即可）：
 
 ```bash
-TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-single
-TILEXR_COMM_ID=192.0.2.11:10177
+run_case run_mode=performance loops=50 warmup=50 bs=128
+run_case run_mode=performance loops=50 warmup=50 bs=256
+run_case run_mode=performance loops=50 warmup=50 bs=512
 ```
 
-`TILEXR_COMM_ID` 供 communicator 建链使用；Host barrier 默认使用同一 IP、端口 +97，也可通过 `TILEXR_DEMO_BARRIER_ADDR` 指定不同端口。两者必须是有效的跨机 IPv4 地址，不能使用 loopback、通配地址、SSH 别名或相同 endpoint。配置只来自原部署文件，环境入口会导出这些变量，无需增加启动命令。
+`run_mode` 支持 functional/performance/breakdown。默认 functional/1 轮/0 预热，performance 和 breakdown 默认 50/50；BS/H/TopK/专家数默认 256/7168/6/384，dtype 默认 bf16，可选 fp16，block_dim 默认 auto。配置值由核心解析器统一提供缺省，不要复制进环境文件。可传入 hostfile、comm_id、barrier_addr、msprof 覆盖一次运行的环境值，但日常使用不需要。
 
-单轮顺序为：选择 hostfile 指定设备，创建 stream 和已有 `TileXRCommInitRankMemoryDomain(0, ...)`，核对 Host/device CommArgs 与全量 peer 映射，分配调用 buffer，进行第一次 TCP Host barrier，调用一次公开 Dispatch Server Dedup 入口，检查 `aclrtSynchronizeStream`，完成轮末 barrier 后释放资源。magic 仅由现有公开入口内部获取一次；不调用旧 Dispatch 算法，不读取空 kernel 未写入的输出。该 MemoryDomain 使用既有 peer-memory 路径，不创建额外 Credit、UDMA 或 SDMA 资源。
+首次部署先配置环境和 hostfile，由提交验收脚本完成所需构建/同步。后续相同安装产物下改变 shape、轮次和 functional/performance 只运行核心或人工批测；运行参数及 host/device 映射随 SSH 启动传递，不需要同步配置文件。新增主机需要先部署程序和环境；环境库不随 case 自动安装。
 
-最新设计已将 `group` 容量改为 **8*BS 行**，每行仍为 `align32(4*(1+2*(K-1)))` 字节；本次更新内部 layout helper 和 caller 分配校验，公共函数签名不变。`assistEx` 仍按 capacityRows 预分配，`sourceMask` 仍为 BS 个元素。较早验证流程里的 `BS` 行分配已经过时，按当前主设计和 helper 分配；不为此提前实现 relay 结果槽位或 Combine。
+breakdown 的设备打点是编译期开关。切换至 breakdown 或从 breakdown 切回 functional/performance，须由提交验收脚本调整模式并构建、同步相应产物；其余运行时参数无需重编译。当前只支持 Dispatch 单算子、非量化 FP16/BF16、2–16 台主机且每台 8 卡，尚不支持 Combine、量化或路由模式扫描。
 
-第五个检查点仍使用 production 和原有建链配置，将 checkpoint 改为 `ep-sdedup-p1-chain-multi`，再执行相同七步。当前只支持 **Dispatch 单算子**，三种模式共用同一 consumer：
+## 输出和验收范围
 
-| `TILEXR_VALIDATION_RUN_MODE` | 默认 `LOOPS / WARMUP` | 测试重点及输出 |
-| --- | --- | --- |
-| `functional`（默认） | `1 / 0` | 可指定轮数；验证建链、提交、整批完成和资源复用，不采集 profiling、不统计性能 |
-| `performance` | `50 / 50` | 每 rank 使用 CANN `msprof` 采集目标 kernel 耗时，排除 warmup，统计每 rank 测量轮次中位数及其跨 rank median/min/max |
-| `breakdown` | `50 / 50` | 构建时启用专用设备打点，批末读取最后一轮全部核记录，输出入口框架耗时拆解 |
+每次运行在仓库 `run/` 下生成独立目录，保留节点/rank 日志、summary.json 与 summary.log。关键输出使用空行和 32 个 `=` 分隔，在 PASS 或 kernel 性能之前展示两行实际 case 参数。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
 
-例如功能模式连续提交 5 轮：
+同一 stream 连续提交整批，批末才 stream 同步与 Host barrier；删除 Host 计时不改变同步策略。functional 不采集 profiling；performance 使用 msprof；breakdown 读取最后一轮各核的设备记录。
 
-```bash
-TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-multi
-TILEXR_VALIDATION_RUN_MODE=functional
-TILEXR_VALIDATION_LOOPS=5
-TILEXR_VALIDATION_WARMUP=0
-```
+当前阶段 1 是空 Dispatch 框架，PASS 不证明去重通信或输出数值。64P/128P 仍待环境具备后验收，16P 通过不扩大到未测规模。提交验收仅保留本次受影响 case；测试脚本重构不要求重新执行已经通过的硬件检查点。
 
-测量模式只需修改 `RUN_MODE` 并按需设置轮数，仍执行原七步。`LOOPS` 为正 uint32，`WARMUP` 为非负 uint32；功能模式要求 warmup=0。`chain-single` 固定 functional/1/0，不受三项配置影响。performance 默认调用 PATH 中的 `msprof`，也可通过 `TILEXR_VALIDATION_MSPROF` 指定路径；每个 rank 的独立输出目录随原日志收集。
+## 后续维护约束
 
-执行策略与 [Memory demo 调用循环](../tests/ep/demo/tilexr_ep_dispatch_demo.cpp) 相同：同一 stream **连续提交整批，再执行一次 stream 同步和 Host barrier**。有预热时先完成独立预热批，再运行测量批；批内没有同步/barrier，不清零共享 Flag，也不额外获取 magic。所有轮次共享原有总期限。空 kernel 尚无通信协议，不能由连续提交成功推断通信区轮转、旧 ready 隔离或数值正确。
+- 环境配置只读，不用追加参数/备份恢复方式传递 case；那会造成双份配置、覆盖用户修改和多机不一致。
+- 核心参数由调用方提供，批测只组合 case，不隐式编译或同步。提交验收按实际需要决定部署步骤。
+- checkpoint 只在提交验收入口选择；人工运行继承安装产物身份，结果仍记录 checkpoint。
+- 只对受影响的配置传递、结果解析和输出做脚本行为测试，不重复旧硬件验收。
 
-performance 构建关闭 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING`，只采集 msprof 的完整 kernel 耗时；breakdown 构建开启此选项，在自己 MemoryDomain 数据区按核覆盖记录，批末只检查最后一轮。切换 breakdown 与其他模式时必须重建，现有 manifest 检查会拒绝开关不匹配的安装包，防止将带打点成本的 kernel 作为性能基线。原公共接口和 20 字段 launch ABI 不变。打点不读取 route/hidden 或 Dispatch 输出，不实现 Combine 或 Dispatch/Combine 连跑。
-
-breakdown 的 `entry_checks`、`record_prepare`、`empty_total` 分别为入口参数检查、记录寻址准备和二者总计，不含最终记录写出/cache clean。保留原始 ticks，并按 A5/950 的 1000 ticks/us 输出微秒；依据为官方 [asc-devkit 9.1.0 GetSystemCycle](https://gitcode.com/cann/asc-devkit/blob/91c03327210113585f52739a6c85c35ece492970/docs/api/SIMD-API/基础API/工具接口/系统资源与变量/GetSystemCycle_ISASI.md)。每段先取各核最大值，再做跨 rank median/min/max；不同阶段最大值可能来自不同核，不保证可相加。性能报告同时记录 backend、空 kernel 状态、artifact SHA、算法通信量 0B、带宽 N/A，仅保留 kernel 耗时统计，不能当作真实去重性能。
-
-## 三层测试脚本与结果目录
-
-测试入口分为三层：`run_case.sh` 是接受详细 `key=value` 参数的单用例核心入口，复用已安装产物且不负责编译和同步；`run_batch.sh` 面向人工探索，只重复调用核心入口并汇总多个 BS、模式或轮数；`run_commit_validation.sh` 面向提交验收，只列出本提交实际影响的 case，必要时统一构建和同步。之前已通过且未受影响的检查点不重复回归。
-
-每次核心运行在当前目录的 `run/` 下创建独立目录，保留 workflow、节点和 rank 日志，生成 `summary.json` 与 `summary.log`。终端只打印 `PASS`，失败只打印 `Failed`；性能 case 额外打印跨 rank 的 `average_us`，错误信息从日志中查找。
-
-人工批测前应先完成一次构建和同步；同一 checkpoint、同一设备打点开关下，BS、模式和轮数变化不需要重新编译。批测脚本本身不增加编译或同步步骤。
-
-当前最低补测项为 **functional 连续 50 轮（无预热）** 和 **performance 预热 50 轮、测量 50 轮**。
-PC 同步本次代码到首节点、配好原 `validation.local.sh` 和 hostfile 后，在服务器仓库根目录执行：
-
-```bash
-bash run_batch.sh
-```
-
-[run_batch.sh](../run_batch.sh) 是人工批测清单，只调用 `run_case.sh`；运行前应完成一次构建和同步。
-
-BS、模式和轮数的变化由核心入口作为本次运行参数传递；同一 checkpoint 和设备打点开关下无需重新编译。测试期间不要同时启动其他验证任务。
-
-每个 case 独立写入 `run/` 结果目录；批次只汇总 PASS/Failed 和性能 average，登记仍以各 case 的 summary 为准。
-
-提交验收应只包含本提交涉及的检查点；已通过且未受影响的检查点不重复回归。
-
-## 一次性环境配置
-
-PC 需要 Git；使用 `push.ps1` 导出时另需 Python 3.9+ 和 Windows OpenSSH 的 ssh/scp。服务器需要 Bash、Python 3.9+、CMake 3.20+、C++14 编译器、Make 和 CANN 9.1.0 工具链。多节点还需要 rsync、SSH 免密访问及已确认的主机密钥。服务器目录必须可写，各节点必须具有兼容的 CPU 架构、CANN/driver 运行库。依赖安装和 SSH 认证属于已有服务器环境，不会由验证脚本静默修改。
-
-首次部署后，用编辑器将根目录 `validation.local.sh.example` 的内容保存为 `validation.local.sh`，修改 CANN 环境脚本及其他实际不同的配置，并按 `hostfile.example` 一次性填写实际服务器清单。单机 Host 验证可以填写 `localhost`。`source set_env.sh` 只读取 hostfile 并显示实际主机数；缺失或格式错误时提示配置位置，不会创建、覆盖文件或回退到单机。使用 Mutagen 等同步工具时，由部署者管理配置文件的同步方向，避免错误清单覆盖正确清单。
-
-| 配置 | 说明 |
-| --- | --- |
-| `TILEXR_CANN_ENV_SCRIPT` | CANN 9.1.0 提供的环境脚本完整路径；可以是 `set_env.sh` 或 `bin/setenv.bash`，不靠 IP 猜路径 |
-| `ASCEND_DRIVER_PATH` | driver 安装根目录，默认 `/usr/local/Ascend/driver` |
-| `TILEXR_VALIDATION_SSH_USER` | SSH 用户，空值使用当前用户或 SSH config |
-| `TILEXR_VALIDATION_HOSTFILE` | 工作目录内的 hostfile，默认 `hostfile` |
-| `TILEXR_VALIDATION_JOBS` | 编译并发数，默认 4 |
-| `TILEXR_VALIDATION_TIMEOUT` | 单次集群测试总期限，默认 180 秒，允许 30..180 秒；编译、源码同步单独计时 |
-| `TILEXR_VALIDATION_BUILD_MODE` | 默认 `production`；显式 `host` 只用于没有 CANN 的 Host/脚本验证，结果中单独标识 |
-| `TILEXR_VALIDATION_CHECKPOINT` | 默认 `ep-sdedup-p1-abi-host`；另支持 `ep-sdedup-p1-empty-kernel`、`ep-sdedup-p1-dry-run`、`ep-sdedup-p1-chain-single`、`ep-sdedup-p1-chain-multi` |
-| `TILEXR_COMM_ID` / `TILEXR_DEMO_BARRIER_ADDR` | 两个 chain 检查点的 communicator / TCP Host barrier endpoint，格式 IPv4:port；后者默认使用前者端口 +97 |
-| `TILEXR_VALIDATION_BS/H/TOPK/MOE_EXPERT_NUM` | 两个 chain 检查点默认 256/7168/6/384，正整数；expert 数要求 `R*L`、`2<=L<=32`，topk<=32 |
-| `TILEXR_VALIDATION_DTYPE` / `TILEXR_VALIDATION_BLOCK_DIM` | 两个 chain 检查点默认 bf16 / auto；dtype 支持 bf16、fp16，显式核数须为正且不超过实际设备 Vector 核数 |
-| `TILEXR_VALIDATION_RUN_MODE` | 仅用于 chain-multi：functional（默认）、performance、breakdown |
-| `TILEXR_VALIDATION_LOOPS` | chain-multi 测量/功能批轮数，1..4294967295；functional 默认 1，其余默认 50 |
-| `TILEXR_VALIDATION_WARMUP` | chain-multi 预热轮数，0..4294967295；functional 固定 0，其余默认 50 |
-| `TILEXR_VALIDATION_MSPROF` | performance 使用的 CANN msprof 可执行文件，默认 `msprof` |
-
-hostfile 每行格式为 `host [devices=0,1,2,3,4,5,6,7]`，允许注释和空行。第一行必须指向执行脚本的首节点，可以写 `localhost`；后续行可使用主机名、IPv4 或 SSH config 别名。主机清单只保存在此文件，不再内置另一套列表。`devices` 省略时为 0..7，重复主机和重复 device ID 会被拒绝；当前 Host checkpoint 每主机只执行一套测试，device 列表不代表执行了 NPU 测试。
-
-64P 清单通常对应 8 台主机，每台列出 8 个实际物理 device ID。使用主机 IP 时，形式为 `192.0.2.11 devices=0,1,2,3,4,5,6,7`，其余 7 行替换为其他服务器的实际 IP（这里的地址仅作示例）。第一行是当前首节点；需要使用其余节点可访问的真实地址时，不使用 `localhost` 作为跨机通信地址。`abi-host` 只执行每主机 Host 测试；`empty-kernel` 额外使用每台首个 device 注册。二者均不启动 64 个 NPU rank。
-
-`validation.local.sh` 与 hostfile 是本地部署配置，不提交到仓库。各主机 CANN 路径不同时，可以在同一份 `validation.local.sh` 中按 `hostname` 设置路径；工作目录仍必须相同。编译、同步、运行期间不要在同一路径同时启动其他验证任务。
-
-## 固定七步
-
-### 1. PC 拉取代码并固定版本
-
-在 PC 仓库目录执行，将 `<commit>` 替换为本次交付的完整提交号：
-
-```powershell
-git fetch origin codex/SilentEmotion
-git switch --detach <commit>
-```
-
-### 2. PC 同步到首节点
-
-可以继续使用已配置的 Mutagen 等工具同步普通源码文件，不需要同步 `.git`。`3rdparty/spdlog` 是可选的日志后端，允许为空或缺失：`src/comm/tilexr_log.h` 用 `__has_include` 检测头文件，找不到时自动使用 `std::cout`/`std::cerr`；Server Dedup 没有新增 spdlog 依赖。若需要使用仓库固定版本的 spdlog，再在 PC 执行 `git submodule update --init --recursive` 并同步其完整源码。保留 Shell 文件的 LF 换行，不传输 PC 编译缓存、安装产物或 CANN 环境目录；同步完成后再开始构建。服务器不需要安装 Git，也不需要额外执行 Git 命令。
-
-需要从固定 HEAD 导出并记录来源提交号时，可使用已有导出入口代替普通同步：
-
-```powershell
-tools\validation\push.ps1 -Server <first-host> -RemotePath /absolute/path/TileXR -SshUser <user>
-```
-
-此入口完整导出固定 HEAD，仍会自动初始化递归子模块，并附上 commit、来源说明和相对路径列表；不再生成或检查源码 SHA256。这是完整导出的规则，不代表普通源码构建必须安装 spdlog。导出不包含 PC 未提交改动，Shell 文件按 Git 中的 LF 字节交付。远端无需联网拉子模块，也不需要 `.git`。
-
-构建和同步只枚举当前源码路径，不读取源码内容计算摘要，也不与旧清单比较内容。`.tilexr-source.json` 中 `files` 是相对路径列表；没有可用来源时，commit 在终端显示 `unknown`、JSON 中为 `null`，`provenance=file-copy`。本地 Git HEAD 标为 `git-head-unverified`，新导出清单记录的提交号标为 `manifest-unverified`：这些是来源标签，不证明当前文件仍等于该提交。无 Git、缺失子模块元数据、旧版摘要清单或损坏的可选来源信息都不会阻断普通复制目录；路径和 symlink 保护仍保留。
-
-源码或文档变化不再触发一致性失败，也不会自动重建已安装程序。需要验证更新后的源码时，仍按第 4～7 步构建、同步和运行；脚本只确认安装包身份及产物摘要，不保证运行时源码与二进制来自同一时刻。请在 PC 同步完成后开始构建。
-
-目标应为新目录、空目录或本工具此前管理且不含 `.git` 的验证目录。刷新时保留配置，更新源码并删除旧来源清单中已不属于新版本的源码文件；不覆盖 Git checkout 或其他工作目录。可以通过 SSH config 管理端口和密钥，不需要把凭据写入脚本。
-
-### 3. 首节点加载环境
-
-登录首节点并进入上述工作目录，首次使用完成前述文件配置，然后执行：
-
-```bash
-source set_env.sh
-```
-
-脚本输出 `ENV_READY` 及本次 mode/checkpoint、主机数和 hostfile 路径。CANN 路径错误、配置错误或缺少 Python 时输出 `CONFIG_FAILED` 并给出配置位置。七步入口使用轻量环境：不执行 `npu-smi`/`lspci` 探测，不添加当前流程不用的 MPI/HCCL Test 等工具路径；保留构建实际使用的 `env/util/cmake/bin`，重复加载不会不断增长 PATH/LD_LIBRARY_PATH。实际配置和 production 的 CANN 环境仍会重新加载。直接使用其他公共环境入口的既有行为保持不变。后续步骤均在此目录执行。
-
-### 4. 一键编译
-
-```bash
-bash build_all.sh
-```
-
-每次先检查路径归属，删除固定 `build/validation/` 内的旧编译内容，再配置和全量编译；不再按 UUID 新建构建目录。生产包和 Host 测试仍使用各自子目录，安装到 `install/validation/`。build_id 和日志目录继续独立记录每次尝试。开始新构建时立即作废旧安装 manifest 和同步记录，即使本次编译失败，也不能继续运行上次安装结果。
-
-Host 测试使用 Debug，保留现有断言；要求当前 17 项必需测试全部注册并安装，允许测试总数增长，新增测试也随清单执行。缺少 Python 测试或缺少安装文件仍失败；本次没有减少测试范围。
-
-production 模式在本次构建完成后执行一次 `nm`、`readelf`、`ldd -r`，检查公共符号、ELF `$ORIGIN` 和真实 driver HAL 依赖，并检查四个 A5 kernel 文件。sync、run 及远端 node 不再重复检查符号或运行库；其他节点的运行库兼容性不会由这一检查覆盖。源码路径/来源标签、安装文件摘要、测试命令、构建模式和工具链日志随构建保留。成功输出 `BUILD_PASS`；编译命令无法启动、非零退出或安装失败归为 `BUILD_FAILED`，附原始日志路径。脚本不要求存在 `3rdparty/spdlog`，日志后端沿用代码中的自动检测。
-
-### 5. 同步所有节点
-
-```bash
-bash sync.sh
-```
-
-首节点不重复复制自身。其他节点使用相同绝对目录，同步当前枚举的源码、测试脚本、配置和 `install/validation/`，检查安装包身份、CPU 架构及产物摘要；任一节点失败，总体失败。源码没有内容校验，运行库不再重复检查。`rsync --checksum` 保留，用于决定已有文件是否需要传输，避免同大小/同时间戳的内容变化被漏传；它不生成源码验证报告。只重建本工具的安装目录，不同步 `.git`、本地 CANN 安装、编译缓存和历史日志。
-
-同步目录检查按决定保留：目标必须为空或已有本流程的管理标记，不得为 Git checkout、经过 symlink 或存在活动锁。其他节点若仅由 Mutagen 放入源码而没有管理标记，会被拒绝接管；脚本不会自动把任意非空目录认作本流程目录。
-
-全部节点通过后输出 `SYNC_PASS`，保存 build_id 与实际生效配置。配置签名使用解析后的主机/device 列表和有效环境参数；hostfile 或 `validation.local.sh` 只改注释、空白且不改变实际配置时，不要求重新同步。构建身份或实际配置改变后须重新同步；安装产物变化仍会被检查。源码和文档文字变化本身不使同步记录失效。
-
-### 6. 启动测试
-
-```bash
-bash run.sh
-```
-
-首节点执行本机测试，其余节点通过 SSH 并行启动。每个远端会话重新加载 `set_env.sh`；不会假设 SSH 继承了首节点的环境。测试从安装包直接运行，不依赖首节点的 CMake 构建树。
-
-### 7. 等待最终结果
-
-`run.sh` 阻塞到测试结束并自动收集结果。成功输出类似：
-
-```text
-VALIDATION_PASS checkpoint=ep-sdedup-p1-abi-host mode=production hosts=8/8 tests_per_host=17 commit=unknown
-```
-
-只有全部预期主机测试成功、退出码为 0、当前 checkpoint 必需 marker 完整、结果属于本次运行且日志汇总完成时才返回 0。`empty-kernel` 额外检查 `EP_SERVER_DEDUP_EMPTY_KERNEL_PASS test=launch` 与 `test=registration`，分别来自 Host 替身和真实设备注册。失败时返回非零，分别记录错误类别、节点、阶段、原始退出码/超时状态及日志路径，保留首个失败边界和后续收集/清理错误。结果保存在 `run/validation/<run_id>/summary.json`，原始日志按节点/测试保留；不再输出源码 SHA256。
-
-`dry-run` 在同一摘要中增加 `rank_size`、`completed_ranks`、`rank_mapping` 和各节点的 `reported_result.ranks`。每 rank 的 `EP_SERVER_DEDUP_DRYRUN_PASS` JSON 记录包含 `run_id/build_id/checkpoint/commit/status`、主机与 rank/device 映射及 PID；原始日志为 `rank-<rank>.log`，远端日志仍收集到 `nodes/<host_index>/`。控制端核对每台的 8 个预期 rank，拒绝缺失、重复、旧运行或错误映射；终端增加 `ranks=64/64` 或 `ranks=128/128`。仅进程 exit=0 不等于验证成功。
-
-`mode=host` 的 PASS 证明 Host 契约，以及所选 dry-run 的普通进程编排；`mode=production` 增加目标环境生产编译/链接和加载依赖证据。`empty-kernel` 通过另证明真实设备注册；前三个检查点都不证明 NPU launch 或去重通信。
-
-`chain-single` 的每个 rank 必须同时提供 `EP_SERVER_DEDUP_CHAIN_PASS` 和 `EP_SERVER_DEDUP_SINGLE_ROUND_PASS` JSON。前者记录 peer 数量与 window 字节数，后者必须是 `submitted=1/completed=1/cleanup=complete`；两者的运行/构建/提交/rank/device/PID 和 shape/dtype 必须与本次配置一致。控制端仍收集 `rank-<rank>.log`，在节点 `ranks` 的最终记录内保留 `chain` 证据，并在摘要中记录 `chain_configuration`。
-
-`chain-multi` 使用同一 CHAIN marker 和 `EP_SERVER_DEDUP_MULTI_ROUND_PASS`；两者的 `run_mode/loops/warmup` 必须匹配本次配置。最终记录要求 `submitted=completed=loops`、`warmup_submitted=warmup_completed=warmup`、`cleanup=complete`。submitted 统计成功提交，completed 仅在整批 stream 同步和 Host barrier 均成功后一次确认；中途失败保留 batch/submission 和实际计数。Host 测试验证连续 magic 及提交失败后不回退；breakdown 另核对 `EP_SERVER_DEDUP_BREAKDOWN_PASS` 的运行身份、全部核和最后一轮 generation=`warmup+loops`。performance 要求每 rank 恰有 `warmup+loops` 个有效目标 kernel 样本，最后 loops 个用于统计。缺失、过期、重复或错误样本不能代替成功。两个检查点均不证明 Dispatch 数值或通信数据面。
-
-### dry-run 退出清理回归
-
-Host 测试和本机 8 个 rank 共用节点剩余执行预算，后启动的 rank 不重新获得 120 秒。控制端统一限制执行阶段并保留清理/收集时间，总期限仍为 180 秒。首个 rank 错误先写入错误列表，再触发同节点取消，避免取消错误抢占原始故障；控制端沿用已有跨节点取消。每个启动进程拥有独立进程组，TERM 后最多等待 5 秒再 KILL，并回收；节点退出清理失败仍保留 PID/锁并使总体失败。
-
-正常七步测试不注入故障。首次在目标 Linux 环境验证本检查点时，可用已有行为测试完成一次卡住与控制连接 HUP 清理演练；它们在临时目录创建会忽略 TERM 的 rank 和子进程，分别验证本地 watchdog 与 HUP 后无运行中进程残留，不访问 NPU，也不改部署配置：
-
-```bash
-(cd tools/validation && python3 -m unittest -v \
-  test_workflow.WorkflowIntegrationTests.test_dry_run_watchdog_reaps_term_resistant_ranks_and_children \
-  test_workflow.WorkflowIntegrationTests.test_dry_run_hangup_reaps_term_resistant_ranks_and_children)
-```
-
-上述 HUP 测试模拟断连信号，SSH 传输由真实 64P/128P 运行覆盖；本地替身或单机进程测试不能替代集群验收。开发回归另覆盖单 rank 非零、缺失/重复/损坏/旧 marker、错误映射和日志收集失败，不为这些场景增加生产故障开关。
-
-## 失败分类
-
-错误按实际失败边界分类；“推出失败”按进程退出与清理处理。进程失败、结果不通过和日志无法解析分别记录，不根据 stderr 关键词猜测测试结果。
-
-| 类别 | 含义与示例 |
-| --- | --- |
-| `CONFIG_FAILED` | CANN/hostfile/工具配置错误，或安装包身份、架构、产物检查失败，尚未进入有效测试 |
-| `BUILD_FAILED` | 配置、编译或安装失败；编译命令无法启动、非零退出或超时均属于此类 |
-| `SYNC_FAILED` | 节点准备、文件传输或同步确认失败 |
-| `LAUNCH_FAILED` | 测试或节点进程未能拉起，例如可执行文件不存在、SSH 启动失败 |
-| `EXIT_FAILED` | 已启动进程非零退出、被信号终止或超过期限；保留原始退出码，不混作结果校验失败 |
-| `RESULT_FAILED` | 执行结束且结果可解析，但报告合法 FAIL marker，或运行身份、测试集合、测试状态不符合预期 |
-| `LOG_PARSE_FAILED` | 日志编码、JSON 或结果协议无法解析；必需 PASS marker 缺失或格式非法也属于此类 |
-| `LOG_COLLECT_FAILED` | 原始日志或结果文件传输/收集失败；不能据此声称测试逻辑失败 |
-| `CLEANUP_FAILED` | 无法确认进程身份、终止失败或未确认所属进程清理完成；已有执行错误另行保留 |
-
-例如，测试已报告 PASS 但日志回传失败，摘要的 `reported_result` 保留节点已报告的结果，同时报告 `LOG_COLLECT_FAILED`，整体流程仍非零退出。`primary_error` 记录最先观察到的失败，`errors` 保留后续错误；编译失败后发生清理错误，应同时保留编译失败和清理失败。解析不了日志时不虚构 PASS/FAIL 结论。
+下面保留历史实施记录作为排查参考；其中旧七步配置操作以本页上述三层入口为准。
 
 ## 维护与验证边界
 

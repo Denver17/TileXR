@@ -9,10 +9,10 @@ mkdir -p "$result_root"
 declare -a assignments=()
 for argument in "$@"; do
     case "$argument" in
-        checkpoint=*|mode=*|run_mode=*|loops=*|warmup=*|bs=*|h=*|topk=*|moe_expert_num=*|dtype=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*)
+        mode=*|run_mode=*|loops=*|warmup=*|bs=*|h=*|topk=*|moe_expert_num=*|dtype=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*)
             key=${argument%%=*}; value=${argument#*=}
             case "$key" in
-                checkpoint) assignments+=("TILEXR_VALIDATION_CHECKPOINT=$value");; mode) assignments+=("TILEXR_VALIDATION_BUILD_MODE=$value");;
+                mode) assignments+=("TILEXR_VALIDATION_BUILD_MODE=$value");;
                 run_mode) assignments+=("TILEXR_VALIDATION_RUN_MODE=$value");; loops) assignments+=("TILEXR_VALIDATION_LOOPS=$value");;
                 warmup) assignments+=("TILEXR_VALIDATION_WARMUP=$value");; bs) assignments+=("TILEXR_VALIDATION_BS=$value");;
                 h) assignments+=("TILEXR_VALIDATION_H=$value");; topk) assignments+=("TILEXR_VALIDATION_TOPK=$value");;
@@ -26,14 +26,19 @@ for argument in "$@"; do
 done
 for assignment in "${assignments[@]}"; do export "$assignment"; done
 export TILEXR_VALIDATION_RESULT_ROOT="$result_root"
-cp -- validation.local.sh "$result_root/validation.local.sh.bak"
-printf '\n# run_case temporary overrides\n' >> validation.local.sh
-for assignment in "${assignments[@]}"; do printf '%s\n' "$assignment" >> validation.local.sh; done
-trap 'cp -- "$result_root/validation.local.sh.bak" validation.local.sh' EXIT
-source ./set_env.sh >"$result_root/environment.log" 2>&1
-for assignment in "${assignments[@]}"; do export "$assignment"; done
-export TILEXR_DIRECT_RUN=1
-if bash ./run.sh >"$result_root/workflow.log" 2>&1; then status=PASS; else status=FAIL; fi
+if source ./set_env.sh >"$result_root/environment.log" 2>&1; then
+    for assignment in "${assignments[@]}"; do export "$assignment"; done
+    export TILEXR_DIRECT_RUN=1
+    if "$TILEXR_VALIDATION_PYTHON" tools/validation/workflow.py run >"$result_root/workflow.log" 2>&1; then
+        status=PASS
+    else
+        status=FAIL
+    fi
+else
+    printf '\n================================\nFailed\n================================\n\n'
+    printf 'ERROR environment setup failed; see environment.log\n' >"$result_root/summary.log"
+    exit 1
+fi
 summary_json=$(find "$result_root" -name summary.json -type f -print -quit || true)
 if [[ -n "$summary_json" ]]; then cp -- "$summary_json" "$result_root/summary.json"; fi
 "${TILEXR_VALIDATION_PYTHON:-python3}" - "$result_root" "$status" <<'PY'

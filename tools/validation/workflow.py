@@ -248,7 +248,11 @@ class Config:
     def __init__(self):
         self.root = Path(os.environ.get("TILEXR_VALIDATION_ROOT", Path(__file__).resolve().parents[2])).resolve()
         self.mode = os.environ.get("TILEXR_VALIDATION_BUILD_MODE", "production")
-        self.checkpoint = os.environ.get("TILEXR_VALIDATION_CHECKPOINT", CHECKPOINT)
+        # 人工测试继承已安装程序的检查点；只由提交验收入口显式选择。
+        self.checkpoint = os.environ.get("TILEXR_VALIDATION_CHECKPOINT")
+        if not self.checkpoint:
+            installed = self.root / "install/validation/manifest.json"
+            self.checkpoint = read_json(installed)["checkpoint"] if installed.exists() else CHECKPOINT
         self.hostfile = Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile"))
         self.user = os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
@@ -561,7 +565,7 @@ def build(config):
 
 def remote_argv(config, host, action, *arguments):
     command = "bash -s -- " + " ".join(shlex.quote(str(value)) for value in (config.root, action, *arguments))
-    if os.environ.get("TILEXR_DIRECT_RUN"):
+    if action in ("verify", "node") or os.environ.get("TILEXR_DIRECT_RUN"):
         values = {
             "TILEXR_VALIDATION_CHECKPOINT": config.checkpoint,
             "TILEXR_VALIDATION_BUILD_MODE": config.mode,
@@ -570,6 +574,7 @@ def remote_argv(config, host, action, *arguments):
             "TILEXR_VALIDATION_TOPK": config.chain.get("topk") if config.chain else None,
             "TILEXR_VALIDATION_MOE_EXPERT_NUM": config.chain.get("moe_expert_num") if config.chain else None,
             "TILEXR_VALIDATION_DTYPE": config.chain.get("dtype") if config.chain else None,
+            "TILEXR_VALIDATION_BLOCK_DIM": config.chain.get("block_dim") if config.chain else None,
             "TILEXR_VALIDATION_LOOPS": config.chain.get("loops") if config.chain else None,
             "TILEXR_VALIDATION_WARMUP": config.chain.get("warmup") if config.chain else None,
             "TILEXR_VALIDATION_RUN_MODE": config.chain.get("run_mode") if config.chain else None,

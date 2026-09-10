@@ -1,4 +1,3 @@
 #!/usr/bin/env bash
-set -eo pipefail
-source "$(dirname -- "${BASH_SOURCE[0]}")/set_env.sh"
-exec "$TILEXR_VALIDATION_PYTHON" "$TILEXR_VALIDATION_ROOT/tools/validation/workflow.py" run "$@"
+# 单次测试的简短别名；参数与 run_case.sh 相同。
+exec bash "$(dirname -- "${BASH_SOURCE[0]}")/run_case.sh" "$@"
