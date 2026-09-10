@@ -393,6 +393,10 @@ readelf -d install/lib/libtilexr-collectives.so | grep -E 'RPATH|RUNPATH' || tru
 ```
 
 No RUNPATH/RPATH entry may contain `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib`.
+When `devlib` is required as a link-time fallback, keep the search order as
+`${ASCEND_DRIVER_PATH}/lib64/driver`, `${ASCEND_HOME_PATH}/${ARCH}-linux/lib64`,
+then `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib`; otherwise stub libraries can
+shadow the real driver HAL or runtime libraries during linking.
 Host tests establish layout, exact profile classification, and communicator
 resource teardown only. They do not prove A5 UDMA transfers.
 
