@@ -25,6 +25,7 @@
 #include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
 #include "ep_memory_server_dedup_profile.h"
+#include "../demo/tilexr_ep_expert_ids.h"
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -385,6 +386,20 @@ int Run(const Config &c)
             Check(aclrtGetDevice(&device), "aclrtGetDevice");
             allocations.push_back({data, sizes[i], sizes[i], alignments[i], device});
         }
+        // Build deterministic, valid caller inputs. The stage-1 kernel may be
+        // empty, but its ABI must receive real token and routing buffers.
+        std::vector<uint8_t> xHost(static_cast<size_t>(layout.xBytes), 0);
+        std::vector<int32_t> idsHost(static_cast<size_t>(c.bs * c.topK));
+        TileXREpDemo::ExpertIdsConfig idsConfig {c.bs, c.topK, c.experts,
+            c.experts / c.rankSize, c.rankSize, c.rank, 2026};
+        idsHost = TileXREpDemo::BuildBalancedExpertIds(idsConfig);
+        Require(idsHost.size() == static_cast<size_t>(c.bs * c.topK), "expert id construction failed");
+        for (size_t i = 0; i < xHost.size(); ++i) xHost[i] = static_cast<uint8_t>(i & 0xffU);
+        Check(aclrtMemcpy(buffers[0], xHost.size(), xHost.data(), xHost.size(), ACL_MEMCPY_HOST_TO_DEVICE), "copy x");
+        Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
+        std::vector<uint8_t> zero(layout.expertTokenNumsBytes + layout.sendCountsBytes, 0);
+        Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0, layout.expertTokenNumsBytes), "clear token counts");
+        Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0, layout.sendCountsBytes), "clear send counts");
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
             "caller allocation validation");
         stage = "chain-barrier";

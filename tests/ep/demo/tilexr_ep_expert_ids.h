@@ -83,6 +83,30 @@ inline std::vector<int32_t> BuildRandomExpertIds(const ExpertIdsConfig &config)
     return expertIds;
 }
 
+// Balanced-shuffle routing: each epoch permutes experts, then assigns a full
+// balanced cycle to consecutive global tokens (Memory reference algorithm).
+inline std::vector<int32_t> BuildBalancedShuffleExpertIds(const ExpertIdsConfig &config)
+{
+    if (!IsValidExpertIdsConfig(config)) return {};
+    const int64_t divisor = std::gcd(config.moeExpertNum, config.topK);
+    const int64_t tokensPerEpoch = config.moeExpertNum / divisor;
+    const int64_t globalTokens = config.bs * config.epWorldSize;
+    if (globalTokens % tokensPerEpoch != 0) return {};
+    std::vector<int32_t> all(static_cast<size_t>(globalTokens * config.topK));
+    std::vector<int32_t> candidates(static_cast<size_t>(config.moeExpertNum));
+    std::mt19937 generator(config.seed);
+    for (int64_t base = 0; base < globalTokens; base += tokensPerEpoch) {
+        std::iota(candidates.begin(), candidates.end(), 0);
+        std::shuffle(candidates.begin(), candidates.end(), generator);
+        for (int64_t token = 0; token < tokensPerEpoch; ++token)
+            for (int64_t k = 0; k < config.topK; ++k)
+                all[static_cast<size_t>((base + token) * config.topK + k)] =
+                    candidates[static_cast<size_t>((token * config.topK + k) % config.moeExpertNum)];
+    }
+    const size_t begin = static_cast<size_t>(config.epRankId * config.bs * config.topK);
+    return {all.begin() + begin, all.begin() + begin + static_cast<size_t>(config.bs * config.topK)};
+}
+
 } // namespace TileXREpDemo
 
 #endif // TILEXR_TESTS_EP_DEMO_EXPERT_IDS_H
