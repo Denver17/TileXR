@@ -31,7 +31,10 @@ DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
 CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
-CHAIN_CHECKPOINTS = (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT)
+MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
+MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
+MEMORY_BOUNDARY_BYTES = 4 * 1024 ** 3
+CHAIN_CHECKPOINTS = (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
 SINGLE_ROUND_MARKER = "EP_SERVER_DEDUP_SINGLE_ROUND_PASS "
@@ -259,7 +262,7 @@ class Config:
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
-            raise ValueError("当前版本支持 ep-sdedup-p1-abi-host、ep-sdedup-p1-empty-kernel、ep-sdedup-p1-dry-run、ep-sdedup-p1-chain-single 和 ep-sdedup-p1-chain-multi")
+            raise ValueError("不支持的 checkpoint：" + self.checkpoint)
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / chain-single / chain-multi 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -279,7 +282,7 @@ class Config:
                      else hosts_from_file(self.hostfile))
             if self.checkpoint in RANK_CHECKPOINTS:
                 rank_mapping(hosts)
-            if self.chain is not None:
+            if self.chain is not None and self.checkpoint != MEMORY_BOUNDARY_CHECKPOINT:
                 ranks = len(hosts) * 8
                 experts = self.chain["moe_expert_num"]
                 if experts % ranks or not 2 <= experts // ranks <= 32 or self.chain["topk"] > experts:
@@ -305,6 +308,11 @@ class Config:
 
 
 def chain_configuration(checkpoint):
+    if checkpoint == MEMORY_BOUNDARY_CHECKPOINT and (
+            os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional" or
+            os.environ.get("TILEXR_VALIDATION_LOOPS", "1") != "1" or
+            os.environ.get("TILEXR_VALIDATION_WARMUP", "0") != "0"):
+        raise ValueError("memory-boundary 仅执行 functional，loops=1，warmup=0")
     shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
              for name, default in (("bs", "256"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "384"))}
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
@@ -497,6 +505,7 @@ def build(config):
         profiling = config.chain is not None and config.chain["run_mode"] == "breakdown"
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
+                 f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
                  f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if profiling else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs],
@@ -512,6 +521,7 @@ def build(config):
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST={'ON' if registration else 'OFF'}",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST={'ON' if chain else 'OFF'}",
+             f"-DBUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
@@ -545,6 +555,13 @@ def build(config):
     missing = (REQUIRED_TESTS | ({REGISTRATION_TEST} if registration else set())) - set(names)
     if missing or len(names) != len(set(names)):
         raise ValueError(f"必需测试缺失或重复：{sorted(missing)}")
+    if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
+        # This delivery accepts only the new capacity/access case; no old checkpoint regression.
+        tests = []
+        for artifact in ("lib/libtilexr-ep-memory-boundary-test.so",
+                         "lib/tilexr/kernels/tilexr_ep_memory_boundary_test_kernel.o"):
+            if not (stage / artifact).is_file():
+                raise ValueError("缺少通信域边界测试产物：" + artifact)
     runtime_check(config, stage, log)
     manifest = {"build_id": build_id, "source": source, "mode": config.mode,
                 "checkpoint": config.checkpoint, "architecture": platform.machine(),
@@ -751,6 +768,16 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                         for key in ("submitted", "completed")) or record.get("cleanup") != "complete"):
                 raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、指定轮数空 launch 或资源清理",
                               rank=mapping["rank"])
+            if manifest["checkpoint"] == MEMORY_BOUNDARY_CHECKPOINT:
+                expected_numbers = {"peer_mem_bytes": MEMORY_BOUNDARY_BYTES,
+                                    "boundary_offset": MEMORY_BOUNDARY_BYTES - 32, "probe_bytes": 32}
+                if (linked["peer_mem_bytes"] != MEMORY_BOUNDARY_BYTES or
+                        any(type(record.get(key)) is not int or record[key] != value
+                            for key, value in expected_numbers.items()) or
+                        any(record.get(key) is not True for key in
+                            ("initial_zero", "device_initial_zero", "device_readback_ff", "host_boundary_ff", "guard_zero"))):
+                    raise Failure("RESULT_FAILED", "rank 未通过 4 GiB 建链及本卡末尾 32B DataCopy 读写校验",
+                                  rank=mapping["rank"])
 
 
 def parse_rank_marker(output, prefix):
@@ -797,6 +824,8 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
             output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
             if config.checkpoint in CHAIN_CHECKPOINTS:
                 marker = MULTI_ROUND_MARKER if config.checkpoint == CHAIN_MULTI_CHECKPOINT else SINGLE_ROUND_MARKER
+                if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
+                    marker = MEMORY_BOUNDARY_MARKER
                 record = parse_rank_marker(output, marker)
                 if not isinstance(record, dict):
                     raise Failure("LOG_PARSE_FAILED", "轮次记录不是 JSON 对象")
@@ -1152,7 +1181,10 @@ def run(config):
         scope += "、A5 空 kernel 安装与设备注册"
     elif config.checkpoint == DRY_RUN_CHECKPOINT:
         scope += f"、{len(mappings)}P rank/device 映射与进程退出；不创建设备上下文或 communicator"
-    if config.checkpoint in CHAIN_CHECKPOINTS:
+    if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
+        scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
+                 "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
+    elif config.checkpoint in CHAIN_CHECKPOINTS:
         rounds = "单轮" if config.checkpoint == CHAIN_CHECKPOINT else f"{config.chain['loops']} 轮"
         scope += f"、{len(mappings)}P communicator/peer window、{rounds}空 Dispatch launch、整批 stream 同步与 Host barrier；未执行去重算法或验证数值。"
     else:

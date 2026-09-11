@@ -26,6 +26,9 @@
 #include "ep_memory_server_dedup_layout.h"
 #include "ep_memory_server_dedup_profile.h"
 #include "../demo/tilexr_ep_expert_ids.h"
+#ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
+#include "memory_boundary_test.h"
+#endif
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -87,7 +90,8 @@ Config Parse(int argc, char **argv)
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
     c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p1-chain-single" : checkpoint;
-    Require(c.checkpoint == "ep-sdedup-p1-chain-single" || c.checkpoint == "ep-sdedup-p1-chain-multi",
+    Require(c.checkpoint == "ep-sdedup-p1-chain-single" || c.checkpoint == "ep-sdedup-p1-chain-multi" ||
+        c.checkpoint == "ep-sdedup-p1-memory-boundary",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
@@ -106,6 +110,9 @@ Config Parse(int argc, char **argv)
     Require(c.checkpoint != "ep-sdedup-p1-chain-single" ||
         (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
         "chain-single requires functional mode, loops=1, warmup=0");
+    Require(c.checkpoint != "ep-sdedup-p1-memory-boundary" ||
+        (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
+        "memory-boundary requires functional mode, loops=1, warmup=0");
     Require(!c.run.empty() && c.run.size() < 128 && !c.build.empty() && c.build.size() < 128 &&
         !c.host.empty(), "invalid run/build/host identity");
     int *fields[] = {&c.hostIndex, &c.localRank, &c.device, &c.rank, &c.rankSize};
@@ -334,8 +341,19 @@ std::string ReadProfile(const Config &c, const TileXR::CommArgs &args, uint32_t 
     return out.str() + ']';
 }
 
+#ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
+#include "memory_boundary_consumer.h"
+#endif
+
 int Run(const Config &c)
 {
+    if (c.checkpoint == "ep-sdedup-p1-memory-boundary") {
+#ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
+        return RunMemoryBoundary(c);
+#else
+        throw std::runtime_error("memory-boundary test kernel was not built");
+#endif
+    }
     TileXREp::EpMemoryServerDedupLayout layout {};
     Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(c.rankSize, c.bs, c.h, c.topK, c.experts, &layout),
         "layout");

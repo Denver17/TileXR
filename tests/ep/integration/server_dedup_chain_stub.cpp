@@ -8,6 +8,7 @@
 #include "acl/acl.h"
 #include "tilexr_ep.h"
 #include "ep_memory_server_dedup_profile.h"
+#include "memory_boundary_test.h"
 
 namespace {
 int deviceId = 0;
@@ -16,6 +17,8 @@ TileXR::CommArgs args;
 std::map<void *, void *> allocations;
 std::map<std::string, uint64_t> calls;
 std::array<void *, 8> firstBuffers {};
+std::array<uint8_t, 64> boundaryTail {};
+bool boundaryMode = false;
 std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupProfileMaxCores> profile {};
 int Call(const char *name)
 {
@@ -95,11 +98,21 @@ aclError aclrtMalloc(void **data, size_t bytes, aclrtMemMallocPolicy)
     return 0;
 }
 aclError aclrtFree(void *data) { std::free(allocations.at(data)); allocations.erase(data); return Call("free"); }
+aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
+{
+    if (bytes > size) return 92;
+    std::memset(data, value, bytes);
+    return Call("memset");
+}
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
+    if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
+        std::memcpy(destination, boundaryTail.data(), bytes);
+        return Call("boundary-host-read");
+    }
     std::memcpy(destination, source, bytes);
     if (source == profile.data()) { return Call("profile-read"); }
-    if (std::getenv("TEST_DEVICE_MAPPING_MISMATCH") != nullptr) {
+    if (source == &args && std::getenv("TEST_DEVICE_MAPPING_MISMATCH") != nullptr) {
         static_cast<TileXR::CommArgs *>(destination)->peerMems[3] += 32;
     }
     return Call("memcpy");
@@ -118,6 +131,21 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
     if (std::getenv("TEST_SMALL_PEER") != nullptr) { args.peerMemBytes = 64; }
     *comm = &args;
     return Call("comm-init");
+}
+int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, int rank, TileXRCommPtr *comm)
+{
+    if (dataMiB != 4092) return 92;
+    const int ret = TileXRCommInitRankMemoryDomain(domain, size, rank, comm);
+    if (ret != 0) return ret;
+    boundaryMode = true;
+    args.peerMemBytes = uint64_t(dataMiB) * 1024 * 1024 + TileXR::TILEXR_FLAG_BUFF_BYTES;
+    for (int i = 0; i < size; ++i) {
+        args.peerMems[i] = reinterpret_cast<GM_ADDR>(UINT64_C(0x1000000000) + uint64_t(i) * (UINT64_C(1) << 33));
+    }
+    const char *fault = std::getenv("TEST_BOUNDARY_FAULT");
+    if (fault != nullptr && std::strcmp(fault, "capacity") == 0) args.peerMemBytes -= 32;
+    if (fault != nullptr && std::strcmp(fault, "initial") == 0) boundaryTail[63] = 1;
+    return Call("comm-init-sized");
 }
 int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&host) { host = &args; return Call("host-args"); }
 int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &device) { device = reinterpret_cast<GM_ADDR>(&args); return Call("device-args"); }
@@ -149,4 +177,21 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     if (result == 0 && mode != nullptr && std::strcmp(mode, "breakdown") == 0) { WriteProfile(); }
     return result;
 }
+}
+
+int TileXRMemoryBoundaryTest::Launch(void *commArgs, void *result, aclrtStream stream)
+{
+    if (commArgs != &args || stream != reinterpret_cast<void *>(0x20) || !boundaryMode ||
+        args.peerMemBytes != kPeerBytes) return 92;
+    const int ret = Call("boundary-launch");
+    if (ret != 0) return ret;
+    const char *configured = std::getenv("TEST_BOUNDARY_FAULT");
+    const std::string fault = configured == nullptr ? "" : configured;
+    if (fault == "no-launch") return 0;
+    auto *output = static_cast<uint8_t *>(result);
+    std::memcpy(output, boundaryTail.data() + 32, 32);
+    if (fault != "no-write") std::memset(boundaryTail.data() + 32, 0xFF, 32);
+    if (fault != "no-read") std::memcpy(output + 32, boundaryTail.data() + 32, 32);
+    if (fault == "guard") boundaryTail[31] = 0xFF;
+    return 0;
 }

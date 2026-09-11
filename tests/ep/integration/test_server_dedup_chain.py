@@ -20,7 +20,7 @@ ACL_HEADER = """
 #include "acl_base.h"
 #define ACL_SUCCESS 0
 typedef enum { ACL_MEM_MALLOC_HUGE_FIRST = 0 } aclrtMemMallocPolicy;
-typedef enum { ACL_MEMCPY_DEVICE_TO_HOST = 2 } aclrtMemcpyKind;
+typedef enum { ACL_MEMCPY_HOST_TO_DEVICE = 1, ACL_MEMCPY_DEVICE_TO_HOST = 2 } aclrtMemcpyKind;
 typedef enum { ACL_DEV_ATTR_VECTOR_CORE_NUM = 1 } aclrtDevAttr;
 extern "C" {
 aclError aclInit(const char *);
@@ -35,6 +35,7 @@ aclError aclrtDestroyStream(aclrtStream);
 aclError aclrtSynchronizeStream(aclrtStream);
 aclError aclrtMalloc(void **, size_t, aclrtMemMallocPolicy);
 aclError aclrtFree(void *);
+aclError aclrtMemset(void *, size_t, int32_t, size_t);
 aclError aclrtMemcpy(void *, size_t, const void *, size_t, aclrtMemcpyKind);
 }
 """
@@ -60,7 +61,7 @@ class ChainConsumerTests(unittest.TestCase):
         (include / "acl.h").write_text(ACL_HEADER)
         cls.executable = cls.folder / "consumer"
         result = subprocess.run([
-            compiler, "-std=c++14", "-Wall", "-Wextra", "-Werror", "-pthread",
+            compiler, "-std=c++14", "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
             "-I", str(include.parent), "-I", str(ROOT / "src/include"),
             "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
             str(SOURCE / "test_tilexr_ep_server_dedup_chain.cpp"),
@@ -131,6 +132,50 @@ class ChainConsumerTests(unittest.TestCase):
         peer.sendall(struct.pack("!4I", 1, phase, rank, 16) +
                      run.ljust(128, b"\0") + b"build-identity".ljust(128, b"\0"))
         return peer
+
+    def test_memory_boundary_all_ranks_validate_capacity_and_roundtrip(self):
+        environment = {"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary"}
+        processes = [self.start(rank, environment=environment) for rank in range(16)]
+        for rank, process in enumerate(processes):
+            output, errors = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 0, output + errors)
+            linked, = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")
+            record, = self.records(output, "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS")
+            self.assertEqual(linked["peer_mem_bytes"], 4 * 1024 ** 3)
+            self.assertEqual(record["boundary_offset"], 4 * 1024 ** 3 - 32)
+            self.assertEqual(record["rank"], rank)
+            for key in ("initial_zero", "device_initial_zero", "device_readback_ff", "host_boundary_ff", "guard_zero"):
+                self.assertIs(record[key], True)
+            calls = self.trace_lines(rank)
+            self.assertEqual(calls.count("comm-init-sized"), 1)
+            self.assertEqual(calls.count("boundary-launch"), 1)
+            self.assertNotIn("launch", calls)  # No Dispatch call or old checkpoint regression.
+            self.assertEqual(calls[-1], "finalize")
+
+    def test_memory_boundary_rejects_bad_capacity(self):
+        process = self.start(0, environment={"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary",
+                                           "TEST_BOUNDARY_FAULT": "capacity"})
+        output, errors = process.communicate(timeout=5)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertNotIn("_PASS", output)
+        self.assertIn("not exactly 4 GiB", errors)
+
+    def test_memory_boundary_detects_missing_operations_and_corruption(self):
+        for fault in ("initial", "no-launch", "no-write", "no-read", "guard"):
+            with self.subTest(fault=fault):
+                process = self.start(0, environment={"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary",
+                                                   "TEST_BOUNDARY_FAULT": fault})
+                peers = []
+                try:
+                    peers = [self.barrier_peer(rank, 0) for rank in range(1, 16)]
+                    output, errors = process.communicate(timeout=5)
+                    self.assertNotEqual(process.returncode, 0)
+                    self.assertNotIn("EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS", output)
+                    self.assertIn("ERROR", errors)
+                    self.assertIn("expected=", errors)
+                finally:
+                    for peer in peers:
+                        peer.close()
 
     def test_full_round_lifecycle_for_both_dtypes(self):
         cases = [("single", "functional", dtype, None, None, 1, 0) for dtype in ("bf16", "fp16")]

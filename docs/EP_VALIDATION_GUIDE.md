@@ -38,6 +38,38 @@ breakdown 的设备打点是编译期开关。切换至 breakdown 或从 breakdo
 
 ## 输出和验收范围
 
+### 每 Rank 4 GiB 通信域与边界访问
+
+`ep-sdedup-p1-memory-boundary` 是独立的 functional 补充验收。当前提交入口只运行这一个 case，
+不回归旧检查点、不运行 Dispatch、不采集性能或 breakdown。在已配置环境的首节点执行：
+
+```bash
+bash run_commit_validation.sh
+```
+
+该入口构建并同步新的通信库、测试 Host 库和独立 A5 kernel。相同安装产物再次执行只需
+`bash run.sh run_mode=functional loops=1 warmup=0`，不必重新构建/同步。
+
+- `TileXRCommInitRankMemoryDomainWithSize(0, 4092, ...)`：4092 MiB 数据区 + 4 MiB Flag 区，
+  `peerMemBytes` 必须恰为 `4294967296`。底层另有 1 MiB 地址偏移余量，实际分配 4097 MiB/Rank。
+  原来的 MemoryDomain 初始化入口保持 8 MiB 数据区默认值；不修改普通 Memory 的固定分区。
+- Host 初始化整个分配为零，各 rank 核对 Host/device CommArgs 和全部 peer 指针，建链 barrier 后开始测试。
+- 每卡只启动一个 AIV，通过自己 `peerMems[rank]` 的 `uint64_t` 偏移 `4294967264`（`4 GiB - 32 B`）
+  读取初值，再用 DataCopy 写入连续 32 B `0xFF`，清空 UB 后从同一位置 DataCopy 读回独立结果区。
+- Host 逐字节检查设备初读为零、设备读回为 `0xFF`、边界原址为 `0xFF`，以及前邻 32 B 仍为零。
+  读回区预置不同哨兵，未 launch/未读回不能误报 PASS。全部卡通过完成 barrier 和清理后才能汇总 PASS。
+
+结果仍保留在 `run/case-<时间>-<PID>/` 的 `summary.log`、`summary.json` 和各 rank 日志中。
+`nodes[].reported_result.ranks[]` 记录 `peer_mem_bytes`、`boundary_offset`、`probe_bytes` 及各项比较结果；
+失败日志包含 `ERROR`、rank、stage 和首个不匹配字节。该验收证明分配、映射和本卡末端访问，
+不证明整个 4 GiB 区间逐字节可用、跨卡 payload 传输或去重算法。
+
+维护时须区分逻辑窗口、底层分配和算子分区，4 GiB 的字节数及地址运算必须保持 64 位。
+边界探针保留在 `tests/ep/integration/memory_boundary_*`，只在验收构建中启用，勿塞入空 Dispatch。
+复用 consumer 头文件时也须保持 C++14：即使未调用，inline 函数中的 `std::gcd` 仍会阻断编译。
+本地检查覆盖 C++ consumer 的 16 进程行为、错误注入和汇总协议；CANN 编译、4 GiB 分配/IPC 映射及
+真实 DataCopy 必须以 A5 上机结果为准，不把 Host 替身通过登记为硬件通过。
+
 ### breakdown Chrome Trace
 
 breakdown 成功后自动生成 `run/case-<时间>-<PID>/<run_id>/traces/`：

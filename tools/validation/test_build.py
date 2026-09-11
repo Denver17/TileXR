@@ -102,6 +102,9 @@ class BuildTests(unittest.TestCase):
                 files = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
                 files += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o"
                           for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup")]
+                if any("-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST=ON" in command for command, _, _ in self.commands):
+                    files += ["lib/libtilexr-ep-memory-boundary-test.so",
+                              "lib/tilexr/kernels/tilexr_ep_memory_boundary_test_kernel.o"]
             else:
                 files = ["bin/" + name for name in self.names]
                 if any("-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST=ON" in command
@@ -231,7 +234,8 @@ class BuildTests(unittest.TestCase):
                     self.build_fixture(config)
                 self.install_chain = True
                 manifest, _ = self.build_fixture(config)
-                self.assertEqual(len(manifest["tests"]), len(workflow.REQUIRED_TESTS))
+                self.assertEqual(len(manifest["tests"]),
+                                 0 if checkpoint == workflow.MEMORY_BOUNDARY_CHECKPOINT else len(workflow.REQUIRED_TESTS))
                 self.assertNotIn(workflow.CHAIN_PROGRAM, [test["name"] for test in manifest["tests"]])
                 self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
 

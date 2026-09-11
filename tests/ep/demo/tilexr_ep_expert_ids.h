@@ -88,7 +88,13 @@ inline std::vector<int32_t> BuildRandomExpertIds(const ExpertIdsConfig &config)
 inline std::vector<int32_t> BuildBalancedShuffleExpertIds(const ExpertIdsConfig &config)
 {
     if (!IsValidExpertIdsConfig(config)) return {};
-    const int64_t divisor = std::gcd(config.moeExpertNum, config.topK);
+    // std::gcd requires C++17; the Host consumer is C++14.
+    int64_t divisor = config.moeExpertNum;
+    for (int64_t remainder = config.topK; remainder != 0;) {
+        const int64_t next = divisor % remainder;
+        divisor = remainder;
+        remainder = next;
+    }
     const int64_t tokensPerEpoch = config.moeExpertNum / divisor;
     const int64_t globalTokens = config.bs * config.epWorldSize;
     if (globalTokens % tokensPerEpoch != 0) return {};

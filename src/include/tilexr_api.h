@@ -49,6 +49,11 @@ int TileXRCommInitRankWithSharedQpDomain(int commDomain, int rankSize, int rank,
 // Creates an isolated peer-memory domain without Credit, UDMA, Fullmesh, or SDMA resources.
 int TileXRCommInitRankMemoryDomain(int commDomain, int rankSize, int rank, TileXRCommPtr *comm);
 
+// bufferSize is the data capacity in MiB (>=1), excluding the 4 MiB flag area.
+// All ranks in this domain must use the same size. The default API above stays at 8 MiB.
+int TileXRCommInitRankMemoryDomainWithSize(
+    int commDomain, int bufferSize, int rankSize, int rank, TileXRCommPtr *comm);
+
 #ifdef __cplusplus
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr);
 

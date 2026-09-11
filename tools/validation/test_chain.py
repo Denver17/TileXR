@@ -112,6 +112,32 @@ class ChainTests(TemporaryRoot):
         with self.assertRaises(workflow.Failure):
             workflow.validate_rank_records([record], [mapping], "run", manifest)
 
+    def test_memory_boundary_requires_capacity_and_each_read_write_assertion(self):
+        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
+        config = self.config()
+        manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
+        mapping = workflow.rank_mapping(config.hosts())[0]
+        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
+                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype")})
+        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
+                      peer_mem_bytes=4 * 1024 ** 3, boundary_offset=4 * 1024 ** 3 - 32, probe_bytes=32,
+                      submitted=1, completed=1, cleanup="complete", initial_zero=True, device_initial_zero=True,
+                      device_readback_ff=True, host_boundary_ff=True, guard_zero=True)
+        workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
+        for key, value in (("peer_mem_bytes", 12 * 1024 ** 2), ("boundary_offset", 0), ("probe_bytes", 31),
+                           ("initial_zero", False), ("device_initial_zero", False), ("device_readback_ff", False),
+                           ("host_boundary_ff", False), ("guard_zero", False), ("completed", 0)):
+            with self.subTest(key=key), self.assertRaises(workflow.Failure):
+                workflow.validate_rank_records([dict(record, **{key: value})], [mapping], "run", manifest, config.chain)
+
+    def test_memory_boundary_is_one_functional_case(self):
+        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
+        self.assertEqual(self.config().chain["run_mode"], "functional")
+        for key, value in (("RUN_MODE", "performance"), ("RUN_MODE", "breakdown"), ("LOOPS", "2"), ("WARMUP", "1")):
+            with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), \
+                    self.assertRaises(ValueError):
+                self.config()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -705,6 +705,7 @@ assert os.environ['TILEXR_DEMO_BARRIER_ADDR'] == '192.0.2.1:10274'
 assert os.environ['TILEXR_VALIDATION_BS'] == '256'
 checkpoint = os.environ['TILEXR_VALIDATION_CHECKPOINT']
 multi = checkpoint == 'ep-sdedup-p1-chain-multi'
+boundary = checkpoint == 'ep-sdedup-p1-memory-boundary'
 loops = int(os.environ['TILEXR_VALIDATION_LOOPS'])
 warmup = int(os.environ['TILEXR_VALIDATION_WARMUP'])
 run_mode = os.environ['TILEXR_VALIDATION_RUN_MODE']
@@ -722,7 +723,8 @@ if behavior == 'launch-failure':
     print('stage=launch code=507000', flush=True)
     sys.exit(9)
 if behavior != 'missing-chain':
-    print('EP_SERVER_DEDUP_CHAIN_PASS ' + json.dumps(dict(record, peer_count=rank_size, peer_mem_bytes=1048576)))
+    print('EP_SERVER_DEDUP_CHAIN_PASS ' + json.dumps(dict(record, peer_count=rank_size,
+                                                       peer_mem_bytes=4 * 1024 ** 3 if boundary else 1048576)))
 if behavior == 'stale-round':
     record['run_id'] = 'old-run'
 if run_mode != 'functional':
@@ -737,6 +739,11 @@ if run_mode == 'breakdown':
 if behavior == 'wrong-loops':
     record['loops'] = loops - 1
 prefix = 'EP_SERVER_DEDUP_MULTI_ROUND_PASS ' if multi else 'EP_SERVER_DEDUP_SINGLE_ROUND_PASS '
+if boundary:
+    prefix = 'EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS '
+    record.update(peer_mem_bytes=4 * 1024 ** 3, boundary_offset=4 * 1024 ** 3 - 32, probe_bytes=32,
+                  initial_zero=True, device_initial_zero=True, device_readback_ff=True,
+                  host_boundary_ff=behavior != 'boundary-mismatch', guard_zero=True)
 if behavior == 'single-marker':
     prefix = 'EP_SERVER_DEDUP_SINGLE_ROUND_PASS '
 print(prefix + json.dumps(dict(record, submitted=loops,
@@ -766,6 +773,32 @@ print(prefix + json.dumps(dict(record, submitted=loops,
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["chain"]["peer_count"], 16)
                 self.assertEqual(rank["completed"], 1)
+
+    def test_memory_boundary_sync_run_collects_16_ranks_without_old_tests(self):
+        self.enable_chain(workflow.MEMORY_BOUNDARY_CHECKPOINT)
+        self.manifest["tests"] = []
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        self.prepare_sync()
+        self.assert_success(self.invoke("run"))
+        summary = self.summary()
+        self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
+        self.assertIn("4 GiB", summary["scope"])
+        self.assertNotIn("空 Dispatch launch", summary["scope"])
+        for node in summary["nodes"]:
+            self.assertEqual(node["reported_result"]["tests"], [])
+            for rank in node["reported_result"]["ranks"]:
+                self.assertIs(rank["host_boundary_ff"], True)
+
+    def test_memory_boundary_one_rank_mismatch_fails_node(self):
+        self.enable_chain(workflow.MEMORY_BOUNDARY_CHECKPOINT)
+        self.manifest["tests"] = []
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        command = self.invoke("node", "boundary-failure", self.manifest["build_id"], "10", "", "1",
+                              environment={"CHAIN_TEST_BEHAVIOR": "boundary-mismatch"})
+        self.assertNotEqual(command.returncode, 0)
+        result = workflow.read_json(self.config_instance.logs / "boundary-failure/result.json")
+        self.assertEqual(result["errors"][0]["type"], "RESULT_FAILED")
+        self.assertEqual(result["errors"][0]["rank"], 8)
 
     def test_chain_single_missing_stale_or_incomplete_evidence_fails(self):
         self.enable_chain()

@@ -144,8 +144,15 @@ int TileXRCommInitRankWithSharedQpDomain(
 int TileXRCommInitRankMemoryDomain(
     int commDomain, int rankSize, int rank, TileXRCommPtr *comm)
 {
+    return TileXRCommInitRankMemoryDomainWithSize(
+        commDomain, TILEXR_MEMORY_DOMAIN_BUFFER_SIZE, rankSize, rank, comm);
+}
+
+int TileXRCommInitRankMemoryDomainWithSize(
+    int commDomain, int bufferSize, int rankSize, int rank, TileXRCommPtr *comm)
+{
     return CommInitRankWithDomainConfig(commDomain,
-        TILEXR_MEMORY_DOMAIN_BUFFER_SIZE, rankSize, rank, false, true, comm);
+        bufferSize, rankSize, rank, false, true, comm);
 }
 
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr)
