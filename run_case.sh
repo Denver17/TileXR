@@ -62,11 +62,12 @@ except (OSError, ValueError, KeyError) as error:
         log.write(f'\nERROR summary: {error}\n')
 result = 'PASS' if status == 'PASS' else 'Failed'
 if status == 'PASS':
-    average = report.get('measurements', {}).get('performance', {}).get('mean_us')
+    performance = report.get('measurements', {}).get('performance', {})
+    average = performance.get('mean_us')
     if average is not None:
-        result += f' kernel average_us={average:.3f}'
+        result += (f' kernel min {performance.get("minimum_us", 0):.3f}us'
+                   f' average {average:.3f}us max {performance.get("maximum_us", 0):.3f}us')
 if report.get('chain_configuration', {}).get('run_mode') == 'breakdown':
-    result += f'\nJSON: {(root / "summary.json").resolve()}'
     if status == 'PASS':
         traces = report.get('traces', {})
         if not traces.get('all_ranks'):
@@ -75,9 +76,7 @@ if report.get('chain_configuration', {}).get('run_mode') == 'breakdown':
             with (root / 'workflow.log').open('a', encoding='utf-8') as log:
                 log.write('\nERROR breakdown trace output missing\n')
         else:
-            result += f'\nTrace (all cards): {traces["all_ranks"]}'
-            for role, path in traces['selected'].items():
-                result += f'\nTrace ({role}, rank={traces["selected_ranks"][role]}): {path}'
+            result += f'\nTrace folder : {(root / "traces").resolve()}/'
 text = f'\n{RESULT_SEPARATOR}\n{description}\n{result}\n{RESULT_SEPARATOR}\n\n'
 (root / 'summary.log').write_text(text, encoding='utf-8')
 print(text, end='')
