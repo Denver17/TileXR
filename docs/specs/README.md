@@ -26,6 +26,7 @@ for UDMA data-plane claims. Sources under `reference/` are comparison-only.
 | MoonEP weight stages | [moonep-weight-stages.md](moonep-weight-stages.md) |
 | MoonEP model replay | [moonep-model-replay.md](moonep-model-replay.md) |
 | Windows cluster SSH tool | [tssh.md](tssh.md) |
+| NPU script scheduler | [npu-scheduler.md](npu-scheduler.md) |
 
 ## Maintenance Rules
 

@@ -1,0 +1,15 @@
+[Unit]
+Description=TileXR NPU Script Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tilexr-npu-scheduler/app
+ExecStart=/opt/tilexr-npu-scheduler/venv/bin/python -m tools.npu_scheduler --config /etc/tilexr-npu-scheduler.json
+Restart=on-failure
+RestartSec=3
+User=root
+
+[Install]
+WantedBy=multi-user.target

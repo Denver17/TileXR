@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6f8">
+  <title>TileXR NPU Scheduler</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #101216; --surface: #171a20; --surface-raised: #1d2129; --surface-soft: #20252e;
+      --line: #2b313c; --line-strong: #3b4350; --text: #f3f5f7; --text-2: #c1c8d2;
+      --muted: #8993a2; --faint: #606a78; --blue: #55a8ff; --blue-strong: #2477d4;
+      --blue-soft: rgba(85,168,255,.14); --green: #45d39b; --green-soft: rgba(69,211,155,.14);
+      --amber: #f1b65a; --amber-soft: rgba(241,182,90,.15); --red: #ff7c84;
+      --red-soft: rgba(255,124,132,.14); --shadow: 0 10px 28px rgba(0,0,0,.22); --radius: 8px;
+    }
+    [data-theme="light"] {
+      color-scheme: light;
+      --bg: #f4f6f8; --surface: #fff; --surface-raised: #fff; --surface-soft: #eef2f6;
+      --line: #dce2e8; --line-strong: #c1cad5; --text: #18212b; --text-2: #405064;
+      --muted: #68788a; --faint: #8b98a8; --blue: #166dcc; --blue-strong: #1159aa;
+      --blue-soft: rgba(22,109,204,.10); --green: #087c54; --green-soft: rgba(8,124,84,.10);
+      --amber: #a55e00; --amber-soft: rgba(165,94,0,.10); --red: #b42332;
+      --red-soft: rgba(180,35,50,.10); --shadow: 0 10px 28px rgba(27,43,61,.08);
+    }
+    * { box-sizing: border-box; letter-spacing: 0; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text); font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    button, input, textarea, select { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { border: 0; }
+    button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 3px solid rgba(85,168,255,.42); outline-offset: 2px; }
+    a { color: inherit; text-decoration: none; }
+    svg { display: block; width: 18px; height: 18px; flex: 0 0 auto; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .app-shell { min-height: 100dvh; display: flex; }
+    .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 30; width: 244px; display: flex; flex-direction: column; background: var(--surface); border-right: 1px solid var(--line); transition: width .2s ease, transform .2s ease; }
+    .brand { min-height: 72px; display: flex; align-items: center; gap: 11px; padding: 0 22px; border-bottom: 1px solid var(--line); }
+    .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 9px; color: #fff; background: #2278d7; box-shadow: 0 6px 16px rgba(34,120,215,.28); font-weight: 800; }
+    .brand-name { font-weight: 700; font-size: 15px; white-space: nowrap; }
+    .brand-subtitle { margin-top: 2px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+    .nav { flex: 1; overflow-y: auto; padding: 18px 12px; }
+    .nav-group { margin-bottom: 22px; }
+    .nav-label { padding: 0 12px 8px; color: var(--faint); font-size: 11px; font-weight: 650; text-transform: uppercase; letter-spacing: .08em; }
+    .nav-link { width: 100%; min-height: 42px; display: flex; align-items: center; gap: 11px; padding: 0 12px; border-radius: 7px; color: var(--text-2); background: transparent; cursor: pointer; text-align: left; transition: background .18s ease, color .18s ease; }
+    .nav-link:hover { background: var(--surface-soft); color: var(--text); }
+    .nav-link.active { color: var(--text); background: var(--blue-soft); box-shadow: inset 3px 0 0 var(--blue); }
+    .nav-count { margin-left: auto; min-width: 22px; padding: 1px 6px; border-radius: 9px; color: var(--blue); background: var(--blue-soft); font-size: 11px; text-align: center; }
+    .sidebar-footer { padding: 14px 12px; border-top: 1px solid var(--line); }
+    .status-user { display: flex; align-items: center; gap: 10px; padding: 8px 10px; color: var(--text-2); }
+    .status-avatar { width: 30px; height: 30px; display: grid; place-items: center; border-radius: 50%; color: #10243d; background: #87c6ff; font-size: 12px; font-weight: 800; }
+    .status-user strong { display: block; color: var(--text); font-size: 12px; }
+    .status-user span { display: block; color: var(--muted); font-size: 11px; }
+    .sidebar-collapsed .sidebar { width: 76px; }
+    .sidebar-collapsed .brand { padding-inline: 23px; }
+    .sidebar-collapsed .brand-copy, .sidebar-collapsed .nav-label, .sidebar-collapsed .nav-link > span:not(.nav-icon):not(.nav-count), .sidebar-collapsed .nav-count, .sidebar-collapsed .status-copy { display: none; }
+    .sidebar-collapsed .nav-link, .sidebar-collapsed .status-user { justify-content: center; padding-inline: 0; }
+    .app-main { width: calc(100% - 244px); min-width: 0; margin-left: 244px; transition: width .2s ease, margin-left .2s ease; }
+    .sidebar-collapsed .app-main { width: calc(100% - 76px); margin-left: 76px; }
+    .topbar { min-height: 72px; position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 16px; padding: 0 28px; background: color-mix(in srgb, var(--bg) 92%, transparent); border-bottom: 1px solid var(--line); backdrop-filter: blur(12px); }
+    .icon-button { width: 40px; height: 40px; display: inline-grid; place-items: center; border-radius: 7px; color: var(--text-2); background: transparent; cursor: pointer; transition: color .18s ease, background .18s ease; }
+    .icon-button:hover { color: var(--text); background: var(--surface-soft); }
+    .breadcrumb { display: flex; align-items: center; gap: 9px; min-width: 0; color: var(--muted); }
+    .breadcrumb strong { color: var(--text); font-size: 15px; }
+    .breadcrumb-separator { color: var(--faint); }
+    .top-actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+    .search-box { width: min(280px, 28vw); min-height: 40px; display: flex; align-items: center; gap: 8px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; color: var(--muted); background: var(--surface); }
+    .search-box:focus-within { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(85,168,255,.12); }
+    .search-box input { width: 100%; min-width: 0; border: 0; outline: 0; color: var(--text); background: transparent; }
+    .search-box input::placeholder { color: var(--faint); }
+    .shortcut { padding: 2px 6px; border: 1px solid var(--line); border-radius: 4px; color: var(--faint); font-size: 10px; white-space: nowrap; }
+    .page-tabs { min-height: 48px; display: flex; align-items: end; gap: 2px; padding: 0 28px; border-bottom: 1px solid var(--line); }
+    .page-tab { min-height: 42px; display: inline-flex; align-items: center; gap: 8px; padding: 0 15px; border: 1px solid var(--line); border-bottom: 0; border-radius: 8px 8px 0 0; color: var(--text); background: var(--surface); font-weight: 600; }
+    .page-tab .close-tab { color: var(--muted); }
+    .main-content { max-width: 1680px; margin: 0 auto; padding: 28px 28px 56px; }
+    .page-intro { display: flex; align-items: end; justify-content: space-between; gap: 18px; margin-bottom: 24px; }
+    .eyebrow { margin: 0 0 7px; color: var(--blue); font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 7px; font-size: clamp(24px, 3vw, 30px); line-height: 1.2; letter-spacing: -.02em; }
+    .page-intro p { margin: 0; color: var(--muted); }
+    .intro-actions { display: flex; align-items: center; gap: 10px; }
+    .button { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; padding: 0 14px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--text-2); background: var(--surface); cursor: pointer; transition: background .18s ease, border-color .18s ease, color .18s ease; }
+    .button:hover { color: var(--text); background: var(--surface-soft); border-color: var(--blue); }
+    .button.primary { border-color: var(--blue-strong); color: #fff; background: var(--blue-strong); }
+    .button.primary:hover { border-color: var(--blue); background: var(--blue); }
+    .button.compact { min-height: 34px; padding-inline: 10px; font-size: 12px; }
+    .connection { display: inline-flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+    .connection-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+    .connection.error .connection-dot { background: var(--red); box-shadow: 0 0 0 4px var(--red-soft); }
+    .metrics-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; margin-bottom: 24px; }
+    .metric-card { min-height: 142px; display: flex; flex-direction: column; justify-content: space-between; padding: 18px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .metric-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); }
+    .metric-label { font-size: 13px; font-weight: 600; }
+    .metric-icon { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 7px; color: var(--blue); background: var(--blue-soft); }
+    .metric-card:nth-child(2) .metric-icon { color: var(--green); background: var(--green-soft); }
+    .metric-card:nth-child(3) .metric-icon { color: var(--amber); background: var(--amber-soft); }
+    .metric-card:nth-child(4) .metric-icon { color: #b999ff; background: rgba(185,153,255,.13); }
+    .metric-value { margin: 13px 0 0; color: var(--text); font-size: 28px; font-weight: 750; line-height: 1; font-variant-numeric: tabular-nums; }
+    .metric-foot { display: flex; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+    .metric-foot strong { color: var(--text-2); font-weight: 650; }
+    .content-section { margin-top: 24px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .section-header { min-height: 70px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 18px; border-bottom: 1px solid var(--line); }
+    .section-title { display: flex; align-items: center; gap: 10px; }
+    .section-title h2 { margin: 0; font-size: 16px; }
+    .section-title p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
+    .section-title-icon { color: var(--blue); }
+    .section-actions { display: flex; align-items: center; gap: 10px; }
+    .filter-tabs { display: flex; align-items: center; gap: 3px; padding: 3px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-soft); }
+    .filter-tab { min-height: 30px; padding: 0 10px; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; font-size: 12px; }
+    .filter-tab:hover { color: var(--text); }
+    .filter-tab.active { color: var(--text); background: var(--surface); box-shadow: 0 1px 4px rgba(0,0,0,.18); }
+    .resource-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; padding: 16px; }
+    .resource-card { min-height: 106px; display: flex; flex-direction: column; justify-content: space-between; padding: 13px; border: 1px solid var(--line); border-radius: 7px; background: var(--surface-raised); transition: border-color .18s ease, transform .18s ease; }
+    .resource-card:hover { border-color: var(--line-strong); transform: translateY(-1px); }
+    .resource-top, .resource-bottom { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+    .resource-name { min-width: 0; display: flex; align-items: center; gap: 8px; font-weight: 700; }
+    .resource-name span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--faint); }
+    .status-dot.idle { background: var(--green); box-shadow: 0 0 0 4px var(--green-soft); }
+    .status-dot.reserved, .status-dot.external_busy { background: var(--amber); box-shadow: 0 0 0 4px var(--amber-soft); }
+    .status-dot.unknown, .status-dot.failed { background: var(--red); box-shadow: 0 0 0 4px var(--red-soft); }
+    .status-text { color: var(--text-2); font-size: 12px; }
+    .resource-meta { color: var(--muted); font-size: 12px; }
+    .resource-badge { padding: 2px 7px; border-radius: 4px; color: var(--muted); background: var(--surface-soft); font-size: 11px; }
+    .resource-badge.reserved { color: var(--amber); background: var(--amber-soft); }
+    .resource-empty, .table-empty { padding: 34px 18px; color: var(--muted); text-align: center; }
+    .table-wrap { overflow-x: auto; }
+    table { width: 100%; min-width: 780px; border-collapse: collapse; }
+    th, td { padding: 13px 18px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+    th { color: var(--faint); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; white-space: nowrap; }
+    tbody tr:last-child td { border-bottom: 0; }
+    tbody tr:hover { background: color-mix(in srgb, var(--surface-soft) 55%, transparent); }
+    .job-main { min-width: 230px; }
+    .job-name { max-width: 360px; overflow: hidden; color: var(--text); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+    .job-id { margin-top: 3px; color: var(--faint); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status-chip { display: inline-flex; align-items: center; gap: 7px; padding: 4px 9px; border-radius: 5px; color: var(--text-2); background: var(--surface-soft); font-size: 12px; font-weight: 650; white-space: nowrap; }
+    .status-chip.idle, .status-chip.SUCCEEDED { color: var(--green); background: var(--green-soft); }
+    .status-chip.RESERVED, .status-chip.STARTING, .status-chip.RUNNING, .status-chip.CHECKING, .status-chip.QUEUED { color: var(--amber); background: var(--amber-soft); }
+    .status-chip.UNKNOWN, .status-chip.FAILED { color: var(--red); background: var(--red-soft); }
+    .status-chip.CANCELLED { color: var(--muted); }
+    .job-hosts { max-width: 250px; overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+    .job-result { max-width: 260px; color: var(--text-2); font-size: 12px; }
+    .job-result .muted { display: block; margin-top: 2px; color: var(--faint); }
+    .row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; white-space: nowrap; }
+    .row-action { min-height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid var(--line); border-radius: 6px; color: var(--text-2); background: transparent; cursor: pointer; font-size: 12px; }
+    .row-action:hover { color: var(--text); border-color: var(--line-strong); background: var(--surface-soft); }
+    .row-action.danger { color: var(--red); }
+    .dialog { width: min(720px, calc(100% - 28px)); max-height: min(850px, calc(100dvh - 32px)); overflow: auto; padding: 0; border: 1px solid var(--line-strong); border-radius: 10px; color: var(--text); background: var(--surface); box-shadow: 0 28px 80px rgba(0,0,0,.5); }
+    .dialog::backdrop { background: rgba(4,7,11,.70); backdrop-filter: blur(3px); }
+    .dialog-header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding: 20px 22px; border-bottom: 1px solid var(--line); }
+    .dialog-header h2 { margin: 0; font-size: 18px; }
+    .dialog-header p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+    .dialog-body { padding: 20px 22px; }
+    .dialog-footer { display: flex; justify-content: flex-end; gap: 10px; padding: 15px 22px; border-top: 1px solid var(--line); }
+    .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+    .field { display: grid; gap: 7px; }
+    .field.wide { grid-column: 1 / -1; }
+    .field label, .field legend { color: var(--text-2); font-size: 12px; font-weight: 650; }
+    .field input, .field textarea, .field select { width: 100%; min-height: 42px; padding: 9px 11px; border: 1px solid var(--line-strong); border-radius: 6px; outline: 0; color: var(--text); background: var(--surface-raised); }
+    .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(85,168,255,.12); }
+    .field textarea { min-height: 130px; resize: vertical; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .field-hint { color: var(--muted); font-size: 11px; }
+    .host-picker { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; padding: 11px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-raised); }
+    .host-option { min-height: 34px; display: flex; align-items: center; gap: 7px; color: var(--text-2); font-size: 12px; }
+    .host-option input { width: 16px; height: 16px; accent-color: var(--blue); }
+    .dialog-error { display: none; margin: 14px 0 0; padding: 9px 11px; border: 1px solid rgba(255,124,132,.35); border-radius: 6px; color: var(--red); background: var(--red-soft); font-size: 12px; }
+    .dialog-error.show { display: block; }
+    .log-meta { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 14px 22px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12px; }
+    .log-content { max-height: 55dvh; overflow: auto; margin: 0; padding: 18px 22px; color: #d9e4ef; background: #0c0f13; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .toast-stack { position: fixed; right: 22px; bottom: 22px; z-index: 100; display: grid; gap: 9px; width: min(360px, calc(100% - 32px)); }
+    .toast { display: flex; align-items: start; gap: 9px; padding: 12px 13px; border: 1px solid var(--line-strong); border-radius: 7px; color: var(--text); background: var(--surface-raised); box-shadow: var(--shadow); animation: toast-in .2s ease-out; }
+    .toast.success svg { color: var(--green); } .toast.error svg { color: var(--red); }
+    .toast p { margin: 0; font-size: 12px; }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; } }
+    @media (max-width: 1180px) { .metrics-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } .search-box { width: 220px; } }
+    @media (max-width: 820px) {
+      .sidebar { transform: translateX(-100%); box-shadow: var(--shadow); }
+      .sidebar.mobile-open { transform: translateX(0); }
+      .app-main, .sidebar-collapsed .app-main { width: 100%; margin-left: 0; }
+      .topbar { padding-inline: 16px; } .page-tabs { padding-inline: 16px; } .main-content { padding: 22px 16px 44px; }
+      .page-intro { align-items: start; flex-direction: column; } .intro-actions { width: 100%; justify-content: space-between; }
+      .search-box { width: min(300px, 58vw); } .breadcrumb { display: none; }
+    }
+    @media (max-width: 560px) {
+      .top-actions .shortcut, .top-actions .help-link { display: none; }
+      .search-box { width: 42px; padding: 0 11px; border-color: transparent; background: transparent; } .search-box input { display: none; }
+      .metrics-grid { grid-template-columns: 1fr 1fr; gap: 9px; } .metric-card { min-height: 126px; padding: 14px; } .metric-value { font-size: 23px; }
+      .section-header { align-items: start; flex-direction: column; padding: 15px; } .section-actions { width: 100%; justify-content: space-between; }
+      .filter-tabs { max-width: 100%; overflow-x: auto; } .resource-grid { grid-template-columns: 1fr; padding: 11px; }
+      .form-grid { grid-template-columns: 1fr; } .field.wide { grid-column: auto; } .host-picker { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .dialog-body, .dialog-header, .dialog-footer { padding-inline: 16px; } .log-content { padding-inline: 16px; }
+    }
+  </style>
+<style>.is-refreshing [data-icon]{animation:refresh-spin .7s ease-in-out;} @keyframes refresh-spin{to{transform:rotate(360deg)}}</style></head>
+<body data-app-shell="tilexr-scheduler">
+  <div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="主导航">
+      <div class="brand"><div class="brand-mark" aria-hidden="true">T</div><div class="brand-copy"><div class="brand-name">TileXR Scheduler</div><div class="brand-subtitle">NPU operations console</div></div></div>
+      <nav class="nav">
+        <div class="nav-group"><div class="nav-label">概览</div><button class="nav-link active" data-scroll="overview" aria-current="page"><span class="nav-icon" data-icon="dashboard"></span><span>运行概览</span></button><button class="nav-link" data-scroll="resources-section"><span class="nav-icon" data-icon="server"></span><span>资源池</span><span class="nav-count" id="nav-resource-count">0</span></button><button class="nav-link" data-scroll="jobs-section"><span class="nav-icon" data-icon="tasks"></span><span>任务队列</span><span class="nav-count" id="nav-job-count">0</span></button></div>
+        <div class="nav-group"><div class="nav-label">工具</div><button class="nav-link" id="nav-new-task"><span class="nav-icon" data-icon="plus"></span><span>新建任务</span></button><a class="nav-link" href="/help"><span class="nav-icon" data-icon="book"></span><span>API Help</span></a></div>
+      </nav>
+      <div class="sidebar-footer"><div class="status-user"><div class="status-avatar">TX</div><div class="status-copy"><strong>TileXR Runtime</strong><span>Scheduler service</span></div></div></div>
+    </aside>
+    <div class="app-main">
+      <header class="topbar"><button class="icon-button" id="sidebar-toggle" aria-label="切换侧边栏" aria-expanded="true"><span data-icon="menu"></span></button><div class="breadcrumb"><span>概览</span><span class="breadcrumb-separator">/</span><strong>运行概览</strong></div><div class="top-actions"><label class="search-box" aria-label="搜索任务或服务器"><span data-icon="search"></span><input id="job-search" type="search" placeholder="搜索任务或服务器" autocomplete="off"><span class="shortcut">Ctrl K</span></label><button class="icon-button" id="theme-toggle" aria-label="切换主题" title="切换主题"><span data-icon="sun"></span></button><button class="icon-button" id="refresh" aria-label="刷新实际状态" title="刷新实际状态"><span data-icon="refresh"></span></button><a class="button compact help-link" href="/help"><span data-icon="book"></span><span>帮助</span></a></div></header>
+      <div class="page-tabs"><div class="page-tab"><span data-icon="dashboard"></span><span>运行概览</span><span class="close-tab" aria-hidden="true">×</span></div></div>
+      <main class="main-content" id="main-content">
+        <section class="page-intro" id="overview"><div><p class="eyebrow">TileXR / NPU OPERATIONS</p><h1>运行概览</h1><p>实时掌握 NPU 资源、任务调度和执行结果。</p></div><div class="intro-actions"><span class="connection" id="connection"><span class="connection-dot"></span><span id="connection-text">服务连接正常</span></span><button class="button primary" id="new-task"><span data-icon="plus"></span><span>新建任务</span></button></div></section>
+        <section class="metrics-grid" aria-label="资源和任务摘要"><article class="metric-card"><div class="metric-head"><span class="metric-label">NPU 总量</span><span class="metric-icon" data-icon="cpu"></span></div><div class="metric-value" id="metric-total-npu">—</div><div class="metric-foot"><span>已纳管设备</span><strong id="metric-host-count">— 台服务器</strong></div></article><article class="metric-card"><div class="metric-head"><span class="metric-label">空闲服务器</span><span class="metric-icon" data-icon="pulse"></span></div><div class="metric-value" id="metric-idle-hosts">—</div><div class="metric-foot"><span>可立即调度</span><strong id="metric-idle-rate">—</strong></div></article><article class="metric-card"><div class="metric-head"><span class="metric-label">运行中任务</span><span class="metric-icon" data-icon="activity"></span></div><div class="metric-value" id="metric-active-jobs">—</div><div class="metric-foot"><span>含 CHECKING / UNKNOWN</span><strong id="metric-reserved-npu">— NPU</strong></div></article><article class="metric-card"><div class="metric-head"><span class="metric-label">排队任务</span><span class="metric-icon" data-icon="clock"></span></div><div class="metric-value" id="metric-queued-jobs">—</div><div class="metric-foot"><span>等待资源</span><strong id="metric-last-refresh">尚未刷新</strong></div></article></section>
+        <section class="content-section" id="resources-section"><div class="section-header"><div class="section-title"><span class="section-title-icon" data-icon="server"></span><div><h2>资源池</h2><p>按服务器查看实时探测和 reservation 状态</p></div></div><div class="section-actions"><div class="filter-tabs" id="resource-filter" role="tablist" aria-label="资源筛选"><button class="filter-tab active" data-resource-filter="all" role="tab" aria-selected="true">全部</button><button class="filter-tab" data-resource-filter="idle" role="tab" aria-selected="false">空闲</button><button class="filter-tab" data-resource-filter="reserved" role="tab" aria-selected="false">已占用</button><button class="filter-tab" data-resource-filter="unknown" role="tab" aria-selected="false">异常</button></div></div></div><div id="resource-grid" class="resource-grid" aria-live="polite"></div></section>
+        <section class="content-section" id="jobs-section"><div class="section-header"><div class="section-title"><span class="section-title-icon" data-icon="tasks"></span><div><h2>任务队列</h2><p>查看执行状态、退出证据和日志</p></div></div><div class="section-actions"><div class="filter-tabs" id="job-filter" role="tablist" aria-label="任务筛选"><button class="filter-tab active" data-job-filter="all" role="tab" aria-selected="true">全部</button><button class="filter-tab" data-job-filter="active" role="tab" aria-selected="false">进行中</button><button class="filter-tab" data-job-filter="SUCCEEDED" role="tab" aria-selected="false">成功</button><button class="filter-tab" data-job-filter="FAILED" role="tab" aria-selected="false">失败</button></div></div></div><div class="table-wrap"><table><thead><tr><th>任务</th><th>状态</th><th>资源</th><th>结果</th><th>更新时间</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="jobs"></tbody></table></div></section>
+      </main>
+    </div>
+  </div>
+  <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
+  <dialog class="dialog" id="task-dialog" aria-labelledby="task-dialog-title"><form id="submit-form"><div class="dialog-header"><div><h2 id="task-dialog-title">新建调度任务</h2><p>提交一个前台脚本任务并预约所需服务器。</p></div><button class="icon-button" type="button" data-close="task-dialog" aria-label="关闭"><span data-icon="close"></span></button></div><div class="dialog-body"><div class="form-grid"><div class="field"><label for="name">任务名称</label><input id="name" required autocomplete="off" placeholder="例如 alltoall smoke test"></div><div class="field"><label for="request-id">Request ID</label><input id="request-id" required autocomplete="off" placeholder="用于幂等重试"></div><div class="field"><label for="execution">执行服务器</label><select id="execution" required></select></div><div class="field"><label for="working-directory">工作目录 <span class="field-hint">可选</span></label><input id="working-directory" placeholder="/home/user/project"></div><fieldset class="field wide"><legend>预约服务器</legend><div class="host-picker" id="host-checks"></div><div class="field-hint" style="margin-top:7px">选择任务运行期间需要保持独占的服务器。</div></fieldset><div class="field wide"><label for="script-content">脚本内容或命令 <span class="field-hint">填写一个完整 Bash 文件，也支持 bash /path/script.sh --arg 1 --arg2 5</span></label><textarea id="script-content" required placeholder="#!/usr/bin/env bash&#10;set -euo pipefail&#10;或：bash /path/script.sh --arg 1 --arg2 5"></textarea></div></div><div class="dialog-error" id="submit-error" role="alert"></div></div><div class="dialog-footer"><button class="button" type="button" data-close="task-dialog">取消</button><button class="button primary" type="submit"><span data-icon="send"></span><span>提交任务</span></button></div></form></dialog>
+  <dialog class="dialog" id="detail" aria-labelledby="detail-title"><div class="dialog-header"><div><h2 id="detail-title">任务日志</h2><p id="detail-subtitle">实时输出</p></div><button class="icon-button" type="button" data-close="detail" aria-label="关闭"><span data-icon="close"></span></button></div><div class="log-meta" id="log-meta"></div><pre class="log-content" id="log"></pre><div class="dialog-footer"><button class="button" type="button" id="copy-log"><span data-icon="copy"></span><span>复制日志</span></button><button class="button primary" type="button" data-close="detail">完成</button></div></dialog>
+  <script>
+    const iconPaths = {
+      dashboard: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+      server: '<rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01M7 17h.01M11 7h7M11 17h7"/>',
+      tasks: '<path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+      plus: '<path d="M12 5v14M5 12h14"/>', book: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>',
+      menu: '<path d="M4 6h16M4 12h16M4 18h16"/>', search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/>',
+      sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>',
+      moon: '<path d="M21 12.8A8.5 8.5 0 1 1 11.2 3 6.5 6.5 0 0 0 21 12.8z"/>', refresh: '<path d="M20 11a8.1 8.1 0 0 0-14.9-4L3 10"/><path d="M3 4v6h6M4 13a8.1 8.1 0 0 0 14.9 4L21 14"/><path d="M21 20v-6h-6"/>',
+      cpu: '<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>', pulse: '<path d="M3 12h4l3-8 4 16 3-8h4"/>', activity: '<path d="M3 12h4l2-7 4 14 3-7h5"/>', clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+      close: '<path d="M6 6l12 12M18 6 6 18"/>', send: '<path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/>', file: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/>', copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>', check: '<path d="m5 12 4 4L19 6"/>', alert: '<path d="M10.3 3.9 2.2 18a2 2 0 0 0 1.7 3h16.2a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>'
+    };
+    const icon = name => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${iconPaths[name] || iconPaths.alert}</svg>`;
+    document.querySelectorAll('[data-icon]').forEach(node => { node.innerHTML = icon(node.dataset.icon); });
+    const state = { resources: [], jobs: [], resourceFilter: 'all', jobFilter: 'all', query: '', hostOptionsReady: false, lastLog: '' };
+    const activeStatuses = new Set(['RESERVED', 'STARTING', 'RUNNING', 'CHECKING', 'UNKNOWN']);
+    const statusLabels = { idle: '空闲', reserved: '已占用', external_busy: '外部占用', unknown: '未知', QUEUED: '排队中', RESERVED: '已预约', STARTING: '启动中', RUNNING: '运行中', CHECKING: '检查中', UNKNOWN: '未知结果', SUCCEEDED: '已成功', FAILED: '失败', CANCELLED: '已取消' };
+    const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+    const formatTime = value => value ? new Date(value.includes('T') ? value : Number(value) * 1000).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '—';
+    const formatNumber = value => Number(value || 0).toLocaleString('en-US'); const statusLabel = value => statusLabels[value] || value || '未知'; const jobIsActive = job => activeStatuses.has(job.status);
+    const setIcon = (node, name) => { if (node) node.innerHTML = icon(name); };
+    function showToast(message, kind = 'success') { const node = document.createElement('div'); node.className = `toast ${kind}`; node.innerHTML = `${icon(kind === 'success' ? 'check' : 'alert')}<p>${esc(message)}</p>`; document.querySelector('#toast-stack').appendChild(node); setTimeout(() => node.remove(), 4500); }
+    function setConnection(ok, message) { const node = document.querySelector('#connection'); node.classList.toggle('error', !ok); document.querySelector('#connection-text').textContent = message; }
+    function updateMetrics() { const totalNpu = state.resources.reduce((sum, host) => sum + Number(host.device_count || 0), 0); const idleHosts = state.resources.filter(host => host.status === 'idle' && !host.reservation_job_id).length; const activeJobs = state.jobs.filter(jobIsActive); const reservedNpu = activeJobs.reduce((sum, job) => sum + Number(job.npu_count || 0), 0); const queued = state.jobs.filter(job => job.status === 'QUEUED').length; document.querySelector('#metric-total-npu').textContent = formatNumber(totalNpu); document.querySelector('#metric-host-count').textContent = `${state.resources.length} 台服务器`; document.querySelector('#metric-idle-hosts').textContent = formatNumber(idleHosts); document.querySelector('#metric-idle-rate').textContent = state.resources.length ? `${Math.round(idleHosts / state.resources.length * 100)}% 可用` : '—'; document.querySelector('#metric-active-jobs').textContent = formatNumber(activeJobs.length); document.querySelector('#metric-reserved-npu').textContent = `${formatNumber(reservedNpu)} NPU`; document.querySelector('#metric-queued-jobs').textContent = formatNumber(queued); document.querySelector('#metric-last-refresh').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', {hour:'2-digit', minute:'2-digit', second:'2-digit'})}`; document.querySelector('#nav-resource-count').textContent = state.resources.length; document.querySelector('#nav-job-count').textContent = activeJobs.length; }
+    function resourceVisible(host) { const query = state.query.toLowerCase(); const searchMatch = !query || [host.name, host.address, host.pool, host.status].some(value => String(value || '').toLowerCase().includes(query)); if (!searchMatch) return false; if (state.resourceFilter === 'reserved') return Boolean(host.reservation_job_id); if (state.resourceFilter === 'unknown') return ['unknown', 'external_busy'].includes(host.status); if (state.resourceFilter === 'idle') return host.status === 'idle' && !host.reservation_job_id; return true; }
+    function renderResources() { const visible = state.resources.filter(resourceVisible); const grid = document.querySelector('#resource-grid'); if (!visible.length) { grid.innerHTML = '<div class="resource-empty">没有匹配的服务器</div>'; return; } grid.innerHTML = visible.map(host => { const status = host.reservation_job_id ? 'reserved' : (host.status || 'unknown'); const reservation = host.reservation_job_id ? `任务 ${esc(host.reservation_job_id.slice(0, 8))}` : `${esc(host.covered_devices?.length || 0)}/${esc(host.device_count)} 设备已探测`; return `<article class="resource-card" title="${esc(host.probe_error || '')}"><div class="resource-top"><div class="resource-name"><span class="status-dot ${esc(status)}"></span><span>${esc(host.name)}</span></div><span class="status-text">${esc(statusLabel(status))}</span></div><div class="resource-bottom"><span class="resource-meta">${esc(host.pool)} · ${esc(host.address)}</span><span class="resource-badge ${host.reservation_job_id ? 'reserved' : ''}">${reservation}</span></div></article>`; }).join(''); }
+    function jobVisible(job) { const query = state.query.toLowerCase(); const searchMatch = !query || [job.name, job.id, job.request_id, job.status, ...(job.reserved_hosts || [])].some(value => String(value || '').toLowerCase().includes(query)); if (!searchMatch) return false; if (state.jobFilter === 'active') return jobIsActive(job); if (state.jobFilter !== 'all') return job.status === state.jobFilter; return true; }
+    function renderJobs() { const body = document.querySelector('#jobs'); const visible = state.jobs.filter(jobVisible); if (!visible.length) { body.innerHTML = '<tr><td class="table-empty" colspan="6">没有匹配的任务</td></tr>'; return; } body.innerHTML = visible.map(job => { const status = esc(job.status); const result = job.exit_code === null || job.exit_code === undefined ? (job.message || job.reason_code || '等待执行结果') : `exit ${esc(job.exit_code)} · ${esc(job.reason_code || (job.exit_code === 0 ? '执行成功' : '脚本失败'))}`; const actions = `<button class="row-action" data-action="logs" data-id="${esc(job.id)}">${icon('file')}<span>日志</span></button>${job.status === 'QUEUED' ? `<button class="row-action danger" data-action="cancel" data-id="${esc(job.id)}">${icon('close')}<span>取消</span></button>` : ''}${job.status === 'UNKNOWN' ? `<button class="row-action" data-action="release" data-id="${esc(job.id)}">${icon('check')}<span>释放</span></button>` : ''}`; return `<tr><td class="job-main"><div class="job-name" title="${esc(job.name)}">${esc(job.name)}</div><div class="job-id">${esc(job.id)}</div></td><td><span class="status-chip ${status}"><span class="status-dot ${status.toLowerCase()}"></span>${esc(statusLabel(job.status))}</span></td><td><div>${esc(job.npu_count)} NPU</div><div class="job-hosts" title="${esc((job.reserved_hosts || []).join(', '))}">${esc((job.reserved_hosts || []).join(', ') || '未预约')}</div></td><td><div class="job-result">${result}</div></td><td><span class="muted">${esc(formatTime(job.updated_at))}</span></td><td><div class="row-actions">${actions}</div></td></tr>`; }).join(''); }
+    function renderHostOptions() { const execution = document.querySelector('#execution'); const existingExecution = execution.value; execution.innerHTML = state.resources.map(host => `<option value="${esc(host.name)}">${esc(host.name)} · ${esc(host.pool)}</option>`).join(''); if ([...execution.options].some(option => option.value === existingExecution)) execution.value = existingExecution; document.querySelector('#host-checks').innerHTML = state.resources.map(host => `<label class="host-option"><input type="checkbox" value="${esc(host.name)}"><span>${esc(host.name)}</span></label>`).join(''); state.hostOptionsReady = true; }
+    async function load(refresh = false) { try { const [resourcesResponse, jobsResponse] = await Promise.all([fetch(`/api/v1/resources?refresh=${refresh}`), fetch('/api/v1/jobs?limit=200')]); if (!resourcesResponse.ok || !jobsResponse.ok) throw new Error('API request failed'); state.resources = (await resourcesResponse.json()).items || []; state.jobs = (await jobsResponse.json()).items || []; if (!state.hostOptionsReady || document.querySelectorAll('#host-checks input').length !== state.resources.length) renderHostOptions(); updateMetrics(); renderResources(); renderJobs(); setConnection(true, '服务连接正常'); } catch (error) { setConnection(false, '服务连接异常'); showToast('无法读取调度服务，请稍后重试', 'error'); } }
+    function openTaskDialog() { const form = document.querySelector('#submit-form'); form.reset(); document.querySelector('#request-id').value = `tilexr-${Date.now()}`; document.querySelector('#name').value = 'NPU scheduler task'; document.querySelector('#submit-error').classList.remove('show'); if (!state.hostOptionsReady) renderHostOptions(); document.querySelector('#task-dialog').showModal(); }
+    async function submitTask(event) { event.preventDefault(); const error = document.querySelector('#submit-error'); const content = document.querySelector('#script-content').value.trim(); const hosts = [...document.querySelectorAll('#host-checks input:checked')].map(input => input.value);if (!hosts.length) { error.textContent = '至少选择一台预约服务器。'; error.classList.add('show'); return; } const body = {request_id: document.querySelector('#request-id').value.trim(), name: document.querySelector('#name').value.trim(), execution_host: document.querySelector('#execution').value, reserved_hosts: hosts, ...(document.querySelector('#working-directory').value.trim() ? {working_directory: document.querySelector('#working-directory').value.trim()} : {}), script_content:content}; const response = await fetch('/api/v1/jobs', {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body)}); const value = await response.json(); if (!response.ok) { error.textContent = value.detail?.message || JSON.stringify(value.detail || value); error.classList.add('show'); return; } document.querySelector('#task-dialog').close(); showToast(`任务已提交：${value.id.slice(0, 8)}`); await load(); }
+    async function showLog(id) { const [logResponse, jobResponse] = await Promise.all([fetch(`/api/v1/jobs/${encodeURIComponent(id)}/logs?cursor=0&limit=1048576`), fetch(`/api/v1/jobs/${encodeURIComponent(id)}`)]); const log = await logResponse.json(); const job = await jobResponse.json(); state.lastLog = log.text || ''; document.querySelector('#detail-title').textContent = job.name || '任务日志'; document.querySelector('#detail-subtitle').textContent = `${statusLabel(job.status)} · ${job.id}`; document.querySelector('#log-meta').innerHTML = `<span>状态：${esc(statusLabel(job.status))}</span><span>退出码：${job.exit_code ?? '—'}</span><span>日志${log.truncated ? '已截断' : '完整'}</span>`; document.querySelector('#log').textContent = state.lastLog || '暂无日志输出'; document.querySelector('#detail').showModal(); }
+    async function cancelJob(id) { if (!window.confirm('确认取消这个排队任务吗？')) return; const response = await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/cancel`, {method:'POST'}); if (response.ok) { showToast('任务已取消'); await load(); } else showToast('取消任务失败', 'error'); }
+    async function releaseJob(id) { const reason = window.prompt('确认远端工作已停止，请填写检查依据：'); if (!reason?.trim()) return; const response = await fetch(`/api/v1/jobs/${encodeURIComponent(id)}/release`, {method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({confirmed_stopped:true, reason:reason.trim()})}); if (response.ok) { showToast('UNKNOWN 任务已释放'); await load(true); } else { const value = await response.json(); showToast(value.detail?.message || '释放失败，请重新检查资源', 'error'); } }
+    function setTheme(theme) { document.documentElement.dataset.theme = theme; localStorage.setItem('tilexr-theme', theme); document.querySelector('meta[name="theme-color"]').setAttribute('content', theme === 'dark' ? '#101216' : '#f4f6f8'); setIcon(document.querySelector('#theme-toggle [data-icon]'), theme === 'dark' ? 'sun' : 'moon'); document.querySelector('#theme-toggle').setAttribute('aria-label', theme === 'dark' ? '切换浅色主题' : '切换深色主题'); }
+    function closeDialog(id) { document.querySelector(`#${id}`)?.close(); }
+    document.querySelector('#submit-form').addEventListener('submit', submitTask); document.querySelector('#new-task').addEventListener('click', openTaskDialog); document.querySelector('#nav-new-task').addEventListener('click', openTaskDialog); document.querySelector('#refresh').addEventListener('click', () => { const button=document.querySelector('#refresh'); button.classList.remove('is-refreshing'); void button.offsetWidth; button.classList.add('is-refreshing'); load(true); }); document.querySelector('#theme-toggle').addEventListener('click', () => setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+    document.querySelector('#sidebar-toggle').addEventListener('click', () => { const shell = document.querySelector('#app-shell'); const sidebar = document.querySelector('#sidebar'); if (window.matchMedia('(max-width: 820px)').matches) sidebar.classList.toggle('mobile-open'); else shell.classList.toggle('sidebar-collapsed'); }); document.querySelector('#job-search').addEventListener('input', event => { state.query = event.target.value.trim(); renderResources(); renderJobs(); });
+    document.addEventListener('click', event => { const close = event.target.closest('[data-close]'); if (close) closeDialog(close.dataset.close); const resourceFilter = event.target.closest('[data-resource-filter]'); if (resourceFilter) { state.resourceFilter = resourceFilter.dataset.resourceFilter; document.querySelectorAll('[data-resource-filter]').forEach(node => { const active = node === resourceFilter; node.classList.toggle('active', active); node.setAttribute('aria-selected', active); }); renderResources(); } const jobFilter = event.target.closest('[data-job-filter]'); if (jobFilter) { state.jobFilter = jobFilter.dataset.jobFilter; document.querySelectorAll('[data-job-filter]').forEach(node => { const active = node === jobFilter; node.classList.toggle('active', active); node.setAttribute('aria-selected', active); }); renderJobs(); } const action = event.target.closest('[data-action]'); if (action) { if (action.dataset.action === 'logs') showLog(action.dataset.id); if (action.dataset.action === 'cancel') cancelJob(action.dataset.id); if (action.dataset.action === 'release') releaseJob(action.dataset.id); } const scroll = event.target.closest('[data-scroll]'); if (scroll) { document.querySelector(`#${scroll.dataset.scroll}`)?.scrollIntoView({behavior:'smooth', block:'start'}); document.querySelectorAll('.nav-link').forEach(node => node.classList.toggle('active', node === scroll)); if (window.matchMedia('(max-width: 820px)').matches) document.querySelector('#sidebar').classList.remove('mobile-open'); } });
+    document.querySelector('#copy-log').addEventListener('click', async () => { try { await navigator.clipboard.writeText(state.lastLog); showToast('日志已复制'); } catch { showToast('当前浏览器不允许复制日志', 'error'); } }); document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.querySelector('#job-search').focus(); } }); const initialTheme = localStorage.getItem('tilexr-theme') || 'light'; setTheme(initialTheme); load(); const refreshSeconds=5; let remaining=refreshSeconds; const countdown=document.createElement("span"); countdown.className="field-hint"; countdown.textContent="自动刷新：5 秒"; document.querySelector("#refresh").after(countdown); setInterval(()=>{ if(document.hidden)return; remaining--; if(remaining<=0){remaining=refreshSeconds; load(false);} countdown.textContent=`自动刷新：${remaining} 秒`; },1000);
+  </script>
+</body>
+</html>

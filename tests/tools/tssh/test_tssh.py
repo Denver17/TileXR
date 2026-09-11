@@ -29,11 +29,14 @@ class ConfigTests(unittest.TestCase):
         self.addCleanup(Path(temporary.name).unlink, missing_ok=True)
         return Path(temporary.name)
 
-    def test_checked_in_inventory_preserves_all_three_clusters(self):
+    def test_checked_in_inventory_preserves_all_five_clusters(self):
         clusters = tssh.load_clusters(tssh.DEFAULT_CONFIG)
 
-        self.assertEqual([cluster.name for cluster in clusters], ["c02-a04", "c02-a07", "c02-a09"])
-        self.assertEqual([len(cluster.hosts) for cluster in clusters], [8, 8, 8])
+        self.assertEqual(
+            [cluster.name for cluster in clusters],
+            ["c02-a04", "c02-a07", "c02-a09", "c01-b03", "c01-b08"],
+        )
+        self.assertEqual([len(cluster.hosts) for cluster in clusters], [8, 8, 8, 8, 8])
         self.assertEqual(clusters[1].hosts[0], tssh.Host("cpu1", "141.61.52.35"))
         self.assertEqual(clusters[1].hosts[-1], tssh.Host("cpu8", "141.61.52.87"))
 
