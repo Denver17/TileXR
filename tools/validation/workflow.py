@@ -310,6 +310,9 @@ def chain_configuration(checkpoint):
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
         raise ValueError("chain 检查点 shape 必须是正 int64，topk<=32")
     dtype = os.environ.get("TILEXR_VALIDATION_DTYPE", "bf16")
+    quant_mode = os.environ.get("TILEXR_VALIDATION_QUANT_MODE", "0")
+    if quant_mode not in ("0", "3", "4"):
+        raise ValueError("QUANT_MODE 必须为 0（非量化）、3（MXFP8 E5M2）或 4（MXFP8 E4M3）")
     block_dim = os.environ.get("TILEXR_VALIDATION_BLOCK_DIM", "auto")
     if dtype not in ("bf16", "fp16") or (block_dim != "auto" and
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
@@ -342,7 +345,7 @@ def chain_configuration(checkpoint):
                             "TILEXR_DEMO_BARRIER_ADDR")
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
-    chain = dict(shape, dtype=dtype, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
+    chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup)
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
@@ -574,6 +577,7 @@ def remote_argv(config, host, action, *arguments):
             "TILEXR_VALIDATION_TOPK": config.chain.get("topk") if config.chain else None,
             "TILEXR_VALIDATION_MOE_EXPERT_NUM": config.chain.get("moe_expert_num") if config.chain else None,
             "TILEXR_VALIDATION_DTYPE": config.chain.get("dtype") if config.chain else None,
+            "TILEXR_VALIDATION_QUANT_MODE": config.chain.get("quant_mode") if config.chain else None,
             "TILEXR_VALIDATION_BLOCK_DIM": config.chain.get("block_dim") if config.chain else None,
             "TILEXR_VALIDATION_LOOPS": config.chain.get("loops") if config.chain else None,
             "TILEXR_VALIDATION_WARMUP": config.chain.get("warmup") if config.chain else None,
@@ -1163,7 +1167,7 @@ def run(config):
         completed = sum(len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
-            report["chain_configuration"] = dict(config.chain, quant_mode=0)
+            report["chain_configuration"] = dict(config.chain)
             if not errors and config.chain["run_mode"] != "functional":
                 try:
                     records = [rank for node in nodes for rank in node["reported_result"]["ranks"]]

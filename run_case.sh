@@ -9,7 +9,7 @@ mkdir -p "$result_root"
 declare -a assignments=()
 for argument in "$@"; do
     case "$argument" in
-        mode=*|run_mode=*|loops=*|warmup=*|bs=*|h=*|topk=*|moe_expert_num=*|dtype=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*)
+        mode=*|run_mode=*|loops=*|warmup=*|bs=*|h=*|topk=*|moe_expert_num=*|dtype=*|quant_mode=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*)
             key=${argument%%=*}; value=${argument#*=}
             case "$key" in
                 mode) assignments+=("TILEXR_VALIDATION_BUILD_MODE=$value");;
@@ -17,6 +17,7 @@ for argument in "$@"; do
                 warmup) assignments+=("TILEXR_VALIDATION_WARMUP=$value");; bs) assignments+=("TILEXR_VALIDATION_BS=$value");;
                 h) assignments+=("TILEXR_VALIDATION_H=$value");; topk) assignments+=("TILEXR_VALIDATION_TOPK=$value");;
                 moe_expert_num) assignments+=("TILEXR_VALIDATION_MOE_EXPERT_NUM=$value");; dtype) assignments+=("TILEXR_VALIDATION_DTYPE=$value");;
+                quant_mode) assignments+=("TILEXR_VALIDATION_QUANT_MODE=$value");;
                 block_dim) assignments+=("TILEXR_VALIDATION_BLOCK_DIM=$value");; comm_id) assignments+=("TILEXR_COMM_ID=$value");;
                 barrier_addr) assignments+=("TILEXR_DEMO_BARRIER_ADDR=$value");; msprof) assignments+=("TILEXR_VALIDATION_MSPROF=$value");;
                 hostfile) assignments+=("TILEXR_VALIDATION_HOSTFILE=$value");;
