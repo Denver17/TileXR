@@ -56,6 +56,44 @@ profiling 构建允许向独立 profiling 区写入入口、出口和本次调�
 在第一阶段接口和框架通过后，按小步加入 server grouping、第一跳发送、relay 展开、metadata 写入、接收布局和真实 Dispatch correctness。
 每个逻辑块继续单独提交、单独上机；不把多个未验证的通信阶段合并成一个不可定位的大提交。
 
+#### 阶段二子模块计划（初步）
+
+阶段二采用积木式推进。每个子模块开始实现前，先复核主设计和待确认项，确认该模块的接口、数据布局、完成边界、资源生命周期和错误条件已经收敛，没有歧义或遗漏；设计未收敛时只补充 Host/reference 或 debug 脚手架，不进入设备实现。每个子模块独立形成 checkpoint，分别执行 functional、performance 和 breakdown（适用时）验证；性能报告只统计该模块新增的 kernel/通信阶段。
+
+**2.1 输入激励与 Host reference 基线。**
+
+构造真实 `x`、原始 `expertIds`、FP32 `[BS,K]` `expertScales` 及量化输入，支持 `balance`、`random` 和 `balance_shift` 路由。Host reference 保存完整原始路由顺序，并生成后续模块共用的 `cnt`、cumsum、`q`、目标 Rank/Server、权重和 payload 预期。第一阶段已完成的输入 ABI 检查扩展为可被设备结果校验复用的固定 reference；不支持的 shared expert、mask 等参数继续使用明确的 0/null 值。
+
+**2.2 cnt 统计与 cumsum 表。**
+
+沿用 Dispatch Memory 已验证的 cnt/cumsum 实现和核组，不重新拆分成熟的内部步骤，也不增加重复的中间检验。模块输出只验收最终 cumsum 表格：Host 根据完整原始 `expertIds` 计算预期表，逐项比较设备输出，覆盖不同路由分布和合法零计数段。性能只记录 cnt/cumsum 所属 kernel；通过后作为后续发送模块的固定输入。
+
+**2.3 待中转数据（第一跳）发送。**
+
+数据发送分为待中转数据和 DIRECT 数据两类，严格保持同一 stream 内先提交待中转数据、再提交直发数据。第一步只启用远端多 route group 的第一跳包：按 `(srcRank, srcTokenId, destinationServer)` 分组，选择原始 k 最小的目标作为 relay，构造 `forwardCount>0` 及有序 `forwardEntries`，发送完整去重记录。Host debug receiver 暂时只接收第一跳并解析包头、首条 route、entries、权重、`q` 和 payload，逐字段与 reference 对比；不要求 relay 完成后续转发。性能统计第一跳发送 kernel 和实际发送字节，breakdown 只覆盖该阶段。
+
+**2.4 DIRECT 数据发送。**
+
+在 2.3 通过后加入远端单 route 和源 Server 内 route 的 DIRECT 包，`forwardCount=0`，其余 route 不重复发送。继续使用 Host debug receiver 校验目标 Rank、expert/source 分区、`q`、原始 k、权重和 hidden 内容；同时确认第一跳在前、DIRECT 在后的提交顺序，以及两类任务合计覆盖全部原始 route 且无重复。性能和 breakdown 独立报告 DIRECT 阶段，并与 2.3 的结果分开保存。
+
+**2.5 中转数据接收与展开（待设计收敛后细分）。**
+
+中转接收是阶段二最复杂部分，当前只确定统一 relay 语义、`forwardCount=-1`、group/member 表和 `recvSlot=t*K+originalK`，监听核分工、Flag 清理、UB/GM 复用、多 H tile 进度及完成边界仍受 R05/R06/R07/R11 影响。待这些设计项逐项关闭后，再拆成可独立验收的子模块：
+
+1. 第一跳接收和 group 表解析；
+2. relay 本卡 expert 的展开与写入；
+3. relay 跨卡 expert 的展开与发送；
+4. member 顺序、统一 recvSlot 和返回 ready；
+5. 多轮资源回收及慢成员推进。
+
+每个子模块先用独立 Host/debug receiver 生成和校验预期，再接入正式 kernel；不得在设计未闭合时预先实现整段中转流水。
+
+**2.6 metadata 输出与完整 Dispatch 组合。**
+
+在第一跳、DIRECT 和中转接收分别通过后，再接入 `assistEx`、`sourceMask`、`group` 的正式写出，验证有效行序、group 成员顺序、mask 位和容量约束。最后组合 cnt/cumsum、第一跳、DIRECT、中转和 metadata，执行完整 Dispatch 功能、性能和 trace 验收。Combine 不在阶段二提前实现。
+
+阶段二的每次提交记录只登记“子模块/检查点通过的 commit SHA”和测试结论，不记录实现细节；任何模块失败都在该模块内返工，不跨越失败点继续叠加后续逻辑。
+
 ### 第三阶段：Combine Server Dedup 空算子工程
 
 在 Dispatch metadata ABI 稳定后，增加独立的 Combine Server Dedup API、空 kernel、Host layout、注册、launch 和测试框架。
