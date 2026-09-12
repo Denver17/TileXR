@@ -34,10 +34,13 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 
 | 检查方向 | 状态 | 通过 commit |
 | --- | --- | --- |
-| cnt 发送/接收、cumsum | 代码与本地 CPU/Host 测试已完成；CANN 编译、真实 A5 通信待验证，见[当前验收步骤](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收) | — |
+| cnt 发送/接收、cumsum | 用户确认最新提交验收通过 | [0bc6f1b](https://github.com/LingquLab/TileXR/commit/0bc6f1bbe64f25ab21a8fae23e70eed797dc48a5) |
 | server grouping / 第一跳 | 未开始 | — |
 | relay 展开 / metadata | 未开始 | — |
 | Dispatch correctness / 完整验收 | 未开始 | — |
+
+2026-09-12：依据用户“最新的提交验证通过”回传，按当前最新提交 `0bc6f1b` 登记 cnt/cumsum 检查点通过。
+未直接读取本次 summary；具体规模、模式、轮次及性能数据以实际运行结果为准，不扩展为 Token 数据发送或完整 Dispatch 验收通过。
 
 ## 阶段 3：Combine 空算子工程
 
