@@ -4,6 +4,8 @@ This directory contains utility scripts for building, testing, and managing the 
 
 EP 服务器验证的统一入口与配置见[EP 七步验证](../docs/EP_VALIDATION_GUIDE.md)。根目录提供
 `set_env.sh`、`build_all.sh`、`sync.sh`、`run.sh`，PC 首次同步使用 `tools/validation/push.ps1`。
+`bash build_all.sh` 默认关闭设备打点；`bash build_all.sh breakdown=1` 编译 cnt/cumsum breakdown 产物。
+随后手动执行 `bash sync.sh`，再执行 `bash run.sh run_mode=breakdown loops=3 warmup=2`；同步无需设置运行模式。
 这些入口负责构建、分发和结果汇总；下列模块脚本保留为内部实现及单独开发入口。
 
 ## Environment Setup

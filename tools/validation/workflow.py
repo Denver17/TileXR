@@ -458,16 +458,17 @@ def artifact_files(install):
             for path in sorted(install.rglob("*")) if path.is_file() and path.name != "manifest.json"}
 
 
-def verify_build(config):
+def verify_build(config, *, check_run_mode=True):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
-    if (config.checkpoint == CHAIN_MULTI_CHECKPOINT and
-            manifest.get("server_dedup_profiling") is not (config.chain["run_mode"] == "breakdown")):
-        raise ValueError("设备打点开关与运行模式不一致，请重新执行 build_all.sh 和 sync.sh")
-    if (config.checkpoint == CHAIN_MULTI_CHECKPOINT and config.chain["run_mode"] == "breakdown" and
-            manifest.get("server_dedup_profile_version") != 2):
-        raise ValueError("需要 cnt/cumsum breakdown v2 产物，请重新执行 build_all.sh 和 sync.sh")
+    if config.checkpoint == CHAIN_MULTI_CHECKPOINT:
+        profiling = manifest.get("server_dedup_profiling")
+        if type(profiling) is not bool or (check_run_mode and profiling is not (config.chain["run_mode"] == "breakdown")):
+            raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
+                             "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
+        if profiling and manifest.get("server_dedup_profile_version") != 2:
+            raise ValueError("需要 cnt/cumsum breakdown v2 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -627,7 +628,8 @@ def sync(config):
     if len(hosts) > 1:
         require_tools(["ssh", "rsync"])
     log = config.logs / ("sync-" + uuid.uuid4().hex)
-    manifest = verify_build(config)
+    # Distribution validates the artifact itself; run/node enforce the selected case mode.
+    manifest = verify_build(config, check_run_mode=False)
     receipt = config.logs / "sync.json"
     receipt.unlink(missing_ok=True)
     source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
@@ -1275,7 +1277,7 @@ def main():
         elif args.action == "rank":
             return dry_run_rank(config, *args.arguments)
         elif args.action == "verify":
-            manifest = verify_build(config)
+            manifest = verify_build(config, check_run_mode=False)
             if manifest["build_id"] != args.arguments[0]:
                 raise ValueError("同步后的 build_id 不一致")
             print("VERIFY_PASS")

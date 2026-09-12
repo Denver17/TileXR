@@ -159,7 +159,7 @@ production 编译默认的 checkpoint 只在 `build_all.sh` 中选择一次并�
 
 | 入口 | 用途 | 修改位置 |
 | --- | --- | --- |
-| `build_all.sh` | 只编译并安装 | 当前生产 checkpoint；构建环境见 `validation.local.sh` |
+| `build_all.sh` | 只编译并安装 | `breakdown=0`（默认）或 `breakdown=1`；构建环境见 `validation.local.sh` |
 | `sync.sh` | 只同步并核对已安装产物 | `hostfile` 和环境配置 |
 | `run.sh` | 只运行一个 case，内部调用 `run_case.sh` | 命令的 key=value 参数 |
 
@@ -180,17 +180,10 @@ bash run.sh run_mode=performance loops=50 warmup=50 bs=96 h=7168 topk=6 moe_expe
 
 ### 当前 cnt/cumsum breakdown JSON
 
-在首节点仓库目录的同一个终端中先执行：
+在首节点仓库目录依次手动执行，每步成功后再进行下一步：
 
 ```bash
-export TILEXR_VALIDATION_RUN_MODE=breakdown
-```
-
-该变量属于测试配置，应在终端导出；`set_env.sh` 会隔离 `validation.local.sh` 中遗留的 RUN_MODE，
-因此不要把它写入部署配置。之后依次手动执行，每步成功后再进行下一步：
-
-```bash
-bash build_all.sh
+bash build_all.sh breakdown=1
 ```
 
 ```bash
@@ -203,7 +196,14 @@ bash run.sh run_mode=breakdown loops=3 warmup=2
 
 编译脚本自动传入 `-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`，安装 manifest 记录
 `server_dedup_profiling=true`、`server_dedup_profile_version=2`。普通 functional/performance 构建显式关闭该开关。
-运行时检查产物模式，拒绝混用旧空 kernel 记录、无打点产物或带打点的性能基线。
+`bash build_all.sh` 等同 `bash build_all.sh breakdown=0`，即使终端遗留 `TILEXR_VALIDATION_RUN_MODE=breakdown`
+也默认关闭打点。构建入口同时隔离遗留 loops/warmup；这些参数只由运行入口决定。
+同步仅核对已安装产物的打点元数据、版本和摘要，不要求设置 RUN_MODE；运行时仍检查模式是否与产物匹配。
+模式不匹配时按错误提示重新选择构建参数，成功后同步；不要手动修改 manifest。
+
+原同步入口将终端 RUN_MODE 的 functional 默认值与打点产物比较，可能在同步时误报模式不一致。
+现将打点选择固定在构建参数中，同步验证安装包自身，运行验证所选 case 与包是否兼容。
+本地 Bash 入口和两节点传输替身回归覆盖默认关闭、显式开启、模式不同的包同步和运行拒绝；不代表新增 NPU 验证。
 
 成功后终端打印 `Trace JSON:` 和代表卡 trace 路径，完整目录为：
 
@@ -232,8 +232,9 @@ summary 的 `measurements.breakdown.stages_us` 给出各 rank 阶段最大核耗
 consumer 先校验计数，再校验全部核的记录身份、最终 generation 和时间戳顺序；缺核、旧 schema 或旧轮次均不能 PASS。
 本地替身测试覆盖记录写入、计数区隔离、consumer 失败路径及 JSON 汇总/导出；新打点产物仍需 CANN/A5 实机验证。
 
-恢复普通产物时先 `export TILEXR_VALIDATION_RUN_MODE=functional`，再手动执行 `build_all.sh`、`sync.sh`；
-随后可按前文运行 functional 或 performance。已有成功 breakdown summary 可离线重新导出：
+恢复普通产物时手动执行 `bash build_all.sh`、`bash sync.sh`，随后使用
+`bash run.sh run_mode=functional loops=3 warmup=0` 或前文的 performance 命令。
+已有成功 breakdown summary 可离线重新导出：
 
 ```bash
 python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summary.json

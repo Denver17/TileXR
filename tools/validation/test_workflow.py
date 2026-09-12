@@ -898,8 +898,15 @@ with output.open('w', newline='') as f:
         self.enable_chain(workflow.CHAIN_MULTI_CHECKPOINT, "breakdown")
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
                           TILEXR_VALIDATION_WARMUP="2")
-        self.prepare_sync()
-        self.assert_success(self.invoke("run"))
+        # A plain sync has functional defaults, even when the installed kernel is profiled.
+        ordinary_mode = dict(TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS="1",
+                             TILEXR_VALIDATION_WARMUP="0")
+        self.assert_success(self.invoke("sync", environment=ordinary_mode))
+        mismatch = self.invoke("run", environment=ordinary_mode)
+        self.assertNotEqual(mismatch.returncode, 0)
+        self.assertIn("设备打点开关", mismatch.stderr)
+        # run.sh forwards case arguments independently of the configuration used to sync.
+        self.assert_success(self.invoke("run", environment={"TILEXR_DIRECT_RUN": "1"}))
         summary = self.summary()
         self.assertEqual(summary["measurements"]["run_mode"], "breakdown")
         self.assertEqual(len(summary["traces"]["ranks"]), 16)

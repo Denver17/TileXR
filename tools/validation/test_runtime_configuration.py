@@ -142,20 +142,25 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         installed.write_text(json.dumps(dict(checkpoint=workflow.MEMORY_BOUNDARY_CHECKPOINT)))
         cann = self.root / 'cann-env.sh'
         cann.write_text('# CANN environment fixture\n')
-        for mode, override, expected in (
-                ('production', None, workflow.CHAIN_MULTI_CHECKPOINT),
-                ('production', workflow.CHECKPOINT, workflow.CHECKPOINT),
-                ('host', None, None)):
-            with self.subTest(mode=mode, override=override):
+        for mode, override, arguments, expected, run_mode in (
+                ('production', None, [], workflow.CHAIN_MULTI_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=0'], workflow.CHAIN_MULTI_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=1'], workflow.CHAIN_MULTI_CHECKPOINT, 'breakdown'),
+                ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
+                ('host', None, [], None, 'functional')):
+            with self.subTest(mode=mode, override=override, arguments=arguments):
                 environment = dict(self.env, TILEXR_VALIDATION_BUILD_MODE=mode,
-                                   TILEXR_CANN_ENV_SCRIPT=str(cann))
+                                   TILEXR_CANN_ENV_SCRIPT=str(cann), TILEXR_VALIDATION_RUN_MODE='breakdown',
+                                   TILEXR_VALIDATION_LOOPS='3', TILEXR_VALIDATION_WARMUP='2')
                 if override:
                     environment['TILEXR_VALIDATION_CHECKPOINT'] = override
-                result = subprocess.run([str(self.bash), 'build_all.sh'], cwd=self.root,
+                result = subprocess.run([str(self.bash), 'build_all.sh', *arguments], cwd=self.root,
                     env=environment, text=True, capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 values = json.loads(result.stdout.splitlines()[-1])
                 self.assertEqual(values.get('TILEXR_VALIDATION_CHECKPOINT'), expected)
+                self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], run_mode)
+                self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('1', '0'))
 
     def test_environment_failure_shows_reason_and_log_without_running_workflow(self):
         (self.root / 'tools/validation/workflow.py').write_text("raise AssertionError('must not run')\n")
@@ -185,6 +190,12 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         self.assertIn(str(output / 'workflow.log'), result.stderr)
 
     def test_bad_arguments_and_missing_configuration_name_the_problem(self):
+        for arguments in (['breakdown=2'], ['run_mode=breakdown'], ['breakdown=1']):
+            # The last case rejects profiling in the fixture's Host build mode.
+            result = subprocess.run([str(self.bash), 'build_all.sh', *arguments], cwd=self.root,
+                                    env=self.env, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn('[build] Failed:', result.stderr)
         result = subprocess.run([str(self.bash), 'run.sh', 'typo=3'], cwd=self.root,
                                 env=self.env, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 2)
