@@ -252,7 +252,7 @@ class BuildTests(unittest.TestCase):
         (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
         for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
-                    "TILEXR_VALIDATION_CHECKPOINT": workflow.FIRST_HOP_CHECKPOINT,
+                    "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
                     "TILEXR_VALIDATION_RUN_MODE": mode, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
                 self.commands.clear()
                 self.build_fixture(self.config("production"))
@@ -267,7 +267,7 @@ class BuildTests(unittest.TestCase):
     def test_breakdown_build_enables_count_profile_and_rejects_baseline_or_legacy_package(self):
         (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {
-                "TILEXR_VALIDATION_CHECKPOINT": workflow.FIRST_HOP_CHECKPOINT,
+                "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
                 "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
             config = self.config("production")
             manifest, _ = self.build_fixture(config)

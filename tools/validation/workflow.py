@@ -31,14 +31,14 @@ DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
 CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
-FIRST_HOP_CHECKPOINT = "ep-sdedup-p2-first-hop"
-FIRST_HOP_MARKER = "EP_SERVER_DEDUP_FIRST_HOP_PASS "
-FIRST_HOP_ABI = {"launch_bytes": 184, "layout": "r07-single", "kernel_scope": "first_hop"}
+SOURCE_SEND_CHECKPOINT = "ep-sdedup-p2-source-send"
+SOURCE_SEND_MARKER = "EP_SERVER_DEDUP_SOURCE_SEND_PASS "
+SOURCE_SEND_ABI = {"launch_bytes": 184, "layout": "r07-single", "kernel_scope": "source_send"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 4 * 1024 ** 3
 MEMORY_BOUNDARY_BYTES = SERVER_DEDUP_PEER_BYTES
-CHAIN_CHECKPOINTS = (FIRST_HOP_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
+CHAIN_CHECKPOINTS = (SOURCE_SEND_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
 BREAKDOWN_MARKER = "EP_SERVER_DEDUP_BREAKDOWN_PASS "
@@ -46,7 +46,7 @@ RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, *CHAIN_CHECKPOINTS)
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
-    "test_tilexr_ep_server_dedup_counts", "test_tilexr_ep_server_dedup_first_hop",
+    "test_tilexr_ep_server_dedup_counts", "test_tilexr_ep_server_dedup_source_send",
     "test_dispatch_memory_trace", "test_msprof_kernel_stats", "test_tilexr_ep_layout",
     "test_tilexr_ep_expert_ids", "test_tilexr_ep_host_validation", "test_tilexr_ep_kernel_launch",
     "test_tilexr_moonep_planner_public_abi", "test_tilexr_ep_plan_layout", "test_tilexr_ep_plan_reference",
@@ -263,13 +263,13 @@ class Config:
         self.user = os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
-        if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT):
-            raise ValueError("旧 cnt-only checkpoint 已由 ep-sdedup-p2-first-hop 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
+        if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, "ep-sdedup-p2-first-hop"):
+            raise ValueError("旧 cnt-only/first-hop checkpoint 已由 ep-sdedup-p2-source-send 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
             raise ValueError("不支持的 checkpoint：" + self.checkpoint)
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
-            raise ValueError("empty-kernel / first-hop / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
+            raise ValueError("empty-kernel / source-send / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
         if self.user and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.user):
@@ -306,13 +306,15 @@ class Config:
                 "cann_script": os.environ.get("TILEXR_CANN_ENV_SCRIPT", ""),
                 "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""),
-                "python": sys.executable}
+                # Record the configured command, not the interpreter's alias
+                # (/usr/bin/python vs /usr/bin/python.exe can differ in MSYS).
+                "python": os.environ.get("TILEXR_VALIDATION_PYTHON", "python3")}
         if self.chain is not None:
             signature["chain"] = self.chain
         return signature
 
 
-def first_hop_stride(config):
+def source_send_stride(config):
     h, k = config["h"], config["topk"]
     data = ((h + 255) // 256 * 256 + (h + 63) // 64 * 2) if config["quant_mode"] == 4 else h * 2
     payload = (data + 31) // 32 * 32 + (32 + 16 * (k - 1) + 31) // 32 * 32
@@ -341,7 +343,7 @@ def chain_configuration(checkpoint):
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
         raise ValueError("chain 检查点 dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
     run_mode, loops, warmup = "functional", 1, 0
-    if checkpoint == FIRST_HOP_CHECKPOINT:
+    if checkpoint == SOURCE_SEND_CHECKPOINT:
         run_mode = os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional")
         if run_mode not in ("functional", "performance", "breakdown"):
             raise ValueError("RUN_MODE 必须为 functional/performance/breakdown")
@@ -350,9 +352,9 @@ def chain_configuration(checkpoint):
         if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
             raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
         if loops != 1 or warmup != 0:
-            raise ValueError("第一跳发送当前仅支持 loops=1、warmup=0；接收清理及跨调用复用尚未启用")
+            raise ValueError("源端发送当前仅支持 loops=1、warmup=0；接收清理及跨调用复用尚未启用")
         if block_dim not in ("auto", "64"):
-            raise ValueError("第一跳发送固定 48/16 核组，block_dim 必须为 auto/64")
+            raise ValueError("源端发送固定 48/16 核组，block_dim 必须为 auto/64")
 
     def endpoint(value, name):
         try:
@@ -372,7 +374,7 @@ def chain_configuration(checkpoint):
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode="balance_shift", seed=2026, kernel_scope="first_hop")
+                 route_mode="balance_shift", seed=2026, kernel_scope="source_send")
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -477,15 +479,15 @@ def verify_build(config, *, check_run_mode=True):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
-    if config.checkpoint == FIRST_HOP_CHECKPOINT:
-        if manifest.get("server_dedup_contract") != FIRST_HOP_ABI:
-            raise ValueError("需要第一跳发送 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
+    if config.checkpoint == SOURCE_SEND_CHECKPOINT:
+        if manifest.get("server_dedup_contract") != SOURCE_SEND_ABI:
+            raise ValueError("需要源端发送 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
         if profiling and manifest.get("server_dedup_profile_version") != 3:
-            raise ValueError("需要第一跳发送 breakdown v3 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
+            raise ValueError("需要源端发送 breakdown v3 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -591,8 +593,8 @@ def build(config):
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""), "tests": tests,
                 "artifacts": artifact_files(stage)}
-    if config.checkpoint == FIRST_HOP_CHECKPOINT:
-        manifest["server_dedup_contract"] = dict(FIRST_HOP_ABI)
+    if config.checkpoint == SOURCE_SEND_CHECKPOINT:
+        manifest["server_dedup_contract"] = dict(SOURCE_SEND_ABI)
         manifest["server_dedup_profiling"] = config.chain["run_mode"] == "breakdown"
         if manifest["server_dedup_profiling"]:
             manifest["server_dedup_profile_version"] = 3
@@ -775,21 +777,21 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         if chain:
             linked = record["chain"]
             loops = 1
-            if manifest["checkpoint"] == FIRST_HOP_CHECKPOINT:
+            if manifest["checkpoint"] == SOURCE_SEND_CHECKPOINT:
                 if chain_config is None:
-                    raise Failure("RESULT_FAILED", "缺少本次第一跳配置", rank=mapping["rank"])
+                    raise Failure("RESULT_FAILED", "缺少本次源端发送配置", rank=mapping["rank"])
                 for key in ("quant_mode", "fp8_format", "kernel_scope"):
                     if record.get(key) != chain_config[key]:
-                        raise Failure("RESULT_FAILED", "第一跳实际类型或范围不一致", rank=mapping["rank"], field=key)
-                stride = first_hop_stride(chain_config)
+                        raise Failure("RESULT_FAILED", "源端发送实际类型或范围不一致", rank=mapping["rank"], field=key)
+                stride = source_send_stride(chain_config)
                 if (any(record.get(key) is not True for key in
-                        ("first_hop_validated", "source_outputs_validated", "weights_unchanged")) or
-                        record.get("native_status") != "first_hop" or record.get("direct_packets") != 0 or
-                        record.get("token_stride") != stride or
-                        any(type(record.get(key)) is not int or record[key] < 0 for key in
-                            ("first_hop_packets", "first_hop_received", "first_hop_bytes")) or
-                        record["first_hop_bytes"] != record["first_hop_packets"] * stride):
-                    raise Failure("RESULT_FAILED", "第一跳包或源端输出缺少完整校验", rank=mapping["rank"])
+                        ("first_hop_validated", "direct_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged")) or
+                        record.get("native_status") != "source_send" or record.get("token_stride") != stride):
+                    raise Failure("RESULT_FAILED", "源端发送包或源端输出缺少完整校验", rank=mapping["rank"])
+                try:
+                    measurements.validate_source_send_traffic(record, chain_config)
+                except (ValueError, TypeError, KeyError) as error:
+                    raise Failure("RESULT_FAILED", f"源端发送流量记录无效：{error}", rank=mapping["rank"]) from error
                 loops = chain_config["loops"]
                 for marker in (record, linked):
                     if any(marker.get(key) != chain_config[key] for key in ("run_mode", "loops", "warmup")):
@@ -866,7 +868,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                             "--output=" + str(profile_dir)]
             output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
             if config.checkpoint in CHAIN_CHECKPOINTS:
-                marker = FIRST_HOP_MARKER
+                marker = SOURCE_SEND_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
                     marker = MEMORY_BOUNDARY_MARKER
                 record = parse_rank_marker(output, marker)
@@ -1228,7 +1230,7 @@ def run(config):
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
     elif config.checkpoint in CHAIN_CHECKPOINTS:
-        scope += f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、单轮 cnt/cumsum、第一跳包 hidden/scale/尾表/q/全部 Flag、源端 mask/权重及只读输入校验；DIRECT、接收转发及 Combine 尚未启用。"
+        scope += f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、单轮 cnt/cumsum、第一跳/DIRECT 包 hidden/scale/尾表/q/全部 Flag、完整 route 覆盖、源端 mask/权重及只读输入校验；接收转发及 Combine 尚未启用。"
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],

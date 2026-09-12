@@ -9,7 +9,7 @@ option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
 option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
 option(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    "Enable per-AIV first-hop breakdown in the Server Dedup kernel" OFF)
+    "Enable per-AIV source-send breakdown in the Server Dedup kernel" OFF)
 option(TILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST
     "Build the isolated A5 4 GiB peer-window boundary test" OFF)
 

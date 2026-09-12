@@ -11,7 +11,7 @@
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
 #include "ep_memory_server_dedup_profile.h"
-#include "server_dedup_first_hop_fixture.h"
+#include "server_dedup_source_send_fixture.h"
 
 namespace {
 int deviceId = 0;
@@ -210,23 +210,33 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         const Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
             dtype == TileXR::TILEXR_DATA_TYPE_BFP16, quant == 4, outDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3};
         const auto layout = TileXREp::TileXREpServerDedupDataLayout(shape.bs, shape.h, shape.k, shape.experts, shape.quantized);
+        const char *packetFault = std::getenv("TEST_PACKET_FAULT");
+        const std::string packetFailure = packetFault == nullptr ? "" : packetFault;
         std::fill(sourceMask, sourceMask + bs, 0);
         for (uint32_t source = 0; source < shape.ranks; ++source) {
-            const auto expected = FirstHops(Ids(shape, source), Weights(shape, source), source, shape.ranks, shape.experts, shape.k);
+            const auto expected = SourcePackets(Ids(shape, source), Weights(shape, source), source, shape.ranks, shape.experts, shape.k);
             for (const auto &packet : expected) {
                 const auto &first = packet.members[0];
                 if (source == uint32_t(rank)) {
                     sourceMask[packet.token] |= uint32_t(1) << first.k;
-                    weightsOut[packet.token * topK + first.k] = 1.0f;
+                    weightsOut[packet.token * topK + first.k] = packet.members.size() > 1U ? 1.0f : first.weight;
+                    if (packet.members.size() == 1U && packetFailure == "direct-weight")
+                        weightsOut[packet.token * topK + first.k] = 0.0f;
                 }
                 const uint32_t local = shape.experts / shape.ranks;
                 if (first.expert / local != uint32_t(rank)) continue;
-                const auto offset = TileXREp::TileXREpServerDedupDispatchOffset(layout, source, rank,
+                auto offset = TileXREp::TileXREpServerDedupDispatchOffset(layout, source, rank,
                     first.expert % local, first.q, shape.ranks, local, shape.bs);
-                packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) + offset] = Pack(Payload(shape, source, packet, layout));
+                auto payload = Payload(shape, source, packet, layout);
+                if (packet.members.size() == 1U) {
+                    if (packetFailure == "direct-missing") continue;
+                    if (packetFailure == "direct-hidden") payload[0] ^= 1U;
+                    if (packetFailure == "direct-tail") Put(payload, layout.tailOffset + 16U, uint32_t(1));
+                    if (packetFailure == "direct-q") offset += layout.tokenStride;
+                }
+                packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) + offset] = Pack(payload);
             }
         }
-        const char *packetFault = std::getenv("TEST_PACKET_FAULT");
         if (packetFault) {
             const std::string fault(packetFault);
             if (fault == "mask") sourceMask[0] ^= 1U;

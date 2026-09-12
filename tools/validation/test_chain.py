@@ -13,7 +13,7 @@ from test_workflow import TemporaryRoot
 class ChainTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.FIRST_HOP_CHECKPOINT,
+        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.SOURCE_SEND_CHECKPOINT,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
         self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
@@ -23,7 +23,7 @@ class ChainTests(TemporaryRoot):
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
-                                           route_mode="balance_shift", seed=2026, kernel_scope="first_hop"))
+                                           route_mode="balance_shift", seed=2026, kernel_scope="source_send"))
         original = config.signature()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "64"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
@@ -59,7 +59,7 @@ class ChainTests(TemporaryRoot):
                 self.assertEqual(config.signature()["chain"]["moe_expert_num"], experts)
 
     def test_requires_both_current_markers_and_one_completed_launch(self):
-        manifest = {"build_id": "build", "checkpoint": workflow.FIRST_HOP_CHECKPOINT, "source": {"commit": "a" * 40}}
+        manifest = {"build_id": "build", "checkpoint": workflow.SOURCE_SEND_CHECKPOINT, "source": {"commit": "a" * 40}}
         config = self.config()
         mappings = workflow.rank_mapping(self.config().hosts())[:8]
         records = []
@@ -67,8 +67,9 @@ class ChainTests(TemporaryRoot):
             identity = dict(workflow.rank_record(mapping, "run", manifest), pid=mapping["rank"] + 100, **config.chain)
             records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                                 submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
-                                first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=0,
-                                first_hop_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="first_hop"))
+                                first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
+                                local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
+                                first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="source_send"))
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
                                    (None, "cleanup", "failed"), (None, "chain", None),
@@ -83,7 +84,7 @@ class ChainTests(TemporaryRoot):
             with self.subTest(marker=marker, key=key), self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records(changed, mappings, "run", manifest, config.chain)
 
-    def test_first_hop_single_submission_in_all_modes(self):
+    def test_source_send_single_submission_in_all_modes(self):
         for mode in ("functional", "performance", "breakdown"):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_RUN_MODE": mode}):
                 chain = self.config().chain
@@ -91,15 +92,15 @@ class ChainTests(TemporaryRoot):
                 for key, value in (("LOOPS", "2"), ("WARMUP", "1"), ("LOOPS", "0"), ("WARMUP", "-1")):
                     with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
                         self.config()
-        for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi"):
+        for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p2-first-hop"):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": checkpoint}), self.assertRaises(ValueError):
                 self.config()
         for quant, format, stride in (("0", "e4m3", 15872), ("4", "e4m3", 8192), ("4", "e5m2", 8192)):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_QUANT_MODE": quant, "TILEXR_VALIDATION_FP8_FORMAT": format}):
-                self.assertEqual(workflow.first_hop_stride(self.config().chain), stride)
+                self.assertEqual(workflow.source_send_stride(self.config().chain), stride)
 
     def test_multi_requires_all_configured_rounds_and_batch_identity(self):
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.FIRST_HOP_CHECKPOINT
+        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.SOURCE_SEND_CHECKPOINT
         os.environ["TILEXR_VALIDATION_LOOPS"] = "1"
         config = self.config()
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
@@ -108,10 +109,13 @@ class ChainTests(TemporaryRoot):
                         **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope")})
         record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                       submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
-                      first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=0,
-                      first_hop_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="first_hop")
+                      first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
+                                local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
+                      first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="source_send")
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
         for key, value in (("first_hop_validated", False), ("token_stride", 8192), ("first_hop_bytes", 1),
+                           ("direct_validated", False), ("route_coverage_validated", False), ("direct_bytes", 0),
+                           ("direct_packets", True), ("direct_received", None), ("same_server_data_bytes", -1),
                            ("weights_unchanged", False), ("source_outputs_validated", False), ("direct_packets", 1),
                            ("quant_mode", 3), ("kernel_scope", "cnt_cumsum"), ("loops", 3), ("submitted", 4), ("completed", 4), ("completed", 6),
                            ("completed", True), ("warmup_submitted", 1), ("warmup_completed", None),

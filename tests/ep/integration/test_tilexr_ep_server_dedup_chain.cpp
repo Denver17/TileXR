@@ -28,7 +28,7 @@
 #include "ep_memory_server_dedup_layout.h"
 #include "ep_memory_server_dedup_profile.h"
 #include "../demo/tilexr_ep_expert_ids.h"
-#include "server_dedup_first_hop_fixture.h"
+#include "server_dedup_source_send_fixture.h"
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_test.h"
 #endif
@@ -118,8 +118,8 @@ Config Parse(int argc, char **argv)
     Config c {};
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-first-hop" : checkpoint;
-    Require(c.checkpoint == "ep-sdedup-p2-first-hop" ||
+    c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-source-send" : checkpoint;
+    Require(c.checkpoint == "ep-sdedup-p2-source-send" ||
         c.checkpoint == "ep-sdedup-p1-memory-boundary",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
@@ -137,7 +137,7 @@ Config Parse(int argc, char **argv)
     c.loops = static_cast<uint32_t>(loops);
     c.warmup = static_cast<uint32_t>(warmup);
     Require(c.loops == 1 && c.warmup == 0,
-        "first-hop requires loops=1, warmup=0 until receive cleanup and cross-call reuse are implemented");
+        "source-send requires loops=1, warmup=0 until receive cleanup and cross-call reuse are implemented");
     Require(c.checkpoint != "ep-sdedup-p1-memory-boundary" ||
         (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
         "memory-boundary requires functional mode, loops=1, warmup=0");
@@ -332,7 +332,7 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
     }
 }
 
-#include "server_dedup_first_hop_consumer.h"
+#include "server_dedup_source_send_consumer.h"
 
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_consumer.h"
@@ -355,7 +355,7 @@ int Run(const Config &c)
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
-    std::string stage = "acl-init", batch = "initialization", breakdown, firstHop;
+    std::string stage = "acl-init", batch = "initialization", breakdown, sourceSend;
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
         Check(aclInit(nullptr), "aclInit"); initialized = true;
@@ -398,11 +398,11 @@ int Run(const Config &c)
             Check(aclrtGetDevice(&device), "aclrtGetDevice");
             allocations.push_back({data, sizes[i], sizes[i], alignments[i], device});
         }
-        const auto shape = FirstHopShape(c);
+        const auto shape = SourceSendShape(c);
         const auto xHost = ServerDedupReference::Hidden(shape, c.rank);
         const auto idsHost = ServerDedupReference::Ids(shape, c.rank);
         const auto weightsHost = ServerDedupReference::Weights(shape, c.rank);
-        SaveFirstHopInputs(c, xHost, idsHost, weightsHost);
+        SaveSourceSendInputs(c, xHost, idsHost, weightsHost);
         Check(aclrtMemcpy(buffers[0], layout.xBytes, xHost.data(), layout.xBytes, ACL_MEMCPY_HOST_TO_DEVICE), "copy x");
         Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
         Check(aclrtMemcpy(buffers[8], layout.weightBytes, weightsHost.data(),
@@ -470,11 +470,11 @@ int Run(const Config &c)
                 previousExpert = cumulative;
             }
         }
-        stage = "first-hop-read";
-        firstHop = ValidateFirstHop(c, *host, layout, buffers, weightsHost);
+        stage = "source-send-read";
+        sourceSend = ValidateSourceSend(c, *host, layout, buffers, weightsHost);
         if (c.runMode == "breakdown") {
             stage = "breakdown-read";
-            breakdown = ReadFirstHopProfile(c, *host);
+            breakdown = ReadSourceSendProfile(c, *host);
         }
         success = true;
     } catch (const std::exception &error) {
@@ -506,7 +506,7 @@ int Run(const Config &c)
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
         if (!breakdown.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown);
-        Marker(c, "EP_SERVER_DEDUP_FIRST_HOP_PASS", details + firstHop);
+        Marker(c, "EP_SERVER_DEDUP_SOURCE_SEND_PASS", details + sourceSend);
     }
     return success ? 0 : 1;
 }

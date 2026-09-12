@@ -1,11 +1,11 @@
-#ifndef TILEXR_TEST_SERVER_DEDUP_FIRST_HOP_FIXTURE_H
-#define TILEXR_TEST_SERVER_DEDUP_FIRST_HOP_FIXTURE_H
+#ifndef TILEXR_TEST_SERVER_DEDUP_SOURCE_SEND_FIXTURE_H
+#define TILEXR_TEST_SERVER_DEDUP_SOURCE_SEND_FIXTURE_H
 
 #include <cstring>
 #include <random>
 #include <stdexcept>
 #include <string>
-#include "server_dedup_first_hop_reference.h"
+#include "server_dedup_source_send_reference.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "../demo/mxfp8_golden.h"
 #include "ep_memory_server_dedup_data_layout.h"

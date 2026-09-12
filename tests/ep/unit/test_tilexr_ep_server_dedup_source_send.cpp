@@ -4,7 +4,7 @@
 #include <random>
 #include "tilexr_ep_server_dedup_send.h"
 #include "server_dedup_test_checks.h"
-#include "../integration/server_dedup_first_hop_reference.h"
+#include "../integration/server_dedup_source_send_reference.h"
 
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
@@ -39,7 +39,18 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         std::copy(mixed, mixed + 12U, ids.begin());
     }
     const auto originalWeights = weights;
-    auto packets = ServerDedupReference::FirstHops(ids, weights, source, ranks, experts, k);
+    auto packets = ServerDedupReference::SourcePackets(ids, weights, source, ranks, experts, k);
+    struct Write { uint32_t core, token, k, entries; const void *destination; uintptr_t lane; };
+    std::vector<Write> writes;
+    AscendC::GmWriteObserver() = [&](const void *destination, const void *payload, uint32_t bytes) {
+        Check(bytes == data.tokenStride, "each source packet uses the complete shared stride");
+        uint32_t header[8] {};
+        for (uint32_t i = 0; i < sizeof(header); ++i) {
+            const uint64_t offset = data.tailOffset + i;
+            reinterpret_cast<uint8_t *>(header)[i] = static_cast<const uint8_t *>(payload)[offset / 480U * 512U + offset % 480U];
+        }
+        writes.push_back({AscendC::testCore, header[1], header[2], header[4], destination, reinterpret_cast<uintptr_t>(payload)});
+    };
     std::map<uint32_t, std::vector<uint8_t>> windows;
     for (const auto &packet : packets) {
         const uint32_t destination = packet.members.front().expert / localExperts;
@@ -49,6 +60,10 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     std::vector<uint32_t> masks(bs + 2U, 0xdeadbeefU);
     std::vector<float> output(bs * k + 2U, -777.0f);
     for (uint32_t core = 0; core < 48U; ++core) {
+        const uint32_t start = core * (bs / 48U) + std::min(core, bs % 48U);
+        const uint32_t count = bs / 48U + (core < bs % 48U);
+        const auto priorMasks = masks;
+        const auto priorOutput = output;
         AscendC::testCore = core;
         AscendC::TPipe pipe;
         TileXREp::ServerDedupSender<uint16_t, false, false> sender;
@@ -56,6 +71,32 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
             reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe);
         sender.Process();
+        for (uint32_t token = 0; token < bs; ++token) if (token < start || token >= start + count) {
+            Check(masks[token + 1U] == priorMasks[token + 1U], "mask write stays within this core's rows");
+            for (uint32_t route = 0; route < k; ++route)
+                Check(output[1U + token * k + route] == priorOutput[1U + token * k + route], "weight write stays within this core's rows");
+        }
+    }
+    AscendC::GmWriteObserver() = {};
+    Check(writes.size() == packets.size(), "exactly one send per expected physical packet");
+    for (uint32_t core = 0; core < 48U; ++core) {
+        bool directStarted = false;
+        uint32_t previousDirect = 0;
+        std::vector<uintptr_t> lanes;
+        uint32_t issued = 0;
+        for (const auto &write : writes) if (write.core == core) {
+            const uint32_t start = core * (bs / 48U) + std::min(core, bs % 48U);
+            const uint32_t count = bs / 48U + (core < bs % 48U);
+            Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
+            if (write.entries == 0) {
+                const uint32_t index = write.token * k + write.k;
+                Check(!directStarted || index > previousDirect, "DIRECT consumes cached tasks in token/k order");
+                directStarted = true; previousDirect = index;
+            } else Check(!directStarted, "all first hops on a core precede its DIRECT sends");
+            if (std::find(lanes.begin(), lanes.end(), write.lane) == lanes.end()) lanes.push_back(write.lane);
+            Check(lanes.size() <= 8U && write.lane == lanes[issued % lanes.size()], "both stages share a continuous lane sequence");
+            ++issued;
+        }
     }
     std::vector<uint32_t> expectedMasks(bs, 0U);
     for (const auto &packet : packets) {
@@ -64,6 +105,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         const uint64_t offset = data.dispatchOffset +
             (((uint64_t(source) + destination) % ranks * localExperts + first.expert % localExperts) * bs + first.q) * data.tokenStride;
         const uint8_t *wire = windows[destination].data() + offset;
+        Check(std::count_if(writes.begin(), writes.end(), [&](const Write &write) {
+            return write.destination == wire && write.token == packet.token && write.k == first.k;
+        }) == 1, "each original q slot is sent exactly once");
         std::vector<uint8_t> payload(data.packedPayloadBytes);
         for (uint32_t block = 0; block < data.blockCount; ++block) {
             std::memcpy(payload.data() + block * 480U, wire + block * 512U, 480U);
@@ -78,7 +122,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         std::memcpy(tail.data(), payload.data() + data.tailOffset, tail.size() * 4U);
         Check(tail[0] == source && tail[1] == packet.token && tail[2] == first.k &&
             tail[4] == packet.members.size() - 1U && tail[5] == tail[4] && tail[6] == UINT32_MAX && tail[7] == UINT32_MAX,
-            "first-hop header identity/count/return fields");
+            "DIRECT/first-hop header identity/count/return fields");
         Check(std::memcmp(&tail[3], &first.weight, 4U) == 0, "header retains real weight");
         for (uint32_t i = 1; i < packet.members.size(); ++i) {
             const auto &member = packet.members[i];
@@ -87,9 +131,10 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 std::memcmp(&tail[index + 3U], &member.weight, 4U) == 0, "entries follow original k/q/weight, excluding the first hop");
         }
         expectedMasks[packet.token] |= uint32_t(1) << first.k;
-        Check(output[1U + packet.token * k + first.k] == 1.0f, "group source contribution has weight one");
+        Check(output[1U + packet.token * k + first.k] == (packet.members.size() > 1U ? 1.0f : first.weight),
+            "group contribution has weight one and DIRECT retains the real weight");
     }
-    Check(std::equal(expectedMasks.begin(), expectedMasks.end(), masks.begin() + 1), "only actually sent first-hop bits are published");
+    Check(std::equal(expectedMasks.begin(), expectedMasks.end(), masks.begin() + 1), "mask contains group heads and all DIRECT routes");
     Check(weights == originalWeights, "input weights remain read-only");
     Check(masks.front() == 0xdeadbeefU && masks.back() == 0xdeadbeefU && output.front() == -777.0f && output.back() == -777.0f,
         "non-aligned per-core writes preserve adjacent outputs");
@@ -111,8 +156,10 @@ int main()
         Run(16, 96, 6, 7168, 6, true);
         Run(16, 96, 1, 33, 1, false);
         Run(16, 96, 47, 64, 6, false);
+        Run(16, 96, 256, 224, 6, false); // all DIRECT, 5/6 tokens per core, ring wraps.
+        Run(16, 96, 256, 224, 32, false); // k31 is a DIRECT route with its original q.
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;
     }
-    return ServerDedupTest::Finish("first_hop");
+    return ServerDedupTest::Finish("source_send");
 }

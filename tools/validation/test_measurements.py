@@ -59,35 +59,64 @@ class MeasurementTests(unittest.TestCase):
                     {"core": 1, "start": 1000, "checked": 1004 + rank * 2, "end": 1010 + rank * 10},
                     {"core": 0, "start": 500, "checked": 507 + rank * 2, "end": 509 + rank * 2}]}}
 
-    def test_first_hop_v3_stages_traffic_and_trace_export(self):
+    def test_source_send_v3_stages_traffic_and_trace_export(self):
         config = dict(self.config, run_mode="breakdown", rank_size=16, loops=1, warmup=0,
                       bs=96, h=7168, moe_expert_num=96, quant_mode=0, fp8_format="e4m3",
-                      route_mode="balance_shift", seed=2026, kernel_scope="first_hop")
+                      route_mode="balance_shift", seed=2026, kernel_scope="source_send")
         ranks = []
         for rank in range(16):
             cores = []
             for core in range(64):
                 time = [100, 110, 120, 160, 160, 160, 160, 180] if core < 48 else [100, 110, 120, 120, 140, 150, 160, 190]
-                cores.append(dict(core=core, **dict(zip(measure.FIRST_HOP_POINTS, time))))
+                cores.append(dict(core=core, **dict(zip(measure.SOURCE_SEND_POINTS, time))))
             ranks.append(dict(rank=rank, first_hop_packets=2 + rank, first_hop_received=2 + rank,
                               first_hop_bytes=(2 + rank) * 15872, token_stride=15872,
-                              breakdown=dict(schema_version=3, kernel_scope="first_hop", generation=1,
+                              direct_packets=3, direct_received=3, direct_bytes=3 * 15872,
+                              local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=(3 + rank) * 15872,
+                              breakdown=dict(schema_version=3, kernel_scope="source_send", generation=1,
                                              run_mode="breakdown", loops=1, warmup=0, block_dim=64, records=cores)))
         summary = measure.summarize_measurements(ranks, config, "a" * 64)
-        self.assertEqual(summary["native_status"], "first_hop")
+        self.assertEqual(summary["native_status"], "source_send")
         self.assertEqual(summary["measurement"], "single_cold_submission")
-        self.assertEqual(summary["algorithm_communication_bytes"], sum(range(2, 18)) * 15872 + 16 * 90 * 32)
+        self.assertEqual(summary["algorithm_communication_bytes"], (sum(range(2, 18)) + 16 * 3) * 15872 + 16 * 90 * 32)
+        self.assertEqual(summary["rank_traffic"][0]["direct_packets"], 3)
+        self.assertEqual(summary["rank_traffic"][0]["local_data_bytes"], 15872)
+        self.assertEqual(summary["rank_traffic"][0]["same_server_data_bytes"], 15872)
+        self.assertEqual(summary["rank_traffic"][0]["cross_server_data_bytes"], 3 * 15872)
         self.assertEqual(summary["breakdown"]["schema_version"], 3)
         self.assertEqual(summary["breakdown"]["stages"]["send_data"]["median"], 40)
-        self.assertEqual(summary["breakdown"]["stages"]["first_hop_total"]["median"], 90)
+        self.assertEqual(summary["breakdown"]["stages"]["source_send_total"]["median"], 90)
         traces = measure.export_breakdown_traces(ranks, config, self.root / "traces", "run", "a" * 64)
         data = json.loads(Path(traces["all_ranks"]).read_text())
         self.assertEqual(data["otherData"]["schema_version"], 3)
         self.assertIn("send_data", {item["name"] for item in data["traceEvents"]})
+        for key, value in (("direct_received", 2), ("direct_bytes", 0), ("same_server_data_bytes", -1),
+                           ("local_data_bytes", 1), ("cross_server_data_bytes", 0)):
+            bad = copy.deepcopy(ranks); bad[0][key] = value
+            with self.subTest(traffic=key), self.assertRaises(ValueError):
+                measure.summarize_measurements(bad, config, "a" * 64)
         for field, value in (("schema_version", 2), ("kernel_scope", "cnt_cumsum"), ("generation", 2)):
             bad = copy.deepcopy(ranks[0]); bad["breakdown"][field] = value
             with self.subTest(field=field), self.assertRaises(ValueError):
                 measure.validate_rank_measurements(bad, config)
+
+    def test_source_send_performance_includes_direct_and_local_copy_bytes(self):
+        config = dict(self.config, rank_size=16, bs=96, moe_expert_num=96, loops=1, warmup=0,
+                      kernel_scope="source_send", route_mode="balance_shift", seed=2026, quant_mode=0, fp8_format="e4m3")
+        ranks = []
+        for rank in range(16):
+            path = self.csv_profile([rank + 1], name=f"PROF_rank{rank}")
+            ranks.append(dict(rank=rank, first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744,
+                              direct_packets=3, direct_received=3, direct_bytes=47616, token_stride=15872,
+                              local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
+                              performance=measure.performance_record(path.parents[1], 1, 0)))
+        summary = measure.summarize_measurements(ranks, config, "a" * 64)
+        self.assertEqual(summary["algorithm_communication_bytes"], 16 * 82240)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["minimum"], 82.24 / 16)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["maximum"], 82.24)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["median"], (82.24 / 8 + 82.24 / 9) / 2)
+        self.assertIn("including local copies", measure.render_measurements(summary))
+        self.assertNotIn("不含本卡访问", measure.render_measurements(summary))
 
     def test_performance_sorts_by_start_and_excludes_warmup(self):
         path = self.csv_profile([1000, 2, 4, 9], reverse=True)

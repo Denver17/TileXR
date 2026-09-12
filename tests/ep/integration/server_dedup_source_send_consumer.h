@@ -1,11 +1,11 @@
 // Included inside the integration consumer's namespace. No production debug ABI.
-ServerDedupReference::Shape FirstHopShape(const Config &c)
+ServerDedupReference::Shape SourceSendShape(const Config &c)
 {
     return {uint32_t(c.rankSize), uint32_t(c.experts), uint32_t(c.bs), uint32_t(c.h), uint32_t(c.topK),
         c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16, c.quantMode == 4, c.fp8Format == "e4m3"};
 }
 
-void SaveFirstHopInputs(const Config &c, const std::vector<uint16_t> &x,
+void SaveSourceSendInputs(const Config &c, const std::vector<uint16_t> &x,
     const std::vector<int32_t> &ids, const std::vector<float> &weights)
 {
     const char *directory = std::getenv("TILEXR_VALIDATION_INPUT_DIR");
@@ -14,21 +14,22 @@ void SaveFirstHopInputs(const Config &c, const std::vector<uint16_t> &x,
     const auto write = [&](const char *suffix, const void *data, size_t bytes) {
         std::ofstream out(stem + suffix, std::ios::binary);
         out.write(static_cast<const char *>(data), bytes);
-        Require(bool(out), "cannot retain first-hop inputs: " + stem + suffix);
+        Require(bool(out), "cannot retain source-send inputs: " + stem + suffix);
     };
     write("-x.bin", x.data(), x.size() * sizeof(uint16_t));
     write("-ids.bin", ids.data(), ids.size() * sizeof(int32_t));
     write("-weights.bin", weights.data(), weights.size() * sizeof(float));
 }
 
-std::string ValidateFirstHop(const Config &c, const TileXR::CommArgs &args,
+std::string ValidateSourceSend(const Config &c, const TileXR::CommArgs &args,
     const TileXREp::EpMemoryServerDedupLayout &layout, const std::vector<void *> &buffers,
     const std::vector<float> &originalWeights)
 {
     using namespace ServerDedupReference;
-    const auto shape = FirstHopShape(c);
+    const auto shape = SourceSendShape(c);
     const uint32_t localExperts = shape.experts / shape.ranks;
-    uint64_t sent = 0, received = 0;
+    uint64_t firstHopSent = 0, firstHopReceived = 0, directSent = 0, directReceived = 0;
+    uint64_t localBytes = 0, sameServerBytes = 0, crossServerBytes = 0;
     std::vector<uint32_t> expectedMask(shape.bs, 0), actualMask(shape.bs);
     std::vector<float> weights(originalWeights.size()), weightsOut(originalWeights.size());
     Check(aclrtMemcpy(actualMask.data(), layout.sourceMaskBytes, buffers[6], layout.sourceMaskBytes,
@@ -40,28 +41,43 @@ std::string ValidateFirstHop(const Config &c, const TileXR::CommArgs &args,
     Require(std::memcmp(weights.data(), originalWeights.data(), layout.weightBytes) == 0, "input weights modified");
     for (uint32_t source = 0; source < shape.ranks; ++source) {
         const auto ids = Ids(shape, source);
-        const auto packets = FirstHops(ids, Weights(shape, source), source, shape.ranks, shape.experts, shape.k);
+        const auto packets = SourcePackets(ids, Weights(shape, source), source, shape.ranks, shape.experts, shape.k);
         std::set<uint64_t> expectedSlots;
+        std::vector<bool> covered(ids.size(), false);
         for (const auto &packet : packets) {
             const auto &first = packet.members[0];
+            const bool direct = packet.members.size() == 1U;
+            for (const auto &member : packet.members) {
+                const uint32_t route = packet.token * shape.k + member.k;
+                Require(route < ids.size() && !covered[route] && uint32_t(ids[route]) == member.expert,
+                    "source packet expansion duplicates or changes an original route");
+                covered[route] = true;
+            }
             if (source == uint32_t(c.rank)) {
-                ++sent;
+                if (direct) ++directSent;
+                else ++firstHopSent;
+                const uint32_t destination = first.expert / localExperts;
+                if (destination == source) localBytes += layout.data.tokenStride;
+                else if (destination / 8U == source / 8U) sameServerBytes += layout.data.tokenStride;
+                else crossServerBytes += layout.data.tokenStride;
                 expectedMask[packet.token] |= uint32_t(1) << first.k;
-                Require(weightsOut[packet.token * shape.k + first.k] == 1.0f,
-                    "source weight must be 1.0 token=" + std::to_string(packet.token) + " k=" + std::to_string(first.k));
+                Require(weightsOut[packet.token * shape.k + first.k] == (direct ? first.weight : 1.0f),
+                    "source weight mismatch token=" + std::to_string(packet.token) + " k=" + std::to_string(first.k));
             }
             if (first.expert / localExperts != uint32_t(c.rank)) continue;
             const auto offset = TileXREp::TileXREpServerDedupDispatchOffset(layout.data, source, c.rank,
                 first.expert % localExperts, first.q, shape.ranks, localExperts, shape.bs);
-            Require(expectedSlots.insert(offset).second, "duplicate expected first-hop slot");
+            Require(expectedSlots.insert(offset).second, "duplicate expected source-send slot");
             std::vector<uint8_t> actual(layout.data.tokenStride);
             Check(aclrtMemcpy(actual.data(), actual.size(), args.peerMems[c.rank] + offset,
-                actual.size(), ACL_MEMCPY_DEVICE_TO_HOST), "read first-hop packet");
+                actual.size(), ACL_MEMCPY_DEVICE_TO_HOST), "read source-send packet");
             CheckPacket(shape, source, packet, layout.data, actual);
-            ++received;
+            if (direct) ++directReceived;
+            else ++firstHopReceived;
         }
-        // Check all other original local route slots: neither DIRECT nor relay
-        // entries have been sent in this checkpoint. Fresh communicator flags are zero.
+        Require(std::all_of(covered.begin(), covered.end(), [](bool value) { return value; }),
+            "source packet expansion misses an original route");
+        // Only relay entry slots remain inactive. Fresh communicator flags are zero.
         std::vector<uint32_t> q(shape.experts, 0);
         for (int32_t expert : ids) {
             const uint32_t originalQ = q[expert]++;
@@ -72,29 +88,33 @@ std::string ValidateFirstHop(const Config &c, const TileXR::CommArgs &args,
             std::array<uint32_t, 8> flags {};
             Check(aclrtMemcpy(flags.data(), sizeof(flags), args.peerMems[c.rank] + offset + 480U,
                 sizeof(flags), ACL_MEMCPY_DEVICE_TO_HOST), "read inactive slot flags");
-            for (uint32_t flag : flags) Require(flag == 0, "unexpected DIRECT/relay slot source=" + std::to_string(source) +
+            for (uint32_t flag : flags) Require(flag == 0, "unexpected relay slot source=" + std::to_string(source) +
                 " expert=" + std::to_string(expert) + " q=" + std::to_string(originalQ));
         }
     }
     for (uint32_t token = 0; token < shape.bs; ++token)
         Require(actualMask[token] == expectedMask[token], "sourceMask mismatch token=" + std::to_string(token) +
             " expected=" + std::to_string(expectedMask[token]) + " actual=" + std::to_string(actualMask[token]));
-    return ",\"kernel_scope\":\"first_hop\",\"native_status\":\"first_hop\",\"first_hop_packets\":" + std::to_string(sent) +
-        ",\"first_hop_received\":" + std::to_string(received) + ",\"token_stride\":" + std::to_string(layout.data.tokenStride) +
-        ",\"first_hop_bytes\":" + std::to_string(sent * layout.data.tokenStride) +
-        ",\"direct_packets\":0,\"first_hop_validated\":true,\"source_outputs_validated\":true,\"weights_unchanged\":true";
+    return ",\"kernel_scope\":\"source_send\",\"native_status\":\"source_send\",\"first_hop_packets\":" + std::to_string(firstHopSent) +
+        ",\"first_hop_received\":" + std::to_string(firstHopReceived) + ",\"token_stride\":" + std::to_string(layout.data.tokenStride) +
+        ",\"first_hop_bytes\":" + std::to_string(firstHopSent * layout.data.tokenStride) +
+        ",\"direct_packets\":" + std::to_string(directSent) + ",\"direct_received\":" + std::to_string(directReceived) +
+        ",\"direct_bytes\":" + std::to_string(directSent * layout.data.tokenStride) +
+        ",\"local_data_bytes\":" + std::to_string(localBytes) + ",\"same_server_data_bytes\":" + std::to_string(sameServerBytes) +
+        ",\"cross_server_data_bytes\":" + std::to_string(crossServerBytes) +
+        ",\"first_hop_validated\":true,\"direct_validated\":true,\"route_coverage_validated\":true,\"source_outputs_validated\":true,\"weights_unchanged\":true";
 }
 
-std::string ReadFirstHopProfile(const Config &c, const TileXR::CommArgs &args)
+std::string ReadSourceSendProfile(const Config &c, const TileXR::CommArgs &args)
 {
     using namespace TileXREp;
     std::array<EpServerDedupProfileRecord, kEpServerDedupCoreNum * kEpServerDedupProfileSegments> records {};
     Check(aclrtMemcpy(records.data(), sizeof(records), args.peerMems[c.rank], sizeof(records), ACL_MEMCPY_DEVICE_TO_HOST),
-        "read first-hop breakdown");
+        "read source-send breakdown");
     const uint64_t generation = 1;
     const char *points[] = {"start", "init_end", "send_cnt_end", "send_data_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end"};
     std::ostringstream out;
-    out << ",\"schema_version\":" << kEpServerDedupProfileVersion << ",\"kernel_scope\":\"first_hop\",\"generation\":" << generation
+    out << ",\"schema_version\":" << kEpServerDedupProfileVersion << ",\"kernel_scope\":\"source_send\",\"generation\":" << generation
         << ",\"block_dim\":" << kEpServerDedupCoreNum << ",\"records\":[";
     for (uint32_t core = 0; core < kEpServerDedupCoreNum; ++core) {
         uint64_t time[8] {};
@@ -103,14 +123,14 @@ std::string ReadFirstHopProfile(const Config &c, const TileXR::CommArgs &args)
             Require(r.marker == kEpServerDedupProfileMarker && r.version == kEpServerDedupProfileVersion &&
                 r.recordBytes == sizeof(r) && r.rank == uint32_t(c.rank) && r.core == core &&
                 r.blockDim == kEpServerDedupCoreNum && r.segment == segment && r.generation == generation,
-                "invalid first-hop breakdown core=" + std::to_string(core) + " segment=" + std::to_string(segment));
+                "invalid source-send breakdown core=" + std::to_string(core) + " segment=" + std::to_string(segment));
             std::copy(r.time, r.time + 4, time + segment * 4U);
         }
-        Require(time[0] > 0 && time[7] > time[0], "invalid first-hop breakdown duration");
+        Require(time[0] > 0 && time[7] > time[0], "invalid source-send breakdown duration");
         if (core != 0) out << ',';
         out << "{\"core\":" << core;
         for (uint32_t i = 0; i < 8; ++i) {
-            Require(i == 0 || time[i] >= time[i - 1], "unordered first-hop breakdown timestamps");
+            Require(i == 0 || time[i] >= time[i - 1], "unordered source-send breakdown timestamps");
             out << ",\"" << points[i] << "\":" << time[i];
         }
         out << '}';

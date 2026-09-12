@@ -8,8 +8,8 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// R02-01/R05-04 source path. The current checkpoint builds DIRECT tasks but
-// enables only first-hop packets; the receive/relay pipeline is a later module.
+// R02-01/R05-04 source path: first hops precede the cached DIRECT tasks on
+// each core, sharing one packet sequence and ring of in-flight send buffers.
 template<class XType, bool Quantized, bool E4M3>
 class ServerDedupSender {
 public:
@@ -102,7 +102,9 @@ public:
                 const uint32_t mask = firstHopMasks_.GetValue(group);
                 uint32_t firstK = 0;
                 while ((mask & (uint32_t(1) << firstK)) == 0U) ++firstK;
-                SendFirstHop(input, token, firstK, mask);
+                const uint32_t index = (start_ + token) * k_ + firstK;
+                const uint32_t expert = uint32_t(routeIds_.GetValue(index));
+                SendPacket(input, token, firstK, expert, CalTokenSendExpertCnt(expert, index), mask);
                 sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << firstK));
                 sourceWeights_.SetValue(token * k_ + firstK, 1.0f);
             }
@@ -117,7 +119,15 @@ public:
                 ++directCount_;
             }
         }
-        // Checkpoint 2.3 intentionally leaves directTasks unexecuted.
+        for (uint32_t task = 0; task < directCount_; ++task) {
+            const uint32_t token = directTasks_.GetValue(task * 4U);
+            const uint32_t k = directTasks_.GetValue(task * 4U + 1U);
+            const uint32_t expert = directTasks_.GetValue(task * 4U + 2U);
+            const uint32_t q = directTasks_.GetValue(task * 4U + 3U);
+            SendPacket(input, token, k, expert, q, 0U);
+            sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << k));
+            sourceWeights_.SetValue(token * k_ + k, routeWeights_.GetValue(token * k_ + k));
+        }
         for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
         Sync<HardEvent::S_MTE3>();
         DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
@@ -204,7 +214,7 @@ private:
         weights.SetValue(3U, routeWeights_.GetValue(token * k_ + firstK));
         header.SetValue(6U, -1); header.SetValue(7U, -1);
         uint32_t entries = 0;
-        for (uint32_t k = firstK + 1U; k < k_; ++k) if (mask & (uint32_t(1) << k)) {
+        for (uint32_t k = firstK + 1U; mask != 0U && k < k_; ++k) if (mask & (uint32_t(1) << k)) {
             const uint32_t index = (start_ + token) * k_ + k;
             const uint32_t expert = uint32_t(routeIds_.GetValue(index));
             const uint32_t q = CalTokenSendExpertCnt(expert, index);
@@ -216,12 +226,10 @@ private:
         }
         header.SetValue(4U, entries); header.SetValue(5U, entries);
     }
-    __aicore__ inline void SendFirstHop(TQue<QuePosition::VECIN, 1> &input,
-        uint32_t token, uint32_t firstK, uint32_t mask)
+    __aicore__ inline void SendPacket(TQue<QuePosition::VECIN, 1> &input,
+        uint32_t token, uint32_t firstK, uint32_t expert, uint32_t q, uint32_t mask)
     {
-        const uint32_t tokenId = start_ + token, index = tokenId * k_ + firstK;
-        const uint32_t expert = uint32_t(routeIds_.GetValue(index));
-        const uint32_t q = CalTokenSendExpertCnt(expert, index), destination = expert / localExperts_;
+        const uint32_t tokenId = start_ + token, destination = expert / localExperts_;
         auto x = input.template AllocTensor<XType>();
         DataCopyPad(x, x_[uint64_t(tokenId) * h_], {1U, h_ * uint32_t(sizeof(XType)), 0U, 0U, 0U},
             {Quantized, 0U, 0U, XType(0)});

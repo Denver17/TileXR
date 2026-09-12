@@ -684,7 +684,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertNotEqual(process.returncode, 0, stdout + stderr)
         self.assert_hanging_ranks_cleaned("rank-hangup")
 
-    def enable_chain(self, checkpoint=workflow.FIRST_HOP_CHECKPOINT, run_mode="functional"):
+    def enable_chain(self, checkpoint=workflow.SOURCE_SEND_CHECKPOINT, run_mode="functional"):
         self.hostfile.write_text("localhost devices=7,2,5,0,6,1,4,3\nnode-b\n", encoding="utf-8")
         os.environ.update(TILEXR_VALIDATION_CHECKPOINT=checkpoint,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177",
@@ -695,7 +695,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.manifest.update(checkpoint=checkpoint, mode="production", server_dedup_profiling=run_mode == "breakdown")
         if run_mode == "breakdown":
             self.manifest["server_dedup_profile_version"] = 3
-        self.manifest["server_dedup_contract"] = dict(workflow.FIRST_HOP_ABI)
+        self.manifest["server_dedup_contract"] = dict(workflow.SOURCE_SEND_ABI)
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.parent.mkdir()
         # 传输/编排夹具使用普通进程产出原生协议，不把它作为 CANN launch 证据。
@@ -719,9 +719,10 @@ record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
                for key in ('bs', 'h', 'topk', 'moe_expert_num')})
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
 record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
-              fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='first_hop', native_status='first_hop',
-              first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=0,
-              first_hop_validated=True, source_outputs_validated=True, weights_unchanged=True)
+              fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='source_send', native_status='source_send',
+              first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
+              local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
+              first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True)
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
 if behavior == 'wrong-shape':
     record['bs'] += 1
@@ -736,7 +737,7 @@ if behavior == 'stale-round':
 if run_mode != 'functional':
     record['timing_us'] = dict(submit=4, sync=3, barrier=2, batch_total=10)
 if run_mode == 'breakdown':
-    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=3, kernel_scope='first_hop',
+    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=3, kernel_scope='source_send',
                    records=[dict(core=core, start=100, init_end=110, send_cnt_end=120, send_data_end=125, recv_cnt_end=130,
                                  cumsum_end=140, prefix_end=150, end=160) for core in range(64)])
     if behavior == 'stale-breakdown':
@@ -745,7 +746,7 @@ if run_mode == 'breakdown':
         print('EP_SERVER_DEDUP_BREAKDOWN_PASS ' + json.dumps(profile))
 if behavior == 'wrong-loops':
     record['loops'] = loops - 1
-prefix = 'EP_SERVER_DEDUP_FIRST_HOP_PASS '
+prefix = 'EP_SERVER_DEDUP_SOURCE_SEND_PASS '
 if boundary:
     prefix = 'EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS '
     record.update(peer_mem_bytes=4 * 1024 ** 3, boundary_offset=4 * 1024 ** 3 - 32, probe_bytes=32,
@@ -821,7 +822,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
                 self.assertEqual(result["errors"][0]["type"], kind)
                 self.assertEqual(result["cleanup"], "complete")
 
-    def test_first_hop_rejects_multiple_submissions_before_run(self):
+    def test_source_send_rejects_multiple_submissions_before_run(self):
         self.enable_chain()
         self.prepare_sync()
         for key, value in (("TILEXR_VALIDATION_LOOPS", "7"), ("TILEXR_VALIDATION_WARMUP", "2")):
@@ -830,7 +831,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
             self.assertIn("loops=1", command.stderr)
 
     def test_chain_multi_rejects_missing_rounds_or_single_marker(self):
-        self.enable_chain(workflow.FIRST_HOP_CHECKPOINT)
+        self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT)
         for behavior, kind in (("incomplete-round", "RESULT_FAILED"), ("single-marker", "LOG_PARSE_FAILED"),
                                ("wrong-loops", "RESULT_FAILED"), ("stale-round", "RESULT_FAILED")):
             with self.subTest(behavior=behavior):
@@ -862,8 +863,8 @@ with output.open('w', newline='') as f:
 ''', encoding="utf-8")
         profiler.chmod(0o755)
 
-    def test_first_hop_performance_collects_one_cold_msprof_sample(self):
-        self.enable_chain(workflow.FIRST_HOP_CHECKPOINT, "performance")
+    def test_source_send_performance_collects_one_cold_msprof_sample(self):
+        self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "performance")
         self.enable_msprof()
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="1",
                           TILEXR_VALIDATION_WARMUP="0")
@@ -878,7 +879,7 @@ with output.open('w', newline='') as f:
                 self.assertEqual(rank["performance"]["median_us"], 1)
 
     def test_dispatch_performance_missing_profiler_samples_fails(self):
-        self.enable_chain(workflow.FIRST_HOP_CHECKPOINT, "performance")
+        self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "performance")
         self.enable_msprof()
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="1",
                           TILEXR_VALIDATION_WARMUP="0")
@@ -890,7 +891,7 @@ with output.open('w', newline='') as f:
         self.assertEqual(result["errors"][0]["rank"], 8)
 
     def test_dispatch_breakdown_collects_all_rank_records(self):
-        self.enable_chain(workflow.FIRST_HOP_CHECKPOINT, "breakdown")
+        self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "breakdown")
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
                           TILEXR_VALIDATION_WARMUP="0")
         # A plain sync has functional defaults, even when the installed kernel is profiled.
@@ -912,7 +913,7 @@ with output.open('w', newline='') as f:
                 self.assertEqual(rank["breakdown"]["generation"], 1)
 
     def test_dispatch_breakdown_missing_or_stale_record_fails(self):
-        self.enable_chain(workflow.FIRST_HOP_CHECKPOINT, "breakdown")
+        self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "breakdown")
         os.environ["TILEXR_VALIDATION_RUN_MODE"] = "breakdown"
         for behavior in ("missing-breakdown", "stale-breakdown"):
             with self.subTest(behavior=behavior):
@@ -921,7 +922,7 @@ with output.open('w', newline='') as f:
                 self.assertNotEqual(command.returncode, 0)
 
     def test_measurement_aggregation_failure_preserves_summary_and_exit_code(self):
-        self.enable_chain(workflow.FIRST_HOP_CHECKPOINT, "breakdown")
+        self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "breakdown")
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
                           TILEXR_VALIDATION_WARMUP="0")
         self.prepare_sync()

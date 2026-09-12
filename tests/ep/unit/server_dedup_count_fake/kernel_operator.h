@@ -9,6 +9,7 @@
 #include <stdexcept>
 #include <vector>
 #include <array>
+#include <functional>
 
 #define __aicore__
 #define __global__
@@ -22,6 +23,10 @@ using bfloat16_t = uint16_t;
 namespace AscendC {
 extern uint32_t testCore;
 extern uint64_t testCopies;
+inline std::function<void(const void *, const void *, uint32_t)> &GmWriteObserver() {
+    static std::function<void(const void *, const void *, uint32_t)> observer;
+    return observer;
+}
 inline uint32_t GetBlockIdx() { return testCore; }
 inline uint32_t GetBlockNum() { return 64; }
 inline uint64_t GetSystemCycle() { static uint64_t ticks = 100; return ++ticks; }
@@ -152,6 +157,7 @@ template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, uint32_
     ++testCopies; std::memcpy(dst.Data(count * sizeof(T)), src.pointer, count * sizeof(T));
 }
 template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, uint32_t count) {
+    if (GmWriteObserver()) GmWriteObserver()(dst.pointer, src.Data(count * sizeof(T)), count * sizeof(T));
     ++testCopies; std::memcpy(dst.pointer, src.Data(count * sizeof(T)), count * sizeof(T));
 }
 template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src, DataCopyExtParams p, DataCopyPadExtParams<T>) {
