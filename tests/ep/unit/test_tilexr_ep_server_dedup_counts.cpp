@@ -143,5 +143,5 @@ int main()
         std::cerr << error.what() << '\n';
         return 1;
     }
-    return ServerDedupTest::Finish("counts_cpu");
+    return ServerDedupTest::Finish("counts");
 }

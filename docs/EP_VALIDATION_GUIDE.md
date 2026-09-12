@@ -113,6 +113,11 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 ```
 
 维护经验：新增 CTest 必须同时安装进分发包；只在 build 目录运行会漏掉 consumer 的安装路径错误。
+Host 测试的 PASS marker 后缀必须与安装测试名对应：`test_tilexr_ep_server_dedup_counts` 应输出
+`EP_SERVER_DEDUP_ABI_HOST_PASS test=counts`。旧 `test=counts_cpu` 虽然退出 0、CTest 通过，
+仍会被节点调度器判为 `LOG_PARSE_FAILED`（退出 16），在启动该节点的 NPU ranks 前停止。
+新增或修改此类测试时，将实际编译安装的可执行文件交给 `workflow.node` 验证 marker 契约，不能只跑 CTest 或使用手写 PASS 替身。
+本次用五个实际 Host 测试复现旧 counts marker 的退出 16，修正后同一路径全部通过；此证据仅覆盖 CPU 测试及其解析，不证明 NPU 通信通过。
 更新专家约束时同步 Host/layout 和调度器的 shape 检查，否则合法的 E=1024/L=64 或 L=1 会在上机前被旧限制拦截。
 切换开发增量时同步编译入口的 checkpoint 和数值判据，否则旧边界测试 PASS 可能被误认为新计数逻辑通过。
 编译/同步输出重定向到 `/dev/null`、运行再缩写为 `Failed` 会隐藏首个失败边界；保持三个手动步骤，透传错误、日志路径及原始退出码。
