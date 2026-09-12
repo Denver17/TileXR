@@ -3,6 +3,7 @@
 
 #include "tilexr_ep_server_dedup_counts.h"
 #include "tilexr_ep_server_dedup_send.h"
+#include "tilexr_ep_server_dedup_recv.h"
 #include "tilexr_ep_server_dedup_profile.h"
 
 namespace TileXREp {
@@ -11,7 +12,8 @@ class DispatchMemoryServerDedupKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR x, GM_ADDR expertIds, GM_ADDR expertScales,
         GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
-        GM_ADDR sourceMaskOut, GM_ADDR expertScalesOut, uint32_t bs, uint32_t h, uint32_t topK,
+        GM_ADDR assistExOut, GM_ADDR sourceMaskOut, GM_ADDR groupOut, GM_ADDR expertScalesOut,
+        uint32_t bs, uint32_t h, uint32_t topK,
         uint32_t experts, uint32_t expertTokenNumsType, int64_t magic, TPipe *pipe)
     {
         profile_.Mark(0);
@@ -25,6 +27,8 @@ public:
         sourceWeights_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(expertScalesOut));
         if (core_ < kEpServerDedupSendCoreNum)
             sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe);
+        else
+            receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe);
         profile_.Mark(1);
     }
 
@@ -41,6 +45,7 @@ public:
             counts_.RecvCnt(); profile_.Mark(4);
             counts_.CalcCumsum(); profile_.Mark(5);
             counts_.CompleteCumsum(); profile_.Mark(6);
+            receiver_.Process();
         }
         counts_.Finish();
         // All 64 cores participate exactly once, after their GM writes complete.
@@ -65,6 +70,7 @@ public:
 private:
     ServerDedupCounts counts_;
     ServerDedupSender<XType, Quantized, E4M3> sender_;
+    ServerDedupReceiver<XType, Quantized, E4M3> receiver_;
     ServerDedupProfile profile_;
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;

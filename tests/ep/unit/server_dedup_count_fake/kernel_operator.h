@@ -47,6 +47,11 @@ template<Pipeline> void PipeBarrier() {}
 template<int, int> int64_t GetCtrlSpr() { return 0; }
 template<int, int> void SetCtrlSpr(int64_t) {}
 inline void SyncAll() {}
+template<class T> inline T AtomicAdd(T *address, T value) {
+    T old = *address;
+    *address += value;
+    return old;
+}
 enum class RoundMode { CAST_TRUNC, CAST_RINT };
 struct fp8_e4m3fn_t {};
 struct fp8_e5m2_t {};

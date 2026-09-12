@@ -11,13 +11,13 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
 {
     // Host owns parameter validation and always launches the fixed 48/16 AIV split.
     (void)assistInfoForCombineOut;
-    (void)assistExOut; (void)groupOut;
     (void)globalBs;
     AscendC::TPipe pipe;
 #define TILEXR_RUN_DEDUP(XType, Quantized, E4M3) \
     TileXREp::DispatchMemoryServerDedupKernel<XType, Quantized, E4M3> kernel; \
     kernel.Init(commArgs, x, expertIds, expertScales, expandXOut, dynamicScalesOut, \
-        expertTokenNumsOut, sendCountsOut, sourceMaskOut, expertScalesOut, uint32_t(bs), uint32_t(h), \
+        expertTokenNumsOut, sendCountsOut, assistExOut, sourceMaskOut, groupOut, expertScalesOut, \
+        uint32_t(bs), uint32_t(h), \
         uint32_t(topK), uint32_t(moeExpertNum), uint32_t(expertTokenNumsType), magic, &pipe); \
     kernel.Process()
     if (dtype == TileXR::TILEXR_DATA_TYPE_FP16) {
