@@ -243,7 +243,7 @@ class ChainConsumerTests(unittest.TestCase):
         cases = [{"TILEXR_VALIDATION_LOOPS": loops} for loops in
                  ("", "0", "-1", "abc", "4294967296", "9223372036854775808")]
         cases += [{"TILEXR_VALIDATION_WARMUP": warmup} for warmup in ("", "-1", "4294967296", "abc")]
-        cases += [{"TILEXR_VALIDATION_RUN_MODE": mode} for mode in ("", "unknown", "breakdown")]
+        cases += [{"TILEXR_VALIDATION_RUN_MODE": mode} for mode in ("", "unknown")]
         cases += [{"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-chain-single", key: value}
                   for key, value in (("TILEXR_VALIDATION_LOOPS", "2"), ("TILEXR_VALIDATION_WARMUP", "1"),
                                      ("TILEXR_VALIDATION_RUN_MODE", "performance"))]
@@ -316,6 +316,31 @@ class ChainConsumerTests(unittest.TestCase):
                     else:
                         self.assertEqual(process.returncode, 0, errors)
                 for rank in range(16):
+                    (Path(self.trace.name) / str(rank)).unlink()
+
+    def test_count_breakdown_reads_final_generation_and_rejects_bad_records(self):
+        for fault in (None, "missing", "stale", "legacy", "core", "time"):
+            with self.subTest(fault=fault):
+                env = dict(TILEXR_VALIDATION_CHECKPOINT="ep-sdedup-p1-chain-multi",
+                           TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                           TILEXR_VALIDATION_WARMUP="2")
+                processes = [self.start(rank, environment=dict(env, **(
+                    {"TEST_PROFILE_FAULT": fault} if rank == 1 and fault else {}))) for rank in range(16)]
+                for rank, process in enumerate(processes):
+                    output, errors = process.communicate(timeout=15)
+                    if rank == 1 and fault:
+                        self.assertNotEqual(process.returncode, 0)
+                        self.assertIn("stage=breakdown-read", errors)
+                        self.assertNotIn("EP_SERVER_DEDUP_BREAKDOWN_PASS", output)
+                        self.assertNotIn("EP_SERVER_DEDUP_MULTI_ROUND_PASS", output)
+                    else:
+                        self.assertEqual(process.returncode, 0, errors)
+                        evidence = json.loads(next(line.split(" ", 1)[1] for line in output.splitlines()
+                                                   if line.startswith("EP_SERVER_DEDUP_BREAKDOWN_PASS ")))
+                        self.assertEqual(evidence["generation"], 5)
+                        self.assertEqual(evidence["schema_version"], 2)
+                        self.assertEqual(len(evidence["records"]), 64)
+                        self.assertEqual(self.trace_lines(rank).count("sync"), 2)
                     (Path(self.trace.name) / str(rank)).unlink()
 
     def test_launch_and_async_errors_do_not_release_unconfirmed_round(self):

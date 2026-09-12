@@ -19,6 +19,7 @@ extern uint32_t testCore;
 extern uint64_t testCopies;
 inline uint32_t GetBlockIdx() { return testCore; }
 inline uint32_t GetBlockNum() { return 64; }
+inline uint64_t GetSystemCycle() { static uint64_t ticks = 100; return ++ticks; }
 template<class A, class B> inline uint32_t Ceil(A a, B b) { return uint32_t((a + b - 1) / b); }
 enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S };
 enum Pipeline { PIPE_ALL, PIPE_V, PIPE_MTE3 };
@@ -46,9 +47,12 @@ template<class T> struct LocalTensor {
 };
 template<class T> struct GlobalTensor {
     T *pointer = nullptr;
-    void SetGlobalBuffer(T *p) { pointer = p; }
+    void SetGlobalBuffer(T *p, std::size_t = 0) { pointer = p; }
     GlobalTensor operator[](std::size_t i) const { return {pointer + i}; }
 };
+enum class CacheLine { SINGLE_CACHE_LINE };
+enum class DcciDst { CACHELINE_OUT };
+template<class T, CacheLine, DcciDst> void DataCacheCleanAndInvalid(GlobalTensor<T>) {}
 template<int = 0> struct TBuf {
     std::shared_ptr<Storage> storage;
     template<class T> LocalTensor<T> Get() { return {storage, 0}; }

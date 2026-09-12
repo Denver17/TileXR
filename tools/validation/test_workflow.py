@@ -693,6 +693,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
         entry = self.root / "set_env.sh"
         entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
         self.manifest.update(checkpoint=checkpoint, mode="production", server_dedup_profiling=run_mode == "breakdown")
+        if run_mode == "breakdown":
+            self.manifest["server_dedup_profile_version"] = 2
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.parent.mkdir()
         # 传输/编排夹具使用普通进程产出原生协议，不把它作为 CANN launch 证据。
@@ -731,8 +733,9 @@ if behavior == 'stale-round':
 if run_mode != 'functional':
     record['timing_us'] = dict(submit=4, sync=3, barrier=2, batch_total=10)
 if run_mode == 'breakdown':
-    profile = dict(record, generation=warmup+loops, block_dim=2,
-                   records=[dict(core=core, start=100, checked=110, end=125) for core in range(2)])
+    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=2, kernel_scope='cnt_cumsum',
+                   records=[dict(core=core, start=100, init_end=110, send_cnt_end=120, recv_cnt_end=130,
+                                 cumsum_end=140, prefix_end=150, end=160) for core in range(64)])
     if behavior == 'stale-breakdown':
         profile['generation'] -= 1
     if behavior != 'missing-breakdown':

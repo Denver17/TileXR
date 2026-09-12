@@ -14,8 +14,10 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_memory_server_dedup_ker
     (void)h; (void)globalBs; (void)dtype; (void)expandXOutDtype;
     AscendC::TPipe pipe;
     TileXREp::DispatchMemoryServerDedupKernel kernel;
+    kernel.ProfileMark(0);
     kernel.Init(commArgs, expertIds, expertTokenNumsOut, sendCountsOut,
         static_cast<uint32_t>(bs), static_cast<uint32_t>(topK), static_cast<uint32_t>(moeExpertNum),
         static_cast<uint32_t>(expertTokenNumsType), magic, &pipe);
+    kernel.ProfileMark(1);
     kernel.Process();
 }

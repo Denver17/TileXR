@@ -281,6 +281,14 @@ add_test(NAME test_tilexr_ep_server_dedup_counts COMMAND test_tilexr_ep_server_d
 set_tests_properties(test_tilexr_ep_server_dedup_counts PROPERTIES TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_counts RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+add_executable(test_tilexr_ep_server_dedup_profile unit/test_tilexr_ep_server_dedup_profile.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_profile PRIVATE
+    unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
+target_compile_definitions(test_tilexr_ep_server_dedup_profile PRIVATE TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
+add_test(NAME test_tilexr_ep_server_dedup_profile COMMAND test_tilexr_ep_server_dedup_profile)
+set_tests_properties(test_tilexr_ep_server_dedup_profile PROPERTIES TIMEOUT 30)
+install(TARGETS test_tilexr_ep_server_dedup_profile RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
 
 add_executable(test_tilexr_ep_plan_layout

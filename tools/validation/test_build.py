@@ -248,7 +248,7 @@ class BuildTests(unittest.TestCase):
             workflow.build(self.config())
         runtime.assert_not_called()
 
-    def test_count_build_retires_empty_kernel_instrumentation(self):
+    def test_baseline_build_disables_breakdown_instrumentation(self):
         (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
         for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
@@ -258,19 +258,29 @@ class BuildTests(unittest.TestCase):
                 self.build_fixture(self.config("production"))
                 configure = next(args for args, _, _ in self.commands
                                  if "-S" in args and str(self.root) in args)
-                self.assertFalse(any("SERVER_DEDUP_ENABLE_PROFILING" in str(arg) for arg in configure))
+                self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=OFF", configure)
                 os.environ["TILEXR_VALIDATION_RUN_MODE"] = "breakdown"
                 with self.assertRaisesRegex(ValueError, "设备打点开关"):
                     workflow.verify_build(self.config("production"))
 
-    def test_removed_breakdown_build_fails_before_build_side_effects(self):
+    def test_breakdown_build_enables_count_profile_and_rejects_baseline_or_legacy_package(self):
         (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {
                 "TILEXR_VALIDATION_CHECKPOINT": workflow.CHAIN_MULTI_CHECKPOINT,
                 "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
-            with mock.patch.object(workflow, "clean_build_directory") as clean, self.assertRaises(ValueError):
-                workflow.build(self.config("production"))
-            clean.assert_not_called()
+            config = self.config("production")
+            manifest, _ = self.build_fixture(config)
+            self.assertTrue(manifest["server_dedup_profiling"])
+            self.assertEqual(manifest["server_dedup_profile_version"], 2)
+            configure = next(args for args, _, _ in self.commands if "-S" in args and str(self.root) in args)
+            self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON", configure)
+            manifest.pop("server_dedup_profile_version")
+            workflow.write_json(config.install / "manifest.json", manifest)
+            with self.assertRaisesRegex(ValueError, "breakdown v2"):
+                workflow.verify_build(config)
+            with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="performance"):
+                with self.assertRaisesRegex(ValueError, "设备打点开关"):
+                    workflow.verify_build(self.config("production"))
 
     def test_runtime_check_occurs_once_after_production_install_and_never_during_verify_sync(self):
         config = self.config("production")

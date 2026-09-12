@@ -25,6 +25,7 @@
 #include "tilexr_ep.h"
 #include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
+#include "ep_memory_server_dedup_profile.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_test.h"
@@ -119,7 +120,7 @@ Config Parse(int argc, char **argv)
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
-    Require(c.runMode == "functional" || c.runMode == "performance",
+    Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
         "unsupported TILEXR_VALIDATION_RUN_MODE");
     const char *loopsText = std::getenv("TILEXR_VALIDATION_LOOPS");
     const char *warmupText = std::getenv("TILEXR_VALIDATION_WARMUP");
@@ -323,6 +324,37 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
     }
 }
 
+std::string ReadCountProfile(const Config &c, const TileXR::CommArgs &args)
+{
+    using namespace TileXREp;
+    const uint64_t offset = TileXREpServerDedupCountLayout(static_cast<uint32_t>(c.experts)).stateBytes;
+    Require(args.peerMemBytes >= offset + kEpServerDedupProfileBytes, "count trace exceeds peer window");
+    std::array<EpServerDedupProfileRecord, kEpServerDedupCoreNum> records {};
+    Check(aclrtMemcpy(records.data(), sizeof(records), args.peerMems[c.rank] + offset,
+        sizeof(records), ACL_MEMCPY_DEVICE_TO_HOST), "read count breakdown");
+    const uint64_t generation = uint64_t(c.warmup) + c.loops;
+    const char *points[] = {"start", "init_end", "send_cnt_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end"};
+    std::ostringstream out;
+    out << ",\"schema_version\":" << kEpServerDedupProfileVersion
+        << ",\"kernel_scope\":\"cnt_cumsum\",\"generation\":" << generation
+        << ",\"block_dim\":" << kEpServerDedupCoreNum << ",\"records\":[";
+    for (uint32_t core = 0; core < kEpServerDedupCoreNum; ++core) {
+        const auto &record = records[core];
+        Require(record.marker == kEpServerDedupProfileMarker && record.version == kEpServerDedupProfileVersion &&
+            record.recordBytes == sizeof(record) && record.rank == uint32_t(c.rank) && record.core == core &&
+            record.blockDim == kEpServerDedupCoreNum && record.generation == generation &&
+            record.time[0] > 0 && record.time[6] > record.time[0], "invalid count breakdown core=" + std::to_string(core));
+        if (core != 0) out << ',';
+        out << "{\"core\":" << core;
+        for (uint32_t i = 0; i < kEpServerDedupProfilePoints; ++i) {
+            Require(i == 0 || record.time[i] >= record.time[i - 1], "unordered count breakdown timestamps");
+            out << ",\"" << points[i] << "\":" << record.time[i];
+        }
+        out << '}';
+    }
+    return out.str() + ']';
+}
+
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_consumer.h"
 #endif
@@ -344,7 +376,7 @@ int Run(const Config &c)
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
-    std::string stage = "acl-init", batch = "initialization";
+    std::string stage = "acl-init", batch = "initialization", breakdown;
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
         Check(aclInit(nullptr), "aclInit"); initialized = true;
@@ -484,6 +516,10 @@ int Run(const Config &c)
                 previousExpert = cumulative;
             }
         }
+        if (c.runMode == "breakdown") {
+            stage = "breakdown-read";
+            breakdown = ReadCountProfile(c, *host);
+        }
         success = true;
     } catch (const std::exception &error) {
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
@@ -514,6 +550,7 @@ int Run(const Config &c)
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
         const bool multi = c.checkpoint == "ep-sdedup-p1-chain-multi";
+        if (!breakdown.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown);
         Marker(c, multi ? "EP_SERVER_DEDUP_MULTI_ROUND_PASS" : "EP_SERVER_DEDUP_SINGLE_ROUND_PASS", details);
     }
     return success ? 0 : 1;

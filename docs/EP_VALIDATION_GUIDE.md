@@ -97,7 +97,10 @@ bash run.sh run_mode=performance loops=50 warmup=50
 运行入口直接使用调度器的报告，不再复制 case 根目录的 `summary.json` 或生成二次 `summary.log`；旧文件不代表本次结果。
 安装身份位于 `install/validation/manifest.json`。
 回传实际 commit、卡数、case summary 和失败 rank 日志即可判定覆盖范围。16P 通过不证明 128P；同 shape 多轮通过不证明跨 shape/并发调用安全。
-当前本地仅通过 CPU 逻辑、Host ABI/launch 以及替身 consumer 测试，CANN 编译和真实 A5 计数通信仍待目标环境验证。
+本地验证覆盖 CPU 逻辑、Host ABI/launch 以及替身 consumer；真实 CANN/A5 执行结果单独记录如下。
+
+2026-09-12 用户反馈：环境修复后，`0bc6f1b` 的功能、多轮及性能测试流程均通过。
+该结论来自服务器执行方反馈；此处尚未收录 run_id、原始日志及具体延迟，不扩展为后续 breakdown 产物的上机验证。
 
 出现 `stage=count-read ... sendCountsOut mismatch at N` 时，该 rank 已完成整批 stream 同步和 Host barrier，
 但计数结果未通过。错误行保留 `expected`、`actual`、`global_expert`、`source_rank` 和最多五项相邻实际结果。
@@ -172,7 +175,69 @@ bash run.sh run_mode=performance loops=50 warmup=50 bs=96 h=7168 topk=6 moe_expe
 
 首次部署先配置环境和 hostfile，手动完成编译和同步，再单独运行。后续相同安装产物下改变轮次或 functional/performance 只执行 `run.sh`；运行参数及 host/device 映射随 SSH 启动传递，不需要同步配置文件。新增主机需要先部署程序和环境；环境库不随 case 自动安装。
 
-当前计数增量使用 functional 验收；旧空 kernel 的 breakdown 打点已经移除。其余运行时参数无需重编译。当前只支持 Dispatch 单算子、非量化 FP16/BF16、2–16 台主机且每台 8 卡，尚不支持 Combine、量化或路由模式扫描。
+当前计数增量支持 functional、performance 和下面的 cnt/cumsum breakdown；旧空 kernel 打点不用于当前验收。
+切换 breakdown 与普通产物需要重新编译、同步，其余运行时参数无需重编译。当前只支持 Dispatch 单算子、非量化 FP16/BF16、2–16 台主机且每台 8 卡，尚不支持 Combine、量化或路由模式扫描。
+
+### 当前 cnt/cumsum breakdown JSON
+
+在首节点仓库目录的同一个终端中先执行：
+
+```bash
+export TILEXR_VALIDATION_RUN_MODE=breakdown
+```
+
+该变量属于测试配置，应在终端导出；`set_env.sh` 会隔离 `validation.local.sh` 中遗留的 RUN_MODE，
+因此不要把它写入部署配置。之后依次手动执行，每步成功后再进行下一步：
+
+```bash
+bash build_all.sh
+```
+
+```bash
+bash sync.sh
+```
+
+```bash
+bash run.sh run_mode=breakdown loops=3 warmup=2
+```
+
+编译脚本自动传入 `-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`，安装 manifest 记录
+`server_dedup_profiling=true`、`server_dedup_profile_version=2`。普通 functional/performance 构建显式关闭该开关。
+运行时检查产物模式，拒绝混用旧空 kernel 记录、无打点产物或带打点的性能基线。
+
+成功后终端打印 `Trace JSON:` 和代表卡 trace 路径，完整目录为：
+
+```text
+run/case-<时间>-<PID>/<run_id>/summary.json
+run/case-<时间>-<PID>/<run_id>/traces/all-ranks.trace.json
+run/case-<时间>-<PID>/<run_id>/traces/rank-N.trace.json
+run/case-<时间>-<PID>/<run_id>/traces/fastest.trace.json
+run/case-<时间>-<PID>/<run_id>/traces/p50.trace.json
+run/case-<时间>-<PID>/<run_id>/traces/slowest.trace.json
+run/case-<时间>-<PID>/<run_id>/traces/index.json
+```
+
+将 `.trace.json` 导入 Perfetto 或 Chrome tracing；`summary.json` 是结构化汇总，`index.json` 是索引。
+summary 的 `measurements.breakdown.stages_us` 给出各 rank 阶段最大核耗时的跨 rank median/min/max，
+`nodes[].reported_result.ranks[].breakdown.records[]` 保留每个 rank 的全部 64 核原始时间戳。
+
+阶段为 `init`（Kernel.Init）、`send_cnt`（本地统计与发送）、`recv_cnt`（接收等待及分段和发布）、
+`cumsum`（分段和等待、前缀计算与发布）、`prefix_consume`（完整前缀等待/消费及专家计数输出）、`finish`。
+前 48 核未执行的接收阶段记为零时长。`count_total` 从 Init 前至 Finish 后，不包含 TPipe/对象构造及最终 trace 写出。
+仅记录最后一次测量提交，示例 generation=5；不把它当成 3 轮平均。各卡分别归零，不能据合并 trace 推断跨卡时序。
+打点构建在时间戳边界插入 `PIPE_ALL`，这些诊断同步会影响耗时；性能基线使用关闭打点的 performance 产物。
+
+记录区占每 rank 8 KiB，紧随两份 cnt 状态区和预留 relay counter，不改变固定 4 GiB 通信域。
+后续接入 Token 数据布局时须显式保留或迁移该记录区；禁止复用旧空 kernel 的 offset=0，以免覆盖当前 cnt 协议状态。
+consumer 先校验计数，再校验全部核的记录身份、最终 generation 和时间戳顺序；缺核、旧 schema 或旧轮次均不能 PASS。
+本地替身测试覆盖记录写入、计数区隔离、consumer 失败路径及 JSON 汇总/导出；新打点产物仍需 CANN/A5 实机验证。
+
+恢复普通产物时先 `export TILEXR_VALIDATION_RUN_MODE=functional`，再手动执行 `build_all.sh`、`sync.sh`；
+随后可按前文运行 functional 或 performance。已有成功 breakdown summary 可离线重新导出：
+
+```bash
+python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summary.json
+```
 
 ## 输出和验收范围
 

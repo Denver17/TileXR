@@ -465,6 +465,9 @@ def verify_build(config):
     if (config.checkpoint == CHAIN_MULTI_CHECKPOINT and
             manifest.get("server_dedup_profiling") is not (config.chain["run_mode"] == "breakdown")):
         raise ValueError("设备打点开关与运行模式不一致，请重新执行 build_all.sh 和 sync.sh")
+    if (config.checkpoint == CHAIN_MULTI_CHECKPOINT and config.chain["run_mode"] == "breakdown" and
+            manifest.get("server_dedup_profile_version") != 2):
+        raise ValueError("需要 cnt/cumsum breakdown v2 产物，请重新执行 build_all.sh 和 sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -494,9 +497,6 @@ def build(config):
     def command(*args, **kwargs):
         return execute(*args, **kwargs, start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
 
-    if config.chain is not None and config.chain["run_mode"] == "breakdown":
-        raise ValueError("Server Dedup 空 kernel 打点已移除；计数增量请使用 functional/performance")
-
     build_id = uuid.uuid4().hex
     work = clean_build_directory(config)
     require_tools(["cmake", "ctest", "g++", "make"])
@@ -510,6 +510,7 @@ def build(config):
     if config.mode == "production":
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
+                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if config.chain and config.chain['run_mode'] == 'breakdown' else 'OFF'}",
                  f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs],
@@ -574,6 +575,8 @@ def build(config):
                 "artifacts": artifact_files(stage)}
     if config.checkpoint == CHAIN_MULTI_CHECKPOINT:
         manifest["server_dedup_profiling"] = config.chain["run_mode"] == "breakdown"
+        if manifest["server_dedup_profiling"]:
+            manifest["server_dedup_profile_version"] = 2
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
@@ -1224,6 +1227,10 @@ def run(config):
     print(measurements.render_case_description(report), flush=True)
     if "measurements" in report:
         print(measurements.render_measurements(report["measurements"]), flush=True)
+    if "traces" in report:
+        print("Trace JSON: " + report["traces"]["all_ranks"], flush=True)
+        for role, path in report["traces"]["selected"].items():
+            print(f"{role}: {path}", flush=True)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
           f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
           f"tests_per_host={len(manifest['tests'])} {rank_summary}commit={report['commit'] or 'unknown'} (unverified)", flush=True)

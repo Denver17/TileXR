@@ -10,6 +10,7 @@
 #include "tilexr_ep.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
+#include "ep_memory_server_dedup_profile.h"
 
 namespace {
 int deviceId = 0;
@@ -21,6 +22,8 @@ std::array<void *, 9> firstBuffers {};
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
 alignas(32) std::array<uint8_t, 32> localPeer {};
+std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum> countProfile {};
+uint64_t countProfileOffset = 0;
 int Call(const char *name)
 {
     const uint64_t count = ++calls[name];
@@ -79,6 +82,10 @@ aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 }
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
+    if (countProfileOffset && source == args.peerMems[rankId] + countProfileOffset && bytes == sizeof(countProfile)) {
+        std::memcpy(destination, countProfile.data(), bytes);
+        return Call("breakdown-read");
+    }
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
         return Call("boundary-host-read");
@@ -159,6 +166,29 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     }
     const int result = Call("launch");
     if (result == 0) {
+        const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
+        if (mode && std::strcmp(mode, "breakdown") == 0) {
+            using namespace TileXREp;
+            countProfileOffset = TileXREpServerDedupCountLayout(uint32_t(experts)).stateBytes;
+            for (uint32_t core = 0; core < kEpServerDedupCoreNum; ++core) {
+                auto &p = countProfile[core];
+                p = EpServerDedupProfileRecord {};
+                p.marker = kEpServerDedupProfileMarker; p.version = kEpServerDedupProfileVersion;
+                p.recordBytes = sizeof(p); p.rank = uint32_t(rank); p.core = core;
+                p.blockDim = kEpServerDedupCoreNum; p.generation = calls["launch"];
+                for (uint32_t i = 0; i < kEpServerDedupProfilePoints; ++i)
+                    p.time[i] = calls["launch"] * 1000 + core + i * 10;
+            }
+            const char *fault = std::getenv("TEST_PROFILE_FAULT");
+            if (fault) {
+                auto &p = countProfile[0];
+                if (std::strcmp(fault, "missing") == 0) p.marker = 0;
+                if (std::strcmp(fault, "stale") == 0) --p.generation;
+                if (std::strcmp(fault, "legacy") == 0) p.version = 1;
+                if (std::strcmp(fault, "core") == 0) p.core = 1;
+                if (std::strcmp(fault, "time") == 0) p.time[3] = p.time[2] - 1;
+            }
+        }
         const char *fault = std::getenv("TEST_COUNT_FAULT");
         if (fault && std::strcmp(fault, "unwritten") == 0) return 0;
         std::fill(sendCounts, sendCounts + experts, 0);

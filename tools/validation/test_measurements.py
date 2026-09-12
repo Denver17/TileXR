@@ -4,6 +4,7 @@
 import copy
 from contextlib import closing
 import csv
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -203,6 +204,35 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(summary["breakdown"]["selection"], "final_measured_iteration")
         self.assertIn("ticks", measure.render_measurements(summary))
         self.assertIn("未计量最终记录写出", measure.render_measurements(summary))
+
+    def test_count_breakdown_exports_real_stages_and_rejects_legacy_or_partial_evidence(self):
+        config = dict(self.config, run_mode="breakdown", rank_size=16, moe_expert_num=96, kernel_scope="cnt_cumsum")
+        ranks = []
+        for rank in range(16):
+            rows = [dict(core=core, **dict(zip(measure.COUNT_POINTS,
+                    (100, 110, 140, 180, 230, 290, 300 + rank)))) for core in range(64)]
+            ranks.append(dict(rank=rank, breakdown=dict(run_mode="breakdown", loops=3, warmup=1,
+                schema_version=2, kernel_scope="cnt_cumsum", generation=4, block_dim=64, records=rows)))
+        summary = measure.summarize_measurements(ranks, config, "c" * 64)
+        self.assertEqual(summary["breakdown"]["stages"]["send_cnt"]["median"], 30)
+        self.assertEqual(summary["breakdown"]["stages"]["count_total"]["maximum"], 215)
+        self.assertEqual(summary["algorithm_communication_bytes"], 46080)
+        self.assertNotIn("empty_total", summary["breakdown"]["stages"])
+        index = measure.export_breakdown_traces(ranks, config, self.root / "traces", "run", "c" * 64)
+        trace = json.loads(Path(index["all_ranks"]).read_text())
+        self.assertEqual(trace["otherData"]["native_status"], "cnt_cumsum")
+        events = [e for e in trace["traceEvents"] if e["ph"] == "X"]
+        self.assertEqual(len(events), 16 * 64 * 6)
+        self.assertEqual({e["name"] for e in events}, set(measure.COUNT_STAGES[:-1]))
+        for fault in ("legacy", "missing", "unordered", "foreign"):
+            broken = copy.deepcopy(ranks[0])
+            p = broken["breakdown"]
+            if fault == "legacy": p.pop("schema_version")
+            if fault == "missing": p["records"].pop()
+            if fault == "unordered": p["records"][0]["recv_cnt_end"] = 1
+            if fault == "foreign": p["records"][0]["core"] = 64
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                measure.validate_rank_measurements(broken, config)
 
     def test_breakdown_uses_documented_a5_1ghz_clock_and_preserves_provenance(self):
         config = dict(self.config, run_mode="breakdown")

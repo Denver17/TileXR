@@ -34,6 +34,8 @@ def render_case_description(report):
 
 
 BREAKDOWN_STAGES = ("entry_checks", "record_prepare", "empty_total")
+COUNT_POINTS = ("start", "init_end", "send_cnt_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end")
+COUNT_STAGES = ("init", "send_cnt", "recv_cnt", "cumsum", "prefix_consume", "finish", "count_total")
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。
 A5_SYSTEM_TICKS_PER_US = 1000
 SYSTEM_CLOCK_SOURCE = {
@@ -80,25 +82,33 @@ def performance_record(output_dir, loops, warmup):
             **_statistics(samples, "_us")}
 
 
+def _breakdown_spans(row, count_scope):
+    points = COUNT_POINTS if count_scope else ("start", "checked", "end")
+    values = [_integer(row.get(key), "breakdown " + key, 1) for key in points]
+    if values != sorted(values) or values[0] == values[-1] or values[-1] > (1 << 64) - 1:
+        raise ValueError("breakdown 时间戳无效或顺序错误")
+    names = COUNT_STAGES if count_scope else BREAKDOWN_STAGES
+    return list(zip(names[:-1], values[:-1], values[1:])) + [(names[-1], values[0], values[-1])]
+
+
 def _breakdown_values(record):
     evidence = record.get("breakdown")
     if not isinstance(evidence, dict):
         raise ValueError("缺少 breakdown 设备记录")
     _integer(evidence.get("generation"), "breakdown generation", 1)
     cores = _integer(evidence.get("block_dim"), "breakdown block_dim", 1)
+    count_scope = evidence.get("schema_version") == 2
+    if count_scope and (cores != 64 or evidence.get("kernel_scope") != "cnt_cumsum"):
+        raise ValueError("cnt/cumsum breakdown 需要 64 核及正确 scope")
     rows = evidence.get("records")
     if (not isinstance(rows, list) or len(rows) != cores
             or any(not isinstance(row, dict) or type(row.get("core")) is not int for row in rows)
             or {row["core"] for row in rows} != set(range(cores))):
         raise ValueError("breakdown core 记录缺失、重复或越界")
-    samples = {name: [] for name in BREAKDOWN_STAGES}
+    samples = {name: [] for name in (COUNT_STAGES if count_scope else BREAKDOWN_STAGES)}
     for row in rows:
-        start, checked, end = [_integer(row.get(key), "breakdown " + key, 1)
-                               for key in ("start", "checked", "end")]
-        if not start <= checked <= end or start == end or end > (1 << 64) - 1:
-            raise ValueError("breakdown 时间戳无效或顺序错误")
-        for name, value in zip(BREAKDOWN_STAGES, (checked - start, end - checked, end - start)):
-            samples[name].append(value)
+        for name, start, end in _breakdown_spans(row, count_scope):
+            samples[name].append(end - start)
     return {name: max(values) for name, values in samples.items()}
 
 
@@ -114,6 +124,10 @@ def validate_rank_measurements(record, chain_config):
     if mode == "breakdown":
         _breakdown_values(record)
         evidence = record["breakdown"]
+        if chain_config.get("kernel_scope") == "cnt_cumsum" and evidence.get("schema_version") != 2:
+            raise ValueError("cnt/cumsum 不能使用旧空 kernel breakdown")
+        if evidence.get("schema_version") == 2 and chain_config.get("kernel_scope") != "cnt_cumsum":
+            raise ValueError("breakdown scope 与本次配置不一致")
         if (evidence.get("run_mode") != mode or evidence["generation"] != warmup + loops
                 or any(_integer(evidence.get(key), "breakdown " + key) != value
                        for key, value in (("loops", loops), ("warmup", warmup)))):
@@ -165,16 +179,17 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     if mode == "functional":
         return summary
     summary.update(algorithm_communication_bytes=0, bandwidth="N/A")
+    if count_scope:
+        # One 32B record per remote expert per source rank; excludes self-target
+        # counts, local prefix traffic and polling reads.
+        remote_bytes = (chain_config["moe_expert_num"] - chain_config["moe_expert_num"] // rank_size) * 32
+        summary.update(algorithm_communication_bytes=remote_bytes * rank_size,
+                       communication_bytes_per_rank=remote_bytes,
+                       communication_scope="remote cnt records; excludes local traffic and polling")
     if mode == "performance":
         medians = [row["performance"]["median_us"] for row in ranks]
         if count_scope:
-            # One 32B record per remote expert per source rank. This excludes
-            # self-target counts, local prefix traffic and polling reads.
-            remote_bytes = (chain_config["moe_expert_num"] - chain_config["moe_expert_num"] // rank_size) * 32
-            summary.update(algorithm_communication_bytes=remote_bytes * rank_size,
-                           communication_bytes_per_rank=remote_bytes,
-                           communication_scope="remote cnt records; excludes local traffic and polling",
-                           bandwidth="effective remote-count GB/s",
+            summary.update(bandwidth="effective remote-count GB/s",
                            bandwidth_gbps=_statistics([remote_bytes / (us * 1000) for us in medians]),
                            route_mode=chain_config["route_mode"], seed=chain_config["seed"])
         summary["performance"] = {"unit": "us", "selection": "last_loops_after_warmup",
@@ -182,11 +197,15 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
                                   "rank_median_us": medians, **_statistics(medians, "_us")}
     else:
         values = [_breakdown_values(row) for row in ranks]
+        stage_names = COUNT_STAGES if count_scope else BREAKDOWN_STAGES
         breakdown = {"unit": "ticks", "selection": "final_measured_iteration",
                      "reduction": "core_max_per_stage_then_statistics_across_ranks",
-                     "stages": {name: _statistics([row[name] for row in values]) for name in BREAKDOWN_STAGES},
+                     "stages": {name: _statistics([row[name] for row in values]) for name in stage_names},
                      "rank_stages": [{"rank": row["rank"], **value} for row, value in zip(ranks, values)],
                      "scope": "empty entry checks and record preparation; final record write is not timed"}
+        if count_scope:
+            breakdown.update(schema_version=2, scope="cnt/cumsum stages; final trace write excluded",
+                             phase_barriers="PIPE_ALL at timestamp boundaries; diagnostic build only")
         breakdown["ticks_per_us"] = A5_SYSTEM_TICKS_PER_US
         breakdown["clock"] = dict(SYSTEM_CLOCK_SOURCE)
         breakdown["stages_us"] = {name: {key: value / A5_SYSTEM_TICKS_PER_US for key, value in stats.items()}
@@ -215,9 +234,12 @@ def render_measurements(summary):
     if "breakdown" in summary:
         breakdown = summary["breakdown"]
         lines.append("GetSystemCycle：Ascend950PR/950DT，1 GHz，1000 ticks/us；原始 ticks 保留在 JSON。")
-        for name in BREAKDOWN_STAGES:
+        for name in breakdown["stages_us"]:
             append("最后一轮各核最大值 " + name, breakdown["stages_us"][name], "us")
-        lines.append("breakdown 仅为空入口检查和记录准备，未计量最终记录写出；各段最大值不保证可相加。")
+        if breakdown.get("schema_version") == 2:
+            lines.append("cnt/cumsum 阶段含诊断同步；未计量最终记录写出，各段最大值不保证可相加；性能基线使用 performance 产物。")
+        else:
+            lines.append("breakdown 仅为空入口检查和记录准备，未计量最终记录写出；各段最大值不保证可相加。")
     return "\n".join(lines)
 
 
@@ -227,6 +249,7 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
     if summary["run_mode"] != "breakdown":
         raise ValueError("trace export requires breakdown records")
     ranks = sorted(rank_records, key=lambda row: row["rank"])
+    count_scope = summary["native_status"] == "cnt_cumsum"
     order = sorted((max(core["end"] - core["start"] for core in row["breakdown"]["records"])
                     / A5_SYSTEM_TICKS_PER_US, row["rank"]) for row in ranks)
     selected = dict(fastest=order[0][1], p50=order[(len(order) - 1) // 2][1], slowest=order[-1][1])
@@ -236,8 +259,10 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                       selection="final_measured_iteration", generation=chain_config["warmup"] + chain_config["loops"],
                       clock_alignment="each rank normalized to its earliest core start; not synchronized across NPUs",
                       selection_rule="max core end-start per rank; ascending duration, ties by rank; p50=ceil(N/2)-1",
-                      clock=SYSTEM_CLOCK_SOURCE, native_status="empty",
-                      scope="entry checks and record preparation only; final record write excluded")
+                      clock=SYSTEM_CLOCK_SOURCE, native_status=summary["native_status"],
+                      scope=summary["breakdown"]["scope"])
+    if count_scope:
+        provenance.update(schema_version=2, phase_barriers=summary["breakdown"]["phase_barriers"])
 
     def write(name, events, **extra):
         path = output_dir / name
@@ -255,8 +280,7 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
         for core in cores:
             tid = core["core"]
             events.append(dict(ph="M", name="thread_name", pid=rank, tid=tid, args=dict(name=f"AIV core {tid}")))
-            for name, begin, end in (("entry_checks", core["start"], core["checked"]),
-                                     ("record_prepare", core["checked"], core["end"])):
+            for name, begin, end in _breakdown_spans(core, count_scope)[:-1]:
                 events.append(dict(ph="X", cat="kernel", name=name, pid=rank, tid=tid,
                                    ts=(begin - origin) / A5_SYSTEM_TICKS_PER_US,
                                    dur=(end - begin) / A5_SYSTEM_TICKS_PER_US,

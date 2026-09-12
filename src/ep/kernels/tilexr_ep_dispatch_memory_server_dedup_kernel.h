@@ -4,6 +4,9 @@
 #include "kernel_operator.h"
 #include "adv_api/reduce/sum.h"
 #include "ep_memory_server_dedup_count_layout.h"
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+#include "ep_memory_server_dedup_profile.h"
+#endif
 
 namespace TileXREp {
 using namespace AscendC;
@@ -31,6 +34,9 @@ public:
         useAllCoreCount_ = bs < kEpServerDedupSendCoreNum;
         layout_ = TileXREpServerDedupCountLayout(experts);
         roundOffset_ = TileXREpServerDedupCountRoundOffset(layout_, magic);
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+        profileGeneration_ = static_cast<uint64_t>(magic);
+#endif
         GM_ADDR localState = args_->peerMems[epRankId_] + roundOffset_;
         windowInstatusFp32Tensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));
         selfRankWinInGMTensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));
@@ -46,12 +52,34 @@ public:
     __aicore__ inline void Process()
     {
         SendCnt();
+        ProfileMark(2);
         if (aivId_ >= aivUsedAllToAll_) {
             RecvCnt();
+            ProfileMark(3);
             CalcCumsum();
+            ProfileMark(4);
             CompleteCumsum();
+            ProfileMark(5);
+        } else {
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+            // Source-only cores do not execute the receive/cumsum stages.
+            profileTime_[3] = profileTime_[4] = profileTime_[5] = profileTime_[2];
+#endif
         }
         Finish();
+        ProfileMark(6);
+        FlushProfile();
+    }
+
+    __aicore__ inline void ProfileMark(uint32_t point)
+    {
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+        // Diagnostic builds drain outstanding instructions at phase boundaries.
+        PipeBarrier<PIPE_ALL>();
+        profileTime_[point] = static_cast<uint64_t>(GetSystemCycle());
+#else
+        (void)point;
+#endif
     }
 
     __aicore__ inline void SendCnt();
@@ -65,6 +93,35 @@ public:
     }
 
 private:
+    __aicore__ inline void FlushProfile()
+    {
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+        if (aivId_ >= kEpServerDedupCoreNum ||
+            args_->peerMemBytes < layout_.stateBytes + kEpServerDedupProfileBytes) return;
+        __gm__ uint8_t *const base = args_->peerMems[epRankId_] + layout_.stateBytes;
+        __gm__ EpServerDedupProfileRecord *record =
+            reinterpret_cast<__gm__ EpServerDedupProfileRecord *>(base) + aivId_;
+        record->marker = kEpServerDedupProfileMarker;
+        record->version = kEpServerDedupProfileVersion;
+        record->recordBytes = sizeof(EpServerDedupProfileRecord);
+        record->rank = epRankId_;
+        record->core = aivId_;
+        record->blockDim = kEpServerDedupCoreNum;
+        record->reserved = 0;
+        record->generation = profileGeneration_;
+        for (uint32_t i = 0; i < kEpServerDedupProfilePoints; ++i) record->time[i] = profileTime_[i];
+        for (uint32_t i = 0; i < 5U; ++i) record->padding[i] = 0;
+        GlobalTensor<uint8_t> output;
+        output.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(record), sizeof(*record));
+        for (uint32_t offset = 0; offset < sizeof(*record); offset += 64U) {
+            DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(output[offset]);
+        }
+#endif
+    }
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    uint64_t profileTime_[kEpServerDedupProfilePoints] {};
+    uint64_t profileGeneration_ = 0;
+#endif
     static constexpr uint32_t UB_ALIGN = 32U;
     static constexpr uint32_t UB_ALIGN_DATA_COUNT = 8U;
     static constexpr uint32_t SIZE_ALIGN_256 = 256U;
