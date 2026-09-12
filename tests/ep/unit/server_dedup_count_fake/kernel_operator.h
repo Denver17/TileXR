@@ -165,7 +165,9 @@ template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src, Data
 template<class T> void Duplicate(LocalTensor<T> dst, T value, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) dst.SetValue(i, value);
 }
-template<class T> void Duplicate(LocalTensor<T> dst, T value, const uint64_t mask[2], uint32_t repeats, uint32_t blockStride, uint32_t repeatStride) {
+// CANN 9.1's bit-mask overload requires a mutable mask array.
+template<class T> void Duplicate(const LocalTensor<T> &dst, const T &value, uint64_t mask[],
+    const uint8_t repeats, const uint16_t blockStride, const uint8_t repeatStride) {
     for (uint32_t r = 0; r < repeats; ++r) for (uint32_t i = 0; i < 256 / sizeof(T); ++i)
         if ((mask[i / 64] >> (i % 64)) & 1U)
             dst.SetValue(r * repeatStride * 32 / sizeof(T) + (i / (32 / sizeof(T))) * blockStride * (32 / sizeof(T)) + i % (32 / sizeof(T)), value);

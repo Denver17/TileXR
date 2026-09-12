@@ -85,7 +85,7 @@ public:
         DataCopyPad(routeWeights_, weights_[uint64_t(start_) * k_],
             {1U, count_ * k_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0.0f});
         Sync<HardEvent::MTE2_S>();
-        const uint64_t flagMask[2] = {0xffU, 0U};
+        uint64_t flagMask[2] = {0xffU, 0U};
         for (uint32_t lane = 0; lane < lanes_; ++lane) {
             // Initialize only the 32B flags. Padding and unused entries carry no semantics.
             Duplicate<float>(outBuf_.Get<float>()[lane * data_.tokenStride / 4U + 120U],

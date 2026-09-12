@@ -218,6 +218,8 @@ breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`�
 
 breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CANN 将 `GM_ADDR` 定义为指针宏，`const GM_ADDR` 实际限定指向的数据为只读；CPU 替身的 `using` 定义却限定指针本身，掩盖了问题。可写 profile 区应显式使用 `__gm__ uint8_t *const`，替身同步采用指针宏语义。此回归验证限定符和记录写入行为，不能代替 CANN 编译或设备 breakdown 验收。
 
+第一跳 Flag 初始化曾在 `Duplicate<float>` 处报 `no matching function`：[官方 asc-devkit v9.1.0 接口](https://gitcode.com/cann/asc-devkit/blob/e5451c7feba11f9e259f4fbc19c4bf82f8c0496c/include/basic_api/kernel_operator_vec_duplicate_intf.h) 的位掩码参数为 `uint64_t mask[]`，不能传 `const uint64_t[]`。应使用可写局部掩码，仍仅初始化每个 512B 块中的 32B Flag；CPU 替身也必须保持该重载的参数限定符和整数宽度。收紧替身后旧调用可复现同一编译错误，修复后用现有 sender/count/profile 测试检查包内容、边界和计数；该检查不替代真实 CANN 编译或 A5 运行。
+
 - 环境配置只读，不用追加参数/备份恢复方式传递 case；那会造成双份配置、覆盖用户修改和多机不一致。
 - 核心参数由调用方提供，批测只组合 case，不隐式编译或同步。提交验收按实际需要决定部署步骤。
 - checkpoint 只在提交验收入口选择；人工运行继承安装产物身份，结果仍记录 checkpoint。
