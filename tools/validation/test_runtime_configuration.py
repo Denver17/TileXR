@@ -18,7 +18,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         repo = Path(__file__).resolve().parents[2]
-        for name in ("set_env.sh", "run_case.sh", "run.sh", "tools/validation/measurements.py",
+        for name in ("set_env.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "tools/validation/measurements.py",
                      "tools/ep/msprof_kernel_stats.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -39,6 +39,10 @@ class RuntimeConfigurationTests(unittest.TestCase):
                     if not key.startswith(("TILEXR_", "ASCEND_"))}
         self.env.update(TILEXR_VALIDATION_BUILD_MODE="host", TILEXR_VALIDATION_PYTHON=sys.executable,
                         PATH=str(self.bash.parent) + os.pathsep + os.environ["PATH"])
+        # Bash expands MSYS short temp-directory names when reporting absolute paths.
+        self.root = Path(subprocess.check_output([str(self.bash), '-c', 'pwd -P'],
+                         cwd=self.root, env=self.env, text=True).strip())
+        self.local = self.root / 'validation.local.sh'
 
     def test_environment_preserves_script_values_and_ignores_legacy_case_fields(self):
         command = 'source ./set_env.sh >/dev/null; "$TILEXR_VALIDATION_PYTHON" -c '
@@ -54,15 +58,21 @@ class RuntimeConfigurationTests(unittest.TestCase):
 
     def test_single_case_alias_changes_parameters_without_writing_environment_file(self):
         stub = self.root / "tools/validation/workflow.py"
-        stub.write_text('''import json, os
+        stub.write_text('''import json, os, sys
 from pathlib import Path
+from measurements import render_case_description
 config = dict(run_mode=os.environ.get('TILEXR_VALIDATION_RUN_MODE', 'functional'),
               loops=int(os.environ.get('TILEXR_VALIDATION_LOOPS', '1')), warmup=0,
               bs=int(os.environ.get('TILEXR_VALIDATION_BS', '256')), h=7168, topk=6,
               moe_expert_num=384, dtype='bf16')
 root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])/'fixture'
 root.mkdir(parents=True)
-(root/'summary.json').write_text(json.dumps(dict(status='PASS', rank_size=16, chain_configuration=config)))
+report = dict(status='PASS', rank_size=16, chain_configuration=config)
+(root/'summary.json').write_text(json.dumps(report))
+print(render_case_description(report))
+print('VALIDATION_' + report['status'])
+print('Summary: ' + str(root/'summary.json'))
+sys.exit(0 if report['status'] == 'PASS' else 15)
 ''')
         before = self.local.read_bytes()
         for name, loops, bs in (("first", 3, 128), ("second", 7, 512)):
@@ -81,11 +91,111 @@ root.mkdir(parents=True)
         result = subprocess.run([str(self.bash), "run.sh", "run_mode=functional"], cwd=self.root,
                                 env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(self.root / "run/failed")),
                                 text=True, capture_output=True)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Failed", result.stdout)
+        self.assertEqual(result.returncode, 15)
+        self.assertIn("Failed", result.stderr)
         self.assertNotIn("PASS", result.stdout)
 
-    def test_manual_checkpoint_comes_from_install_and_commit_override_wins(self):
+    def test_manual_entries_invoke_only_requested_action_and_preserve_failures(self):
+        stub = self.root / "tools/validation/workflow.py"
+        stub.write_text('''import json, os, sys
+from pathlib import Path
+action = sys.argv[1]
+with Path('calls.jsonl').open('a') as log:
+    print(json.dumps(dict(action=action,
+        checkpoint=os.environ.get('TILEXR_VALIDATION_CHECKPOINT'),
+        comm_id=os.environ.get('TILEXR_COMM_ID'))), file=log)
+print(action + ' stdout detail')
+print(action + ' stderr detail', file=sys.stderr)
+sys.exit(int(os.environ['INJECT_EXIT']))
+''')
+        for entry, code in (("build_all", 11), ("sync", 12), ("run", 10),
+                            ("run", 13), ("run", 14), ("run", 15), ("run", 0)):
+            with self.subTest(entry=entry, code=code):
+                output = self.root / f"run/{entry}-{code}"
+                calls_path = self.root / 'calls.jsonl'
+                calls_path.unlink(missing_ok=True)
+                result = subprocess.run([str(self.bash), entry + ".sh"], cwd=self.root,
+                    env=dict(self.env, INJECT_EXIT=str(code), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+                    text=True, capture_output=True, timeout=10)
+                action = "build" if entry == "build_all" else entry
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+                self.assertEqual([call['action'] for call in calls], [action])
+                self.assertEqual(calls[0]['comm_id'], '192.0.2.1:10177')
+                self.assertIn(action + ' stdout detail', result.stdout)
+                self.assertIn(action + ' stderr detail', result.stdout + result.stderr)
+                if entry == 'run':
+                    self.assertIn(str(output / 'environment.log'), result.stdout)
+                    self.assertIn(str(output / 'workflow.log'), result.stdout)
+                    log = (output / 'workflow.log').read_text()
+                    self.assertIn('run stdout detail', log)
+                    self.assertIn('run stderr detail', log)
+                    if code:
+                        self.assertIn(f'workflow exit={code}', result.stderr)
+
+    def test_build_default_selects_counts_only_for_production(self):
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import os,json; print(json.dumps(dict(os.environ)))\n")
+        # A prior installed boundary checkpoint must not select an obsolete build.
+        installed = self.root / 'install/validation/manifest.json'
+        installed.parent.mkdir(parents=True)
+        installed.write_text(json.dumps(dict(checkpoint=workflow.MEMORY_BOUNDARY_CHECKPOINT)))
+        cann = self.root / 'cann-env.sh'
+        cann.write_text('# CANN environment fixture\n')
+        for mode, override, expected in (
+                ('production', None, workflow.CHAIN_MULTI_CHECKPOINT),
+                ('production', workflow.CHECKPOINT, workflow.CHECKPOINT),
+                ('host', None, None)):
+            with self.subTest(mode=mode, override=override):
+                environment = dict(self.env, TILEXR_VALIDATION_BUILD_MODE=mode,
+                                   TILEXR_CANN_ENV_SCRIPT=str(cann))
+                if override:
+                    environment['TILEXR_VALIDATION_CHECKPOINT'] = override
+                result = subprocess.run([str(self.bash), 'build_all.sh'], cwd=self.root,
+                    env=environment, text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                values = json.loads(result.stdout.splitlines()[-1])
+                self.assertEqual(values.get('TILEXR_VALIDATION_CHECKPOINT'), expected)
+
+    def test_environment_failure_shows_reason_and_log_without_running_workflow(self):
+        (self.root / 'tools/validation/workflow.py').write_text("raise AssertionError('must not run')\n")
+        output = self.root / 'run/environment-failure'
+        missing = self.root / 'missing-cann-env.sh'
+        result = subprocess.run([str(self.bash), 'run.sh'], cwd=self.root,
+            env=dict(self.env, TILEXR_VALIDATION_BUILD_MODE='production',
+                     TILEXR_CANN_ENV_SCRIPT=str(missing), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+            text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn('type=CONFIG_FAILED', result.stderr)
+        self.assertIn(str(missing), result.stderr)
+        self.assertIn(str(output / 'environment.log'), result.stderr)
+        self.assertIn('type=CONFIG_FAILED', (output / 'environment.log').read_text())
+        self.assertFalse((output / 'workflow.log').exists())
+
+    def test_log_capture_failure_is_nonzero(self):
+        (self.root / 'tools/validation/workflow.py').write_text("print('workflow finished')\n")
+        output = self.root / 'run/log-failure'
+        (output / 'workflow.log').mkdir(parents=True)
+        result = subprocess.run([str(self.bash), 'run.sh'], cwd=self.root,
+            env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+            text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('workflow finished', result.stdout)
+        self.assertIn('log capture exit=', result.stderr)
+        self.assertIn(str(output / 'workflow.log'), result.stderr)
+
+    def test_bad_arguments_and_missing_configuration_name_the_problem(self):
+        result = subprocess.run([str(self.bash), 'run.sh', 'typo=3'], cwd=self.root,
+                                env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('unknown argument: typo=3', result.stderr)
+        self.local.unlink()
+        result = subprocess.run([str(self.bash), 'run.sh'], cwd=self.root,
+                                env=self.env, text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(str(self.local), result.stderr)
+
+    def test_manual_checkpoint_comes_from_install_and_explicit_override_wins(self):
         target = self.root / "install/validation/manifest.json"
         target.parent.mkdir(parents=True)
         target.write_text(json.dumps({"checkpoint": workflow.DRY_RUN_CHECKPOINT}))

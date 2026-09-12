@@ -253,7 +253,7 @@ class Config:
     def __init__(self):
         self.root = Path(os.environ.get("TILEXR_VALIDATION_ROOT", Path(__file__).resolve().parents[2])).resolve()
         self.mode = os.environ.get("TILEXR_VALIDATION_BUILD_MODE", "production")
-        # 人工测试继承已安装程序的检查点；只由提交验收入口显式选择。
+        # 同步和人工测试继承安装检查点；build_all.sh 选择当前生产增量。
         self.checkpoint = os.environ.get("TILEXR_VALIDATION_CHECKPOINT")
         if not self.checkpoint:
             installed = self.root / "install/validation/manifest.json"

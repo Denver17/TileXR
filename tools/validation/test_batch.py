@@ -10,17 +10,14 @@ import unittest
 
 @unittest.skipUnless(os.name == "posix" and shutil.which("bash"), "需要 POSIX Python 和 Bash")
 class BatchTests(unittest.TestCase):
-    def test_batch_and_commit_failures_stop_without_success_conclusion(self):
+    def test_batch_failure_stops_without_success_conclusion(self):
         repo = Path(__file__).resolve().parents[2]
         bash = Path(sys.executable).parent / "bash"
         if not bash.exists():
             bash = Path(shutil.which("bash"))
         for entry, failure, expected in (
             ("run_batch.sh", "run_case", 1),
-            ("run_commit_validation.sh", "build_all", 1),
-            ("run_commit_validation.sh", "sync", 2),
-            ("run_commit_validation.sh", "run_case", 3),
-            ("run_commit_validation.sh", "none", 5),
+            ("run_batch.sh", "none", 3),
         ):
             with self.subTest(entry=entry, failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -39,6 +36,25 @@ class BatchTests(unittest.TestCase):
                     self.assertEqual(result.returncode, 19, result.stderr)
                     self.assertNotIn("PASS", result.stdout)
                     self.assertIn("Failed", result.stdout)
+
+    def test_retired_commit_entry_only_explains_manual_steps(self):
+        repo = Path(__file__).resolve().parents[2]
+        bash = Path(sys.executable).parent / "bash"
+        if not bash.exists():
+            bash = Path(shutil.which("bash"))
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            shutil.copy2(repo / 'run_commit_validation.sh', root / 'run_commit_validation.sh')
+            for step in ('build_all', 'sync', 'run', 'run_case'):
+                (root / (step + '.sh')).write_text(f'echo {step} >> calls\nexit 0\n')
+            result = subprocess.run([str(bash), 'run_commit_validation.sh'], cwd=root,
+                env=dict(os.environ, PATH=str(bash.parent) + os.pathsep + os.environ['PATH']),
+                text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 2)
+            self.assertFalse((root / 'calls').exists())
+            for command in ('bash build_all.sh', 'bash sync.sh', 'bash run.sh'):
+                self.assertIn(command, result.stderr)
+            self.assertNotIn('PASS', result.stdout + result.stderr)
 
     def test_batch_invokes_core_cases_without_build_or_sync(self):
         with tempfile.TemporaryDirectory() as directory:

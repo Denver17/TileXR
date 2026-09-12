@@ -7,7 +7,7 @@
 `TileXRCommInitRankMemoryDomainWithSize(0, 4092, ...)` 申请 4092 MiB 数据区加 4 MiB Flag 区，`peerMemBytes=4294967296`。
 Host/device CommArgs 和最终汇总均核对这个固定值；后续 case/算子增量只调整域内布局及容量检查，不随当前有效数据量缩放通信域。
 底层另有 1 MiB 地址偏移余量，实际分配为 4097 MiB/rank。CPU 替身仅核对申请参数和报告容量，不申请或验证真实 4 GiB NPU 内存。
-`run_commit_validation.sh` 现选择 `ep-sdedup-p1-chain-multi`，沿用历史 checkpoint 名称，实际执行当前计数 kernel 和数值校验。
+`build_all.sh` 在 production 模式默认选择 `ep-sdedup-p1-chain-multi`，沿用历史 checkpoint 名称，实际执行当前计数 kernel 和数值校验。
 旧空 kernel、breakdown、4 GiB 本卡边界访问的通过记录均不能作为本增量通过的证据。
 
 真实执行需要 CANN 9.1.0、匹配的 driver（25.1.rc1 或更新）以及每卡至少 64 AIV 的 Ascend 910A5/Ascend950。
@@ -28,16 +28,43 @@ test -f hostfile || cp hostfile.example hostfile
 脚本在首节点构建并向其他节点的同一绝对仓库路径分发；远端目标必须为空或已有 `.tilexr-validation-root` 的受管理目录，不能是另一个 Git checkout。
 各节点自行准备匹配的 CANN/driver 环境；脚本不安装这些依赖。
 
-```bash
-bash run_commit_validation.sh
-```
+依次手动执行下面三个步骤，每一步退出码为 0 且出现对应通过标志后，再执行下一步。
+不要再运行一键编排；`run_commit_validation.sh` 仅提示迁移命令并退出，不执行构建、同步或测试。
+
+1. 编译并安装（结束标志 `BUILD_PASS`）：
+
+   ```bash
+   bash build_all.sh
+   ```
+
+2. 同步已安装产物（结束标志 `SYNC_PASS`）：
+
+   ```bash
+   bash sync.sh
+   ```
+
+3. 运行计数用例（结束标志 `VALIDATION_PASS`）：
+
+   ```bash
+   bash run.sh run_mode=functional loops=3 warmup=0
+   ```
+
+每条命令结束后可立即用 `echo $?` 查看退出码。脚本自行加载 `set_env.sh`，不要求预先 source。
 
 整个开发流程的阶段 1（Dispatch 框架）、阶段 2（Dispatch 逻辑）、阶段 3（Combine 框架）、阶段 4（Combine 逻辑）
 统一采用 **16P、每卡 6 专家（E=96）、BS=96、TopK=6、balance_shift、每 rank 4 GiB** 的主流程基线。
 H/dtype 暂沿用 7168/BF16，seed=2026。`balance_shift` 对应已有 `BuildBalancedShuffleExpertIds` 的按 epoch 均衡打乱；原始路由顺序保存给算子，reference 独立统计原始路由。
 当前优先完成各阶段主流程并采集性能，边界 shape/拓扑扫描留到完整流程验收末尾；当前计数提交不宣称后续数据或 Combine 阶段已通过。
 
-该命令构建/安装生产库和独立 A5 kernel、安装并分发 Host 测试及硬件 consumer，然后在同一固定输入上运行三个 case：
+`build_all.sh` 构建/安装生产库、独立 A5 kernel、Host 测试及硬件 consumer；`sync.sh` 分发该安装产物。
+完成上述第一个 functional case 后，继续手动运行下面两条命令以覆盖累计输出和性能；每条运行通过后再执行下一条，无需重新构建/同步：
+
+```bash
+bash run.sh run_mode=functional loops=4 warmup=0
+bash run.sh run_mode=performance loops=50 warmup=50
+```
+
+三个 case 的范围如下：
 
 | 模式 | loops / warmup | 检查内容 |
 | --- | --- | --- |
@@ -48,21 +75,27 @@ H/dtype 暂沿用 7168/BF16，seed=2026。`balance_shift` 对应已有 `BuildBal
 该场景每个 source 对每个 expert 贡献 6 条 route，每卡完整前缀为 `6,12,...,576`，逐 expert count 为 6 个 96，累计 expert 输出为 `96,192,...,576`。
 本次每 rank 远端 cnt 记录量为 `15*6*32=2880 B`，16P 总计 46080 B；有效带宽按此量和 kernel 耗时计算，排除本卡前缀访问及轮询流量。
 性能报告保留 kernel SHA256、backend/native 状态、每 rank 样本及跨 rank median/min/max；性能达标须与约定阈值或同环境基准比较，完成采集本身不表示达到性能目标。
-相同安装产物下可直接重跑固定场景，不必再次构建/同步：
-
-```bash
-bash run.sh run_mode=functional loops=4 warmup=0
-bash run.sh run_mode=performance loops=50 warmup=50
-```
 
 通过条件必须同时满足：
 
-- 入口退出码为 0，最后输出 `Batch PASS cases=3`；每个 case 的 `summary.json` 为 `status=PASS`、`errors` 为空，全部 16 个 rank 齐全，实际 shape、路由模式及 seed 符合上述基线。
+- 编译和同步分别退出 0 并输出 `BUILD_PASS`、`SYNC_PASS`；上述三个运行命令分别退出 0 并输出 `VALIDATION_PASS`。每个 case 的 `summary.json` 为 `status=PASS`、`errors` 为空，全部 16 个 rank 齐全，实际 shape、路由模式及 seed 符合上述基线。
 - 每个 rank 的最终 `EP_SERVER_DEDUP_MULTI_ROUND_PASS` 对应本次 run/build/commit，`submitted=completed=loops`、`cleanup=complete`。只有初始化的 `EP_SERVER_DEDUP_CHAIN_PASS` 不算通过。
 - 每个 rank 的建链记录 `peer_mem_bytes=4294967296`，汇总中的 `nodes[].reported_result.ranks[].chain.peer_mem_bytes` 保留该证据。
 - consumer 从各源 rank 的原始路由独立计算直方图，逐项比较 `sendCountsOut[E]` 和 `expertTokenNumsOut[E/R]`。批末只读回最后一轮，奇数 loops 检查逐 expert count，偶数 loops 检查累计前缀；需保留两种 case。
 
-各 case 证据保留在 `run/case-*/summary.json`、`summary.log` 和 rank 日志；构建/同步日志位于 `run/validation/`，安装身份位于 `install/validation/manifest.json`。
+失败时先看当前命令的终端错误和输出的日志绝对路径；不要继续执行下一步。
+
+| 失败步骤 | 首节点仓库下的日志位置 | 重点内容 |
+| --- | --- | --- |
+| 编译 | `run/validation/build-*/production-configure.log`、`production-build.log`、`production-install.log`、`host-*.log` | 终端指出的失败命令、错误尾部及对应文件 |
+| 同步 | `run/validation/sync-*/<节点序号>/prepare.log`、`transfer.log`、`verify.log` | 目标目录、SSH/rsync、安装身份核对 |
+| 运行环境 | `run/case-*/environment.log` | CANN、Python、配置加载错误；此时尚未启动测试 |
+| 运行 | `run/case-*/workflow.log`，以及终端“结果”行指定的 `run/case-*/<run_id>/summary.json` | `primary_error`、`errors`、host/rank/stage 和错误记录中的日志路径 |
+
+`workflow.log` 保留调度器标准输出和标准错误，终端同时显示这些内容。各 rank 日志位于同一 `<run_id>` 目录及其 `nodes/` 子目录。
+参数、环境或构建身份预检查失败时可能还没有 `summary.json`，此时以终端及已生成日志为准。
+运行入口直接使用调度器的报告，不再复制 case 根目录的 `summary.json` 或生成二次 `summary.log`；旧文件不代表本次结果。
+安装身份位于 `install/validation/manifest.json`。
 回传实际 commit、卡数、case summary 和失败 rank 日志即可判定覆盖范围。16P 通过不证明 128P；同 shape 多轮通过不证明跨 shape/并发调用安全。
 当前本地仅通过 CPU 逻辑、Host ABI/launch 以及替身 consumer 测试，CANN 编译和真实 A5 计数通信仍待目标环境验证。
 
@@ -81,7 +114,10 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 
 维护经验：新增 CTest 必须同时安装进分发包；只在 build 目录运行会漏掉 consumer 的安装路径错误。
 更新专家约束时同步 Host/layout 和调度器的 shape 检查，否则合法的 E=1024/L=64 或 L=1 会在上机前被旧限制拦截。
-切换开发增量时同步提交验收脚本的 checkpoint 和数值判据，否则旧边界测试 PASS 可能被误认为新计数逻辑通过。
+切换开发增量时同步编译入口的 checkpoint 和数值判据，否则旧边界测试 PASS 可能被误认为新计数逻辑通过。
+编译/同步输出重定向到 `/dev/null`、运行再缩写为 `Failed` 会隐藏首个失败边界；保持三个手动步骤，透传错误、日志路径及原始退出码。
+日志使用 `tee` 时分别核对工作流和日志写入的退出码；环境必须在当前 shell 中 source，不能通过管道丢失导出变量。
+本地替身检查覆盖入口隔离、错误可见性和退出码，不证明内网服务器原始故障已修复或 NPU 运行通过。
 
 ## 配置职责
 
@@ -89,33 +125,27 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 
 模式、loops/warmup、BS/H/TopK/专家数/dtype/block_dim 属于 case 参数，只在调用脚本中填写。旧环境文件遗留的测试参数在加载时隔离，不覆盖调用方参数；可一次性删除这些旧项，不必每轮修改。
 
-checkpoint 的选择只出现在 `run_commit_validation.sh` 一处，以环境变量供构建、同步和验收 case 继承。人工核心/批测不接收 checkpoint 参数，直接使用已安装 manifest 的 checkpoint。内部检查点定义和结果中的 checkpoint 字段仍用于识别实际测试范围，不是第二处用户配置。
+production 编译默认的 checkpoint 只在 `build_all.sh` 中选择一次并写入安装 manifest；显式导出的 `TILEXR_VALIDATION_CHECKPOINT` 仍可覆盖该默认值，Host 模式不强制选择生产检查点。同步和运行直接读取已安装 manifest，无需再次指定。内部检查点定义和结果中的 checkpoint 字段用于识别实际测试范围，不是第二处用户配置。
 
 ## 三个入口
 
 | 入口 | 用途 | 修改位置 |
 | --- | --- | --- |
-| `run_case.sh`（`run.sh` 为别名） | 单 case 核心；不编译、不分发代码、不修改环境文件 | 命令的 key=value 参数 |
-| `run_batch.sh` | 人工参数扫描；仅重复调用核心 | run_case 行中的参数组合 |
-| `run_commit_validation.sh` | 当前提交验收；仅包含本提交影响的 case，可按需统一构建和同步 | 一处 checkpoint、运行模式变量和 case 清单 |
+| `build_all.sh` | 只编译并安装 | 当前生产 checkpoint；构建环境见 `validation.local.sh` |
+| `sync.sh` | 只同步并核对已安装产物 | `hostfile` 和环境配置 |
+| `run.sh` | 只运行一个 case，内部调用 `run_case.sh` | 命令的 key=value 参数 |
 
 例如单次测试：
 
 ```bash
-bash run.sh run_mode=performance loops=50 warmup=50 bs=256 h=7168 topk=6 moe_expert_num=384 dtype=bf16
+bash run.sh run_mode=performance loops=50 warmup=50 bs=96 h=7168 topk=6 moe_expert_num=96 dtype=bf16
 ```
 
-人工批测示例（编辑 `run_batch.sh`，直接调用即可）：
-
-```bash
-run_case run_mode=performance loops=50 warmup=50 bs=128
-run_case run_mode=performance loops=50 warmup=50 bs=256
-run_case run_mode=performance loops=50 warmup=50 bs=512
-```
+`run_batch.sh` 保留为可选人工扫描工具，仅重复调用 `run_case.sh`；当前固定基线验收使用上述逐条 `run.sh` 命令。
 
 当前使用 functional/performance。核心默认 functional/1 轮/0 预热，performance 默认 50/50；BS/H/TopK/专家数默认 96/7168/6/96，dtype 默认 bf16，block_dim 默认 auto（当前实际固定 64 AIV）。配置值由核心解析器统一提供缺省，不要复制进环境文件。可传入 hostfile、comm_id、barrier_addr、msprof 覆盖一次运行的环境值，但日常使用不需要。
 
-首次部署先配置环境和 hostfile，由提交验收脚本完成所需构建/同步。后续相同安装产物下改变 shape、轮次和 functional/performance 只运行核心或人工批测；运行参数及 host/device 映射随 SSH 启动传递，不需要同步配置文件。新增主机需要先部署程序和环境；环境库不随 case 自动安装。
+首次部署先配置环境和 hostfile，手动完成编译和同步，再单独运行。后续相同安装产物下改变轮次或 functional/performance 只执行 `run.sh`；运行参数及 host/device 映射随 SSH 启动传递，不需要同步配置文件。新增主机需要先部署程序和环境；环境库不随 case 自动安装。
 
 当前计数增量使用 functional 验收；旧空 kernel 的 breakdown 打点已经移除。其余运行时参数无需重编译。当前只支持 Dispatch 单算子、非量化 FP16/BF16、2–16 台主机且每台 8 卡，尚不支持 Combine、量化或路由模式扫描。
 

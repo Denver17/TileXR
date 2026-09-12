@@ -16,8 +16,8 @@ are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
 ## Host Tests
 
-服务器验证统一使用[EP 七步验证](../../docs/EP_VALIDATION_GUIDE.md)：PC 固定提交并同步后，
-依次执行根目录 `source set_env.sh`、`bash build_all.sh`、`bash sync.sh`、`bash run.sh`。
+服务器验证统一使用[EP 验证指南](../../docs/EP_VALIDATION_GUIDE.md)：PC 固定提交并同步后，
+依次手动执行根目录 `bash build_all.sh`、`bash sync.sh`、`bash run.sh`，每步通过后再执行下一步。
 当前支持 `abi-host`、`empty-kernel`、`dry-run` 和 `chain-single`；沿用现有配置，脚本自动汇总各主机结果。
 检查点状态与通过提交见[调试进度](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
@@ -42,9 +42,23 @@ metadata generation, and Combine remain unimplemented. The public entry still re
 its caller-owned data/metadata placeholders and non-null FP32 route weights.
 
 Use the [current validation guide](../../docs/EP_VALIDATION_GUIDE.md) for deployment and
-pass criteria. On the configured first server, `bash run_commit_validation.sh` builds,
-installs, distributes, and runs count correctness and profiling on the fixed
-16P / E=96 / BS=96 / K=6 / balance_shift baseline, with a 4 GiB domain per rank. The existing
+pass criteria. On the configured first server, run each command manually and continue
+only after that command succeeds:
+
+```bash
+bash build_all.sh
+bash sync.sh
+bash run.sh run_mode=functional loops=3 warmup=0
+```
+
+Using the same installation, manually run `bash run.sh run_mode=functional loops=4 warmup=0`
+for cumulative expert counts, then `bash run.sh run_mode=performance loops=50 warmup=50`
+for profiling. All three cases use the fixed
+16P / E=96 / BS=96 / K=6 / balance_shift baseline, with a 4 GiB domain per rank.
+Build, sync, and run report `BUILD_PASS`, `SYNC_PASS`, and `VALIDATION_PASS` respectively.
+Errors and absolute log paths remain visible in the terminal; run output is also saved
+in `run/case-*/workflow.log`, with the actual summary at `run/case-*/<run_id>/summary.json`.
+The retired `run_commit_validation.sh` only prints migration instructions. The existing
 `ep-sdedup-p1-chain-multi` identifier now launches the count kernel. Real execution needs
 at least two eight-card A5 servers, with 64 AIVs per device. The kernel always launches
 64 AIVs in a 48/16 split; the old block dimension override and empty-kernel profiling

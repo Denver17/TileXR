@@ -2,10 +2,14 @@
 # 单用例核心入口。参数以 key=value 传入；构建和同步由调用方决定。
 set -euo pipefail
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
-if [[ ! -f validation.local.sh ]]; then printf '\n================================\nFailed\n================================\n\n' ; exit 2; fi
+if [[ ! -f validation.local.sh ]]; then
+    printf '[run] Failed: missing %s/validation.local.sh; configure it from validation.local.sh.example\n' "$PWD" >&2
+    exit 2
+fi
 case_id="case-$(date +%Y%m%d-%H%M%S)-$$"
 result_root="${TILEXR_VALIDATION_RESULT_ROOT:-$PWD/run/$case_id}"
 mkdir -p "$result_root"
+result_root=$(cd -- "$result_root" && pwd -P)
 declare -a assignments=()
 for argument in "$@"; do
     case "$argument" in
@@ -22,65 +26,35 @@ for argument in "$@"; do
                 barrier_addr) assignments+=("TILEXR_DEMO_BARRIER_ADDR=$value");; msprof) assignments+=("TILEXR_VALIDATION_MSPROF=$value");;
                 hostfile) assignments+=("TILEXR_VALIDATION_HOSTFILE=$value");;
             esac;;
-        *) printf '\n================================\nFailed\n================================\n\n' ; exit 2;;
+        *) printf '[run] Failed: unknown argument: %s (expected key=value; see docs/EP_VALIDATION_GUIDE.md)\n' "$argument" >&2; exit 2;;
     esac
 done
 for assignment in "${assignments[@]}"; do export "$assignment"; done
 export TILEXR_VALIDATION_RESULT_ROOT="$result_root"
+printf '[run] Environment log: %s/environment.log\n[run] Workflow log: %s/workflow.log\n' "$result_root" "$result_root"
+# Source in this shell so the configured environment reaches the workflow.
 if source ./set_env.sh >"$result_root/environment.log" 2>&1; then
-    for assignment in "${assignments[@]}"; do export "$assignment"; done
-    export TILEXR_DIRECT_RUN=1
-    if "$TILEXR_VALIDATION_PYTHON" tools/validation/workflow.py run >"$result_root/workflow.log" 2>&1; then
-        status=PASS
-    else
-        status=FAIL
-    fi
+    cat -- "$result_root/environment.log"
 else
-    printf '\n================================\nFailed\n================================\n\n'
-    printf 'ERROR environment setup failed; see environment.log\n' >"$result_root/summary.log"
-    exit 1
+    environment_status=$?
+    cat -- "$result_root/environment.log" >&2
+    printf '[run] Failed: environment exit=%s; log=%s/environment.log\n' "$environment_status" "$result_root" >&2
+    exit "$environment_status"
 fi
-summary_json=$(find "$result_root" -name summary.json -type f -print -quit || true)
-if [[ -n "$summary_json" ]]; then cp -- "$summary_json" "$result_root/summary.json"; fi
-"${TILEXR_VALIDATION_PYTHON:-python3}" - "$result_root" "$status" <<'PY'
-import json
-from pathlib import Path
-import sys
-sys.path.insert(0, 'tools/validation')
-from measurements import RESULT_SEPARATOR, render_case_description
-root = Path(sys.argv[1])
-status = sys.argv[2]
-try:
-    report = json.loads((root / 'summary.json').read_text(encoding='utf-8'))
-    description = render_case_description(report)
-    if report.get('status') != 'PASS' or report.get('errors'):
-        status = 'FAIL'
-except (OSError, ValueError, KeyError) as error:
-    report = {}
-    description = 'Case configuration unavailable'
-    status = 'FAIL'
-    with (root / 'workflow.log').open('a', encoding='utf-8') as log:
-        log.write(f'\nERROR summary: {error}\n')
-result = 'PASS' if status == 'PASS' else 'Failed'
-if status == 'PASS':
-    performance = report.get('measurements', {}).get('performance', {})
-    average = performance.get('mean_us')
-    if average is not None:
-        result += (f' kernel min {performance.get("minimum_us", 0):.3f}us'
-                   f' median {performance.get("median_us", 0):.3f}us'
-                   f' average {average:.3f}us max {performance.get("maximum_us", 0):.3f}us')
-if report.get('chain_configuration', {}).get('run_mode') == 'breakdown':
-    if status == 'PASS':
-        traces = report.get('traces', {})
-        if not traces.get('all_ranks'):
-            status = 'FAIL'
-            result = result.replace('PASS', 'Failed', 1)
-            with (root / 'workflow.log').open('a', encoding='utf-8') as log:
-                log.write('\nERROR breakdown trace output missing\n')
-        else:
-            result += f'\nTrace folder : {(root / "traces").resolve()}/'
-text = f'\n{RESULT_SEPARATOR}\n{description}\n{result}\n{RESULT_SEPARATOR}\n\n'
-(root / 'summary.log').write_text(text, encoding='utf-8')
-print(text, end='')
-sys.exit(0 if status == 'PASS' else 1)
-PY
+for assignment in "${assignments[@]}"; do export "$assignment"; done
+export TILEXR_DIRECT_RUN=1
+# The workflow owns validation and reports its exact summary.json path. Keep its
+# stdout/stderr visible and retain the real exit code through tee.
+if "$TILEXR_VALIDATION_PYTHON" -u tools/validation/workflow.py run 2>&1 | tee "$result_root/workflow.log"; then
+    stage_status=("${PIPESTATUS[@]}")
+else
+    stage_status=("${PIPESTATUS[@]}")
+fi
+if (( stage_status[0] != 0 )); then
+    printf '[run] Failed: workflow exit=%s; log=%s/workflow.log\n' "${stage_status[0]}" "$result_root" >&2
+    exit "${stage_status[0]}"
+fi
+if (( stage_status[1] != 0 )); then
+    printf '[run] Failed: log capture exit=%s; log=%s/workflow.log\n' "${stage_status[1]}" "$result_root" >&2
+    exit "${stage_status[1]}"
+fi

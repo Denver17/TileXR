@@ -216,8 +216,9 @@ lane=`累计实际发送包数%sendTokenBufNum`，两遍共用包序号和池；
 | UB/输出 | BS=256 的每核 5/6 Token，非 32B 输出长度和邻核边界；实际包数超过发送池路数、跨两遍的池复用；mask 的 k31 使用 uint32 位操作 |
 
 这是本次模块的验收方向，R12 的最终完整 Dispatch 矩阵和性能目标仍待确认。每个实现提交只选择受影响的 case，不跑笛卡尔积，不重做第一阶段已通过的检查点；没有 64P/128P 时在现有规模推进并注明未覆盖项。
-复用现有三类脚本：`run_case.sh` 是无 commit 验收策略的单 case 核心；人工 `run_batch.sh` 只调用并汇总，不编译/同步；`run_commit_validation.sh` 配置当次 checkpoint 和受影响 case，可按产物变化 build/sync。
-`validation.local.sh` 只保存环境，模式、loops、warmup、shape 等在 case/批脚本配置；checkpoint 只在 commit 入口配置一次，不增加测试框架或重复配置源。
+依次手动执行三个入口：`build_all.sh` 编译安装、`sync.sh` 同步产物、`run.sh` 运行单 case（内部调用 `run_case.sh`）；每一步通过后再执行下一步。
+`run_batch.sh` 仅保留可选人工扫描用途；`run_commit_validation.sh` 已停用自动编排，仅提示迁移命令。
+`validation.local.sh` 只保存环境，模式、loops、warmup、shape 等通过 case 参数传入；当前 production checkpoint 在编译入口选择并写入 manifest，同步/运行继承安装检查点。
 
 functional 默认 1 轮，不采 profiling 或性能；performance 沿用 msprof，warmup 排除，统计有效 kernel 记录；breakdown 沿用全 Rank 解析、筛选和 trace 输出链路。
 多轮保持同一 stream 连续提交整批，整批末才 stream 同步和 Host barrier，Host 读回/解析在测量外。
@@ -226,7 +227,8 @@ functional 默认 1 轮，不采 profiling 或性能；performance 沿用 msprof
 
 msprof 给出当前已启用路径的整体 kernel 时间；模块内耗时仅在已有对应打点时用 breakdown 报告，核组并行时不将各段时间相加当作总时间。
 日志保留 commit/artifact、backend/native 状态、启用模块、shape/路由/量化、loops/warmup、逐 Rank 样本及所有 Rank 的 median/min/max，沿用现有聚合口径；流量分清原始 route 数、第一跳/DIRECT 包数、完整 T（含尾部/Flag/填充）及实际本卡/跨卡/跨 Server 字节，适用时报告带宽。
-终端只打印精简 case 参数与最终结论/有效 kernel min/average/max，前后空行及 32 个 `=`；breakdown 另给一行 `Trace folder`。失败仅打印 `Failed` 并返回非零，详细 ERROR 留在本次 run 的 summary.log/各 Rank 日志；不统计或打印 Host submit/sync/barrier 时间，不追加无条件 Pass。
+终端显示 case 参数、有效 kernel 性能报告和最终结论，失败时直接显示错误类型、host/rank/stage（如已获取）和日志绝对路径，保留原始非零退出码。
+运行输出同时保存在 `run/case-*/workflow.log`；实际汇总为 `run/case-*/<run_id>/summary.json`，预检查失败可能尚未生成汇总。避免再次折叠成单独的 `Failed`；不统计或打印 Host submit/sync/barrier 时间，不追加无条件 Pass。
 性能基线与诊断插桩分开，先登记测得数据，不臆定尚未确认的性能阈值或宣称完整算法收益。新增通信测试复用匹配的 HCCL 环境资格记录。
 
 #### 2.5 以后：待数据接收/转发设计收敛后补充
