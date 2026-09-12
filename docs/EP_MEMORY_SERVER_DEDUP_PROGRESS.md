@@ -35,7 +35,7 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 | 检查方向 | 状态 | 通过 commit |
 | --- | --- | --- |
 | cnt 发送/接收、cumsum | 用户确认最新提交验收通过 | [0bc6f1b](https://github.com/LingquLab/TileXR/commit/0bc6f1bbe64f25ab21a8fae23e70eed797dc48a5) |
-| server grouping / 第一跳 | §2.3 实现及本地验证完成，CANN/A5 待验收 | — |
+| server grouping / 第一跳 | §2.3 用户确认单轮检查点 PASS；多轮及性能达标未验收 | [0df1db0](https://github.com/LingquLab/TileXR/commit/0df1db02bb139c447456c283afe05586ff9f3c5d) |
 | relay 展开 / metadata | 未开始 | — |
 | Dispatch correctness / 完整验收 | 未开始 | — |
 
@@ -45,6 +45,8 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 2026-09-12：用户确认“阶段 1 的第一个部分”测试通过并要求实现第二部分；按当前设计验证流程 §2.3 接入第一跳发送。该反馈延续已有 cnt/cumsum 基线，未读取新 summary，不推断额外 dtype、规模或时延。
 
 新的 `ep-sdedup-p2-first-hop` 开放单次 functional/performance/breakdown（loops=1、warmup=0）；固定 16P/L6/BS96/H7168/K6/BF16/balance_shift/seed2026、每 rank 4 GiB。实现在线分组、原始 q、第一跳完整包及源端输出，DIRECT 表仅构建；数据接收转发和 Combine 未实现。本地验证覆盖非量化 sender、184B ABI、单份布局、consumer 错包诊断和 v3 trace，不能作为 CANN/A5 通过记录。
+
+2026-09-12：修复第一跳 `Duplicate` 掩码限定符编译错误后，用户回传“1轮测试通过，最终结果pass”。按最近交付的 `0df1db0` 登记 `ep-sdedup-p2-first-hop` 单轮检查点通过；未直接读取服务器 summary，实际 SHA、配置和运行模式以该次结果为准。通过范围为当前 cnt/cumsum + 第一跳包及源端输出校验，不扩展为量化组合、breakdown、多轮复用或性能达标已验收。下一增量按验证流程 §2.4 叠加 DIRECT 直发。
 
 ## 阶段 3：Combine 空算子工程
 
