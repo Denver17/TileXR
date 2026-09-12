@@ -13,26 +13,32 @@ struct EpServerDedupKernelArgs {
     GM_ADDR expertIds;
     GM_ADDR expertScales;
     GM_ADDR expandXOut;
+    GM_ADDR dynamicScalesOut;
     GM_ADDR expertTokenNumsOut;
     GM_ADDR sendCountsOut;
     GM_ADDR assistInfoForCombineOut;
     GM_ADDR assistExOut;
     GM_ADDR sourceMaskOut;
     GM_ADDR groupOut;
+    GM_ADDR expertScalesOut;
     int64_t bs;
     int64_t h;
     int64_t topK;
     int64_t moeExpertNum;
     int64_t globalBs;
     int64_t expertTokenNumsType;
+    int64_t quantMode;
     int64_t dtype;
     int64_t expandXOutDtype;
     int64_t magic;
 };
 static_assert(std::is_standard_layout<EpServerDedupKernelArgs>::value, "launch arguments must be standard layout");
-static_assert(sizeof(EpServerDedupKernelArgs) == 160, "launch ABI has twenty 64-bit fields");
-static_assert(offsetof(EpServerDedupKernelArgs, bs) == 88, "shape follows eleven GM addresses");
-static_assert(offsetof(EpServerDedupKernelArgs, magic) == 152, "magic is the final argument");
+static_assert(sizeof(EpServerDedupKernelArgs) == 184, "launch ABI has thirteen addresses and ten int64 fields");
+static_assert(offsetof(EpServerDedupKernelArgs, dynamicScalesOut) == 40, "quant scale address");
+static_assert(offsetof(EpServerDedupKernelArgs, expertScalesOut) == 96, "source weight address");
+static_assert(offsetof(EpServerDedupKernelArgs, bs) == 104, "shape follows thirteen GM addresses");
+static_assert(offsetof(EpServerDedupKernelArgs, quantMode) == 152, "quant mode");
+static_assert(offsetof(EpServerDedupKernelArgs, magic) == 176, "magic is the final argument");
 
 // 内部注册入口也供安装包测试调用；不需要创建 communicator。
 int TileXREpRegisterDispatchMemoryServerDedupKernel();

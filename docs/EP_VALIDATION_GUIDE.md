@@ -1,186 +1,82 @@
 # EP 验证与人工测试
 
-## 当前提交：cnt/cumsum 验收
+## 当前提交：第一跳发送（设计验证流程 §2.3）
 
-当前 Server Dedup 已实现 cnt 发送/接收、cumsum、完整前缀发布/消费/清理，未实现 Token 数据发送/接收或 Combine。
-从本次计数测试直到完整 Dispatch/Combine Server Dedup 功能、性能验收完成，每 rank 固定使用 **4 GiB 通信域**：
-`TileXRCommInitRankMemoryDomainWithSize(0, 4092, ...)` 申请 4092 MiB 数据区加 4 MiB Flag 区，`peerMemBytes=4294967296`。
-Host/device CommArgs 和最终汇总均核对这个固定值；后续 case/算子增量只调整域内布局及容量检查，不随当前有效数据量缩放通信域。
-底层另有 1 MiB 地址偏移余量，实际分配为 4097 MiB/rank。CPU 替身仅核对申请参数和报告容量，不申请或验证真实 4 GiB NPU 内存。
-`build_all.sh` 在 production 模式默认选择 `ep-sdedup-p1-chain-multi`，沿用历史 checkpoint 名称，实际执行当前计数 kernel 和数值校验。
-旧空 kernel、breakdown、4 GiB 本卡边界访问的通过记录均不能作为本增量通过的证据。
+当前检查点为 `ep-sdedup-p2-first-hop`：保留 cnt 发送/接收和 cumsum，新增源端在线分组、原始 q、远端多路 group 第一跳、尾表及源端 mask/权重输出。DIRECT 直发表按设计构建，但不执行；接收转发、最终 expert 行整理、assistEx/group 生成及 Combine 留待后续模块。
 
-真实执行需要 CANN 9.1.0、匹配的 driver（25.1.rc1 或更新）以及每卡至少 64 AIV 的 Ascend 910A5/Ascend950。
-当前固定两台服务器、每台 8 卡，共 16P；一台 8 卡服务器只可做 Host 测试和目标编译。
-复用同环境已保留的 HCCL Test 资格记录，不因本次拉取或重新构建重复运行；无记录或环境失败时按 `AGENTS.md` 的一次性基线规则处理。
+固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS=96、H=7168、TopK=6、BF16、balance_shift、seed=2026**。每 rank 始终申请 **4 GiB 通信域**：4092 MiB 数据区 + 4 MiB Flag 区，`peerMemBytes=4294967296`。直到完整 Dispatch/Combine 功能和性能验收结束，不随增量缩小通信域。底层另有 1 MiB 地址偏移余量，实际分配 4097 MiB/rank。
 
-在新环境首节点拉取交付分支的指定 commit 后：
+本检查点仅支持 **loops=1、warmup=0**，functional/performance/breakdown 均如此。数据接收清理和跨调用复用尚未启用，不能沿用 cnt-only 的连续多轮设置。每次运行重新创建 communicator；不通过逐轮 Host barrier 掩盖数据 Flag 复用问题。
+
+实际执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
+
+## 手动编译、同步、运行
+
+首次部署时准备环境文件与主机清单；已有文件只检查，不覆盖：
 
 ```bash
 git submodule update --init --recursive
-# 首次部署才从模板复制；已有配置直接检查，不覆盖。
 test -f validation.local.sh || cp validation.local.sh.example validation.local.sh
 test -f hostfile || cp hostfile.example hostfile
 ```
 
-编辑 `validation.local.sh` 的实际 CANN 环境脚本、driver、SSH 用户/Python 和 `TILEXR_COMM_ID`（首节点跨机可达 IPv4:端口）。
-编辑 `hostfile`，首项为执行命令的本机，其余为免交互 SSH 可达的服务器；每项恰有 8 个实际可用 device。
-脚本在首节点构建并向其他节点的同一绝对仓库路径分发；远端目标必须为空或已有 `.tilexr-validation-root` 的受管理目录，不能是另一个 Git checkout。
-各节点自行准备匹配的 CANN/driver 环境；脚本不安装这些依赖。
+`validation.local.sh` 只保存 CANN/driver、Python/msprof、SSH 用户、hostfile 和首节点可跨机访问的 `TILEXR_COMM_ID`。`hostfile` 第一项为当前首节点，每台恰好 8 个可用 device。脚本向其余节点同一绝对路径分发，目标必须为空或有 `.tilexr-validation-root` 的受管理目录。
 
-依次手动执行下面三个步骤，每一步退出码为 0 且出现对应通过标志后，再执行下一步。
-不要再运行一键编排；`run_commit_validation.sh` 仅提示迁移命令并退出，不执行构建、同步或测试。
-
-1. 编译并安装（结束标志 `BUILD_PASS`）：
-
-   ```bash
-   bash build_all.sh
-   ```
-
-2. 同步已安装产物（结束标志 `SYNC_PASS`）：
-
-   ```bash
-   bash sync.sh
-   ```
-
-3. 运行计数用例（结束标志 `VALIDATION_PASS`）：
-
-   ```bash
-   bash run.sh run_mode=functional loops=3 warmup=0
-   ```
-
-每条命令结束后可立即用 `echo $?` 查看退出码。脚本自行加载 `set_env.sh`，不要求预先 source。
-
-整个开发流程的阶段 1（Dispatch 框架）、阶段 2（Dispatch 逻辑）、阶段 3（Combine 框架）、阶段 4（Combine 逻辑）
-统一采用 **16P、每卡 6 专家（E=96）、BS=96、TopK=6、balance_shift、每 rank 4 GiB** 的主流程基线。
-H/dtype 暂沿用 7168/BF16，seed=2026。`balance_shift` 对应已有 `BuildBalancedShuffleExpertIds` 的按 epoch 均衡打乱；原始路由顺序保存给算子，reference 独立统计原始路由。
-当前优先完成各阶段主流程并采集性能，边界 shape/拓扑扫描留到完整流程验收末尾；当前计数提交不宣称后续数据或 Combine 阶段已通过。
-
-`build_all.sh` 构建/安装生产库、独立 A5 kernel、Host 测试及硬件 consumer；`sync.sh` 分发该安装产物。
-完成上述第一个 functional case 后，继续手动运行下面两条命令以覆盖累计输出和性能；每条运行通过后再执行下一条，无需重新构建/同步：
+按顺序逐条执行，每步成功后再执行下一步：
 
 ```bash
-bash run.sh run_mode=functional loops=4 warmup=0
-bash run.sh run_mode=performance loops=50 warmup=50
+bash build_all.sh
 ```
-
-三个 case 的范围如下：
-
-| 模式 | loops / warmup | 检查内容 |
-| --- | --- | --- |
-| functional | 3 / 0 | 逐 expert count 输出及完整前缀 |
-| functional | 4 / 0 | 按 expert 累计输出及完整前缀 |
-| performance | 50 / 50 | 数值校验、连续批次和 msprof kernel 耗时 |
-
-该场景每个 source 对每个 expert 贡献 6 条 route，每卡完整前缀为 `6,12,...,576`，逐 expert count 为 6 个 96，累计 expert 输出为 `96,192,...,576`。
-本次每 rank 远端 cnt 记录量为 `15*6*32=2880 B`，16P 总计 46080 B；有效带宽按此量和 kernel 耗时计算，排除本卡前缀访问及轮询流量。
-性能报告保留 kernel SHA256、backend/native 状态、每 rank 样本及跨 rank median/min/max；性能达标须与约定阈值或同环境基准比较，完成采集本身不表示达到性能目标。
-
-通过条件必须同时满足：
-
-- 编译和同步分别退出 0 并输出 `BUILD_PASS`、`SYNC_PASS`；上述三个运行命令分别退出 0 并输出 `VALIDATION_PASS`。每个 case 的 `summary.json` 为 `status=PASS`、`errors` 为空，全部 16 个 rank 齐全，实际 shape、路由模式及 seed 符合上述基线。
-- 每个 rank 的最终 `EP_SERVER_DEDUP_MULTI_ROUND_PASS` 对应本次 run/build/commit，`submitted=completed=loops`、`cleanup=complete`。只有初始化的 `EP_SERVER_DEDUP_CHAIN_PASS` 不算通过。
-- 每个 rank 的建链记录 `peer_mem_bytes=4294967296`，汇总中的 `nodes[].reported_result.ranks[].chain.peer_mem_bytes` 保留该证据。
-- consumer 从各源 rank 的原始路由独立计算直方图，逐项比较 `sendCountsOut[E]` 和 `expertTokenNumsOut[E/R]`。批末只读回最后一轮，奇数 loops 检查逐 expert count，偶数 loops 检查累计前缀；需保留两种 case。
-
-失败时先看当前命令的终端错误和输出的日志绝对路径；不要继续执行下一步。
-
-| 失败步骤 | 首节点仓库下的日志位置 | 重点内容 |
-| --- | --- | --- |
-| 编译 | `run/validation/build-*/production-configure.log`、`production-build.log`、`production-install.log`、`host-*.log` | 终端指出的失败命令、错误尾部及对应文件 |
-| 同步 | `run/validation/sync-*/<节点序号>/prepare.log`、`transfer.log`、`verify.log` | 目标目录、SSH/rsync、安装身份核对 |
-| 运行环境 | `run/case-*/environment.log` | CANN、Python、配置加载错误；此时尚未启动测试 |
-| 运行 | `run/case-*/workflow.log`，以及终端“结果”行指定的 `run/case-*/<run_id>/summary.json` | `primary_error`、`errors`、host/rank/stage 和错误记录中的日志路径 |
-
-`workflow.log` 保留调度器标准输出和标准错误，终端同时显示这些内容。各 rank 日志位于同一 `<run_id>` 目录及其 `nodes/` 子目录。
-参数、环境或构建身份预检查失败时可能还没有 `summary.json`，此时以终端及已生成日志为准。
-运行入口直接使用调度器的报告，不再复制 case 根目录的 `summary.json` 或生成二次 `summary.log`；旧文件不代表本次结果。
-安装身份位于 `install/validation/manifest.json`。
-回传实际 commit、卡数、case summary 和失败 rank 日志即可判定覆盖范围。16P 通过不证明 128P；同 shape 多轮通过不证明跨 shape/并发调用安全。
-本地验证覆盖 CPU 逻辑、Host ABI/launch 以及替身 consumer；真实 CANN/A5 执行结果单独记录如下。
-
-2026-09-12 用户反馈：环境修复后，`0bc6f1b` 的功能、多轮及性能测试流程均通过。
-该结论来自服务器执行方反馈；此处尚未收录 run_id、原始日志及具体延迟，不扩展为后续 breakdown 产物的上机验证。
-
-出现 `stage=count-read ... sendCountsOut mismatch at N` 时，该 rank 已完成整批 stream 同步和 Host barrier，
-但计数结果未通过。错误行保留 `expected`、`actual`、`global_expert`、`source_rank` 和最多五项相邻实际结果。
-当前固定场景下 rank 4 的 index 0 对应源 rank 0、全局专家 24，预期为 6；这一项不依赖其他接收核的分段和。
-保持 `balance_shift` 和原 shape，先用 `bash run.sh run_mode=functional loops=1 warmup=0` 查看是否单轮即可复现，
-再用 `bash run.sh run_mode=functional loops=3 warmup=0` 保留原失败轮数的详细结果。首次拉取诊断变更仍需手动编译、同步；
-只有单轮通过、多轮失败时，才将轮次复用列为优先假设，不能直接据此认定根因。
-
-count 输出在整批 launch 前初始化为 `-1`，帮助区分整批未写与合法的零计数；不在轮间清空输出或新增同步。
-相同路由多轮复用同一输出缓冲区，该哨兵不能证明具体哪一轮写过结果。只报不匹配索引而不记录实际值会迫使额外上机，
-因此保留首个不匹配值及有限邻域；CPU 错值/未写入注入只验证诊断和失败判据，不证明设备数值问题已修复。
-
-单轮同步成功但输出仍为 `-1` 时，先核对实际加载的 Host 库及独立 kernel，不能据此判断为 cnt 等待超时。
-`readelf -Ws install/validation/lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o` 可查看完整函数表；
-入口较小也可能调用其他函数，因此须同时查看其余函数及对应源码，不能只凭入口大小认定空 kernel。
-EP 的自定义链接命令必须依赖 `$<TARGET_OBJECTS:...>`：仅依赖 OBJECT target 只保证编译顺序，
-源码或编译选项变化可能重编中间对象，却不重链最终 kernel，随后打包/同步的仍是旧产物。
-维护构建规则时验证“只改 `.cpp` 后中间对象、最终 kernel 和库旁 staged kernel 均更新”，并检查不改输入时不重链。
-此缺陷已用实际 EP CMake 规则、Host 编译器/链接适配复现；该检查不验证 CANN 编译或 A5 计数正确性。
-`build_all.sh` 本身会重建专用构建目录，故不能仅凭该增量构建缺陷断定某次手动脚本运行的根因。
-
-无需 NPU 的聚焦检查可独立执行：
 
 ```bash
-cmake -S tests/ep -B build/server-dedup-host
-cmake --build build/server-dedup-host --target \
-  test_tilexr_ep_server_dedup_protocol test_tilexr_ep_server_dedup_layout \
-  test_tilexr_ep_server_dedup_host_validation test_tilexr_ep_server_dedup_public_abi \
-  test_tilexr_ep_kernel_launch test_tilexr_ep_server_dedup_counts -j8
-ctest --test-dir build/server-dedup-host --output-on-failure \
-  -R 'test_tilexr_ep_server_dedup_|test_tilexr_ep_kernel_launch$'
-python3 tests/ep/integration/test_server_dedup_chain.py
+bash sync.sh
 ```
-
-维护经验：新增 CTest 必须同时安装进分发包；只在 build 目录运行会漏掉 consumer 的安装路径错误。
-Host 测试的 PASS marker 后缀必须与安装测试名对应：`test_tilexr_ep_server_dedup_counts` 应输出
-`EP_SERVER_DEDUP_ABI_HOST_PASS test=counts`。旧 `test=counts_cpu` 虽然退出 0、CTest 通过，
-仍会被节点调度器判为 `LOG_PARSE_FAILED`（退出 16），在启动该节点的 NPU ranks 前停止。
-新增或修改此类测试时，将实际编译安装的可执行文件交给 `workflow.node` 验证 marker 契约，不能只跑 CTest 或使用手写 PASS 替身。
-本次用五个实际 Host 测试复现旧 counts marker 的退出 16，修正后同一路径全部通过；此证据仅覆盖 CPU 测试及其解析，不证明 NPU 通信通过。
-更新专家约束时同步 Host/layout 和调度器的 shape 检查，否则合法的 E=1024/L=64 或 L=1 会在上机前被旧限制拦截。
-切换开发增量时同步编译入口的 checkpoint 和数值判据，否则旧边界测试 PASS 可能被误认为新计数逻辑通过。
-编译/同步输出重定向到 `/dev/null`、运行再缩写为 `Failed` 会隐藏首个失败边界；保持三个手动步骤，透传错误、日志路径及原始退出码。
-日志使用 `tee` 时分别核对工作流和日志写入的退出码；环境必须在当前 shell 中 source，不能通过管道丢失导出变量。
-本地替身检查覆盖入口隔离、错误可见性和退出码，不证明内网服务器原始故障已修复或 NPU 运行通过。
-
-## 配置职责
-
-`validation.local.sh` 只保存一次性环境配置：CANN/driver、Python/msprof、三方库搜索路径、SSH 用户、hostfile 和主节点通信地址。首次部署填写后，只有环境变化才修改；测试脚本始终只读该文件。参考根目录 `validation.local.sh.example`。
-
-模式、loops/warmup、BS/H/TopK/专家数/dtype/block_dim 属于 case 参数，只在调用脚本中填写。旧环境文件遗留的测试参数在加载时隔离，不覆盖调用方参数；可一次性删除这些旧项，不必每轮修改。
-
-production 编译默认的 checkpoint 只在 `build_all.sh` 中选择一次并写入安装 manifest；显式导出的 `TILEXR_VALIDATION_CHECKPOINT` 仍可覆盖该默认值，Host 模式不强制选择生产检查点。同步和运行直接读取已安装 manifest，无需再次指定。内部检查点定义和结果中的 checkpoint 字段用于识别实际测试范围，不是第二处用户配置。
-
-## 三个入口
-
-| 入口 | 用途 | 修改位置 |
-| --- | --- | --- |
-| `build_all.sh` | 只编译并安装 | `breakdown=0`（默认）或 `breakdown=1`；构建环境见 `validation.local.sh` |
-| `sync.sh` | 只同步并核对已安装产物 | `hostfile` 和环境配置 |
-| `run.sh` | 只运行一个 case，内部调用 `run_case.sh` | 命令的 key=value 参数 |
-
-例如单次测试：
 
 ```bash
-bash run.sh run_mode=performance loops=50 warmup=50 bs=96 h=7168 topk=6 moe_expert_num=96 dtype=bf16
+bash run.sh run_mode=functional loops=1 warmup=0
 ```
 
-`run_batch.sh` 保留为可选人工扫描工具，仅重复调用 `run_case.sh`；当前固定基线验收使用上述逐条 `run.sh` 命令。
+构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
 
-当前使用 functional/performance。核心默认 functional/1 轮/0 预热，performance 默认 50/50；BS/H/TopK/专家数默认 96/7168/6/96，dtype 默认 bf16，block_dim 默认 auto（当前实际固定 64 AIV）。配置值由核心解析器统一提供缺省，不要复制进环境文件。可传入 hostfile、comm_id、barrier_addr、msprof 覆盖一次运行的环境值，但日常使用不需要。
+`build_all.sh` 默认关闭设备打点，production 默认选择新的 first-hop 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝将新数据 kernel 当作旧计数检查点运行。Host 库、kernel 和 consumer 的 ABI 已一起更新，必须重新编译和同步，不混用旧安装包。
 
-首次部署先配置环境和 hostfile，手动完成编译和同步，再单独运行。后续相同安装产物下改变轮次或 functional/performance 只执行 `run.sh`；运行参数及 host/device 映射随 SSH 启动传递，不需要同步配置文件。新增主机需要先部署程序和环境；环境库不随 case 自动安装。
+同一普通产物可继续手动测量一次完整 kernel：
 
-当前计数增量支持 functional、performance 和下面的 cnt/cumsum breakdown；旧空 kernel 打点不用于当前验收。
-切换 breakdown 与普通产物需要重新编译、同步，其余运行时参数无需重编译。当前只支持 Dispatch 单算子、非量化 FP16/BF16、2–16 台主机且每台 8 卡，尚不支持 Combine、量化或路由模式扫描。
+```bash
+bash run.sh run_mode=performance loops=1 warmup=0
+```
 
-### 当前 cnt/cumsum breakdown JSON
+这是无预热的单次样本，测量范围为 cnt/cumsum + 第一跳发送（包括 DIRECT 建表/q 开销）。各 rank 保留 msprof 原始样本和 kernel SHA256，并汇总跨 rank median/min/max。有效带宽采用实际第一跳包数乘完整 T，加远端 cnt 记录量，除以整个 kernel 耗时；不能解释为独立发送阶段带宽或完整 Dispatch 性能。性能是否符合预期需与同条件基准/阈值比较。
 
-在首节点仓库目录依次手动执行，每步成功后再进行下一步：
+## 输入类型与验证内容
+
+六种已接入类型为 BF16/FP16 × 非量化/E4M3/E5M2；默认只运行上述 BF16 非量化基线。类型参数是运行参数，无需更改 kernel 构建：
+
+```bash
+bash run.sh run_mode=functional loops=1 warmup=0 dtype=fp16 quant_mode=0
+bash run.sh run_mode=functional loops=1 warmup=0 dtype=bf16 quant_mode=4 fp8_format=e4m3
+bash run.sh run_mode=functional loops=1 warmup=0 dtype=bf16 quant_mode=4 fp8_format=e5m2
+```
+
+FP16 的量化组合使用相同命令并设置 `dtype=fp16`。两种 FP8 均为 `quant_mode=4`，由输出 dtype 选择格式，不使用 `quant_mode=3`。设备调用沿用 Memory 的 MXFP8 函数；Host 保留 BF16/FP16 输入，使用现有 MXFP8 golden 比较包内结果。
+
+完成 stream 同步及 Host barrier 后，每 rank 必须同时通过：
+
+- communicator 的 Host/device 映射及固定 4 GiB 容量检查。
+- 原始全路由的 cnt/cumsum 数值检查。固定基线每源卡每 expert 为 6，每卡前缀 `6,12,...,576`，6 个 expert 的 count 均为 96。
+- 所有预期第一跳目标槽位、完整 hidden、量化 scale、32B 头部、有效 16B entries、原始 k/q/真实权重及每个 512B 块的 8 个 Flag。Flag 固定为 FP32 1.0 的位型；填充及未用 entries 不比较。
+- sourceMask 仅保留各已发送 group 的首 k，对应 expertScalesOut 为 1.0；原始 expertScales 逐字节不变。未发送 DIRECT/relay route 的目标槽位 Flag 保持零。
+- 正常资源清理完成后才输出 `EP_SERVER_DEDUP_FIRST_HOP_PASS`，其 `submitted=completed=1`、`warmup_submitted=warmup_completed=0`、`cleanup=complete`。仅 `EP_SERVER_DEDUP_CHAIN_PASS` 不算成功。
+
+固定 H/K 下非量化 T=15872B，MXFP8 T=8192B。`first_hop_packets`、`first_hop_received`、`first_hop_bytes` 和 `token_stride` 记录实际流量；第一跳数据全为跨 Server 流量，当前 DIRECT 数据流量为零。每源 rank 的远端 cnt 为 `(E-E/R)*32=2880B`，不包含轮询与本卡前缀访问。
+
+调用方为真实权重输入和新增的 `expertScalesOut[BS,K]` 分别分配内存，两者不可重叠。公共签名在 `groupOut` 后新增权重输出；内部 launch 为 13 地址 + 10 个 int64，共 184B。最终 expandX/dynamicScales/assistEx/group 仍按完整容量分配，当前 checkpoint 不校验尚未产生的最终结果。
+
+运行会在本次 `<run_id>/inputs/` 保存 `rank-N-x.bin`、`rank-N-ids.bin`、`rank-N-weights.bin`（小端原始位型）。远端输入随日志收集到 `nodes/<节点序号>/inputs/`；shape、dtype、量化、seed、commit/build_id 在同次 summary 中。直接运行 C++ 可用 `TILEXR_VALIDATION_INPUT_DIR` 指定已存在目录。
+
+## Breakdown JSON
+
+在首节点逐条执行：
 
 ```bash
 bash build_all.sh breakdown=1
@@ -191,21 +87,12 @@ bash sync.sh
 ```
 
 ```bash
-bash run.sh run_mode=breakdown loops=3 warmup=2
+bash run.sh run_mode=breakdown loops=1 warmup=0
 ```
 
-编译脚本自动传入 `-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`，安装 manifest 记录
-`server_dedup_profiling=true`、`server_dedup_profile_version=2`。普通 functional/performance 构建显式关闭该开关。
-`bash build_all.sh` 等同 `bash build_all.sh breakdown=0`，即使终端遗留 `TILEXR_VALIDATION_RUN_MODE=breakdown`
-也默认关闭打点。构建入口同时隔离遗留 loops/warmup；这些参数只由运行入口决定。
-同步仅核对已安装产物的打点元数据、版本和摘要，不要求设置 RUN_MODE；运行时仍检查模式是否与产物匹配。
-模式不匹配时按错误提示重新选择构建参数，成功后同步；不要手动修改 manifest。
+构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=3`，并标记 184B ABI、`r07-single` 布局及 `first_hop` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
 
-原同步入口将终端 RUN_MODE 的 functional 默认值与打点产物比较，可能在同步时误报模式不一致。
-现将打点选择固定在构建参数中，同步验证安装包自身，运行验证所选 case 与包是否兼容。
-本地 Bash 入口和两节点传输替身回归覆盖默认关闭、显式开启、模式不同的包同步和运行拒绝；不代表新增 NPU 验证。
-
-成功后终端打印 `Trace JSON:` 和代表卡 trace 路径，完整目录为：
+成功结果和 trace 路径：
 
 ```text
 run/case-<时间>-<PID>/<run_id>/summary.json
@@ -217,32 +104,54 @@ run/case-<时间>-<PID>/<run_id>/traces/slowest.trace.json
 run/case-<时间>-<PID>/<run_id>/traces/index.json
 ```
 
-将 `.trace.json` 导入 Perfetto 或 Chrome tracing；`summary.json` 是结构化汇总，`index.json` 是索引。
-summary 的 `measurements.breakdown.stages_us` 给出各 rank 阶段最大核耗时的跨 rank median/min/max，
-`nodes[].reported_result.ranks[].breakdown.records[]` 保留每个 rank 的全部 64 核原始时间戳。
+将 `.trace.json` 导入 Perfetto/Chrome tracing。`measurements.breakdown.stages_us` 给出各阶段核最大值的跨 rank median/min/max；`nodes[].reported_result.ranks[].breakdown.records[]` 保留 64 核的原始时间戳。
 
-阶段为 `init`（Kernel.Init）、`send_cnt`（本地统计与发送）、`recv_cnt`（接收等待及分段和发布）、
-`cumsum`（分段和等待、前缀计算与发布）、`prefix_consume`（完整前缀等待/消费及专家计数输出）、`finish`。
-前 48 核未执行的接收阶段记为零时长。`count_total` 从 Init 前至 Finish 后，不包含 TPipe/对象构造及最终 trace 写出。
-仅记录最后一次测量提交，示例 generation=5；不把它当成 3 轮平均。各卡分别归零，不能据合并 trace 推断跨卡时序。
-打点构建在时间戳边界插入 `PIPE_ALL`，这些诊断同步会影响耗时；性能基线使用关闭打点的 performance 产物。
+阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`finish` 和 `first_hop_total`。源端核未执行的接收阶段为零时长，接收核的 send_data 为零；finish 包含末尾全核 SyncAll 及 core63 counter 清零。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。当前 generation=1，各卡独立归零，不能推断跨卡绝对时序。
 
-记录区占每 rank 8 KiB，紧随两份 cnt 状态区和预留 relay counter，不改变固定 4 GiB 通信域。
-后续接入 Token 数据布局时须显式保留或迁移该记录区；禁止复用旧空 kernel 的 offset=0，以免覆盖当前 cnt 协议状态。
-consumer 先校验计数，再校验全部核的记录身份、最终 generation 和时间戳顺序；缺核、旧 schema 或旧轮次均不能 PASS。
-本地替身测试覆盖记录写入、计数区隔离、consumer 失败路径及 JSON 汇总/导出；新打点产物仍需 CANN/A5 实机验证。
+打点构建在时间戳边界插入 PIPE_ALL，会影响耗时；各段核最大值不可直接相加。普通性能基线关闭设备打点，performance 的 msprof 仍保留。恢复普通产物需再次手动执行 `bash build_all.sh`、`bash sync.sh`。
 
-恢复普通产物时手动执行 `bash build_all.sh`、`bash sync.sh`，随后使用
-`bash run.sh run_mode=functional loops=3 warmup=0` 或前文的 performance 命令。
-已有成功 breakdown summary 可离线重新导出：
+R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v3 每核使用两个 64B 行，实际记录占 8192B。旧 v2 位于计数状态之后，不能按旧 offset/行宽读取新包。reader 同时检查 schema、segment、核/rank、generation 和时间戳顺序。
+
+已有成功 summary 可离线导出，无需再次启动设备：
 
 ```bash
 python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summary.json
 ```
 
+## 失败定位与本地检查
+
+| 步骤 | 日志 | 首先查看 |
+| --- | --- | --- |
+| 编译 | `run/validation/build-*/production-*.log`、`host-*.log` | 终端指出的编译/链接命令及错误 |
+| 同步 | `run/validation/sync-*/<节点>/prepare.log`、`transfer.log`、`verify.log` | SSH、分发路径和安装包身份 |
+| 运行环境 | `run/case-*/environment.log` | CANN、Python、配置加载 |
+| 运行 | `run/case-*/workflow.log` 和终端指定的 `<run_id>/summary.json` | primary_error、errors、失败 rank 的日志与 stage |
+
+`stage=count-read` 或 `stage=first-hop-read` 表示 stream 与 Host barrier 已完成，随后数值/包校验失败，不代表等待超时。错误保留首个不匹配字段、source/token/k/q 或 count 邻域。count 输出预填 -1，mask/权重输出预填哨兵；保留实际原始输入供复现。提交、同步或 barrier 失败而完成状态未知时，不释放可能仍在使用的设备资源，交由进程退出和调度器收尾。
+
+不带 CANN/NPU 的聚焦检查：
+
+```bash
+cmake -S tests/ep -B build/server-dedup-host
+cmake --build build/server-dedup-host --target \
+  test_tilexr_ep_server_dedup_protocol test_tilexr_ep_server_dedup_layout \
+  test_tilexr_ep_server_dedup_host_validation test_tilexr_ep_server_dedup_public_abi \
+  test_tilexr_ep_kernel_launch test_tilexr_ep_server_dedup_counts \
+  test_tilexr_ep_server_dedup_profile test_tilexr_ep_server_dedup_first_hop -j8
+ctest --test-dir build/server-dedup-host --output-on-failure \
+  -R 'test_tilexr_ep_server_dedup_|test_tilexr_ep_kernel_launch$'
+python3 tests/ep/integration/test_server_dedup_chain.py
+```
+
+本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+
+维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。数据 Flag 尚无清理 owner 时只开放单次提交；旧 cnt-only 多轮结果不能作为数据复用证据。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
+
+新增 Host CTest 必须安装并输出与测试名对应的 marker（如 `EP_SERVER_DEDUP_ABI_HOST_PASS test=first_hop`）。EP 自定义链接命令必须依赖 `$<TARGET_OBJECTS:...>`，保证对象重编后最终外部 kernel 重链；生产 Host 库继续相对加载、注册独立 AICore 二进制。CPU 编译/链接和故障注入只证明这些边界，不替代设备验证。
+
 ## 输出和验收范围
 
-以下保留历史检查点说明，原文中的“当前提交/当前阶段”指记录形成时的代码。当前 cnt/cumsum 操作步骤及通过条件以上文为准；不运行下面的旧空 kernel 或 breakdown 验收。
+以下保留历史检查点说明，原文中的“当前提交/当前阶段”指记录形成时的代码。当前第一跳操作步骤及通过条件以上文为准；不运行下面的旧空 kernel 或 breakdown 验收。
 
 ### 每 Rank 4 GiB 通信域与边界访问
 

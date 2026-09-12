@@ -50,11 +50,13 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
     TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype, aclrtStream stream);
 
-// 当前增量仅实现 cnt 发送/接收及 cumsum；A5 固定 64 AIV，成功表示异步提交成功。
+// 当前增量实现 cnt/cumsum 和远端多 route group 的第一跳发送；A5 固定 64 AIV。
 // sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
 // expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
-// hidden 发送/接收和 metadata 生成尚未实现，其输出不可用于 expert/Combine。非 A5 返回 NOT_SUPPORT。
+// DIRECT、接收/转发及最终 expert 输出尚未实现；成功表示异步提交成功。非 A5 返回 NOT_SUPPORT。
+// 当前仅支持新建 communicator 上的单次调用；数据 Flag 清理和跨调用复用尚未启用。
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
+// expertScalesOut 是独立 FP32[bs,topK] 输出；当前仅 sourceMask 中的第一跳首 k 有效，权重为 1.0。
 // groupOut 预留 8*bs 行，行字节数为 align32(4*(1+2*(topK-1)))；sourceMaskOut 仍为 bs 个 uint32。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
@@ -63,7 +65,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     int64_t globalBs, int64_t expertTokenNumsType, void *expandXOut, void *dynamicScalesOut,
     int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
     int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
-    uint32_t *groupOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
+    uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
     aclrtStream stream);
 
 }

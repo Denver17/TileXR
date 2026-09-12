@@ -11,6 +11,7 @@ struct EpMemoryServerDedupParams {
     uint32_t *assistExOut = nullptr;
     uint32_t *sourceMaskOut = nullptr;
     uint32_t *groupOut = nullptr;
+    float *expertScalesOut = nullptr;
 };
 
 int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams &params);

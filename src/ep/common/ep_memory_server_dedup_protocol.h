@@ -27,6 +27,22 @@ struct EpServerDedupGroupMember {
     uint32_t weightBits;
 };
 
+struct EpServerDedupForwardEntry {
+    int32_t destinationExpertId;
+    int32_t destinationQ;
+    int32_t originalK;
+    uint32_t weightBits;
+};
+
+struct EpServerDedupDirectTask {
+    uint32_t tokenOffset;
+    uint32_t originalK;
+    uint32_t expertId;
+    uint32_t q;
+};
+static_assert(sizeof(EpServerDedupForwardEntry) == 16U, "forward entry ABI");
+static_assert(sizeof(EpServerDedupDirectTask) == 16U, "source direct task ABI");
+
 constexpr uint32_t kEpServerDedupGroupMembersOffset = sizeof(int32_t);
 
 static_assert(sizeof(EpServerDedupAssistEx) == 32U, "AssistEx must occupy eight words");

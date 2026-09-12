@@ -21,19 +21,22 @@ int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams
         !IsAligned(p.expertTokenNumsOut, 8U) || !IsAligned(p.epRecvCountsOut, 4U) ||
         !IsAligned(params.assistExOut, 32U) || !IsAligned(params.sourceMaskOut, 4U) ||
         !IsAligned(params.groupOut, 32U) ||
-        !IsAligned(p.expertScales, 4U)) {
+        !IsAligned(p.expertScales, 4U) || !IsAligned(params.expertScalesOut, 4U)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if ((p.dtype != TileXR::TILEXR_DATA_TYPE_FP16 && p.dtype != TileXR::TILEXR_DATA_TYPE_BFP16) ||
-        p.quantMode != 0 || p.activeMaskType != TILEXR_EP_ACTIVE_MASK_NONE || p.xActiveMask != nullptr ||
+        (p.quantMode != 0 && p.quantMode != 4) || p.activeMaskType != TILEXR_EP_ACTIVE_MASK_NONE || p.xActiveMask != nullptr ||
         p.sharedExpertNum != 0 || p.sharedExpertRankNum != 0 ||
         (p.tpWorldSize != 0 && p.tpWorldSize != 1) || p.tpRankId != 0 || p.expertShardType != 0 ||
-        p.scales != nullptr || p.dynamicScalesOut != nullptr || p.tpRecvCountsOut != nullptr ||
+        p.scales != nullptr || p.tpRecvCountsOut != nullptr ||
         p.expandScalesOut != nullptr) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
-    if ((p.expandXOutDtype != TileXR::TILEXR_DATA_TYPE_RESERVED && p.expandXOutDtype != p.dtype) ||
-        p.expertTokenNumsType < kEpExpertTokenNumsTypePrefixSum ||
+    const bool validOutput = p.quantMode == 4 ?
+        ((p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3 || p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E5M2) &&
+         p.dynamicScalesOut != nullptr) :
+        ((p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED || p.expandXOutDtype == p.dtype) && p.dynamicScalesOut == nullptr);
+    if (!validOutput || p.expertTokenNumsType < kEpExpertTokenNumsTypePrefixSum ||
         p.expertTokenNumsType > kEpExpertTokenNumsTypeCount) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
@@ -55,14 +58,22 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     }
     EpMemoryServerDedupLayout next {};
     const int ret = TileXREpBuildMemoryServerDedupLayout(commArgs.rankSize, p.bs, p.h,
-        p.topK, p.moeExpertNum, &next);
+        p.topK, p.moeExpertNum, &next, p.quantMode == 4);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
+    }
+    const uintptr_t weights = reinterpret_cast<uintptr_t>(p.expertScales);
+    const uintptr_t outputWeights = reinterpret_cast<uintptr_t>(params.expertScalesOut);
+    if (next.weightBytes > UINTPTR_MAX - weights || next.weightBytes > UINTPTR_MAX - outputWeights ||
+        (weights < outputWeights + next.weightBytes && outputWeights < weights + next.weightBytes)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (p.globalBs != 0 && (p.globalBs < 0 || static_cast<uint64_t>(p.globalBs) != next.globalBs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    if (commArgs.peerMemBytes < next.countStateBytes) {
+    // The communicator's final 4 MiB are flags, not payload capacity.
+    constexpr uint64_t flagBytes = 4ULL * 1024 * 1024;
+    if (commArgs.peerMemBytes < flagBytes || next.data.requiredBytes > commArgs.peerMemBytes - flagBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {

@@ -46,7 +46,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     int64_t globalBs, int64_t expertTokenNumsType, void *expandXOut, void *dynamicScalesOut,
     int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
     int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
-    uint32_t *groupOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
+    uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
     aclrtStream stream)
 {
     TileXREp::EpMemoryServerDedupParams params {};
@@ -85,5 +85,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     params.assistExOut = assistExOut;
     params.sourceMaskOut = sourceMaskOut;
     params.groupOut = groupOut;
+    params.expertScalesOut = expertScalesOut;
     return DispatchServerDedup(params);
 }

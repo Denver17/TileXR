@@ -3,6 +3,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include "ep_memory_server_dedup_data_layout.h"
 
 namespace TileXREp {
 
@@ -14,6 +15,7 @@ struct EpMemoryServerDedupLayout {
     uint64_t expertIdsBytes = 0;
     uint64_t weightBytes = 0;
     uint64_t expandXBytes = 0;
+    uint64_t dynamicScalesBytes = 0;
     uint64_t expertTokenNumsBytes = 0;
     uint64_t sendCountsBytes = 0;
     uint64_t countStateBytes = 0;
@@ -21,6 +23,7 @@ struct EpMemoryServerDedupLayout {
     uint64_t sourceMaskBytes = 0;
     uint64_t groupRowStrideBytes = 0;
     uint64_t groupBytes = 0;
+    EpServerDedupDataLayout data {};
 };
 
 // Caller-side allocation records only. The public bare-pointer API cannot infer these sizes.
@@ -33,7 +36,7 @@ struct EpServerDedupAllocation {
 };
 
 int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out);
+    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out, bool quantized = false);
 int TileXREpValidateServerDedupAllocations(const EpServerDedupAllocation *allocations,
     std::size_t count, int32_t deviceId);
 

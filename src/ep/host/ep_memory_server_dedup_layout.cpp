@@ -24,14 +24,14 @@ bool MultiplyBytes(uint64_t lhs, uint64_t rhs, uint64_t *out)
 } // namespace
 
 int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out)
+    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out, bool quantized)
 {
     if (out == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     *out = EpMemoryServerDedupLayout {};
     if (rankSize < 16 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
-        rankSize % kEpServerDedupRanksPerServer != 0 || bs <= 0 || h <= 0 ||
+        rankSize % kEpServerDedupRanksPerServer != 0 || bs <= 0 || h <= 0 || h > UINT32_MAX ||
         topK <= 0 || topK > kEpServerDedupMaxTopK || moeExpertNum <= 0 ||
         moeExpertNum > kEpServerDedupMaxExperts || topK > moeExpertNum ||
         moeExpertNum % rankSize != 0 || bs > UINT32_MAX / topK) {
@@ -49,6 +49,7 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
     next.globalBs = static_cast<uint64_t>(rankSize * bs);
     next.localExpertNum = static_cast<uint64_t>(moeExpertNum / rankSize);
     next.countStateBytes = TileXREpServerDedupCountLayout(uint32_t(moeExpertNum)).stateBytes;
+    next.data = TileXREpServerDedupDataLayout(uint32_t(bs), uint32_t(h), uint32_t(topK), uint32_t(moeExpertNum), quantized);
     const uint64_t logicalGroupBytes = kEpServerDedupGroupMembersOffset +
         static_cast<uint64_t>(topK - 1) * sizeof(EpServerDedupGroupMember);
     next.groupRowStrideBytes = (logicalGroupBytes + 31U) / 32U * 32U;
@@ -61,7 +62,8 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
         !MultiplyBytes(bs, topK, &routeCount) ||
         !MultiplyBytes(routeCount, sizeof(int32_t), &next.expertIdsBytes) ||
         !MultiplyBytes(routeCount, sizeof(float), &next.weightBytes) ||
-        !MultiplyBytes(next.capacityRows, rowBytes, &next.expandXBytes) ||
+        !MultiplyBytes(next.capacityRows, quantized ? uint64_t(h) : rowBytes, &next.expandXBytes) ||
+        !MultiplyBytes(next.capacityRows, next.data.scaleBytes, &next.dynamicScalesBytes) ||
         !MultiplyBytes(next.localExpertNum, sizeof(int64_t), &next.expertTokenNumsBytes) ||
         !MultiplyBytes(moeExpertNum, sizeof(int32_t), &next.sendCountsBytes) ||
         !MultiplyBytes(next.capacityRows, sizeof(EpServerDedupAssistEx), &next.assistExBytes) ||

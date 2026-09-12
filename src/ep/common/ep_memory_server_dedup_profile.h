@@ -7,12 +7,11 @@
 
 namespace TileXREp {
 constexpr uint32_t kEpServerDedupProfileMarker = 0x53445046U;
-constexpr uint16_t kEpServerDedupProfileVersion = 2U;
-constexpr uint32_t kEpServerDedupProfilePoints = 7U;
+constexpr uint16_t kEpServerDedupProfileVersion = 3U;
+constexpr uint32_t kEpServerDedupProfilePoints = 8U;
+constexpr uint32_t kEpServerDedupProfileSegments = 2U;
 
-// Count-only increment: an independent trace area immediately follows both
-// count banks and the reserved relay counter. Payload layout must reserve or
-// relocate this area when payload processing is implemented.
+// R07-01 reserves 200 rows of 64B at offset zero. Each of 64 cores uses two rows.
 struct alignas(64) EpServerDedupProfileRecord {
     uint32_t marker;
     uint16_t version;
@@ -20,14 +19,14 @@ struct alignas(64) EpServerDedupProfileRecord {
     uint32_t rank;
     uint32_t core;
     uint32_t blockDim;
-    uint32_t reserved;
+    uint32_t segment;
     uint64_t generation;
-    uint64_t time[kEpServerDedupProfilePoints];
-    uint64_t padding[5];
+    uint64_t time[kEpServerDedupProfilePoints / kEpServerDedupProfileSegments];
 };
 constexpr uint64_t kEpServerDedupProfileBytes =
-    kEpServerDedupCoreNum * sizeof(EpServerDedupProfileRecord);
-static_assert(sizeof(EpServerDedupProfileRecord) == 128U, "count trace record ABI");
+    kEpServerDedupCoreNum * kEpServerDedupProfileSegments * sizeof(EpServerDedupProfileRecord);
+static_assert(sizeof(EpServerDedupProfileRecord) == 64U, "trace row ABI");
+static_assert(kEpServerDedupProfileBytes <= kEpServerDedupProfileReservedBytes, "trace stays within reserved profile region");
 static_assert(offsetof(EpServerDedupProfileRecord, time) == 32U, "count trace timestamp ABI");
 } // namespace TileXREp
 #endif

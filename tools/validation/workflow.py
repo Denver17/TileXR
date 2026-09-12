@@ -31,21 +31,22 @@ DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
 CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
+FIRST_HOP_CHECKPOINT = "ep-sdedup-p2-first-hop"
+FIRST_HOP_MARKER = "EP_SERVER_DEDUP_FIRST_HOP_PASS "
+FIRST_HOP_ABI = {"launch_bytes": 184, "layout": "r07-single", "kernel_scope": "first_hop"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 4 * 1024 ** 3
 MEMORY_BOUNDARY_BYTES = SERVER_DEDUP_PEER_BYTES
-CHAIN_CHECKPOINTS = (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
+CHAIN_CHECKPOINTS = (FIRST_HOP_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
-SINGLE_ROUND_MARKER = "EP_SERVER_DEDUP_SINGLE_ROUND_PASS "
-MULTI_ROUND_MARKER = "EP_SERVER_DEDUP_MULTI_ROUND_PASS "
 BREAKDOWN_MARKER = "EP_SERVER_DEDUP_BREAKDOWN_PASS "
 RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, *CHAIN_CHECKPOINTS)
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
-    "test_tilexr_ep_server_dedup_counts",
+    "test_tilexr_ep_server_dedup_counts", "test_tilexr_ep_server_dedup_first_hop",
     "test_dispatch_memory_trace", "test_msprof_kernel_stats", "test_tilexr_ep_layout",
     "test_tilexr_ep_expert_ids", "test_tilexr_ep_host_validation", "test_tilexr_ep_kernel_launch",
     "test_tilexr_moonep_planner_public_abi", "test_tilexr_ep_plan_layout", "test_tilexr_ep_plan_reference",
@@ -262,11 +263,13 @@ class Config:
         self.user = os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
+        if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT):
+            raise ValueError("旧 cnt-only checkpoint 已由 ep-sdedup-p2-first-hop 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
             raise ValueError("不支持的 checkpoint：" + self.checkpoint)
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
-            raise ValueError("empty-kernel / chain-single / chain-multi 必须使用 production 模式验证真实 A5 artifact 和设备调用")
+            raise ValueError("empty-kernel / first-hop / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
         if self.user and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.user):
@@ -309,6 +312,13 @@ class Config:
         return signature
 
 
+def first_hop_stride(config):
+    h, k = config["h"], config["topk"]
+    data = ((h + 255) // 256 * 256 + (h + 63) // 64 * 2) if config["quant_mode"] == 4 else h * 2
+    payload = (data + 31) // 32 * 32 + (32 + 16 * (k - 1) + 31) // 32 * 32
+    return (payload + 479) // 480 * 512
+
+
 def chain_configuration(checkpoint):
     if checkpoint == MEMORY_BOUNDARY_CHECKPOINT and (
             os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional" or
@@ -321,23 +331,28 @@ def chain_configuration(checkpoint):
         raise ValueError("chain 检查点 shape 必须是正 int64，topk<=32")
     dtype = os.environ.get("TILEXR_VALIDATION_DTYPE", "bf16")
     quant_mode = os.environ.get("TILEXR_VALIDATION_QUANT_MODE", "0")
-    if quant_mode not in ("0", "3", "4"):
-        raise ValueError("QUANT_MODE 必须为 0（非量化）、3（MXFP8 E5M2）或 4（MXFP8 E4M3）")
+    if quant_mode not in ("0", "4"):
+        raise ValueError("QUANT_MODE 必须为 0（非量化）或 4（MXFP8），FP8_FORMAT 选择 e4m3/e5m2")
+    fp8_format = os.environ.get("TILEXR_VALIDATION_FP8_FORMAT", "e4m3")
+    if fp8_format not in ("e4m3", "e5m2"):
+        raise ValueError("FP8_FORMAT 必须为 e4m3/e5m2")
     block_dim = os.environ.get("TILEXR_VALIDATION_BLOCK_DIM", "auto")
     if dtype not in ("bf16", "fp16") or (block_dim != "auto" and
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
         raise ValueError("chain 检查点 dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
     run_mode, loops, warmup = "functional", 1, 0
-    if checkpoint == CHAIN_MULTI_CHECKPOINT:
+    if checkpoint == FIRST_HOP_CHECKPOINT:
         run_mode = os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional")
         if run_mode not in ("functional", "performance", "breakdown"):
             raise ValueError("RUN_MODE 必须为 functional/performance/breakdown")
-        loops = int(os.environ.get("TILEXR_VALIDATION_LOOPS", "1" if run_mode == "functional" else "50"))
-        warmup = int(os.environ.get("TILEXR_VALIDATION_WARMUP", "0" if run_mode == "functional" else "50"))
+        loops = int(os.environ.get("TILEXR_VALIDATION_LOOPS", "1"))
+        warmup = int(os.environ.get("TILEXR_VALIDATION_WARMUP", "0"))
         if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
             raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
-        if run_mode == "functional" and warmup != 0:
-            raise ValueError("functional 模式不执行 warmup，请使用 warmup=0")
+        if loops != 1 or warmup != 0:
+            raise ValueError("第一跳发送当前仅支持 loops=1、warmup=0；接收清理及跨调用复用尚未启用")
+        if block_dim not in ("auto", "64"):
+            raise ValueError("第一跳发送固定 48/16 核组，block_dim 必须为 auto/64")
 
     def endpoint(value, name):
         try:
@@ -355,9 +370,9 @@ def chain_configuration(checkpoint):
                             "TILEXR_DEMO_BARRIER_ADDR")
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
-    chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
+    chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode="balance_shift", seed=2026, kernel_scope="cnt_cumsum")
+                 route_mode="balance_shift", seed=2026, kernel_scope="first_hop")
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -462,13 +477,15 @@ def verify_build(config, *, check_run_mode=True):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
-    if config.checkpoint == CHAIN_MULTI_CHECKPOINT:
+    if config.checkpoint == FIRST_HOP_CHECKPOINT:
+        if manifest.get("server_dedup_contract") != FIRST_HOP_ABI:
+            raise ValueError("需要第一跳发送 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
-        if profiling and manifest.get("server_dedup_profile_version") != 2:
-            raise ValueError("需要 cnt/cumsum breakdown v2 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
+        if profiling and manifest.get("server_dedup_profile_version") != 3:
+            raise ValueError("需要第一跳发送 breakdown v3 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -574,10 +591,11 @@ def build(config):
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""), "tests": tests,
                 "artifacts": artifact_files(stage)}
-    if config.checkpoint == CHAIN_MULTI_CHECKPOINT:
+    if config.checkpoint == FIRST_HOP_CHECKPOINT:
+        manifest["server_dedup_contract"] = dict(FIRST_HOP_ABI)
         manifest["server_dedup_profiling"] = config.chain["run_mode"] == "breakdown"
         if manifest["server_dedup_profiling"]:
-            manifest["server_dedup_profile_version"] = 2
+            manifest["server_dedup_profile_version"] = 3
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
@@ -603,6 +621,7 @@ def remote_argv(config, host, action, *arguments):
             "TILEXR_VALIDATION_MOE_EXPERT_NUM": config.chain.get("moe_expert_num") if config.chain else None,
             "TILEXR_VALIDATION_DTYPE": config.chain.get("dtype") if config.chain else None,
             "TILEXR_VALIDATION_QUANT_MODE": config.chain.get("quant_mode") if config.chain else None,
+            "TILEXR_VALIDATION_FP8_FORMAT": config.chain.get("fp8_format") if config.chain else None,
             "TILEXR_VALIDATION_BLOCK_DIM": config.chain.get("block_dim") if config.chain else None,
             "TILEXR_VALIDATION_LOOPS": config.chain.get("loops") if config.chain else None,
             "TILEXR_VALIDATION_WARMUP": config.chain.get("warmup") if config.chain else None,
@@ -756,9 +775,21 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         if chain:
             linked = record["chain"]
             loops = 1
-            if manifest["checkpoint"] == CHAIN_MULTI_CHECKPOINT:
+            if manifest["checkpoint"] == FIRST_HOP_CHECKPOINT:
                 if chain_config is None:
-                    raise Failure("RESULT_FAILED", "缺少本次多轮配置", rank=mapping["rank"])
+                    raise Failure("RESULT_FAILED", "缺少本次第一跳配置", rank=mapping["rank"])
+                for key in ("quant_mode", "fp8_format", "kernel_scope"):
+                    if record.get(key) != chain_config[key]:
+                        raise Failure("RESULT_FAILED", "第一跳实际类型或范围不一致", rank=mapping["rank"], field=key)
+                stride = first_hop_stride(chain_config)
+                if (any(record.get(key) is not True for key in
+                        ("first_hop_validated", "source_outputs_validated", "weights_unchanged")) or
+                        record.get("native_status") != "first_hop" or record.get("direct_packets") != 0 or
+                        record.get("token_stride") != stride or
+                        any(type(record.get(key)) is not int or record[key] < 0 for key in
+                            ("first_hop_packets", "first_hop_received", "first_hop_bytes")) or
+                        record["first_hop_bytes"] != record["first_hop_packets"] * stride):
+                    raise Failure("RESULT_FAILED", "第一跳包或源端输出缺少完整校验", rank=mapping["rank"])
                 loops = chain_config["loops"]
                 for marker in (record, linked):
                     if any(marker.get(key) != chain_config[key] for key in ("run_mode", "loops", "warmup")):
@@ -775,7 +806,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] != SERVER_DEDUP_PEER_BYTES or
                     linked["pid"] != record["pid"] or any(type(record.get(key)) is not int or record[key] != loops
                         for key in ("submitted", "completed")) or record.get("cleanup") != "complete"):
-                raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、指定轮数空 launch 或资源清理",
+                raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、指定轮数 launch 或资源清理",
                               rank=mapping["rank"])
             if manifest["checkpoint"] == MEMORY_BOUNDARY_CHECKPOINT:
                 expected_numbers = {"peer_mem_bytes": MEMORY_BOUNDARY_BYTES,
@@ -817,8 +848,11 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
                 env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
-                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "loops", "warmup", "run_mode"):
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format", "loops", "warmup", "run_mode"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
+                inputs = log.parent / "inputs"
+                inputs.mkdir(parents=True, exist_ok=True)
+                env["TILEXR_VALIDATION_INPUT_DIR"] = str(inputs)
                 env["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 env["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
                 block_dim = "TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"
@@ -832,7 +866,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                             "--output=" + str(profile_dir)]
             output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
             if config.checkpoint in CHAIN_CHECKPOINTS:
-                marker = MULTI_ROUND_MARKER if config.checkpoint == CHAIN_MULTI_CHECKPOINT else SINGLE_ROUND_MARKER
+                marker = FIRST_HOP_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
                     marker = MEMORY_BOUNDARY_MARKER
                 record = parse_rank_marker(output, marker)
@@ -1194,8 +1228,7 @@ def run(config):
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
     elif config.checkpoint in CHAIN_CHECKPOINTS:
-        rounds = "单轮" if config.checkpoint == CHAIN_CHECKPOINT else f"{config.chain['loops']} 轮"
-        scope += f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、{rounds} cnt/cumsum 数值校验、整批 stream 同步与 Host barrier；不包含 Token 数据发送/接收或 Combine。"
+        scope += f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、单轮 cnt/cumsum、第一跳包 hidden/scale/尾表/q/全部 Flag、源端 mask/权重及只读输入校验；DIRECT、接收转发及 Combine 尚未启用。"
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],

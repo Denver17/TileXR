@@ -11,6 +11,7 @@
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
 #include "ep_memory_server_dedup_profile.h"
+#include "server_dedup_first_hop_fixture.h"
 
 namespace {
 int deviceId = 0;
@@ -18,12 +19,13 @@ int rankId = -1;
 TileXR::CommArgs args;
 std::map<void *, void *> allocations;
 std::map<std::string, uint64_t> calls;
-std::array<void *, 9> firstBuffers {};
+std::vector<void *> firstBuffers;
+std::map<uintptr_t, std::vector<uint8_t>> packets;
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
 alignas(32) std::array<uint8_t, 32> localPeer {};
-std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum> countProfile {};
-uint64_t countProfileOffset = 0;
+std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum * 2> countProfile {};
+bool profileReady = false;
 int Call(const char *name)
 {
     const uint64_t count = ++calls[name];
@@ -82,13 +84,26 @@ aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 }
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
-    if (countProfileOffset && source == args.peerMems[rankId] + countProfileOffset && bytes == sizeof(countProfile)) {
+    if (profileReady && source == args.peerMems[rankId] && bytes == sizeof(countProfile)) {
         std::memcpy(destination, countProfile.data(), bytes);
         return Call("breakdown-read");
     }
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
         return Call("boundary-host-read");
+    }
+    const uintptr_t address = reinterpret_cast<uintptr_t>(source);
+    const uintptr_t peer = rankId < 0 ? 0 : reinterpret_cast<uintptr_t>(args.peerMems[rankId]);
+    if (peer && address >= peer && address - peer < args.peerMemBytes) {
+        const auto found = packets.find(address);
+        if (found != packets.end() && bytes == found->second.size())
+            std::memcpy(destination, found->second.data(), bytes);
+        else {
+            const auto flags = packets.find(address - 480U);
+            if (bytes == 32U && flags != packets.end()) std::memcpy(destination, flags->second.data() + 480U, bytes);
+            else std::memset(destination, 0, bytes);
+        }
+        return Call("packet-read");
     }
     std::memcpy(destination, source, bytes);
     if (source == &args && std::getenv("TEST_DEVICE_MAPPING_MISMATCH") != nullptr) {
@@ -138,18 +153,20 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     int64_t shard, int64_t shared, int64_t sharedRanks, int64_t quant, int64_t globalBs,
     int64_t countType, void *expandX, void *dynamic, int32_t *assist, int64_t *counts,
     int32_t *sendCounts, int32_t *tpCounts, void *expandScales, uint32_t *assistEx,
-    uint32_t *sourceMask, uint32_t *group, TileXR::TileXRDataType dtype,
+    uint32_t *sourceMask, uint32_t *group, float *weightsOut, TileXR::TileXRDataType dtype,
     TileXR::TileXRDataType outDtype, aclrtStream stream)
 {
     if (x == nullptr || ids == nullptr || comm != &args || bs != 2 || h != 16 || topK != 3 ||
         experts != world * 2 || rank != rankId || tpWorld != 1 || tpRank != 0 || shard != 0 ||
-        shared != 0 || sharedRanks != 0 || quant != 0 || globalBs != world * bs || (countType != 0 && countType != 1) ||
-        maskType != 0 || scales != nullptr || mask != nullptr || weights == nullptr || dynamic != nullptr ||
+        shared != 0 || sharedRanks != 0 || (quant != 0 && quant != 4) || globalBs != world * bs || (countType != 0 && countType != 1) ||
+        maskType != 0 || scales != nullptr || mask != nullptr || weights == nullptr || (quant == 4 ? dynamic == nullptr : dynamic != nullptr) ||
         assist != nullptr || tpCounts != nullptr || expandScales != nullptr || expandX == nullptr ||
         counts == nullptr || sendCounts == nullptr || assistEx == nullptr || sourceMask == nullptr ||
-        group == nullptr || stream != reinterpret_cast<void *>(0x20) || outDtype != TileXR::TILEXR_DATA_TYPE_RESERVED ||
+        group == nullptr || weightsOut == nullptr || weightsOut == weights || stream != reinterpret_cast<void *>(0x20) || (quant == 0 ? outDtype != TileXR::TILEXR_DATA_TYPE_RESERVED :
+            (outDtype != TileXR::TILEXR_DATA_TYPE_FP8E4M3 && outDtype != TileXR::TILEXR_DATA_TYPE_FP8E5M2)) ||
         (dtype != TileXR::TILEXR_DATA_TYPE_FP16 && dtype != TileXR::TILEXR_DATA_TYPE_BFP16)) { return 92; }
-    const std::array<void *, 9> current {{x, ids, expandX, counts, sendCounts, assistEx, sourceMask, group, weights}};
+    std::vector<void *> current {x, ids, expandX, counts, sendCounts, assistEx, sourceMask, group, weights, weightsOut};
+    if (dynamic) current.push_back(dynamic);
     if (calls["launch"] == 0) { firstBuffers = current; }
     if (current != firstBuffers || allocations.size() != current.size() || calls["comm-init"] != 1 ||
         calls["create-stream"] != 1) { return 92; }
@@ -169,15 +186,15 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
         if (mode && std::strcmp(mode, "breakdown") == 0) {
             using namespace TileXREp;
-            countProfileOffset = TileXREpServerDedupCountLayout(uint32_t(experts)).stateBytes;
-            for (uint32_t core = 0; core < kEpServerDedupCoreNum; ++core) {
+            profileReady = true;
+            for (uint32_t core = 0; core < kEpServerDedupCoreNum * 2U; ++core) {
                 auto &p = countProfile[core];
                 p = EpServerDedupProfileRecord {};
                 p.marker = kEpServerDedupProfileMarker; p.version = kEpServerDedupProfileVersion;
-                p.recordBytes = sizeof(p); p.rank = uint32_t(rank); p.core = core;
+                p.recordBytes = sizeof(p); p.rank = uint32_t(rank); p.core = core / 2U; p.segment = core % 2U;
                 p.blockDim = kEpServerDedupCoreNum; p.generation = calls["launch"];
-                for (uint32_t i = 0; i < kEpServerDedupProfilePoints; ++i)
-                    p.time[i] = calls["launch"] * 1000 + core + i * 10;
+                for (uint32_t i = 0; i < 4U; ++i)
+                    p.time[i] = calls["launch"] * 1000 + core / 2U + (p.segment * 4U + i) * 10;
             }
             const char *fault = std::getenv("TEST_PROFILE_FAULT");
             if (fault) {
@@ -187,6 +204,40 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
                 if (std::strcmp(fault, "legacy") == 0) p.version = 1;
                 if (std::strcmp(fault, "core") == 0) p.core = 1;
                 if (std::strcmp(fault, "time") == 0) p.time[3] = p.time[2] - 1;
+            }
+        }
+        using namespace ServerDedupReference;
+        const Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
+            dtype == TileXR::TILEXR_DATA_TYPE_BFP16, quant == 4, outDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3};
+        const auto layout = TileXREp::TileXREpServerDedupDataLayout(shape.bs, shape.h, shape.k, shape.experts, shape.quantized);
+        std::fill(sourceMask, sourceMask + bs, 0);
+        for (uint32_t source = 0; source < shape.ranks; ++source) {
+            const auto expected = FirstHops(Ids(shape, source), Weights(shape, source), source, shape.ranks, shape.experts, shape.k);
+            for (const auto &packet : expected) {
+                const auto &first = packet.members[0];
+                if (source == uint32_t(rank)) {
+                    sourceMask[packet.token] |= uint32_t(1) << first.k;
+                    weightsOut[packet.token * topK + first.k] = 1.0f;
+                }
+                const uint32_t local = shape.experts / shape.ranks;
+                if (first.expert / local != uint32_t(rank)) continue;
+                const auto offset = TileXREp::TileXREpServerDedupDispatchOffset(layout, source, rank,
+                    first.expert % local, first.q, shape.ranks, local, shape.bs);
+                packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) + offset] = Pack(Payload(shape, source, packet, layout));
+            }
+        }
+        const char *packetFault = std::getenv("TEST_PACKET_FAULT");
+        if (packetFault) {
+            const std::string fault(packetFault);
+            if (fault == "mask") sourceMask[0] ^= 1U;
+            if (fault == "input-weight") static_cast<float *>(weights)[0] += 1.0f;
+            if (fault == "source-weight") std::fill(weightsOut, weightsOut + bs * topK, 0.0f);
+            for (auto &packet : packets) {
+                uint64_t offset = 0;
+                if (fault == "flag") offset = packet.second.size() - 4U;
+                if (fault == "tail-q") offset = (layout.tailOffset + 36U) / 480U * 512U + (layout.tailOffset + 36U) % 480U;
+                if (fault == "header-weight") offset = (layout.tailOffset + 12U) / 480U * 512U + (layout.tailOffset + 12U) % 480U;
+                if (fault == "flag" || fault == "tail-q" || fault == "header-weight" || fault == "hidden") packet.second[offset] ^= 1U;
             }
         }
         const char *fault = std::getenv("TEST_COUNT_FAULT");

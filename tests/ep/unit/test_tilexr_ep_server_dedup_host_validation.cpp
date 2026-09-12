@@ -51,6 +51,7 @@ EpMemoryServerDedupParams ValidParams()
     params.assistExOut = reinterpret_cast<uint32_t *>(0xB000);
     params.sourceMaskOut = reinterpret_cast<uint32_t *>(0xC004);
     params.groupOut = reinterpret_cast<uint32_t *>(0xD000);
+    params.expertScalesOut = reinterpret_cast<float *>(0xF000);
     return params;
 }
 
@@ -63,7 +64,7 @@ int Invoke(const EpMemoryServerDedupParams &params)
         p.sharedExpertNum, p.sharedExpertRankNum, p.quantMode, p.globalBs, p.expertTokenNumsType,
         p.expandXOut, p.dynamicScalesOut, p.assistInfoForCombineOut, p.expertTokenNumsOut,
         p.epRecvCountsOut, p.tpRecvCountsOut, p.expandScalesOut, params.assistExOut,
-        params.sourceMaskOut, params.groupOut, p.dtype, p.expandXOutDtype, p.stream);
+        params.sourceMaskOut, params.groupOut, params.expertScalesOut, p.dtype, p.expandXOutDtype, p.stream);
 }
 
 void CheckRejected(const EpMemoryServerDedupParams &params, int expected)
@@ -114,7 +115,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
 int main()
 {
     g_commArgs.rankSize = 64;
-    g_commArgs.peerMemBytes = 230400;
+    g_commArgs.peerMemBytes = 4ULL * 1024 * 1024 * 1024;
     g_commArgs.rank = 9;
     for (auto &peer : g_commArgs.peerMems) {
         peer = reinterpret_cast<GM_ADDR>(0xE000);
@@ -129,7 +130,8 @@ int main()
     Check(captured.expandXOut == p.expandXOut && captured.expertTokenNumsOut == p.expertTokenNumsOut &&
         captured.epRecvCountsOut == p.epRecvCountsOut, "original output pointers forwarded");
     Check(g_submitted.assistExOut == valid.assistExOut && g_submitted.sourceMaskOut == valid.sourceMaskOut &&
-        g_submitted.groupOut == valid.groupOut, "three metadata pointers retain their order");
+        g_submitted.groupOut == valid.groupOut && g_submitted.expertScalesOut == valid.expertScalesOut,
+        "metadata and independent weight output retain their order");
     Check(captured.bs == 4 && captured.h == 13 && captured.topK == 6 && captured.moeExpertNum == 192 &&
         captured.globalBs == 256 && captured.epRankId == 9 && captured.epWorldSize == 64 &&
         captured.tpWorldSize == 1 && captured.expertTokenNumsType == 1, "shape and count settings forwarded");
@@ -139,7 +141,7 @@ int main()
         g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 2048,
         "validated context and bounded output layout forwarded");
 
-    for (int test = 0; test < 29; ++test) {
+    for (int test = 0; test < 36; ++test) {
         auto params = valid;
         auto &v = params.dispatch;
         int error = TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -173,8 +175,30 @@ int main()
             case 26: v.expertTokenNumsOut = reinterpret_cast<int64_t *>(0x7004); break;
             case 27: v.h = std::numeric_limits<int64_t>::max(); break;
             case 28: v.expertScales = nullptr; break;
+            case 29: params.expertScalesOut = nullptr; break;
+            case 30: params.expertScalesOut = reinterpret_cast<float *>(0xF001); break;
+            case 31: v.quantMode = 4; v.dynamicScalesOut = reinterpret_cast<void *>(0x11000); break;
+            case 32: v.dynamicScalesOut = reinterpret_cast<void *>(0x11000); break;
+            case 33: params.expertScalesOut = static_cast<float *>(v.expertScales); break;
+            case 34: params.expertScalesOut = static_cast<float *>(v.expertScales) + 1; break;
+            case 35: params.expertScalesOut = reinterpret_cast<float *>(UINTPTR_MAX - 3U); break;
         }
         CheckRejected(params, error);
+    }
+
+    for (auto dtype : {TILEXR_DATA_TYPE_FP16, TILEXR_DATA_TYPE_BFP16}) {
+        for (auto outType : {TILEXR_DATA_TYPE_FP8E4M3, TILEXR_DATA_TYPE_FP8E5M2}) {
+            auto quantized = valid;
+            quantized.dispatch.dtype = dtype;
+            quantized.dispatch.quantMode = 4;
+            quantized.dispatch.expandXOutDtype = outType;
+            quantized.dispatch.dynamicScalesOut = reinterpret_cast<void *>(0x11000);
+            Check(Invoke(quantized) == TILEXR_SUCCESS && g_layout.dynamicScalesBytes > 0 &&
+                g_submitted.dispatch.dynamicScalesOut == quantized.dispatch.dynamicScalesOut,
+                "both input and FP8 types pass the existing quantization ABI");
+            quantized.dispatch.dynamicScalesOut = nullptr;
+            CheckRejected(quantized, TILEXR_ERROR_PARA_CHECK_FAIL);
+        }
     }
     for (int test = 0; test < 12; ++test) {
         auto params = valid;
@@ -187,10 +211,10 @@ int main()
             case 4: v.tpWorldSize = 2; break;
             case 5: v.tpRankId = 1; break;
             case 6: v.expertShardType = 1; break;
-            case 7: v.quantMode = 4; break;
+            case 7: v.quantMode = 3; break;
             case 8: v.dtype = TILEXR_DATA_TYPE_FP32; break;
             case 9: v.scales = reinterpret_cast<void *>(0x1000); break;
-            case 10: v.dynamicScalesOut = reinterpret_cast<void *>(0x1000); break;
+            case 10: v.expandScalesOut = reinterpret_cast<void *>(0x1000); break;
             case 11: v.tpRecvCountsOut = reinterpret_cast<int32_t *>(0x1000); break;
         }
         CheckRejected(params, TILEXR_ERROR_NOT_SUPPORT);
@@ -221,10 +245,10 @@ int main()
     g_commArgs.peerMems[63] = nullptr;
     CheckRejected(valid, TILEXR_ERROR_NOT_INITIALIZED);
     g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(0xE000);
-    g_commArgs.peerMemBytes = g_layout.countStateBytes - 1;
+    g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024 - 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    g_commArgs.peerMemBytes = g_layout.countStateBytes;
-    Check(Invoke(valid) == TILEXR_SUCCESS, "exact count state capacity accepted");
+    g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024;
+    Check(Invoke(valid) == TILEXR_SUCCESS, "exact data domain plus flag capacity accepted");
     g_commArgs.peerMems[63] += 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMems[63] -= 1;

@@ -8,11 +8,16 @@
 #include <memory>
 #include <stdexcept>
 #include <vector>
+#include <array>
 
 #define __aicore__
 #define __global__
 #define __gm__
+#define __ubuf__
+#define __mix__(a, b)
 #define GM_ADDR uint8_t *
+using half = uint16_t;
+using bfloat16_t = uint16_t;
 
 namespace AscendC {
 extern uint32_t testCore;
@@ -24,11 +29,22 @@ template<class A, class B> inline uint32_t Ceil(A a, B b) { return uint32_t((a +
 enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S };
 enum Pipeline { PIPE_ALL, PIPE_V, PIPE_MTE3 };
 using TEventID = uint32_t;
-template<HardEvent> void SetFlag(TEventID) {}
-template<HardEvent> void WaitFlag(TEventID) {}
+template<HardEvent> std::array<bool, 8> &Events() { static std::array<bool, 8> state {}; return state; }
+template<HardEvent E> void SetFlag(TEventID id) {
+    if (id >= 8 || Events<E>()[id]) throw std::runtime_error("duplicate or invalid event publication");
+    Events<E>()[id] = true;
+}
+template<HardEvent E> void WaitFlag(TEventID id) {
+    if (id >= 8 || !Events<E>()[id]) throw std::runtime_error("waiting on an unpublished event");
+    Events<E>()[id] = false;
+}
 template<Pipeline> void PipeBarrier() {}
 template<int, int> int64_t GetCtrlSpr() { return 0; }
 template<int, int> void SetCtrlSpr(int64_t) {}
+inline void SyncAll() {}
+enum class RoundMode { CAST_TRUNC, CAST_RINT };
+struct fp8_e4m3fn_t {};
+struct fp8_e5m2_t {};
 
 struct Storage { std::vector<uint8_t> bytes; bool alive = true; };
 template<class T> struct LocalTensor {
@@ -42,6 +58,7 @@ template<class T> struct LocalTensor {
     T GetValue(std::size_t i) const { T value; std::memcpy(&value, Data((i + 1) * sizeof(T)) + i * sizeof(T), sizeof(T)); return value; }
     void SetValue(std::size_t i, T value) const { std::memcpy(Data((i + 1) * sizeof(T)) + i * sizeof(T), &value, sizeof(T)); }
     T operator()(std::size_t i) const { return GetValue(i); }
+    uint64_t GetPhyAddr() const { return reinterpret_cast<uint64_t>(Data(0)); }
     LocalTensor operator[](std::size_t i) const { return {storage, offset + i * sizeof(T)}; }
     template<class U> LocalTensor<U> ReinterpretCast() const { return {storage, offset}; }
 };
@@ -58,6 +75,35 @@ template<int = 0> struct TBuf {
     template<class T> LocalTensor<T> Get() { return {storage, 0}; }
     template<class T> LocalTensor<T> GetWithOffset(uint32_t, uint32_t offset) { return {storage, offset}; }
 };
+enum class QuePosition { VECIN };
+enum class TPosition { VECIN };
+template<QuePosition, int> struct TQue {
+    std::vector<LocalTensor<uint8_t>> slots;
+    uint32_t next = 0, state = 0;
+    template<class T> LocalTensor<T> AllocTensor() {
+        if (state != 0) throw std::runtime_error("queue slot reused before FreeTensor");
+        state = 1; return slots.at(next).template ReinterpretCast<T>();
+    }
+    template<class T> void EnQue(LocalTensor<T>) {
+        if (state != 1) throw std::runtime_error("queue enqueue order");
+        state = 2;
+    }
+    template<class T> LocalTensor<T> DeQue() {
+        if (state != 2) throw std::runtime_error("queue dequeue order");
+        state = 3; return slots.at(next).template ReinterpretCast<T>();
+    }
+    template<class T> void FreeTensor(LocalTensor<T>) {
+        if (state != 3) throw std::runtime_error("queue free order");
+        state = 0; next = (next + 1) % slots.size();
+    }
+};
+template<TPosition> struct TBufPool {
+    std::shared_ptr<Storage> storage;
+    template<QuePosition Q, int N> void InitBuffer(TQue<Q, N> &q, uint32_t count, uint32_t size) {
+        for (uint32_t i = 0; i < count; ++i) q.slots.push_back({storage, uint64_t(i) * size});
+    }
+    void InitBuffer(TBuf<> &b, uint32_t) { b.storage = storage; }
+};
 struct TPipe {
     std::vector<std::shared_ptr<Storage>> buffers;
     uint64_t bytes = 0;
@@ -69,10 +115,22 @@ struct TPipe {
         bytes += size;
     }
     TEventID FetchEventID(HardEvent) { return 0; }
+    template<TPosition P> void InitBufPool(TBufPool<P> &pool, uint32_t size) {
+        TBuf<> b; InitBuffer(b, size); pool.storage = b.storage;
+    }
+    template<TPosition P> void InitBufPool(TBufPool<P> &pool, uint32_t, TBufPool<P> &other) { pool.storage = other.storage; }
     void Reset() { for (auto &b : buffers) b->alive = false; buffers.clear(); bytes = 0; }
 };
 struct DataCopyParams { uint16_t blockCount, blockLen, srcStride, dstStride; };
 struct DataCopyExtParams { uint16_t blockCount; uint32_t blockLen, srcStride, dstStride, rsv; };
+struct CopyRepeatParams { uint8_t dstBlkStride, srcBlkStride, dstRepStride, srcRepStride; };
+template<class T> void Copy(LocalTensor<T> dst, LocalTensor<T> src, uint64_t mask, uint8_t repeats, CopyRepeatParams p) {
+    for (uint32_t r = 0; r < repeats; ++r) for (uint32_t i = 0; i < mask; ++i) {
+        const uint32_t block = i / (32 / sizeof(T)), within = i % (32 / sizeof(T));
+        dst.SetValue((r * p.dstRepStride + block * p.dstBlkStride) * 32 / sizeof(T) + within,
+            src.GetValue((r * p.srcRepStride + block * p.srcBlkStride) * 32 / sizeof(T) + within));
+    }
+}
 template<class T> struct DataCopyPadExtParams { bool isPad; uint8_t leftPadding, rightPadding; T paddingValue; };
 template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, DataCopyParams p) {
     ++testCopies;

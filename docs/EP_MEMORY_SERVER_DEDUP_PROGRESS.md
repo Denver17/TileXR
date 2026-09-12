@@ -1,6 +1,6 @@
 # EP Memory Server Dedup 调试进度
 
-只记录检查点的服务器通过结果和对应 commit；完整命令见[七步验证](EP_VALIDATION_GUIDE.md)。
+记录检查点的服务器通过结果及当前增量状态；完整命令见[人工验证](EP_VALIDATION_GUIDE.md)。
 通过范围按实际配置登记，64P/128P 与目标 Linux 卡住/HUP 清理演练仍待验证。
 
 ## 阶段 1：Dispatch 公共框架与空算子
@@ -35,12 +35,16 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 | 检查方向 | 状态 | 通过 commit |
 | --- | --- | --- |
 | cnt 发送/接收、cumsum | 用户确认最新提交验收通过 | [0bc6f1b](https://github.com/LingquLab/TileXR/commit/0bc6f1bbe64f25ab21a8fae23e70eed797dc48a5) |
-| server grouping / 第一跳 | 未开始 | — |
+| server grouping / 第一跳 | §2.3 实现及本地验证完成，CANN/A5 待验收 | — |
 | relay 展开 / metadata | 未开始 | — |
 | Dispatch correctness / 完整验收 | 未开始 | — |
 
 2026-09-12：依据用户“最新的提交验证通过”回传，按当前最新提交 `0bc6f1b` 登记 cnt/cumsum 检查点通过。
 未直接读取本次 summary；具体规模、模式、轮次及性能数据以实际运行结果为准，不扩展为 Token 数据发送或完整 Dispatch 验收通过。
+
+2026-09-12：用户确认“阶段 1 的第一个部分”测试通过并要求实现第二部分；按当前设计验证流程 §2.3 接入第一跳发送。该反馈延续已有 cnt/cumsum 基线，未读取新 summary，不推断额外 dtype、规模或时延。
+
+新的 `ep-sdedup-p2-first-hop` 开放单次 functional/performance/breakdown（loops=1、warmup=0）；固定 16P/L6/BS96/H7168/K6/BF16/balance_shift/seed2026、每 rank 4 GiB。实现在线分组、原始 q、第一跳完整包及源端输出，DIRECT 表仅构建；数据接收转发和 Combine 未实现。本地验证覆盖非量化 sender、184B ABI、单份布局、consumer 错包诊断和 v3 trace，不能作为 CANN/A5 通过记录。
 
 ## 阶段 3：Combine 空算子工程
 
@@ -59,4 +63,4 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 | source 归约 | 未开始 | — |
 | correctness / 性能验收 | 未开始 | — |
 
-阶段 2–4 仅保留既有方向，检查点边界待设计确认；当前仅执行 Dispatch 单算子。
+后续阶段按最新设计逐模块推进；当前仅交付 Dispatch 第一跳检查点，完整数据多轮复用仍待接收清理契约。

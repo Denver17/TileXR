@@ -204,6 +204,10 @@ void TestServerDedupRuntimeLaunch()
     params.assistExOut = reinterpret_cast<uint32_t *>(0x9000);
     params.sourceMaskOut = reinterpret_cast<uint32_t *>(0xa000);
     params.groupOut = reinterpret_cast<uint32_t *>(0xb000);
+    params.expertScalesOut = reinterpret_cast<float *>(0xc000);
+    p.dynamicScalesOut = reinterpret_cast<void *>(0xd000);
+    p.quantMode = 4;
+    p.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_FP8E5M2;
     TileXREp::EpMemoryServerDedupLayout layout {};
     layout.globalBs = 64 * 256;
     auto launch = [&]() { return TileXREp::TileXREpLaunchDispatchMemoryServerDedupKernel(params, context, layout); };
@@ -260,11 +264,11 @@ void TestServerDedupRuntimeLaunch()
     ResetCapture();
     gVectorCores = 64;
     Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
-    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 20);
+    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 23);
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
-        0x1000, 0x2000, 0x3000, 0x5000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000,
-        256, 7168, 6, 384, 64 * 256, 1, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.dtype), kNextMagic};
-    Check(gLaunches[0].args == expected, "all twenty kernel arguments preserve order, widths and values");
+        0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
+        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic};
+    Check(gLaunches[0].args == expected, "all 23 kernel arguments preserve order, widths and values (184B)");
     Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
@@ -285,10 +289,12 @@ void TestServerDedupRuntimeLaunch()
     ResetCapture();
     gVectorCores = 96;
     p.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
+    p.quantMode = 0;
+    p.dynamicScalesOut = nullptr;
     p.expandXOutDtype = p.dtype;
     p.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0xc000);
     Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches[0].blockDim == 64 &&
-        gLaunches[0].args[7] == 0xc000 && gLaunches[0].args[18] == static_cast<uint64_t>(p.dtype),
+        gLaunches[0].args[8] == 0xc000 && gLaunches[0].args[21] == static_cast<uint64_t>(p.dtype),
         "larger devices retain fixed 48/16 partition and explicit FP16 ABI");
     ResetCapture();
     gVectorCores = 64;

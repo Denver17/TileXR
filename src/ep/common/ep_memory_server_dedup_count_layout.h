@@ -11,6 +11,7 @@ constexpr uint32_t kEpServerDedupRecvCoreNum = 16U;
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
+constexpr uint64_t kEpServerDedupProfileReservedBytes = 12800U;
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
 #define TILEXR_EP_DEDUP_INLINE FORCE_INLINE_AICORE
@@ -18,13 +19,14 @@ constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
 #define TILEXR_EP_DEDUP_INLINE inline
 #endif
 
-// Offsets are relative to peerMems[rank], independent of the ordinary Memory layout.
-// Only cnt/cumsum state is round-buffered. The future relay counter stays single-copy.
+// R07-01: one state region. Matrix offsets are relative to cntOffset; counter
+// and stateBytes are relative to peerMems[rank]. Profiling capacity is always reserved.
 struct EpServerDedupCountLayout {
+    uint64_t cntOffset;
     uint64_t cumsumOffset;
     uint64_t cumsumFlagOffset;
     uint64_t prefixOffset;
-    uint64_t roundBytes;
+    uint64_t prefixStride;
     uint64_t counterOffset;
     uint64_t stateBytes;
 };
@@ -34,21 +36,15 @@ TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(u
     EpServerDedupCountLayout layout {};
     const uint64_t matrixBytes = uint64_t(kEpServerDedupRecvCoreNum) *
         kEpServerDedupRecvCoreNum * kEpServerDedupCountRecordBytes;
+    layout.cntOffset = kEpServerDedupProfileReservedBytes;
     layout.cumsumOffset = uint64_t(experts) * kEpServerDedupCountRecordBytes;
-    layout.cumsumFlagOffset = layout.cumsumOffset + matrixBytes;
-    layout.prefixOffset = layout.cumsumFlagOffset + matrixBytes;
-    const uint64_t bytes = layout.prefixOffset +
-        uint64_t(kEpServerDedupRecvCoreNum) * experts * sizeof(int32_t);
-    layout.roundBytes = (bytes + 1023U) / 1024U * 1024U;
-    layout.counterOffset = uint64_t(TileXR::PING_PONG_SIZE) * layout.roundBytes;
+    layout.prefixOffset = layout.cumsumOffset + matrixBytes;
+    layout.prefixStride = (uint64_t(experts) * sizeof(int32_t) + 31U) / 32U * 32U;
+    layout.cumsumFlagOffset = layout.prefixOffset + kEpServerDedupRecvCoreNum * layout.prefixStride;
+    const uint64_t bytes = layout.cntOffset + layout.cumsumFlagOffset + matrixBytes;
+    layout.counterOffset = (bytes + 1023U) / 1024U * 1024U;
     layout.stateBytes = layout.counterOffset + 1024U;
     return layout;
-}
-
-TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupCountRoundOffset(
-    const EpServerDedupCountLayout &layout, int64_t magic)
-{
-    return (uint64_t(magic) % uint64_t(TileXR::PING_PONG_SIZE)) * layout.roundBytes;
 }
 
 // Peak sendCnt allocation: four route-sized UB buffers plus count records/histogram.

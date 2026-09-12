@@ -58,10 +58,19 @@ int main()
     Check(TileXREpBuildMemoryServerDedupLayout(128, 4096, 1, 32, 1024, &layout) ==
         TILEXR_ERROR_PARA_CHECK_FAIL, "route scratch exceeding UB rejected");
     const auto countLayout = TileXREpServerDedupCountLayout(1024);
-    Check(countLayout.cumsumOffset == 32768 && countLayout.cumsumFlagOffset == 40960 &&
-        countLayout.prefixOffset == 49152 && countLayout.roundBytes == 114688 &&
-        countLayout.counterOffset == 229376 && countLayout.stateBytes == 230400,
-        "two count rounds, sixteen prefix copies and one isolated counter");
+    Check(countLayout.cntOffset == 12800 && countLayout.cumsumOffset == 32768 &&
+        countLayout.prefixOffset == 40960 && countLayout.prefixStride == 4096 &&
+        countLayout.cumsumFlagOffset == 106496 && countLayout.counterOffset == 128000 && countLayout.stateBytes == 129024,
+        "single count state, reserved profile rows and one isolated counter");
+    Check(TileXREpBuildMemoryServerDedupLayout(128, 256, 7168, 6, 384, &layout) == TILEXR_SUCCESS &&
+        layout.data.sourceOffset == 67584 && layout.data.sourceBytes == 23592960 &&
+        layout.data.dispatchOffset == 23660544 && layout.data.dispatchBytes == 1560281088 &&
+        layout.data.relayOffset == 1583941632 && layout.data.requiredBytes == 1772685312,
+        "R07-01 published non-quantized example, including all return reservations");
+    Check(TileXREpBuildMemoryServerDedupLayout(16, 96, 7168, 6, 96, &layout, true) == TILEXR_SUCCESS &&
+        layout.data.tokenStride == 8192 && layout.data.scaleBytes == 224 &&
+        layout.expandXBytes == layout.capacityRows * 7168 && layout.dynamicScalesBytes == layout.capacityRows * 224,
+        "MXFP8 packet and separate output scales");
 
     alignas(32) uint8_t storage[256] = {};
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS,

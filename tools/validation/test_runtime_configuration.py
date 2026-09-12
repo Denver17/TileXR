@@ -143,9 +143,9 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         cann = self.root / 'cann-env.sh'
         cann.write_text('# CANN environment fixture\n')
         for mode, override, arguments, expected, run_mode in (
-                ('production', None, [], workflow.CHAIN_MULTI_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=0'], workflow.CHAIN_MULTI_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=1'], workflow.CHAIN_MULTI_CHECKPOINT, 'breakdown'),
+                ('production', None, [], workflow.FIRST_HOP_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=0'], workflow.FIRST_HOP_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=1'], workflow.FIRST_HOP_CHECKPOINT, 'breakdown'),
                 ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
                 ('host', None, [], None, 'functional')):
             with self.subTest(mode=mode, override=override, arguments=arguments):
@@ -222,8 +222,8 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         before = self.local.read_bytes()
         with mock.patch.dict(os.environ, dict(self.env, TILEXR_VALIDATION_ROOT=str(self.root),
                              TILEXR_VALIDATION_BUILD_MODE="production",
-                             TILEXR_VALIDATION_CHECKPOINT=workflow.CHAIN_MULTI_CHECKPOINT,
-                             TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_BLOCK_DIM="4",
+                             TILEXR_VALIDATION_CHECKPOINT=workflow.FIRST_HOP_CHECKPOINT,
+                             TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_BLOCK_DIM="64",
                              TILEXR_COMM_ID="192.0.2.1:10177"), clear=True):
             config = workflow.Config()
             command = workflow.remote_argv(config, "worker", "verify", "test-build")[-1]
@@ -232,8 +232,8 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(values["TILEXR_VALIDATION_RUN_MODE"], "breakdown")
-        self.assertEqual(values["TILEXR_VALIDATION_BLOCK_DIM"], "4")
-        self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], workflow.CHAIN_MULTI_CHECKPOINT)
+        self.assertEqual(values["TILEXR_VALIDATION_BLOCK_DIM"], "64")
+        self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], workflow.FIRST_HOP_CHECKPOINT)
         self.assertEqual(self.local.read_bytes(), before)
 
 

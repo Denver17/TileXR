@@ -272,8 +272,7 @@ endforeach()
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
 add_executable(test_tilexr_ep_server_dedup_counts
-    unit/test_tilexr_ep_server_dedup_counts.cpp
-    ${TILEXR_ROOT}/src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp)
+    unit/test_tilexr_ep_server_dedup_counts.cpp)
 target_include_directories(test_tilexr_ep_server_dedup_counts PRIVATE
     unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS}
     ${TILEXR_ROOT}/src/ep/kernels)
@@ -288,6 +287,15 @@ target_compile_definitions(test_tilexr_ep_server_dedup_profile PRIVATE TILEXR_EP
 add_test(NAME test_tilexr_ep_server_dedup_profile COMMAND test_tilexr_ep_server_dedup_profile)
 set_tests_properties(test_tilexr_ep_server_dedup_profile PROPERTIES TIMEOUT 30)
 install(TARGETS test_tilexr_ep_server_dedup_profile RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(test_tilexr_ep_server_dedup_first_hop unit/test_tilexr_ep_server_dedup_first_hop.cpp
+    ${CMAKE_CURRENT_LIST_DIR}/../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_first_hop PRIVATE
+    unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
+set_target_properties(test_tilexr_ep_server_dedup_first_hop PROPERTIES CXX_STANDARD 17)
+add_test(NAME test_tilexr_ep_server_dedup_first_hop COMMAND test_tilexr_ep_server_dedup_first_hop)
+set_tests_properties(test_tilexr_ep_server_dedup_first_hop PROPERTIES TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_first_hop RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
 

@@ -59,6 +59,36 @@ class MeasurementTests(unittest.TestCase):
                     {"core": 1, "start": 1000, "checked": 1004 + rank * 2, "end": 1010 + rank * 10},
                     {"core": 0, "start": 500, "checked": 507 + rank * 2, "end": 509 + rank * 2}]}}
 
+    def test_first_hop_v3_stages_traffic_and_trace_export(self):
+        config = dict(self.config, run_mode="breakdown", rank_size=16, loops=1, warmup=0,
+                      bs=96, h=7168, moe_expert_num=96, quant_mode=0, fp8_format="e4m3",
+                      route_mode="balance_shift", seed=2026, kernel_scope="first_hop")
+        ranks = []
+        for rank in range(16):
+            cores = []
+            for core in range(64):
+                time = [100, 110, 120, 160, 160, 160, 160, 180] if core < 48 else [100, 110, 120, 120, 140, 150, 160, 190]
+                cores.append(dict(core=core, **dict(zip(measure.FIRST_HOP_POINTS, time))))
+            ranks.append(dict(rank=rank, first_hop_packets=2 + rank, first_hop_received=2 + rank,
+                              first_hop_bytes=(2 + rank) * 15872, token_stride=15872,
+                              breakdown=dict(schema_version=3, kernel_scope="first_hop", generation=1,
+                                             run_mode="breakdown", loops=1, warmup=0, block_dim=64, records=cores)))
+        summary = measure.summarize_measurements(ranks, config, "a" * 64)
+        self.assertEqual(summary["native_status"], "first_hop")
+        self.assertEqual(summary["measurement"], "single_cold_submission")
+        self.assertEqual(summary["algorithm_communication_bytes"], sum(range(2, 18)) * 15872 + 16 * 90 * 32)
+        self.assertEqual(summary["breakdown"]["schema_version"], 3)
+        self.assertEqual(summary["breakdown"]["stages"]["send_data"]["median"], 40)
+        self.assertEqual(summary["breakdown"]["stages"]["first_hop_total"]["median"], 90)
+        traces = measure.export_breakdown_traces(ranks, config, self.root / "traces", "run", "a" * 64)
+        data = json.loads(Path(traces["all_ranks"]).read_text())
+        self.assertEqual(data["otherData"]["schema_version"], 3)
+        self.assertIn("send_data", {item["name"] for item in data["traceEvents"]})
+        for field, value in (("schema_version", 2), ("kernel_scope", "cnt_cumsum"), ("generation", 2)):
+            bad = copy.deepcopy(ranks[0]); bad["breakdown"][field] = value
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                measure.validate_rank_measurements(bad, config)
+
     def test_performance_sorts_by_start_and_excludes_warmup(self):
         path = self.csv_profile([1000, 2, 4, 9], reverse=True)
         result = measure.performance_record(self.root, 3, 1)

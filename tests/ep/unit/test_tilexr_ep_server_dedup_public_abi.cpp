@@ -11,10 +11,10 @@ using DispatchMemory = int (*)(void *, int32_t *, void *, bool *, int64_t, void 
 using DispatchServerDedup = int (*)(void *, int32_t *, void *, bool *, int64_t, void *, TileXRCommPtr,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, void *, void *, int32_t *, int64_t *, int32_t *, int32_t *,
-    void *, uint32_t *, uint32_t *, uint32_t *, TileXR::TileXRDataType, TileXR::TileXRDataType, aclrtStream);
+    void *, uint32_t *, uint32_t *, uint32_t *, float *, TileXR::TileXRDataType, TileXR::TileXRDataType, aclrtStream);
 static_assert(std::is_same<decltype(&TileXRMoeEpDispatchMemory), DispatchMemory>::value, "Old Memory ABI unchanged");
 static_assert(std::is_same<decltype(&TileXRMoeEpDispatchMemoryServerDedup), DispatchServerDedup>::value,
-    "Independent ABI has exactly three added output pointers");
+    "Independent ABI has three metadata outputs and separate source weights");
 
 namespace {
 TileXR::CommArgs g_args {};
@@ -50,11 +50,12 @@ int main()
 {
     using ServerDedupTest::Check;
     g_args.rankSize = 16;
-    g_args.peerMemBytes = 230400;
+    g_args.peerMemBytes = 4ULL * 1024 * 1024 * 1024;
     for (auto &peer : g_args.peerMems) { peer = reinterpret_cast<GM_ADDR>(0x1000); }
     alignas(32) uint16_t x[1] = {123};
     int32_t expertId[1] = {0};
     float expertScale[1] = {1.0f};
+    float sourceWeight[1] = {-1.0f};
     alignas(32) uint16_t output[16] = {456};
     alignas(32) uint32_t assist[16 * 8] = {789};
     uint32_t mask[1] = {321};
@@ -66,7 +67,7 @@ int main()
         g_a5 = a5;
         Check(entry(x, expertId, nullptr, nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, expertScale,
             reinterpret_cast<TileXRCommPtr>(0x1000), 1, 1, 1, 32, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0,
-            output, nullptr, nullptr, expertCounts, counts, nullptr, nullptr, assist, mask, group,
+            output, nullptr, nullptr, expertCounts, counts, nullptr, nullptr, assist, mask, group, sourceWeight,
             TileXR::TILEXR_DATA_TYPE_FP16, TileXR::TILEXR_DATA_TYPE_RESERVED,
             reinterpret_cast<aclrtStream>(0x2000)) == TileXR::TILEXR_ERROR_NOT_SUPPORT,
             "ABI consumer propagates submit result and rejects non-A5");

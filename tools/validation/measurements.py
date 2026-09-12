@@ -28,7 +28,7 @@ def render_case_description(report):
         f"loops={config['loops']} warmup={config['warmup']}\n"
         f"BS={config['bs']} H={config['h']} TopK={config['topk']} "
         f"experts={config['moe_expert_num']} dtype={config['dtype']} "
-        f"cards={report.get('rank_size', 'unknown')} quant_mode={config.get('quant_mode', 0)} "
+        f"cards={report.get('rank_size', 'unknown')} quant_mode={config.get('quant_mode', 0)} fp8_format={config.get('fp8_format', 'N/A')} "
         f"routes={config.get('route_mode', 'unknown')} seed={config.get('seed', 'unknown')}"
     )
 
@@ -36,6 +36,8 @@ def render_case_description(report):
 BREAKDOWN_STAGES = ("entry_checks", "record_prepare", "empty_total")
 COUNT_POINTS = ("start", "init_end", "send_cnt_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end")
 COUNT_STAGES = ("init", "send_cnt", "recv_cnt", "cumsum", "prefix_consume", "finish", "count_total")
+FIRST_HOP_POINTS = ("start", "init_end", "send_cnt_end", "send_data_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end")
+FIRST_HOP_STAGES = ("init", "send_cnt", "send_data", "recv_cnt", "cumsum", "prefix_consume", "finish", "first_hop_total")
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。
 A5_SYSTEM_TICKS_PER_US = 1000
 SYSTEM_CLOCK_SOURCE = {
@@ -82,12 +84,12 @@ def performance_record(output_dir, loops, warmup):
             **_statistics(samples, "_us")}
 
 
-def _breakdown_spans(row, count_scope):
-    points = COUNT_POINTS if count_scope else ("start", "checked", "end")
+def _breakdown_spans(row, count_scope, first_hop=False):
+    points = FIRST_HOP_POINTS if first_hop else COUNT_POINTS if count_scope else ("start", "checked", "end")
     values = [_integer(row.get(key), "breakdown " + key, 1) for key in points]
     if values != sorted(values) or values[0] == values[-1] or values[-1] > (1 << 64) - 1:
         raise ValueError("breakdown 时间戳无效或顺序错误")
-    names = COUNT_STAGES if count_scope else BREAKDOWN_STAGES
+    names = FIRST_HOP_STAGES if first_hop else COUNT_STAGES if count_scope else BREAKDOWN_STAGES
     return list(zip(names[:-1], values[:-1], values[1:])) + [(names[-1], values[0], values[-1])]
 
 
@@ -97,6 +99,9 @@ def _breakdown_values(record):
         raise ValueError("缺少 breakdown 设备记录")
     _integer(evidence.get("generation"), "breakdown generation", 1)
     cores = _integer(evidence.get("block_dim"), "breakdown block_dim", 1)
+    first_hop = evidence.get("schema_version") == 3
+    if first_hop and (cores != 64 or evidence.get("kernel_scope") != "first_hop"):
+        raise ValueError("first-hop breakdown 需要 64 核及正确 scope")
     count_scope = evidence.get("schema_version") == 2
     if count_scope and (cores != 64 or evidence.get("kernel_scope") != "cnt_cumsum"):
         raise ValueError("cnt/cumsum breakdown 需要 64 核及正确 scope")
@@ -105,9 +110,9 @@ def _breakdown_values(record):
             or any(not isinstance(row, dict) or type(row.get("core")) is not int for row in rows)
             or {row["core"] for row in rows} != set(range(cores))):
         raise ValueError("breakdown core 记录缺失、重复或越界")
-    samples = {name: [] for name in (COUNT_STAGES if count_scope else BREAKDOWN_STAGES)}
+    samples = {name: [] for name in (FIRST_HOP_STAGES if first_hop else COUNT_STAGES if count_scope else BREAKDOWN_STAGES)}
     for row in rows:
-        for name, start, end in _breakdown_spans(row, count_scope):
+        for name, start, end in _breakdown_spans(row, count_scope, first_hop):
             samples[name].append(end - start)
     return {name: max(values) for name, values in samples.items()}
 
@@ -124,6 +129,10 @@ def validate_rank_measurements(record, chain_config):
     if mode == "breakdown":
         _breakdown_values(record)
         evidence = record["breakdown"]
+        if chain_config.get("kernel_scope") == "first_hop" and evidence.get("schema_version") != 3:
+            raise ValueError("first-hop 必须使用 breakdown v3")
+        if evidence.get("schema_version") == 3 and chain_config.get("kernel_scope") != "first_hop":
+            raise ValueError("breakdown scope 与本次配置不一致")
         if chain_config.get("kernel_scope") == "cnt_cumsum" and evidence.get("schema_version") != 2:
             raise ValueError("cnt/cumsum 不能使用旧空 kernel breakdown")
         if evidence.get("schema_version") == 2 and chain_config.get("kernel_scope") != "cnt_cumsum":
@@ -169,8 +178,9 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     for record in ranks:
         validate_rank_measurements(record, chain_config)
     mode = chain_config["run_mode"]
+    first_hop = chain_config.get("kernel_scope") == "first_hop"
     count_scope = chain_config.get("kernel_scope") == "cnt_cumsum"
-    summary = {"run_mode": mode, "backend": "memory", "native_status": "cnt_cumsum" if count_scope else "empty",
+    summary = {"run_mode": mode, "backend": "memory", "native_status": "first_hop" if first_hop else "cnt_cumsum" if count_scope else "empty",
                "kernel": KERNEL_NAME, "kernel_sha256": kernel_sha,
                "rank_size": rank_size,
                "configuration": {name: chain_config[name] for name in
@@ -179,25 +189,45 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     if mode == "functional":
         return summary
     summary.update(algorithm_communication_bytes=0, bandwidth="N/A")
-    if count_scope:
+    if count_scope or first_hop:
         # One 32B record per remote expert per source rank; excludes self-target
         # counts, local prefix traffic and polling reads.
         remote_bytes = (chain_config["moe_expert_num"] - chain_config["moe_expert_num"] // rank_size) * 32
         summary.update(algorithm_communication_bytes=remote_bytes * rank_size,
                        communication_bytes_per_rank=remote_bytes,
                        communication_scope="remote cnt records; excludes local traffic and polling")
+    if first_hop:
+        summary.pop("communication_bytes_per_rank", None)
+        traffic = [{"rank": row["rank"], "original_routes": chain_config["bs"] * chain_config["topk"],
+                    "first_hop_packets": row["first_hop_packets"], "direct_packets": 0,
+                    "token_stride": row["token_stride"], "cross_server_data_bytes": row["first_hop_bytes"],
+                    "same_server_data_bytes": 0, "local_data_bytes": 0, "remote_count_bytes": remote_bytes,
+                    "cross_server_count_bytes": (chain_config["moe_expert_num"] - chain_config["moe_expert_num"] // rank_size * 8) * 32,
+                    "same_server_count_bytes": chain_config["moe_expert_num"] // rank_size * 7 * 32,
+                    "local_count_bytes": chain_config["moe_expert_num"] // rank_size * 32}
+                   for row in ranks]
+        summary.update(submission="single_launch_then_sync_and_host_barrier", measurement="single_cold_submission",
+                       route_mode=chain_config["route_mode"], seed=chain_config["seed"],
+                       quant_mode=chain_config["quant_mode"], fp8_format=chain_config["fp8_format"],
+                       rank_traffic=traffic,
+                       algorithm_communication_bytes=sum(row["first_hop_bytes"] + remote_bytes for row in ranks),
+                       communication_scope="first-hop full T across servers plus remote cnt records; excludes polling/local prefix traffic")
     if mode == "performance":
         medians = [row["performance"]["median_us"] for row in ranks]
         if count_scope:
             summary.update(bandwidth="effective remote-count GB/s",
                            bandwidth_gbps=_statistics([remote_bytes / (us * 1000) for us in medians]),
                            route_mode=chain_config["route_mode"], seed=chain_config["seed"])
+        if first_hop:
+            summary.update(bandwidth="effective first-hop plus remote-count GB/s over whole kernel",
+                           bandwidth_gbps=_statistics([(row["first_hop_bytes"] + remote_bytes) / (us * 1000)
+                                                      for row, us in zip(ranks, medians)]))
         summary["performance"] = {"unit": "us", "selection": "last_loops_after_warmup",
                                   "reduction": "statistics_of_rank_sample_medians",
                                   "rank_median_us": medians, **_statistics(medians, "_us")}
     else:
         values = [_breakdown_values(row) for row in ranks]
-        stage_names = COUNT_STAGES if count_scope else BREAKDOWN_STAGES
+        stage_names = FIRST_HOP_STAGES if first_hop else COUNT_STAGES if count_scope else BREAKDOWN_STAGES
         breakdown = {"unit": "ticks", "selection": "final_measured_iteration",
                      "reduction": "core_max_per_stage_then_statistics_across_ranks",
                      "stages": {name: _statistics([row[name] for row in values]) for name in stage_names},
@@ -205,6 +235,9 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
                      "scope": "empty entry checks and record preparation; final record write is not timed"}
         if count_scope:
             breakdown.update(schema_version=2, scope="cnt/cumsum stages; final trace write excluded",
+                             phase_barriers="PIPE_ALL at timestamp boundaries; diagnostic build only")
+        if first_hop:
+            breakdown.update(schema_version=3, scope="cnt/cumsum plus first-hop send; DIRECT/relay disabled; final trace write excluded",
                              phase_barriers="PIPE_ALL at timestamp boundaries; diagnostic build only")
         breakdown["ticks_per_us"] = A5_SYSTEM_TICKS_PER_US
         breakdown["clock"] = dict(SYSTEM_CLOCK_SOURCE)
@@ -230,14 +263,14 @@ def render_measurements(summary):
     if "performance" in summary:
         append("kernel（每 rank 测量轮次 median 的跨 rank 汇总）", summary["performance"], "us", "_us")
     if "bandwidth_gbps" in summary:
-        append("有效远端 cnt 带宽（不含本卡访问和轮询）", summary["bandwidth_gbps"], "GB/s")
+        append("有效通信带宽（范围见上文；不含本卡访问和轮询）", summary["bandwidth_gbps"], "GB/s")
     if "breakdown" in summary:
         breakdown = summary["breakdown"]
         lines.append("GetSystemCycle：Ascend950PR/950DT，1 GHz，1000 ticks/us；原始 ticks 保留在 JSON。")
         for name in breakdown["stages_us"]:
             append("最后一轮各核最大值 " + name, breakdown["stages_us"][name], "us")
-        if breakdown.get("schema_version") == 2:
-            lines.append("cnt/cumsum 阶段含诊断同步；未计量最终记录写出，各段最大值不保证可相加；性能基线使用 performance 产物。")
+        if breakdown.get("schema_version") in (2, 3):
+            lines.append("各阶段含诊断同步；未计量最终记录写出，各段最大值不保证可相加；性能基线使用 performance 产物。")
         else:
             lines.append("breakdown 仅为空入口检查和记录准备，未计量最终记录写出；各段最大值不保证可相加。")
     return "\n".join(lines)
@@ -249,6 +282,7 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
     if summary["run_mode"] != "breakdown":
         raise ValueError("trace export requires breakdown records")
     ranks = sorted(rank_records, key=lambda row: row["rank"])
+    first_hop = summary["native_status"] == "first_hop"
     count_scope = summary["native_status"] == "cnt_cumsum"
     order = sorted((max(core["end"] - core["start"] for core in row["breakdown"]["records"])
                     / A5_SYSTEM_TICKS_PER_US, row["rank"]) for row in ranks)
@@ -261,8 +295,8 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                       selection_rule="max core end-start per rank; ascending duration, ties by rank; p50=ceil(N/2)-1",
                       clock=SYSTEM_CLOCK_SOURCE, native_status=summary["native_status"],
                       scope=summary["breakdown"]["scope"])
-    if count_scope:
-        provenance.update(schema_version=2, phase_barriers=summary["breakdown"]["phase_barriers"])
+    if count_scope or first_hop:
+        provenance.update(schema_version=3 if first_hop else 2, phase_barriers=summary["breakdown"]["phase_barriers"])
 
     def write(name, events, **extra):
         path = output_dir / name
@@ -280,7 +314,7 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
         for core in cores:
             tid = core["core"]
             events.append(dict(ph="M", name="thread_name", pid=rank, tid=tid, args=dict(name=f"AIV core {tid}")))
-            for name, begin, end in _breakdown_spans(core, count_scope)[:-1]:
+            for name, begin, end in _breakdown_spans(core, count_scope, first_hop)[:-1]:
                 events.append(dict(ph="X", cat="kernel", name=name, pid=rank, tid=tid,
                                    ts=(begin - origin) / A5_SYSTEM_TICKS_PER_US,
                                    dur=(end - begin) / A5_SYSTEM_TICKS_PER_US,

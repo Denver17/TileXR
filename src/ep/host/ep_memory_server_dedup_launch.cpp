@@ -33,11 +33,11 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     }
     EpServerDedupKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.x),
         reinterpret_cast<GM_ADDR>(p.expertIds), static_cast<GM_ADDR>(p.expertScales),
-        static_cast<GM_ADDR>(p.expandXOut), reinterpret_cast<GM_ADDR>(p.expertTokenNumsOut),
+        static_cast<GM_ADDR>(p.expandXOut), static_cast<GM_ADDR>(p.dynamicScalesOut), reinterpret_cast<GM_ADDR>(p.expertTokenNumsOut),
         reinterpret_cast<GM_ADDR>(p.epRecvCountsOut), reinterpret_cast<GM_ADDR>(p.assistInfoForCombineOut),
         reinterpret_cast<GM_ADDR>(params.assistExOut), reinterpret_cast<GM_ADDR>(params.sourceMaskOut),
-        reinterpret_cast<GM_ADDR>(params.groupOut), p.bs, p.h, p.topK, p.moeExpertNum,
-        static_cast<int64_t>(layout.globalBs), p.expertTokenNumsType, static_cast<int64_t>(p.dtype),
+        reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), p.bs, p.h, p.topK, p.moeExpertNum,
+        static_cast<int64_t>(layout.globalBs), p.expertTokenNumsType, p.quantMode, static_cast<int64_t>(p.dtype),
         static_cast<int64_t>(p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype),
         magic};
     return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);

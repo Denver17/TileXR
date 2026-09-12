@@ -2,7 +2,7 @@
 #include <numeric>
 #include <random>
 
-#include "tilexr_ep_dispatch_memory_server_dedup_kernel.h"
+#include "tilexr_ep_server_dedup_counts.h"
 #include "server_dedup_test_checks.h"
 
 namespace AscendC {
@@ -11,7 +11,7 @@ uint64_t testCopies = 0;
 }
 
 namespace {
-using TileXREp::DispatchMemoryServerDedupKernel;
+using TileXREp::ServerDedupCounts;
 using ServerDedupTest::Check;
 
 struct Rank {
@@ -20,7 +20,7 @@ struct Rank {
     std::vector<int32_t> routes, output;
     std::vector<int64_t> expertOutput;
     std::vector<AscendC::TPipe> pipes;
-    std::vector<DispatchMemoryServerDedupKernel> cores;
+    std::vector<ServerDedupCounts> cores;
 };
 
 void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rounds)
@@ -43,15 +43,12 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
     std::vector<uint32_t> order(world * 64);
     std::iota(order.begin(), order.end(), 0);
     for (uint32_t round = 1; round <= rounds; ++round) {
-        // Alternate count/prefix outputs, rotate routes and wrap both state banks.
+        // Alternate outputs and routes only after all simulated ranks finish each call.
         const uint32_t outputType = round % 2;
-        const auto offset = TileXREp::TileXREpServerDedupCountRoundOffset(layout, round);
-        const auto other = TileXREp::TileXREpServerDedupCountRoundOffset(layout, round + 1);
-        std::vector<std::vector<uint32_t>> inactive(world);
+        const auto offset = layout.cntOffset;
         std::vector<std::vector<int32_t>> expected(world, std::vector<int32_t>(experts));
         for (uint32_t s = 0; s < world; ++s) {
             auto &rank = ranks[s];
-            inactive[s].assign(rank.state.begin() + other / 4, rank.state.begin() + (other + layout.roundBytes) / 4);
             rank.routes.clear();
             rank.output.assign(experts + 2, -777);
             rank.expertOutput.assign(localExperts + 2, -888);
@@ -113,13 +110,14 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                     previousExpert = cumulative;
                 }
             }
-            for (uint64_t byte = layout.cumsumOffset; byte < layout.prefixOffset; byte += 4)
-                Check(rank.state[(offset + byte) / 4] == 0, "segment and full-prefix readiness cleaned");
+            for (uint32_t matrix = 0; matrix < 2; ++matrix) {
+                const uint64_t begin = matrix == 0 ? layout.cumsumOffset : layout.cumsumFlagOffset;
+                for (uint64_t byte = begin; byte < begin + 16U * 16U * 32U; byte += 4)
+                    Check(rank.state[(offset + byte) / 4] == 0, "segment and full-prefix readiness cleaned");
+            }
             Check(rank.output.front() == -777 && rank.output.back() == -777 &&
                 rank.expertOutput.front() == -888 && rank.expertOutput.back() == -888,
                 "exact output bytes preserve adjacent canaries");
-            Check(std::equal(inactive[r].begin(), inactive[r].end(), rank.state.begin() + other / 4),
-                "other round state stays untouched");
             Check(std::all_of(rank.state.begin() + layout.counterOffset / 4, rank.state.end(),
                 [](uint32_t v) { return v == 0xa5a5a5a5; }), "count-only increment does not touch counter or payload space");
         }
