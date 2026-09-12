@@ -5,6 +5,7 @@
 
 #include "comm_args.h"
 #include "ep_memory_server_dedup_protocol.h"
+#include "ep_memory_server_dedup_count_layout.h"
 #include "tilexr_types.h"
 
 namespace TileXREp {
@@ -32,14 +33,22 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
     if (rankSize < 16 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE ||
         rankSize % kEpServerDedupRanksPerServer != 0 || bs <= 0 || h <= 0 ||
         topK <= 0 || topK > kEpServerDedupMaxTopK || moeExpertNum <= 0 ||
-        moeExpertNum % rankSize != 0 || moeExpertNum / rankSize < 2 || moeExpertNum / rankSize > 32 ||
-        bs > std::numeric_limits<int64_t>::max() / rankSize) {
+        moeExpertNum > kEpServerDedupMaxExperts || topK > moeExpertNum ||
+        moeExpertNum % rankSize != 0 || bs > UINT32_MAX / topK) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+
+    const uint32_t countCores = bs < kEpServerDedupSendCoreNum ?
+        kEpServerDedupCoreNum : kEpServerDedupRecvCoreNum;
+    if (TileXREpServerDedupCountSendUbBytes(uint64_t(bs) * topK, uint32_t(moeExpertNum),
+        countCores) > kEpServerDedupCountUbBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     EpMemoryServerDedupLayout next {};
     next.globalBs = static_cast<uint64_t>(rankSize * bs);
     next.localExpertNum = static_cast<uint64_t>(moeExpertNum / rankSize);
+    next.countStateBytes = TileXREpServerDedupCountLayout(uint32_t(moeExpertNum)).stateBytes;
     const uint64_t logicalGroupBytes = kEpServerDedupGroupMembersOffset +
         static_cast<uint64_t>(topK - 1) * sizeof(EpServerDedupGroupMember);
     next.groupRowStrideBytes = (logicalGroupBytes + 31U) / 32U * 32U;

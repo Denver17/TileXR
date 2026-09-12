@@ -50,9 +50,11 @@ int main()
 {
     using ServerDedupTest::Check;
     g_args.rankSize = 16;
+    g_args.peerMemBytes = 230400;
     for (auto &peer : g_args.peerMems) { peer = reinterpret_cast<GM_ADDR>(0x1000); }
     alignas(32) uint16_t x[1] = {123};
     int32_t expertId[1] = {0};
+    float expertScale[1] = {1.0f};
     alignas(32) uint16_t output[16] = {456};
     alignas(32) uint32_t assist[16 * 8] = {789};
     uint32_t mask[1] = {321};
@@ -62,7 +64,7 @@ int main()
     DispatchServerDedup entry = &TileXRMoeEpDispatchMemoryServerDedup;
     for (bool a5 : {true, false}) {
         g_a5 = a5;
-        Check(entry(x, expertId, nullptr, nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, nullptr,
+        Check(entry(x, expertId, nullptr, nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, expertScale,
             reinterpret_cast<TileXRCommPtr>(0x1000), 1, 1, 1, 32, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0,
             output, nullptr, nullptr, expertCounts, counts, nullptr, nullptr, assist, mask, group,
             TileXR::TILEXR_DATA_TYPE_FP16, TileXR::TILEXR_DATA_TYPE_RESERVED,

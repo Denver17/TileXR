@@ -21,7 +21,7 @@ int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams
         !IsAligned(p.expertTokenNumsOut, 8U) || !IsAligned(p.epRecvCountsOut, 4U) ||
         !IsAligned(params.assistExOut, 32U) || !IsAligned(params.sourceMaskOut, 4U) ||
         !IsAligned(params.groupOut, 32U) ||
-        (p.expertScales != nullptr && !IsAligned(p.expertScales, 4U))) {
+        !IsAligned(p.expertScales, 4U)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if ((p.dtype != TileXR::TILEXR_DATA_TYPE_FP16 && p.dtype != TileXR::TILEXR_DATA_TYPE_BFP16) ||
@@ -62,9 +62,15 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     if (p.globalBs != 0 && (p.globalBs < 0 || static_cast<uint64_t>(p.globalBs) != next.globalBs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    if (commArgs.peerMemBytes < next.countStateBytes) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {
         if (commArgs.peerMems[rank] == nullptr) {
             return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+        }
+        if (!IsAligned(commArgs.peerMems[rank], 32U)) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }
     *layout = next;

@@ -6,25 +6,30 @@
 [第二轮待确认项 R01-R12](ep-memory-server-dedup-open-topics.md)。
 本文保留 C01-C14 旧编号的定位映射，并承接本轮从 Dispatch 待确认文档迁入的 Combine 内部实现议题。
 Dispatch 细节和 Dispatch/Combine 公共接口仍在[第二轮待确认项 R01-R12](ep-memory-server-dedup-open-topics.md)维护；本文的 C15 之后只讨论 Combine 内部实现和内部验收。
-此前已确认的公共契约已同步主设计；本轮 R04-07/R04-08 权重复用及接口复核只更新两份待确认文档，后续再归并主设计。
-主设计中 source 类型/权重载体待定的旧表述以本轮确认结论为准；本文保留 Combine 内部实现的待确认项。
+已确认的公共契约及 R04-07/R04-08 权重复用已同步主设计，source 按 sourceMask 和 Dispatch 输出的 expertScalesOut 统一归约，
+不再保留结果类型/权重载体待定的旧表述；本文继续保留 Combine 内部实现的待确认项。
 
 Server 内逐 expert 返回、公共转发包、本卡/跨卡统一原子取号和密排 recvSlot/weight 成员表，均以主设计的新约定为准。
-R04-01 已确认 Dispatch 新增 assistEx/sourceMask/group 三个输出，Combine 对应新增三个输入，不引入 X。
-R04-07/R04-08 已确认复用 Memory Combine 的 FP32 `[BS,K]` expertScales：去重 Dispatch 先取用真实 route weight 构造通信包，再原地将各 group 的 returnK 权重改为 1.0，DIRECT 保留真实值。
+专家数量沿用主设计的总数上限 1024，保持 `moeExpertNum=R*L` 均匀分配；不设独立的单卡专家数限制，允许 L=1，128P 下每卡最多 8 个 expert。
+R04-01 已确认 Dispatch 新增 assistEx/sourceMask/group 三个 metadata 输出，Combine 对应新增三个输入；独立权重输出见 R04-08，不引入 X。
+R04-07/R04-08 已确认权重输入输出分离：Dispatch 从只读 FP32 `[BS,K]` expertScales 取真实权重，将 DIRECT 真实值及 returnK=1.0 写入独立 expertScalesOut；Combine 的既有 expertScales 参数接收该输出。
 Source 按 sourceMask 只等待有效 k，统一乘 expertScales 后累加；mask 为 0 的位置不消费、无需清零，不新增 source/sourceWeight/partialMask 或权重快照 tensor。
 Relay 的第一跳 assistEx 与 group members 保留真实权重，relay 对本 Server 内第一跳及全部转发贡献加权求和；终端 expertOut 返回未加权结果。
-已转换 expertScales 保持到 Combine 消费完成；下一轮 Dispatch 前重新提供真实权重。nullptr 支持组合仍归 R08-02，重复 Combine 规则归 R11-02，不在此选择内部实现。
+Dispatch 输出 expertScalesOut 保持到 Combine 消费完成；原始 expertScales 输入只读，可按调用生命周期复用。首版要求非空 FP32 权重输入，nullptr 直接报错。重复 Combine 规则归 R11-02。
+R08-03 已确认 Dispatch 支持 BF16/FP16 输入、非量化及 MXFP8 E4M3/E5M2，量化计算和 dynamicScalesOut 沿用 Memory；路由 weight 保持 FP32。
+该结论确定的是送给 expert 的 hidden/scale 格式，不自动将 expertOut 或 Combine 的 member/partial 返回设为 FP8；这些公共契约及内部数值分别在 R08-03 剩余部分和 C15/C16 讨论。
 安全用例保证每个 relay 的实际 group 数不超过 8*BS，不做超限校验、状态记录、报错或超限测试；X 记录及超限优化为 R04-06/R07-04 低优先级遗留。
 内部 AtomicAdd 分配 forwardTokenIdx 的逻辑保留，不要求发布计数。R04-03 已确认在有效 assistEx 行中识别 forwardCount>0 的第一跳，取 t 访问固定 stride 的 group[t]，firstHopRow 保存 dstPosition；内部筛选和分核后续在本文讨论。
 R04-02 已确认 ExpertOut/assistEx 保持 Dispatch 的有效行序，首版 `tokenNum=sendCounts[L*R-1]`；expert 内部若重排，须在 Combine 前还原，不增加 public row map。
-R04-04 沿用 Memory 的算子完成语义：所有核完成任务及 GM 写入后 Dispatch 才结束，后续 Combine 可读取完整 metadata 和已转换的 expertScales，不另设发布协议、ready 或额外同步。
+R04-04 沿用 Memory 的算子完成语义：所有核完成任务及 GM 写入后 Dispatch 才结束，后续 Combine 可读取完整 metadata 和 Dispatch 输出的 expertScalesOut，不另设发布协议、ready 或额外同步。
 上述转发和 group 归约仅服务于跨 Server 去重；源 Server 内逐 route DIRECT，Combine 直接回 source，R01 已确认关闭。
 R04-05/R07-02/R07-03 已确认统一中转结果区 `[8*BS,K,H]`，group 表预留 8*BS 行；全卡取号 `t`，本卡及其他卡返回共用 `recvSlot=uint64(t)*K+originalK`，不按来源卡分区。
 每组即使 n=1 也预留 K 槽，只监听 members[0:n] 指定的位置；第一跳从 firstHopRow 读取，空洞不使用、不等待。
 已有 assistEx 的 relayRank/t/k 足够返回寻址，无新编号或包字段；assistEx[tokenNum,8] 和 sourceMask[BS] 的 shape 保持不变。
-8*BS 是本 relay 合计 group 的安全容量上限，并非八卡拓扑自然保证的接收上限；完整区域 base/offset/stride 与预算仍归 R07-01。
-不再沿用旧单 expert 示例、静态全 source/token 结果区或逐 Token credit 作为当前方案。
+8*BS 是本 relay 合计 group 的安全容量上限，并非八卡拓扑自然保证的接收上限；单份区域 base/offset/非量化 stride 与预算已由 R07-01 收口，跨调用复用仍归 R11。
+已确认 Server Dedup 独占通信空间，按状态区（cnt/cumsum/counter）、数据接收区、中转 Token 区三块排布；不保留旧 Memory 区域位置。
+R07-01 已采用第二块内 source 返回在前、Dispatch 槽位在后的独立子区；member 使用第三块，当前非量化返回沿用 Memory DataAsFlag。Combine 内部实现不另改公共大区顺序。
+旧单 expert 示例不能代替当前多 route/group 契约；L=1 仍按同一协议处理，不沿用静态全 source/token 结果区或逐 Token credit。
 
 接口复用清单见 [Dispatch 待确认文档](ep-memory-server-dedup-open-topics.md#同语义接口复核)：sendCounts 提供 tokenNum，sourceMask 提供 source 每 Token 的有效 k 和贡献数，group 的 n 给出转发返回数；这些数量不另增参数。
 量化 dynamicScalesOut 与 route weight 语义不同，旧 bool mask 与 uint32 sourceMask 也不同；普通 Memory 的全 K 等待逻辑必须适配 mask 有效范围，不能因参数复用就整段沿用。
@@ -56,7 +61,7 @@ R10 的 ABI 和 R11 的对外生命周期仍在主待确认文档维护。内部
 **议题：Combine 内部 dtype 与量化。来源：R08-03 的内部部分。**
 
 需要明确 expert 输入转为乘法 dtype、group 累加、partial 通信、source 累加和最终输出的各次 cast/量化及 scale 生命周期。
-Dispatch 的 hidden/scale 输出形状和公共返回区 dtype/stride 仍由 R08-03/R10-03/R07 确认；本项讨论如何实现这些约定。
+当前非量化公共返回跨度已由 R07-01 按 Memory 收口；Dispatch 的 BF16/FP16 非量化与 MXFP8 输出格式也已确认。expertOut 及 Combine 各段返回的公共格式仍归 R08-03/R10-03，本项只讨论内部如何实现这些约定。
 不能因普通 Memory 有某种格式的源码，就认为两级去重归约已适配或通过验证。
 
 ## C16
@@ -120,8 +125,8 @@ Expert 发送、partial 发布、source 输出各何时完成，全部对外责�
 
 **议题：Combine 内部与端到端验收。来源：R12-02 及 R12-03/R12-04 的 Combine 部分。**
 
-- **C23-01：** Combine-only 的合法 assistEx/sourceMask/group 和已转换 expertScales 输入如何独立生成，并保证 joint Dispatch-expert-Combine 测试不会同错互相抵消？有效行序和 group 识别按 R04-02/R04-03，槽位按 R04-05/R07-03，真实成员权重与 source 归约权重按 R04-07/R04-08，不新增 X 输入。
-- **C23-02：** 如何验证第一跳与全部本卡/跨卡返回恰好一次、仅消费前 n 个 member、交错原始 k 的固定顺序，以及 source 按 mask 统一加权（DIRECT 真实权重、partial 乘 1.0）？需覆盖第一跳/成员真实权重不被 source 写回覆盖、mask 空洞不等待且不消费、真实 DIRECT weight 为 0/1 的正常贡献；误差按 C16 落实。
+- **C23-01：** Combine-only 的合法 assistEx/sourceMask/group 和 Dispatch 输出的 expertScalesOut 输入如何独立生成，并保证 joint Dispatch-expert-Combine 测试不会同错互相抵消？有效行序和 group 识别按 R04-02/R04-03，槽位按 R04-05/R07-03，真实成员权重与 source 归约权重按 R04-07/R04-08，不新增 X 输入。
+- **C23-02：** 如何验证第一跳与全部本卡/跨卡返回恰好一次、仅消费前 n 个 member、交错原始 k 的固定顺序，以及 source 按 mask 统一加权（DIRECT 真实权重、partial 乘 1.0）？需覆盖第一跳/成员保持真实输入权重、独立 expertScalesOut 保存 source 归约权重、mask 空洞不等待且不消费、真实 DIRECT weight 为 0/1 的正常贡献；误差按 C16 落实。
 - **C23-03：** 哪些规模、路由和偏斜属于 Combine/端到端性能目标，允许多大退化，如何与普通 Memory 保持相同输入和数值契约？
 
 安全矩阵保留实际 group 数为 0/BS/8*BS-1/8*BS、group 数不超过 8*BS 且转发结果条数 Y>8*BS、仅本卡转发、不同 source 同 TokenId、`tokenNum=0`、零 group、慢成员和连续轮次；不要求 X 字段或输出断言。
@@ -155,12 +160,12 @@ X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增�
 | [C01](#c01) | 多 Expert 贡献身份与 Group 边界 | 统一转发/编号、三项输入、密排成员表、有效 group 识别及行引用已确认；GM 写入沿用 Dispatch 算子完成语义，无独立发布议题 | [R01](ep-memory-server-dedup-open-topics.md#r01)、[R04](ep-memory-server-dedup-open-topics.md#r04) |
 | [C02](#c02) | ExpertOut 行序、有效行与 Plan 一致性 | 已随 R04-02/R04-03 确认：沿用 Memory 行序及有效 tokenNum，expert 重排在 Combine 前还原，无 public row map，firstHopRow=dstPosition | [R04](ep-memory-server-dedup-open-topics.md#r04)、[R10](ep-memory-server-dedup-open-topics.md#r10) |
 | [C03](#c03) | DIRECT、Group 与 Source 寻址及 Mask | 原始 k、mask、统一 recvSlot 及 source 按 expertScales 统一加权已确认；无需 source 结果类型标记或返回计数 | [R04](ep-memory-server-dedup-open-topics.md#r04)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R08](ep-memory-server-dedup-open-topics.md#r08) |
-| [C04](#c04) | Route Weight 来源与单次加权 | 包/assistEx/member 的真实权重、expertScales 原地转换及保持至 Combine 完成已确认；仅 nullptr/支持组合仍归 R08-02 | [R04](ep-memory-server-dedup-open-topics.md#r04)、[R08](ep-memory-server-dedup-open-topics.md#r08) |
+| [C04](#c04) | Route Weight 来源与单次加权 | 包/assistEx/member 的真实权重、权重输入/输出分离及输出保持至 Combine 完成已确认；首版要求非空 FP32 expertScales，其他公共支持组合仍归 R08-03/R10 | [R04](ep-memory-server-dedup-open-topics.md#r04)、[R08](ep-memory-server-dedup-open-topics.md#r08) |
 | [C05](#c05) | 两级归约顺序、精度与量化 | 公共格式由 R08 约定；内部数值待确认 | [C15](#c15)、[C16](#c16)、[R08](ep-memory-server-dedup-open-topics.md#r08) |
 | [C06](#c06) | 两段回传格式与 Ready | 公共 stride/地址由 R07/R08 约定；内部发布和清理待确认 | [C15](#c15)、[C21](#c21)、[C24](#c24)、[R07](ep-memory-server-dedup-open-topics.md#r07) |
 | [C07](#c07) | Combine 分核与调度 | 内部安排已迁回本文待讨论 | [C17](#c17) |
 | [C08](#c08) | H 分块、累加驻留与慢成员 | 内部 H tile、累加器与进度状态待确认 | [C18](#c18)、[C19](#c19)、[C20](#c20) |
-| [C09](#c09) | Workspace 容量、Slot 复用与流控 | 统一原子编号、8*BS 个 group 的共享容量及 t*K+k 槽位已确认，无超限校验；完整区域预算与跨轮复用待确认，X 记录及超限优化低优先级遗留 | [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11) |
+| [C09](#c09) | Workspace 容量、Slot 复用与流控 | 统一原子编号、8*BS 个 group 的共享容量及 t*K+k 槽位已确认，无超限校验；单份区域预算已收口，跨轮复用待确认，X 记录及超限优化低优先级遗留 | [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11) |
 | [C10](#c10) | Plan 代际、执行轮次与并发生命周期 | Plan 与 Combine epoch 的绑定、重复/并发调用和窗口复用待确认 | [R11](ep-memory-server-dedup-open-topics.md#r11) |
 | [C11](#c11) | 去重入口与跨 Rank 契约 | 三个新增输入、有效行序及复用 expertScales 已确认；同语义 Memory 参数优先沿用，无 X 输入或超限校验，具体声明/方向注释和支持矩阵待确认 | [R04](ep-memory-server-dedup-open-topics.md#r04)、[R10](ep-memory-server-dedup-open-topics.md#r10) |
 | [C12](#c12) | 完成边界、错误传播与退出 | 对外完成由 R11 约定，内部完整责任结束待确认；X 超限继续延后 | [C22](#c22)、[C24](#c24)、[R11](ep-memory-server-dedup-open-topics.md#r11) |
@@ -183,7 +188,7 @@ X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增�
 
 ## C04
 
-**Route Weight 来源与单次加权。** 包/assistEx/member 的真实权重、source expertScales 原地转换及保持至 Combine 完成已确认；GM 写入随 Dispatch 算子完成，无需额外权重输出。仅 nullptr/支持组合仍归 R08-02。结论与剩余项见 [R04](ep-memory-server-dedup-open-topics.md#r04)、[R08](ep-memory-server-dedup-open-topics.md#r08)。
+**Route Weight 来源与单次加权。** Dispatch expertScales 输入只读，expertScalesOut 独立输出 source 归约权重并由 Combine 的 expertScales 参数消费；GM 输出随 Dispatch 算子完成。包/assistEx/member 保留真实权重，输出保持到 Combine 完成。首版输入非空 FP32 `[BS,K]`；其余公共组合归 R08-03/R10。
 
 ## C05
 
@@ -203,7 +208,7 @@ X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增�
 
 ## C09
 
-**Workspace 容量、Slot 复用与流控。** 统一原子编号、8*BS 个 group 的共享容量及 t*K+k 槽位已确认，无超限校验；完整区域预算与跨轮复用待确认，X 记录及超限优化低优先级遗留。后续见 [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11)。
+**Workspace 容量、Slot 复用与流控。** 统一原子编号、8*BS 个 group 的共享容量及 t*K+k 槽位已确认，无超限校验；单份区域预算已收口，跨轮复用待确认，X 记录及超限优化低优先级遗留。后续见 [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11)。
 
 ## C10
 
@@ -211,7 +216,7 @@ X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增�
 
 ## C11
 
-**去重入口与跨 Rank 契约。** 双入口隔离，assistEx/sourceMask/group 三个新增输入、有效行序及复用 expertScales 已确认；同语义 Memory 参数优先沿用，无 X 输入或超限校验。以当前独立去重 Dispatch 声明为基线，具体 Combine 声明、方向注释及支持矩阵仍见 [R04](ep-memory-server-dedup-open-topics.md#r04)、[R10](ep-memory-server-dedup-open-topics.md#r10)。
+**去重入口与跨 Rank 契约。** 双入口隔离，assistEx/sourceMask/group 三个新增输入、有效行序及复用 expertScales 已确认；同语义 Memory 参数优先沿用，无 X 输入或超限校验。首版要求非空 FP32 `expertScales[BS,K]`，`nullptr` 直接报错。以当前独立去重 Dispatch 声明为基线，具体 Combine 声明、方向注释及支持矩阵仍见 [R04](ep-memory-server-dedup-open-topics.md#r04)、[R10](ep-memory-server-dedup-open-topics.md#r10)。
 
 ## C12
 

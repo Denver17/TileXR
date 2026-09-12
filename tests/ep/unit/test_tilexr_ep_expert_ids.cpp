@@ -139,6 +139,29 @@ void TestRejectsInvalidConfig()
     CheckTrue("random invalid config", TileXREpDemo::BuildRandomExpertIds(config).empty());
 }
 
+void TestServerDedupBalancedShiftMainCase()
+{
+    TileXREpDemo::ExpertIdsConfig config {96, 6, 96, 16, 16, 0, 2026};
+    std::vector<int64_t> counts(96, 0);
+    const auto rank0 = TileXREpDemo::BuildBalancedShuffleExpertIds(config);
+    CheckTrue("balance_shift reproducible", rank0 == TileXREpDemo::BuildBalancedShuffleExpertIds(config));
+    for (int rank = 0; rank < 16; ++rank) {
+        config.epRankId = rank;
+        const auto routes = TileXREpDemo::BuildBalancedShuffleExpertIds(config);
+        CheckRandomConstraints("balance_shift main case", config, routes);
+        if (routes.size() != 96 * 6) return;
+        std::vector<int64_t> perSource(96, 0);
+        for (int32_t expert : routes) {
+            if (expert >= 0 && expert < 96) { ++counts[expert]; ++perSource[expert]; }
+        }
+        CheckTrue("balance_shift six routes per expert/source",
+            std::all_of(perSource.begin(), perSource.end(), [](int64_t value) { return value == 6; }));
+        if (rank == 1) CheckTrue("balance_shift rank permutation differs", routes != rank0);
+    }
+    CheckTrue("balance_shift 96 routes per expert globally",
+        std::all_of(counts.begin(), counts.end(), [](int64_t value) { return value == 96; }));
+}
+
 } // namespace
 
 int main()
@@ -146,6 +169,7 @@ int main()
     TestBalancedMatchesCommercialOrderAndOffsets();
     TestBalanced64pDistribution();
     TestRandomConstraintsAndRankVariation();
+    TestServerDedupBalancedShiftMainCase();
     TestRejectsInvalidConfig();
     return g_failures == 0 ? 0 : 1;
 }

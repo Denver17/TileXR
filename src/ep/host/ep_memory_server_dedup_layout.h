@@ -16,6 +16,7 @@ struct EpMemoryServerDedupLayout {
     uint64_t expandXBytes = 0;
     uint64_t expertTokenNumsBytes = 0;
     uint64_t sendCountsBytes = 0;
+    uint64_t countStateBytes = 0;
     uint64_t assistExBytes = 0;
     uint64_t sourceMaskBytes = 0;
     uint64_t groupRowStrideBytes = 0;

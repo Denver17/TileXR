@@ -8,6 +8,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -24,7 +25,6 @@
 #include "tilexr_ep.h"
 #include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
-#include "ep_memory_server_dedup_profile.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_test.h"
@@ -33,6 +33,10 @@
 namespace {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
+// Fixed validation capacity through Dispatch/Combine Server Dedup qualification.
+constexpr uint64_t kServerDedupPeerBytes = UINT64_C(4) * 1024 * 1024 * 1024;
+constexpr int kServerDedupDataMiB = static_cast<int>(
+    (kServerDedupPeerBytes - TileXR::TILEXR_FLAG_BUFF_BYTES) / (1024 * 1024));
 
 void Require(bool condition, const std::string &message)
 {
@@ -95,7 +99,7 @@ Config Parse(int argc, char **argv)
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
-    Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
+    Require(c.runMode == "functional" || c.runMode == "performance",
         "unsupported TILEXR_VALIDATION_RUN_MODE");
     const char *loopsText = std::getenv("TILEXR_VALIDATION_LOOPS");
     const char *warmupText = std::getenv("TILEXR_VALIDATION_WARMUP");
@@ -159,6 +163,7 @@ void Marker(const Config &c, const char *name, const std::string &details)
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
         << ",\"backend\":\"memory\",\"bs\":" << c.bs << ",\"h\":" << c.h << ",\"topk\":" << c.topK
+        << ",\"route_mode\":\"balance_shift\",\"seed\":2026"
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
         << Json(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16") << details << '}' << std::endl;
 }
@@ -289,56 +294,13 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 {
     Require(args.rank == c.rank && args.rankSize == c.rankSize && args.localRank == c.localRank &&
         args.localRankSize == 8 && args.commDomain == 0, "communicator rank mapping mismatch");
-    // MemoryDomain 使用既有 8 MiB 数据区 + flag 区；空 kernel 不使用旧 Dispatch 的 2 GiB 分区。
-    const uint64_t frameworkBytes = static_cast<uint64_t>(TileXR::TILEXR_MEMORY_DOMAIN_BUFFER_SIZE) *
-        1024U * 1024U + TileXR::TILEXR_FLAG_BUFF_BYTES;
-    Require(args.peerMemBytes >= frameworkBytes, "peer window does not cover communicator allocation");
+    Require(args.peerMemBytes == kServerDedupPeerBytes,
+        "peer window is not exactly 4 GiB; actual=" + std::to_string(args.peerMemBytes));
     for (int rank = 0; rank < c.rankSize; ++rank) {
         const uintptr_t begin = reinterpret_cast<uintptr_t>(args.peerMems[rank]);
         Require(begin != 0 && begin % 32 == 0 && args.peerMemBytes <= UINTPTR_MAX - begin,
             "invalid peer window rank=" + std::to_string(rank));
     }
-}
-
-uint32_t ProfileBlockDim(const Config &c)
-{
-    int64_t vectorCores = 0;
-    Check(aclrtGetDeviceInfo(static_cast<uint32_t>(c.device), ACL_DEV_ATTR_VECTOR_CORE_NUM, &vectorCores),
-        "aclrtGetDeviceInfo");
-    Require(vectorCores > 0 && vectorCores <= UINT32_MAX, "invalid vector core count");
-    uint32_t blockDim = 0;
-    Check(TileXREp::TileXREpResolveMemoryBlockDim(static_cast<uint32_t>(vectorCores), 1U,
-        std::getenv("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"), &blockDim), "profile block dimension");
-    Require(blockDim <= TileXREp::kEpServerDedupProfileMaxCores, "profile core capacity exceeded");
-    return blockDim;
-}
-
-std::string ReadProfile(const Config &c, const TileXR::CommArgs &args, uint32_t blockDim)
-{
-    using namespace TileXREp;
-    const uint64_t bytes = static_cast<uint64_t>(blockDim) * sizeof(EpServerDedupProfileRecord);
-    const uint64_t dataBytes = static_cast<uint64_t>(TileXR::TILEXR_MEMORY_DOMAIN_BUFFER_SIZE) * 1024U * 1024U;
-    Require(kEpServerDedupProfileOffset <= dataBytes && bytes <= dataBytes - kEpServerDedupProfileOffset &&
-        kEpServerDedupProfileOffset <= args.peerMemBytes && bytes <= args.peerMemBytes - kEpServerDedupProfileOffset,
-        "profile records exceed own peer data region");
-    std::array<EpServerDedupProfileRecord, kEpServerDedupProfileMaxCores> records {};
-    Check(aclrtMemcpy(records.data(), sizeof(records), args.peerMems[c.rank] + kEpServerDedupProfileOffset,
-        static_cast<std::size_t>(bytes), ACL_MEMCPY_DEVICE_TO_HOST), "read device breakdown records");
-    const uint64_t generation = static_cast<uint64_t>(c.warmup) + c.loops;
-    std::ostringstream out;
-    out << ",\"generation\":" << generation << ",\"block_dim\":" << blockDim << ",\"records\":[";
-    for (uint32_t core = 0; core < blockDim; ++core) {
-        const auto &record = records[core];
-        Require(record.marker == kEpServerDedupProfileMarker && record.version == kEpServerDedupProfileVersion &&
-            record.recordBytes == sizeof(EpServerDedupProfileRecord) && record.rank == static_cast<uint32_t>(c.rank) &&
-            record.core == core && record.blockDim == blockDim && record.generation == generation &&
-            record.start > 0 && record.checked >= record.start && record.end >= record.checked,
-            "invalid breakdown record core=" + std::to_string(core));
-        if (core != 0) { out << ','; }
-        out << "{\"core\":" << core << ",\"start\":" << record.start << ",\"checked\":" << record.checked
-            << ",\"end\":" << record.end << '}';
-    }
-    return out.str() + ']';
 }
 
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
@@ -362,7 +324,7 @@ int Run(const Config &c)
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
-    std::string stage = "acl-init", batch = "initialization", breakdown;
+    std::string stage = "acl-init", batch = "initialization";
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
         Check(aclInit(nullptr), "aclInit"); initialized = true;
@@ -371,10 +333,10 @@ int Run(const Config &c)
         const char *soc = aclrtGetSocName();
         Require(soc != nullptr && (std::strncmp(soc, "Ascend950", 9) == 0 ||
             std::strncmp(soc, "Ascend910_9", 11) == 0 || std::strncmp(soc, "A5", 2) == 0), "A5 required");
-        const uint32_t profileCores = c.runMode == "breakdown" ? ProfileBlockDim(c) : 0;
         Check(aclrtCreateStream(&stream), "aclrtCreateStream");
         stage = "communicator";
-        Check(TileXRCommInitRankMemoryDomain(0, c.rankSize, c.rank, &comm), "TileXRCommInitRankMemoryDomain");
+        Check(TileXRCommInitRankMemoryDomainWithSize(0, kServerDedupDataMiB, c.rankSize, c.rank, &comm),
+            "TileXRCommInitRankMemoryDomainWithSize");
         TileXR::CommArgs *host = nullptr;
         GM_ADDR dev = nullptr;
         Check(TileXRGetCommArgsHost(comm, host), "TileXRGetCommArgsHost");
@@ -392,10 +354,10 @@ int Run(const Config &c)
         stage = "allocation";
         const uint64_t sizes[] = {layout.xBytes, layout.expertIdsBytes, layout.expandXBytes,
             layout.expertTokenNumsBytes, layout.sendCountsBytes, layout.assistExBytes,
-            layout.sourceMaskBytes, layout.groupBytes};
-        const uint32_t alignments[] = {2, 4, 2, 8, 4, 32, 4, 32};
+            layout.sourceMaskBytes, layout.groupBytes, layout.weightBytes};
+        const uint32_t alignments[] = {2, 4, 2, 8, 4, 32, 4, 32, 4};
         std::vector<TileXREp::EpServerDedupAllocation> allocations;
-        for (std::size_t i = 0; i < 8; ++i) {
+        for (std::size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
             void *data = nullptr;
             Require(sizes[i] > 0 && sizes[i] <= SIZE_MAX, "allocation size overflow");
             Check(aclrtMalloc(&data, static_cast<std::size_t>(sizes[i]), ACL_MEM_MALLOC_HUGE_FIRST), "aclrtMalloc");
@@ -404,18 +366,38 @@ int Run(const Config &c)
             Check(aclrtGetDevice(&device), "aclrtGetDevice");
             allocations.push_back({data, sizes[i], sizes[i], alignments[i], device});
         }
-        // Build deterministic, valid caller inputs. The stage-1 kernel may be
-        // empty, but its ABI must receive real token and routing buffers.
+        // Count-only kernel receives valid original routes; data/metadata buffers
+        // remain caller-owned placeholders until payload processing is implemented.
         std::vector<uint8_t> xHost(static_cast<size_t>(layout.xBytes), 0);
         std::vector<int32_t> idsHost(static_cast<size_t>(c.bs * c.topK));
         TileXREpDemo::ExpertIdsConfig idsConfig {c.bs, c.topK, c.experts,
             c.experts / c.rankSize, c.rankSize, c.rank, 2026};
-        idsHost = TileXREpDemo::BuildBalancedExpertIds(idsConfig);
+        // balance_shift uses the existing balanced epoch permutation, seed 2026.
+        idsHost = TileXREpDemo::BuildBalancedShuffleExpertIds(idsConfig);
         Require(idsHost.size() == static_cast<size_t>(c.bs * c.topK), "expert id construction failed");
+        // Fixed seed makes random routing weights reproducible across test runs.
+        // Normalization belongs to the caller fixture, not the Dispatch kernel.
+        std::mt19937 weightRng(2026U + static_cast<uint32_t>(c.rank));
+        std::uniform_int_distribution<uint32_t> weightSample(1U, 65535U);
+        std::vector<float> weightsHost(idsHost.size());
+        for (int64_t token = 0; token < c.bs; ++token) {
+            const size_t begin = static_cast<size_t>(token * c.topK);
+            double sum = 0.0;
+            for (int64_t k = 0; k < c.topK; ++k) {
+                const float value = static_cast<float>(weightSample(weightRng));
+                weightsHost[begin + static_cast<size_t>(k)] = value;
+                sum += value;
+            }
+            for (int64_t k = 0; k < c.topK; ++k) {
+                auto &weight = weightsHost[begin + static_cast<size_t>(k)];
+                weight = static_cast<float>(weight / sum);
+            }
+        }
         for (size_t i = 0; i < xHost.size(); ++i) xHost[i] = static_cast<uint8_t>(i & 0xffU);
         Check(aclrtMemcpy(buffers[0], xHost.size(), xHost.data(), xHost.size(), ACL_MEMCPY_HOST_TO_DEVICE), "copy x");
         Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
-        std::vector<uint8_t> zero(layout.expertTokenNumsBytes + layout.sendCountsBytes, 0);
+        Check(aclrtMemcpy(buffers[8], layout.weightBytes, weightsHost.data(),
+            weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
         Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0, layout.expertTokenNumsBytes), "clear token counts");
         Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0, layout.sendCountsBytes), "clear send counts");
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
@@ -429,8 +411,8 @@ int Run(const Config &c)
             for (submission = 1; submission <= count; ++submission) {
                 stage = "launch";
                 Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
-                    nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, nullptr, comm, c.bs, c.h, c.topK, c.experts,
-                    c.rankSize, c.rank, 1, 0, 0, 0, 0, 0, static_cast<int64_t>(layout.globalBs), 0, buffers[2],
+                    nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[8], comm, c.bs, c.h, c.topK, c.experts,
+                    c.rankSize, c.rank, 1, 0, 0, 0, 0, 0, static_cast<int64_t>(layout.globalBs), static_cast<int64_t>(submission % 2), buffers[2],
                     nullptr, nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
                     nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
                     static_cast<uint32_t *>(buffers[7]), c.dtype, TileXR::TILEXR_DATA_TYPE_RESERVED, stream),
@@ -451,9 +433,31 @@ int Run(const Config &c)
         batch = "measurement";
         runBatch(c.loops, 2, submitted, completed);
         safeCleanup = true;
-        if (c.runMode == "breakdown") {
-            stage = "breakdown-read";
-            breakdown = ReadProfile(c, *host, profileCores);
+        stage = "count-read";
+        std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
+        std::vector<int64_t> actualExperts(c.experts / c.rankSize);
+        Check(aclrtMemcpy(actualPrefix.data(), layout.sendCountsBytes, buffers[4],
+            layout.sendCountsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read sendCountsOut");
+        Check(aclrtMemcpy(actualExperts.data(), layout.expertTokenNumsBytes, buffers[3],
+            layout.expertTokenNumsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read expertTokenNumsOut");
+        const int64_t localExperts = c.experts / c.rankSize;
+        for (int source = 0; source < c.rankSize; ++source) {
+            TileXREpDemo::ExpertIdsConfig sourceConfig {c.bs, c.topK, c.experts,
+                localExperts, c.rankSize, source, 2026};
+            for (int32_t expert : TileXREpDemo::BuildBalancedShuffleExpertIds(sourceConfig)) {
+                if (expert / localExperts == c.rank)
+                    ++referenceCounts[(expert % localExperts) * c.rankSize + source];
+            }
+        }
+        int64_t cumulative = 0, previousExpert = 0;
+        for (int64_t index = 0; index < c.experts; ++index) {
+            cumulative += referenceCounts[index];
+            Require(actualPrefix[index] == cumulative, "sendCountsOut mismatch at " + std::to_string(index));
+            if ((index + 1) % c.rankSize == 0) {
+                const int64_t expected = c.loops % 2 ? cumulative - previousExpert : cumulative;
+                Require(actualExperts[index / c.rankSize] == expected, "expertTokenNumsOut mismatch");
+                previousExpert = cumulative;
+            }
         }
         success = true;
     } catch (const std::exception &error) {
@@ -485,7 +489,6 @@ int Run(const Config &c)
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
         const bool multi = c.checkpoint == "ep-sdedup-p1-chain-multi";
-        if (!breakdown.empty()) { Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown); }
         Marker(c, multi ? "EP_SERVER_DEDUP_MULTI_ROUND_PASS" : "EP_SERVER_DEDUP_SINGLE_ROUND_PASS", details);
     }
     return success ? 0 : 1;

@@ -1,6 +1,7 @@
 #include <limits>
 
 #include "ep_memory_server_dedup_layout.h"
+#include "ep_memory_server_dedup_count_layout.h"
 #include "server_dedup_test_checks.h"
 #include "tilexr_types.h"
 
@@ -14,7 +15,10 @@ int main()
     const Case cases[] = {
         {16, 32, 1, 4096, 32}, {64, 384, 6, 98304, 64},
         {128, 384, 6, 98304, 64}, {16, 512, 32, 131072, 256},
-        {64, 384, 8, 98304, 64}, {128, 384, 16, 98304, 128}
+        {64, 384, 8, 98304, 64}, {128, 384, 16, 98304, 128},
+        {16, 16, 1, 4096, 32}, {16, 1024, 32, 131072, 256},
+        {64, 1024, 16, 262144, 128}, {128, 1024, 8, 262144, 64},
+        {24, 1008, 32, 196608, 256}
     };
     for (const auto &test : cases) {
         Check(TileXREpBuildMemoryServerDedupLayout(test.ranks, 256, 7168, test.k, test.experts,
@@ -35,7 +39,7 @@ int main()
     const int64_t invalid[][5] = {
         {0, 1, 1, 1, 32}, {8, 1, 1, 1, 32}, {17, 1, 1, 1, 34}, {136, 1, 1, 1, 272},
         {16, 0, 1, 1, 32}, {16, -1, 1, 1, 32}, {16, 1, 0, 1, 32}, {16, 1, -1, 1, 32},
-        {16, 1, 1, 0, 32}, {16, 1, 1, 33, 32}, {16, 1, 1, 1, 16}, {16, 1, 1, 1, 528},
+        {16, 1, 1, 0, 32}, {16, 1, 1, 33, 32}, {16, 1, 1, 17, 16}, {16, 1, 1, 1, 1040},
         {16, 1, 1, 1, 33}, {16, 1, 1, 1, -32},
         {16, std::numeric_limits<int64_t>::max(), 1, 1, 32},
         {16, 1, std::numeric_limits<int64_t>::max(), 1, 32},
@@ -49,6 +53,15 @@ int main()
     }
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 1, 1, 32, nullptr) == TILEXR_ERROR_PARA_CHECK_FAIL,
         "null layout rejected");
+
+    // cnt uses bounded UB even though this increment does not allocate hidden buffers.
+    Check(TileXREpBuildMemoryServerDedupLayout(128, 4096, 1, 32, 1024, &layout) ==
+        TILEXR_ERROR_PARA_CHECK_FAIL, "route scratch exceeding UB rejected");
+    const auto countLayout = TileXREpServerDedupCountLayout(1024);
+    Check(countLayout.cumsumOffset == 32768 && countLayout.cumsumFlagOffset == 40960 &&
+        countLayout.prefixOffset == 49152 && countLayout.roundBytes == 114688 &&
+        countLayout.counterOffset == 229376 && countLayout.stateBytes == 230400,
+        "two count rounds, sixteen prefix copies and one isolated counter");
 
     alignas(32) uint8_t storage[256] = {};
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS,

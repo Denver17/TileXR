@@ -167,6 +167,20 @@ class MeasurementTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "rank"):
                 measure.summarize_measurements(invalid, self.config, "a" * 64)
 
+    def test_count_scope_reports_remote_record_volume_and_rank_bandwidth(self):
+        config = dict(self.config, rank_size=16, bs=96, moe_expert_num=96,
+                      kernel_scope="cnt_cumsum", route_mode="balance_shift", seed=2026)
+        ranks = [self.performance_rank(rank, (999, 9, 10, 11)) for rank in range(16)]
+        summary = measure.summarize_measurements(ranks, config, "b" * 64)
+        self.assertEqual(summary["native_status"], "cnt_cumsum")
+        self.assertEqual(summary["communication_bytes_per_rank"], 2880)
+        self.assertEqual(summary["algorithm_communication_bytes"], 46080)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["median"], 0.288)
+        report = measure.render_measurements(summary)
+        self.assertIn("native=cnt_cumsum", report)
+        self.assertIn("46080B", report)
+        self.assertIn("median=10.000 us min=10.000 us max=10.000 us", report)
+
     def test_corrupted_performance_evidence_is_rejected(self):
         original = self.performance_rank(0)
         invalid = [dict(original, performance={})]

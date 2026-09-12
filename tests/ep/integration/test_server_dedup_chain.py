@@ -179,7 +179,7 @@ class ChainConsumerTests(unittest.TestCase):
 
     def test_full_round_lifecycle_for_both_dtypes(self):
         cases = [("single", "functional", dtype, None, None, 1, 0) for dtype in ("bf16", "fp16")]
-        for run_mode in ("functional", "performance", "breakdown"):
+        for run_mode in ("functional", "performance"):
             default_loops, default_warmup = (1, 0) if run_mode == "functional" else (50, 50)
             cases += [("multi", run_mode, "bf16", None, None, default_loops, default_warmup),
                       ("multi", run_mode, "fp16", "5", "2", 5, 2)]
@@ -193,8 +193,6 @@ class ChainConsumerTests(unittest.TestCase):
                     environment["TILEXR_VALIDATION_LOOPS"] = loops
                 if warmup is not None:
                     environment["TILEXR_VALIDATION_WARMUP"] = warmup
-                if run_mode == "breakdown" and dtype == "fp16":
-                    environment["TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"] = "2"
                 processes = [self.start(rank, environment=environment) for rank in range(16)]
                 for rank, process in enumerate(processes):
                     output, errors = process.communicate(timeout=15)
@@ -219,23 +217,20 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["loops"], count)
                         self.assertEqual(record["warmup"], warmup_count)
                         self.assertEqual(record["run_mode"], run_mode)
+                        self.assertEqual(record["route_mode"], "balance_shift")
+                        self.assertEqual(record["seed"], 2026)
                     self.assertNotIn("timing_us", final[0])
-                    breakdown = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")
-                    self.assertEqual(len(breakdown), 1 if run_mode == "breakdown" else 0)
-                    if breakdown:
-                        cores = 2 if dtype == "fp16" else 4
-                        self.assertEqual(breakdown[0]["generation"], count + warmup_count)
-                        self.assertEqual(breakdown[0]["block_dim"], cores)
-                        self.assertEqual([record["core"] for record in breakdown[0]["records"]], list(range(cores)))
                     calls = self.trace_lines(rank)
-                    self.assertEqual(calls.count("malloc"), 8)
-                    self.assertEqual(calls.count("free"), 8)
+                    self.assertEqual(calls.count("malloc"), 9)
+                    self.assertEqual(calls.count("free"), 9)
                     self.assertEqual(calls.count("comm-init"), 1)
+                    self.assertEqual(calls.count("comm-init-sized"), 1)
+                    self.assertEqual(self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")[0]["peer_mem_bytes"],
+                                     4 * 1024 ** 3)
                     self.assertEqual(calls.count("create-stream"), 1)
                     expected = (["launch"] * warmup_count + ["sync"]) if warmup_count else []
                     expected += ["launch"] * count + ["sync"]
-                    if run_mode == "breakdown":
-                        expected += ["profile-read"]
+                    expected += ["memcpy", "memcpy"]
                     self.assertEqual(calls[calls.index("launch"):calls.index("free")], expected)
                     self.assertLess(calls.index("launch"), calls.index("sync"))
                     self.assertLess(calls.index("sync"), calls.index("free"))
@@ -248,7 +243,7 @@ class ChainConsumerTests(unittest.TestCase):
         cases = [{"TILEXR_VALIDATION_LOOPS": loops} for loops in
                  ("", "0", "-1", "abc", "4294967296", "9223372036854775808")]
         cases += [{"TILEXR_VALIDATION_WARMUP": warmup} for warmup in ("", "-1", "4294967296", "abc")]
-        cases += [{"TILEXR_VALIDATION_RUN_MODE": mode} for mode in ("", "unknown")]
+        cases += [{"TILEXR_VALIDATION_RUN_MODE": mode} for mode in ("", "unknown", "breakdown")]
         cases += [{"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-chain-single", key: value}
                   for key, value in (("TILEXR_VALIDATION_LOOPS", "2"), ("TILEXR_VALIDATION_WARMUP", "1"),
                                      ("TILEXR_VALIDATION_RUN_MODE", "performance"))]
@@ -278,15 +273,10 @@ class ChainConsumerTests(unittest.TestCase):
 
     def test_prelaunch_errors_never_launch_or_pass(self):
         cases = [{"TEST_FAIL_STAGE": stage} for stage in (
-            "init", "set-device", "create-stream", "comm-init", "host-args", "device-args", "memcpy", "malloc")]
+            "init", "set-device", "create-stream", "comm-init", "comm-init-sized", "host-args", "device-args", "memcpy", "malloc")]
         cases += [{"TEST_SOC": "Ascend910B"}, {"TEST_MISSING_PEER": "1"},
-                  {"TEST_SMALL_PEER": "1"}, {"TEST_DEVICE_MAPPING_MISMATCH": "1"},
+                  {"TEST_SMALL_PEER": "1"}, {"TEST_LARGE_PEER": "1"}, {"TEST_DEVICE_MAPPING_MISMATCH": "1"},
                   {"TILEXR_VALIDATION_TOPK": "0"}, {"TILEXR_VALIDATION_H": "9223372036854775807"}]
-        profile_config = {"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-chain-multi",
-                          "TILEXR_VALIDATION_RUN_MODE": "breakdown"}
-        cases += [dict(profile_config, TEST_VECTOR_CORES=cores) for cores in ("0", "-1", "201", "4294967296")]
-        cases += [dict(profile_config, TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM="5"),
-                  dict(profile_config, TEST_FAIL_STAGE="device-info")]
         for environment in cases:
             with self.subTest(environment=environment):
                 process = self.start(0, environment=environment)
@@ -296,29 +286,17 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertIn("EP_SERVER_DEDUP_FAIL", errors)
                 self.assertNotIn("launch", self.trace_lines(0))
 
-    def test_breakdown_rejects_invalid_or_missing_core_records_after_batch_completion(self):
-        faults = [{"TEST_PROFILE_FAULT": field} for field in
-                  ("marker", "version", "size", "rank", "core", "block_dim", "generation", "start", "checked", "end", "missing")]
-        faults += [{"TEST_FAIL_STAGE": "profile-read"}]
-        for fault in faults:
+    def test_count_corruption_never_reports_success(self):
+        for fault in ("prefix", "expert"):
             with self.subTest(fault=fault):
-                environment = {"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-chain-multi",
-                    "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_VALIDATION_LOOPS": "3",
-                    "TILEXR_VALIDATION_WARMUP": "2"}
-                processes = [self.start(rank, environment=dict(environment, **fault) if rank == 1 else environment)
+                processes = [self.start(rank, environment={"TEST_COUNT_FAULT": fault} if rank == 1 else {})
                              for rank in range(16)]
                 for rank, process in enumerate(processes):
                     output, errors = process.communicate(timeout=15)
                     if rank == 1:
                         self.assertNotEqual(process.returncode, 0)
-                        self.assertNotIn("EP_SERVER_DEDUP_MULTI_ROUND_PASS", output)
-                        self.assertNotIn("EP_SERVER_DEDUP_BREAKDOWN_PASS", output)
-                        self.assertIn("stage=breakdown-read", errors)
-                        self.assertIn("submitted=3 completed=3 warmup_submitted=2 warmup_completed=2", errors)
-                        calls = self.trace_lines(rank)
-                        self.assertEqual(calls.count("profile-read"), 1)
-                        self.assertEqual(calls.count("free"), 8)
-                        self.assertEqual(calls[-1], "finalize")
+                        self.assertNotIn("EP_SERVER_DEDUP_SINGLE_ROUND_PASS", output)
+                        self.assertIn("stage=count-read", errors)
                     else:
                         self.assertEqual(process.returncode, 0, errors)
                 for rank in range(16):

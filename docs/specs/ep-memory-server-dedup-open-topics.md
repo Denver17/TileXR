@@ -10,12 +10,22 @@ Combine 内部的核分工、H 分块、归约状态、数值实现和内部验�
 
 各待确认点使用 `Rxx-01`、`Rxx-02` 等子项编号，每个 Rxx 独立从 01 开始，不跨议题连续。
 子项确认后保留编号并更新状态；后续新增点接续本议题编号，不重排既有编号。关联议题引用同一问题时标明对应子项。
-R01/R02 已关闭且无独立待确认点，不新增待确认编号；低优先级遗留同样编号，但明确标记延后，不计入初版关闭条件。
+R01 已关闭；R02-01 已确认采用 serverRouteMask + directMask，两遍扫描的分类、路由顺序和 Memory 复用结论均已收口。低优先级遗留同样编号，但明确标记延后，不计入初版关闭条件。
 R04 输入清单中的第 1-3 项是信息类别，与 `R04-xx` 待确认子项编号分开使用；原第 4 项 X 已移入超限优化遗留。
-本轮 R04-07/R04-08 的权重复用结论及接口复核只更新两份待确认文档；主设计中的 source 类型编码待定、权重载体待定等旧表述留待后续归并，本轮以本文确认结论为准。
-R05-01 的默认 64 核、固定 48/16 分工、cnt 发送时序、源端连续均分及 DataCopyPad 精确写回均已确认，本子项关闭；主设计中的对应旧表述后续统一归并，以本文为准。
-R05-02 已确认 uint32 相对通信槽位编码及双表仅存 UB，本子项关闭；撤回 GM 存表/分批加载建议，本轮仍只更新待确认文档。
-R05-03 已确认 AtomicAdd 取号及 cnt 双缓冲中的计数器方案：两份各预留 1KB，仅用首 4B，核 63 每轮清零另一份首 4B。基础 API 依据见[官方 API 核对](#官方-api-核对)。非阻塞 MTE3 查询仅为资源回收的候选实现，尚未查到官网接口；本轮不回写主设计。
+R03、R04 已确认内容及 R05 最新结论已同步[主设计](ep-memory-server-dedup.md)：
+R03 的 16B entry、固定 K-1 容量和无效区域不清零；R04-07/R04-08 的权重输入/输出分离及 Combine 参数复用；
+R05-01/R05-02 的固定 64 核、48/16 分工、DataCopyPad 写回和 UB 相对槽位双表；
+R05-03 的一份 1KB counter、首 4B 取号及算子末尾 SyncAll 后核 63 清零。
+R05-04 的本卡源端数据发送已按 Memory 流水合入主设计，Token 尺寸使用去重版 T，并发数按剩余 UB 计算为 1 至 8 路，安全输入保证至少 1 路，无需校验。
+R05-04 已按 Memory 收口：lane 显式 ID、独立输出 UB、核末 S_MTE3/DataCopyPad/MTE3_S；数据转发的监听/UB/Event/在途进度保留 R05-05/R05-06 后续设计，不套用源端发送流水。
+Cnt 发送/接收/cumsum 整体复用 Memory，适配固定 48/16 核组；零 cnt/零 tokenNum 的既有行为已确认。
+本轮确认 recvData 前两部分包括完整前缀就绪等待、读取和 Flag 清理；expertTokenNumsOut 由接收组内核 0（物理核 48）沿用 Memory 计算写出。
+完整前缀仅由 16 核消费，发布副本、就绪 Flag 和清理均使用接收组内索引 0..15；源端 48 核不消费。
+R07-01 已按 Memory 记录格式给出三块区域的完整单份布局；第二块沿用 source 返回在前、Dispatch 槽位在后的独立子区，第三块为 relay 返回。
+R08-02 已确认首版要求非空 FP32 `expertScales[BS,K]`，nullptr 直接报错；其他库的 nullptr 语义不纳入首版。
+R08-03 的 Dispatch 部分已确认 BF16/FP16 非量化及 MXFP8 E4M3/E5M2，量化计算、scale 布局和输出沿用 Memory；R10-01 同步补齐已有量化参数的 launch 传递，待代码接入。
+专家数量约束更新为总数 `0<moeExpertNum<=1024`、`moeExpertNum=R*L`；不设独立的单卡专家数限制，允许 L=1，128P 下 L 至多为 8。
+基础 API 依据见[官方 API 核对](#官方-api-核对)，设计确认与目标设备验证状态分别记录。
 
 “待确认”表示需选择具体机制；“实现核对”表示逻辑方向已经确定，但 API/资源/可见性尚无足够证据。
 各项候选建议只作为讨论起点。关闭议题时应将明确的输入、输出、所有权与完成条件合入主设计，
@@ -32,17 +42,19 @@ R05-03 已确认 AtomicAdd 取号及 cnt 双缓冲中的计数器方案：两份
 | Token 尾部 | 不作为 public output/input；不跨 Dispatch/Combine 生命周期保存整份 Payload | 作为同一通信记录的内部 Payload，接收端按有效长度剥离并生成 metadata |
 | 旧 Memory `assistInfoForCombine` 的三字段语义 | 保留基础接口形态时可保留参数，但去重逻辑不依赖旧三字段；不再复制一份同语义表 | 新增 `assistEx[tokenNum,8]`，与 Combine 的 `expertOut` 行一一对应 |
 | relay cnt/转发 cnt | 不增加代理 cnt、二次 cumsum 或 cnt 控制包 | 原始 source 统计并发送 cnt，relay 只做数据转发 |
+| 重开 cnt 接收/cumsum/计数输出设计 | 整体复用 Memory 的统计分支、记录格式、同步、清理及输出语义；零 cnt/零 tokenNum 同样沿用 | 适配固定核组、取消双 Group 和去重区域地址，不另造 raw-count/prefix 接口 |
+| 保留旧 Memory 通信区域及绝对 offset | 两种算法不混用，通信空间按 Server Dedup 自身需要重新排布 | 依次为状态区（cnt/cumsum/counter）、数据接收区、中转 Token 区；只核算本版本的容量和生命周期 |
 | 双 Group/两批发送屏障 | 不增加阶段间 `PIPE_ALL`、`SyncAll` 或单独等待 MTE3 | 每个发送核内部先处理第一跳，再处理 DIRECT，任务可连续下发 |
 | 卡级多 expert 去重 | 不建立卡内 route 合并表，不省略同卡不同 expert 的贡献 | 统一按跨 Server 去重后的正常转发流程记录每条 route |
 | 重复 Top-k、invalid expert、mask 分支 | 不增加扫描、过滤、哨兵或错误恢复路径 | 依赖已确认的安全输入和不支持场景直接报错 |
 | `memberMask`/`groupCount`/哨兵 | 不增加有效位、独立 group 数或清零流程 | group 固定容量，前 `n` 项有效，尾部由 `n` 忽略 |
 | 独立 metadata 发布机制 | 不增加逐表/逐 group ready 或额外同步，R04-04 关闭 | 沿用 Memory 算子完成语义，Dispatch 所有核完成任务及 GM 写入后，后续 Combine 才消费输出 |
 | 按返回发送卡划分七/八块中转区 | 撤回来源卡分区，统一预留 8*BS 个 group，每组 K 个结果槽位 | 全卡唯一 t 与组内唯一 originalK 已足够定位贡献；group 表同步预留 8*BS 行，本卡及跨卡返回共享容量 |
-| 独立 source/sourceWeight/partialMask | 不新增 source 权重输出、权重快照 tensor 或结果类型位图 | 复用 expertScales[BS,K]；Dispatch 保留真实 route weight 后原地将 returnK 权重设为 1.0，source 按 sourceMask 统一加权 |
+| source 类型与重复权重载体 | 三项 metadata 之外独立输出 expertScalesOut；不再增加权重快照或结果类型位图 | expertScales 输入只读；Combine 通过已有 expertScales 参数读取输出，按 sourceMask 统一加权 |
 | source 返回数量输出 | 不新增 per-Token recvCount 或通知 | sourceMask 已给出有效位置，popcount 可得有效贡献数；到达状态仍由这些位置的 Flag 决定 |
 
 因此，初版 Dispatch/Combine 新增 metadata buffer 仍只有 `assistEx`、`sourceMask`、`group`；
-复用的 expertScales 在去重 Dispatch 中增加已确认的原地写回职责，不算第四个新增 buffer 参数。
+Dispatch 使用独立 expertScales 输入和 expertScalesOut 输出；“三项 metadata”不再表示 Dispatch 仅有三个新增输出参数。Combine 的权重参数继续复用。
 其余名称要么是内部临时变量，要么是未来超限优化的遗留备忘，不再形成额外接口或同步协议。
 
 ## Memory 复用判断
@@ -56,41 +68,40 @@ q/cnt、统一 Payload/DataAsFlag、32B 头部及 R01/R02 已确认的内容不�
 | --- | --- | --- |
 | E01 [分核与参数计算](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L482) | BS<48 全核发 cnt，否则仅 cumsum 核组发送；cumsum 核数由既有公式限制，最多 8 核；`SplitToCore` 使用连续区间和余数均分 | R05-01 已确认默认 64 核，48 核源端数据发送、16 核 cnt 接收/cumsum/copy/relay；沿用 BS<48 分界，不沿用动态核数公式或 8 核上限。源端 BS 在 48 核连续均分、余数优先分配，接收 tokenNum 在 16 核均分；不原样复用旧全核 LocalWindowCopy 分区 |
 | E02 [输出行与元数据](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1506) | `dstPosition=prefixBefore(localExpert*R+srcRank)+q`，首个分区的 prefixBefore 为 0，其余取前一项前缀；hidden 和三字段 assist 同行，`CalRecvAndSetFlag` 写出完整前缀 | R04-02/R04-03 已确认保留行序、前缀和 caller-owned 输出 GM；assist 改为已确认的 32B assistEx，不能继续直接复制旧三字段 |
-| E03 [发送资源](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L861) | 按剩余 UB/通信长度计算发送 buffer 数，上限 8；发送和接收复用 buffer 时有阻塞 `WaitFlag` | 可复用容量计算方法及最后使用者保护；不能据此声称已有非阻塞 Event 查询或监听/发送解耦 |
+| E03 [发送资源](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L861) | 按剩余 UB/通信长度计算发送 buffer 数，上限 8；发送和接收复用 buffer 时有阻塞 `WaitFlag` | 本卡源端数据发送可复用容量计算方法及最后使用者保护；不能据此推导数据转发的监听/发送解耦 |
 | E04 [核末 Flag 清理](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1569) | `WaitAndFormatOutput` 收完负责的记录并等 buffer 后，调用 `ClearLocalWindowDataFlags`，只写每块 32B Flag | 推荐保留核末清理粒度；地址遍历改为去重的 tokenPos 所有权，不能沿用旧整段 source/expert 清理范围 |
-| E05 [Host 校验](../../src/ep/host/ep_dispatch_memory_host.cpp#L54) | 拒绝非空 `expertScales`；无量化 FP16/BF16，MXFP8 为显式组合；BS 必须大于 0，globalBs 取 BS*R | 可复用参数和能力检查框架；去重 Dispatch 已确认复用 expertScales 作为 FP32 路由权重输入及 source 归约权重原地输出，不照搬非空拒绝条件 |
+| E05 [Host 校验](../../src/ep/host/ep_dispatch_memory_host.cpp#L54) | 普通 Memory 对 expertScales 有不同限制；无量化 FP16/BF16，MXFP8 为显式组合 | 去重输入 expertScales 必须非空、FP32 `[BS,K]` 且只读；归约权重写独立输出，nullptr 直接报错 |
 | E06 [注册启动](../../src/ep/host/ep_kernel_launch.cpp#L390) | 查询设备核数、检查布局、取得 `TileXRCommNextMagic`，在给定 stream 上异步启动注册 kernel | 推荐复用提交方式；Host 返回成功不等于设备完成。新增持久表在 Dispatch kernel 完成后供后续 stream 任务使用 |
 | E07 [窗口与预算](../../src/ep/host/ep_memory_layout.cpp#L98) / [轮次选择](../../src/ep/common/ep_memory_window.h) | Host 用有溢出检查的尺寸运算校验 UB/窗口；magic 选择 ping-pong 窗口，Payload Flag 仍需要清理 | 复用预算方法，新增区域需重新计算；magic 取模选窗不能独自使同一窗口中的旧 Payload Flag 失效 |
-| E08 [Combine 权重接口](../../src/ep/kernels/tilexr_ep_combine_memory_kernel.h#L849) | `ExpertScaleCopy` 从本 source 的 FP32 `expertScales[BS,K]` 读取权重；非量化下可为空并按 1 处理 | R04-07/R04-08 已确认复用该输入：DIRECT 使用真实权重，partial 使用 1.0，sourceMask 为 0 的槽位跳过；Dispatch 原地更新后同一 buffer 保持到 Combine 完成，nullptr 支持组合仍归 R08-02 |
+| E08 [Combine 权重接口](../../src/ep/kernels/tilexr_ep_combine_memory_kernel.h#L849) | ExpertScaleCopy 从本 source 的 FP32 `[BS,K]` expertScales 读取权重 | Combine 的 expertScales 指向 Dispatch 的 expertScalesOut：DIRECT 真实权重、partial 为 1.0，sourceMask 为 0 的槽位跳过 |
 | E09 [参考行序](../../tests/ep/demo/tilexr_ep_dispatch_demo.cpp#L787) | `BuildExpectedMemoryRoutes` 独立按 localExpert、srcRank、原 route 顺序产生结果，另行累计前缀 | 可复用测试组织及原始 route oracle，新增去重通信路径和 metadata 断言，不能复用 kernel 生成的表当唯一正确答案 |
 | E10 [Combine 返回寻址](../../src/ep/kernels/tilexr_ep_combine_memory_kernel.h#L552) | 以 `tokenId*slotCount+topkId` 定位目标卡结果槽位，不额外乘发送卡数 | R04-05/R07-03 已确认沿用二维展平思路，以 relay 的 t 和原始 k 定位中转结果，`recvSlot=t*K+k` |
 
 ### 同语义接口复核
 
 **已确认原则：** 去重与非去重入口隔离，去重入口无需兼容旧算法的全部限制；在用途、数据形状和消费含义不变时，优先沿用 Memory 的既有参数名称与传递方式。
-expertScales 的用途仍是逐原始 Token/k 的归约权重，变化在于去重 Dispatch 会原地生成 source 归约所需的值，该写入职责必须在接口中明确。
-source 只是原始输入所属 Rank 的角色名，不单独对应 tensor；“source 权重”在接口中统一称为 expertScales，避免多个名称被误认为多个输出。
+Dispatch expertScales 提供真实路由权重，expertScalesOut 提供 source 归约权重；Combine 继续用 expertScales 参数按原始 Token/k 索引消费输出。
+source 只是原始输入所属 Rank 的角色名；权重参数以 expertScales / expertScalesOut 区分输入输出，二者存储独立。
 
 | 需求或遗留名称 | 已有接口与源码依据 | 复核结论及状态 |
 | --- | --- | --- |
-| source 最终归约权重 | [Memory Dispatch](../../src/ep/host/tilexr_ep_memory_dispatch.cpp#L32) 已有 expertScales 参数；[Memory Combine](../../src/ep/host/tilexr_ep_memory_combine.cpp#L28) 为 float* expertScales | 已确认：去重 Dispatch 读真实 FP32[BS,K] 权重，原地写回 source 归约权重；Combine 用同一 buffer，不新增 sourceWeight 输出或权重快照 |
+| source 最终归约权重 | Memory Dispatch 已有 expertScales 输入，Memory Combine 已有 float* expertScales 输入 | Dispatch 新增独立 expertScalesOut，由 Combine 既有 expertScales 参数消费；两个输入接口并不自动提供 Dispatch 权重输出 |
 | tokenNum / 本卡 expert 输出有效行数 | [ReadSendCount](../../src/ep/kernels/tilexr_ep_combine_memory_kernel.h#L429) 读取 sendCounts 最后一项；Dispatch 已有 sendCountsOut | 已确认：首版 tokenNum=sendCounts[L*R-1]；沿用 sendCountsOut -> sendCounts，不新增 tokenNum 标量、计数 tensor 或通知；它不表示 source 的逐 Token 返回数量 |
 | 每个 expert 的行数或前缀 | [SetValidExpertInfo](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1433) 写 expertTokenNumsOut，expertTokenNumsType=0 为累计前缀、1 为逐 expert count | 沿用既有计数契约，不再建立同义 expert 行数/offset 输出；精确参数声明仍归 R10-01 |
-| Dispatch hidden 输出、expert 结果与最终 source 输出 | [公共 Memory 参数](../../src/include/tilexr_ep.h#L29) 已有 expandXOut、expertOut、yOut；[CopyInAndOut](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1506) 按 dstPosition 写 hidden | 建议沿用现有参数及行关联，不为内部加长 Payload 新增 public Token buffer；expertOut 是 expert 计算结果，不假定与 expandXOut 为同一块内存。dtype/stride 仍归 R08-03/R10-03 |
+| Dispatch hidden 输出、expert 结果与最终 source 输出 | [公共 Memory 参数](../../src/include/tilexr_ep.h#L29) 已有 expandXOut、expertOut、yOut；[CopyInAndOut](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1506) 按 dstPosition 写 hidden | Dispatch 已确认沿用 expandXOut 紧密行及 R08-03 的 BF16/FP16/FP8 输出格式；expertOut 是 expert 计算结果，不假定与 expandXOut 为同一块内存，其 dtype/返回格式仍归 R08-03/R10-03 |
 | 每个 source Token 的最终贡献数 | 已确认 sourceMask[BS]，每项 uint32 表示有效 k 槽位 | 已确认：有效数量可由 popcount(sourceMask[token]) 得到，实际消费直接依据位集合；无需额外 recvCount，且不能用权重为 0 判断是否等待 |
-| 量化 scale 输出 | [Memory CopyInAndOut](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1540) 将量化 scale 写入 dynamicScalesOut | 建议在启用相同量化格式时沿用 dynamicScalesOut；它是量化 scale，不承载 route weight。scales/expandScalesOut 在当前 Memory 路径仍是未支持占位，不因名称相似就用于 source 权重 |
+| 量化 scale 输出 | [Memory CopyInAndOut](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1540) 将量化 scale 写入 dynamicScalesOut | R08-03 已确认 MXFP8 直接沿用 dynamicScalesOut，按 [tokenNum,S] 紧密输出，S=align2(ceil(H/32))；它不承载 route weight，scales/expandScalesOut 仍为未使用占位 |
 | comm、shape、dtype、stream 与调用完成 | [公共参数](../../src/include/tilexr_ep.h#L29) 已有相应参数，R04-04 已确认算子完成覆盖 GM 写入 | 同语义参数沿用；不为 metadata 单独新增完成事件或公开 plan handle。并发、跨轮生命周期仍归 R11，不因接口复用视为已验证 |
 | 旧布尔 mask 与三字段 assist | Memory 的 xActiveMask 表示 Token/expert 活跃性；[旧 assist](../../src/ep/common/ep_memory_window.h#L17) 每行只有三个 int32 | 语义或布局不同，继续采用已确认的 sourceMask、assistEx、group；不把 uint32 k 位图塞入 bool mask，也不同时生成重复的旧 assist 记录 |
-| workspace 参数或布局查询 | Memory [Dispatch 包装](../../src/ep/host/tilexr_ep_memory_dispatch.cpp#L70) 和 [Combine 包装](../../src/ep/host/tilexr_ep_memory_combine.cpp#L55) 将内部 workspace 设为 nullptr，两个 Memory 公共签名没有 workspace 参数 | 不能把其他 backend 的 workspace 参数称为可直接复用的 Memory 参数；新增中转区域的容量/映射查询需求仍在 R07-01/R10-01 讨论，不先引入统一 plan/workspace handle |
+| workspace 参数或布局查询 | Memory [Dispatch 包装](../../src/ep/host/tilexr_ep_memory_dispatch.cpp#L70) 和 [Combine 包装](../../src/ep/host/tilexr_ep_memory_combine.cpp#L55) 将内部 workspace 设为 nullptr，两个 Memory 公共签名没有 workspace 参数 | 不能把其他 backend 的 workspace 参数称为可直接复用的 Memory 参数；内部区域布局及所需字节数查询归 R07-01/R10-01，通信域扩容和 peer 映射由框架负责，不先引入统一 plan/workspace handle |
 
 复核结果：可沿用的重点是 expertScales、sendCounts、expertTokenNumsOut 及既有数据/shape/stream 参数；
 sourceMask 已能替代额外返回计数，但仍是去重新增的位图输出。接口复用不自动意味着沿用 Memory 全 K 槽等待逻辑，去重消费范围必须受 sourceMask 限定。
 当前[公共头文件](../../src/include/tilexr_ep.h#L53)已有独立去重 Dispatch 声明，可作为 R10-01 核对基线；声明或空 kernel 的存在不证明权重改写、路由或 Combine 已实现。
 
-**容量实数边界：** [当前常量](../../src/include/comm_args.h#L39)为 `IPC_BUFF_MAX_SIZE=1022MiB`。
-R=128、L=3、BS=256、H=7168、非量化且采用 K=6 的已确认尾部容量时，Dispatch 接收数据区为 `128*3*256*15872=1488MiB`，
-尚未加 state、返回区等。当前固定窗口不能容纳该例；R07-01 必须讨论容量扩展或另一份已建立 peer 映射的通信区，不能只修改设备 offset。
-这是尺寸核对，不是新方案的设备运行结果。
+**通信框架边界（已确认）：** 通信域后续扩大到 4GB 上限，由通信框架独立修改；容量上限及扩容实现不属于本方案。
+R07-01 只落实三块区域的内部 offset、对齐、所需字节数和复用，不以旧固定容量拒绝新布局。
+例如 R=128、L=3、BS=256、H=7168、K=6 时 Dispatch 数据区为 1488MiB，该值用于区域寻址计算。
 
 ### 可合并确认的建议组
 
@@ -100,11 +111,11 @@ R=128、L=3、BS=256、H=7168、非量化且采用 K=6 的已确认尾部容量�
 | 建议组 | 相关子项 | 推荐方向 |
 | --- | --- | --- |
 | 尾部格式 | R03-01 至 R03-03 | 全部已确认：16B entry、固定 K-1 容量、未用 entry/纯传输填充不清零，由有效长度限定解释范围 |
-| 输出与行引用 | R04-01 至 R04-04、R10-01/R10-02、R11-04 | 三个新增输出/输入、有效行序和 group 行引用已确认；GM 写入沿用 Dispatch 算子完成语义，R04-04 无独立设计项；具体参数声明与资源释放仍归 R10/R11 |
-| 类型与权重 | R04-07/R04-08、R08-01/R08-02 | 已确认 source 用 expertScales 统一加权：DIRECT 为真实 weight，partial 为 1.0，sourceMask 限定消费范围；不新增类型标记或权重输出；nullptr 支持组合仍待 R08-02 |
-| 接收与发送资源 | R05-01 至 R05-06 | R05-01/R05-02 已关闭；R05-03 已确认 AtomicAdd 取号及核 63 清零对侧 counter。基础 API 已取得 9.1 依据；并发资源、发送进度和回收方式继续讨论，非阻塞查询仅为候选 |
+| 输出与行引用 | R04-01 至 R04-04、R10-01/R10-02、R11-04 | 三个 metadata 输出/输入、有效行序和 group 行引用已确认；GM 写入沿用 Dispatch 算子完成语义，R04-04 无独立设计项；具体参数声明与资源释放仍归 R10/R11 |
+| 类型与权重 | R04-07/R04-08、R08-01/R08-02 | 已确认 source 用 expertScales 统一加权：DIRECT 为真实 weight，partial 为 1.0，sourceMask 限定消费范围；独立输出 expertScalesOut，不新增类型标记；首版 expertScales 必须非空，nullptr 直接报错 |
+| 数据发送与数据转发资源 | R05-01 至 R05-06 | 分核、UB 双表、原子取号和核末清零已确认；源端 1 至 8 路环形发送基线已确认，保留具体 ID/权重写回核对；数据转发 UB/Event 和在途进度后续设计 |
 | Flag 清理 | R06-01 至 R06-04 | 核末统一清理本核消费的 Flag，保持下发后剔除 |
-| 槽位与有效 group | R04-03/R04-05、R07-01 至 R07-03 | 已确认通过第一跳 assistEx 定位 group；统一中转区预留 8*BS 个 group，recvSlot=t*K+originalK，不引入 X 或来源卡分区；完整区域预算仍归 R07-01 |
+| 槽位与有效 group | R04-03/R04-05、R07-01 至 R07-03 | 已确认通过第一跳 assistEx 定位 group；统一中转区预留 8*BS 个 group，recvSlot=t*K+originalK，不引入 X 或来源卡分区；完整单份区域预算见已收口的 R07-01 |
 | 支持范围与生命周期 | R08-03、R10-03 至 R10-06、R11-01 至 R11-03/R11-05 | 精简首版格式，复用异步启动和跨 Rank 调用次序约定，明确持久输入寿命 |
 | Dispatch 验收 | R12-01/R12-03/R12-04 | 沿用 Memory 独立行序参考，补去重 metadata、并发和完整字节统计 |
 
@@ -118,54 +129,55 @@ R04-06 的 X 记录及 R07-04 的超限处理低优先级延后。R08-04、R09 �
 
 | 子项 | 判断与推荐选项 | 备选或需保留的核对 |
 | --- | --- | --- |
+| `R02-01` | **已确认并关闭：** 第一遍以当前 Token 的 serverRouteMask 分组并发第一跳，在 UB 为每 Token 留一个 directMask；第二遍按 directMask 发 DIRECT | 每核复用 64B 分组表，directMask 每 Token 4B；q/cnt/cumsum 及发送流水继续复用，不重新选择 |
 | `R03-01` | **已确认采用推荐方案：** entry 按 `{int32 destinationExpertId,int32 destinationQ,int32 originalK,FP32 weight}`，offset 为 0/4/8/12，合计 16B | 本项关闭，保留编号 |
 | `R03-02` | **已确认采用推荐方案：** 每包固定 K-1 个 entry 容量，由 n 指示有效前缀，统一 T | 本项关闭，保留编号；K=1 时 entry 容量为 0，固定头部仍存在 |
 | `R03-03` | **已确认：** `[n,K-1)` 的未用 entry、两段纯传输对齐填充和末个 480B Payload 块余量不清零，不要求哨兵；由 n/有效数据长度限定解释范围 | 本项关闭；T 和全部 Flag 保持，有效头部/entries、hidden/scale 正确写入，量化计算补齐仍按算法处理 |
-| `R04-01` | **已确认：** Dispatch 新增 assistEx、sourceMask、group 三个输出，Combine 对应新增三个输入；不引入 X 输出或输入 | 本项接口清单关闭；具体参数声明归 R10-01，行关联及算子完成语义见已关闭的 R04-02/R04-03/R04-04 |
+| `R04-01` | **已确认：** Dispatch 新增 assistEx、sourceMask、group 三个 metadata 输出，Combine 对应新增三个输入；不引入 X 输出或输入 | 本项 metadata 清单关闭；独立权重输出见 R04-08，具体参数声明归 R10-01，行关联及算子完成语义见已关闭的 R04-02/R04-03/R04-04 |
 | `R04-02` | **已确认采用推荐方案：** 沿用 E02 行序，ExpertOut 保持 Dispatch 的有效 `tokenNum` 行；`assistEx[row]` 与 `expertOut[row]` 一一对应，首版 `tokenNum=sendCounts[L*R-1]` | 本项及关联 R10-02 关闭；expert 内部重排须在交给 Combine 前还原，不增加 public row map，不消费 padding 行 |
 | `R04-03` | **已确认采用推荐方案：** group[t] 保持固定 stride，firstHopRow 保存 dstPosition；通过有效 assistEx 行中 forwardCount>0 的第一跳记录取得 t，再访问 group[t] | 本项关闭；不盲扫未写入的 8*BS 行，不新增 X/groupCount/validMask/哨兵或初始化整张 group 表；Combine 核分工在其文档讨论 |
 | `R04-04` | **无需独立设计，关闭：** 沿用 Memory，Dispatch 所有核完成全部任务及 GM 写入后算子才结束，后续 Combine 可读取完整 metadata | 不增加 metadata 发布协议、逐表/逐 group ready 或额外同步；核内 UB/Event 复用仍归 R05，算子完成与 Host 异步提交返回沿用既有区别 |
 | `R04-05` | **已确认并关闭：** Dispatch 按 `recvSlot=uint64(t)*K+entry.originalK` 产表；终端 Combine 从 assistEx 取得 relayRank/t/k，按同一公式返回，本卡相同 | 不需要 senderRank 维度、新编号或额外包字段；完整 base/offset 与返回 stride 仍归 R07-01/R08-03 |
 | `R04-06` | **低优先级遗留：** 初版不生成对外 X 记录，也不在 Combine 接收 X；X 仅留作后续超限场景优化的讨论项 | 不影响已确认的内部 AtomicAdd 取号；超限处理方向与 R07-04 合并讨论，旧 X 输出建议撤回 |
 | `R04-07` | **已确认并关闭：** source 的 DIRECT 权重保留真实值，group 的 returnK 权重设为 1.0，按 sourceMask 对有效结果统一乘权重累加 | 不新增 partialMask/类型标记，也不通过 weight 是否等于 1.0 推断类型；relay 的第一跳及成员仍保留真实 route weight |
-| `R04-08` | **已确认并关闭：** 复用 expertScales 的 FP32[BS,K] buffer；去重 Dispatch 输入真实权重，唯一 Token 发送核先完成真实权重取用，再原地写回 source 归约权重，Combine 消费同一 buffer | 不新增 source/sourceWeight 或快照输出；已修改 buffer 保持到 Combine 完成，下一轮 Dispatch 前由调用方重新提供真实权重；核内拷贝/Event 归 R05 |
+| `R04-08` | **已确认并更新：** Dispatch 只读 expertScales 输入，生成独立 FP32[BS,K] expertScalesOut；Combine 通过已有 expertScales 参数消费输出 | 两个 GM buffer 不重叠，输入保持真实值；输出保持到 Combine 完成，核末写出及 Event 已由 R05-04 收口，ABI 契约见 R10-01 |
 | `R05-01` | **已确认并关闭：** 默认 64 核，固定 48 核源端数据发送、16 核 cnt 接收/cumsum/localwindowcopy/转发。BS<48 时全部 64 核发 cnt，数据核先完成本核 cnt 再发数据；BS>=48 仅 16 核发 cnt，48 核直接处理数据发送 | 源端 BS 在 48 核连续均分、余数优先分配，接收 tokenNum 在 16 核均分。sourceMask 核末用 DataCopyPad 写回本核有效字节，最小 4B，GM 起点/长度无需 32B 对齐；不使用 DataCopy 将 UB 填充写入邻核区间。旧动态核数公式和 8 核上限不沿用 |
-| `R05-02` | **已确认并关闭：** tokenPos[j] 为 uint32，保存相对本卡本轮 Dispatch 接收区第 0 个 Token 槽位的偏移；地址为 base+uint64(tokenPos[j])*T。tokenPos/pendingIdx 两张表均仅存 UB，pendingIdx 继续末项覆盖删除 | 按 BS*K 和接收不均衡度估算每核条目数；1024 项时单表 4KiB、双表 8KiB。撤回 GM 存表/分批加载方案；完整 UB 预算归 R05-04，不因估算值另增固定 1024 项的公共限制 |
-| `R05-03` | **取号及清零方案已确认：** uint32_t AtomicAdd 返回旧值作为 t；本 Rank 的两份 cnt 乒乓 buffer 各预留 1KB，仅首 4B 用作 counter；核 63 清零另一份首 4B | 首次零值沿用现有 peer memory 初始化，核末完成覆盖对侧 4B 写零；具体 offset 归 R07-01，连续 Dispatch 的交替选窗映射归 R11-05；不清未用区域，不新增 X |
-| `R05-04` | 适配 E03：独立 Flag 检测 scratch 与发送 buffer 池；先预留双表/元数据资源，再按剩余 UB 和可用 Event 计算并发数 | 基础 API 已核对；并发数及回收方式待确认。非阻塞 MTE3 查询是避免等待忙 UB 的候选，非必选接口；尚未查到官网依据，WaitFlag/ReleaseEventID 也不能当作完成查询 |
-| `R05-05` | 新增：在途记录保存 t、nextEntry、公共 UB 与 Event 归属；所有本地写出/转发完成下发后按已确认规则剔除 pending，UB 另由在途表追踪 | 最后一次使用同一 UB 的 MTE3 完成后才复用；不因 pending 删除就立即复用或再次 AtomicAdd |
-| `R05-06` | 新增：未到达的 Token 或暂时没有空闲发送资源时继续轮询其他任务；保留部分发送进度，资源释放后继续 | Memory 的固定接收槽位无需新增逐 Token 目标端 ready/credit；资源暂忙不作为错误，不增加控制包 |
+| `R05-02` | **已确认并关闭：** tokenPos[j] 为 uint32，保存相对本卡本轮 Dispatch 接收区第 0 个 Token 槽位的偏移；地址为 base+uint64(tokenPos[j])*T。tokenPos/pendingIdx 两张表均仅存 UB，pendingIdx 继续末项覆盖删除 | 按 BS*K 和接收不均衡度估算每核条目数；1024 项时单表 4KiB、双表 8KiB。撤回 GM 存表/分批加载方案；数据转发 UB 预算归 R05-05，不因估算值另增固定 1024 项的公共限制 |
+| `R05-03` | **取号及清零方案已确认：** uint32_t AtomicAdd 返回旧值作为 t；保留一份 1KB counter 区，仅首 4B 使用；算子末尾全核 SyncAll() 后由核 63 清零首 4B | 首次零值沿用现有 peer memory 初始化；不清未用的 1020B，不新增 X。具体 offset 归 R07-01，算子间生命周期归 R11-05 |
+| `R05-04` | **Memory 复核已收口：** 两类发送事件均按 lane 固定 ID，新增尾部沿用原拼包流水；源端输入/输出 UB 独立，核末 DataCopyPad 写出 mask 和权重 | S_MTE3 即时配对发布 Scalar 输出，核末 MTE3_S 完成写出；无新增发送事件池、阶段屏障或设计选择，待代码实现/验证 |
+| `R05-05` | **数据转发后续设计：** 保留一次取号、公共副本和任务下发后剔除；讨论 t、nextEntry、转发 UB、metaUB/group 行 UB、监听双表及 Event 的资源与进度组织 | 最后使用者完成后才能复用 UB；不因 pending 删除重复取号或提前改写，不直接套用源端 1 至 8 路流水 |
+| `R05-06` | **数据转发后续设计：** Token 尚未到达或转发资源暂忙时，如何继续监听并保持进度 | 固定接收槽位不增加逐 Token 目标端 ready/credit，资源暂忙不作为错误，不增加控制包 |
 | `R06-01` | 沿用 E04 的核末粒度：本核负责的 Token 全部完成任务下发后，统一清理其接收 Flag | 逐 Token/小批次清理作为备选；两种方式都不改变已确认的“下发完成即可剔除 pending”，不等待 MTE3 完成再删除 |
 | `R06-02` | PipeBarrier 的同流水前后序及 PIPE_ALL 核内完成语义已有 9.1 官网依据；推荐核末以 PIPE_MTE3 排序清理写入，独立零值 UB 保持到完成 | API 语义不再待确认；清理粒度及零值 UB/Event 组织仍待选择。若复用发送 UB，仍须建立最后使用者到新写入者的跨流水依赖 |
 | `R06-03` | 适配 E04：以保留的 tokenPos 遍历已消费 slot 的每个 32B Flag，跨 480B Payload 间隔写零；每 Token 的 slot 仅一个清理 owner | DataCopyPad 的 GM/UB 对齐及 stride 单位已核对；具体地址遍历仍待确认，不清 Payload 或另一核尚未消费的本卡转发目标 |
 | `R06-04` | 公共契约：Dispatch 接收 Flag 由该接收 owner 清理，Combine 返回 Flag 由 Combine 消费者清理；两者地址域独立，复用受 invocation 完成约束 | Combine 内部的清理时机/Event 迁入 C24；不在本轮指定 |
-| `R07-01` | 适配 E07：Host 统一计算 state、Dispatch slot、公共返回 slot 和 scratch 的区域预算；持久 metadata 使用独立普通 GM；推荐提供所需 peer bytes 的布局查询并配置足量映射 | 当前 1022MiB 窗口不足以支持 1488MiB 示例。备选单独分配并映射更大通信区；不能把普通未映射 GM 当作远端地址，也不能直接扩 offset 越过已分配空间 |
+| `R07-01` | **单份布局已收口：** 状态区按 Memory 记录和 16 核重算 offset；第二块 source 返回与 Dispatch 槽位各自预留，第三块为统一 relay 结果区 | 主设计列出 base/offset/stride、字节公式和完整示例；当前非量化返回沿用 Memory DataAsFlag，后续 dtype/并发分别归 R08/R11，框架扩容不在本方案内 |
 | `R07-02` | **已确认并关闭：** 一块统一中转区，预留 8*BS 个 group、每组 K 个槽位；group 表同步预留 8*BS 行，全卡共用 `[0,8*BS)` 的 t | 七/八来源卡分区候选撤回；本卡与其他卡返回共享容量，实际 group 数合计不超过 8*BS 由安全用例保证 |
 | `R07-03` | **已确认并关闭：** `recvSlot=uint64(t)*K+originalK`，地址为目标 relay 本轮中转区 base 加 recvSlot*stride，本卡及跨卡返回相同 | 每组结果区按原始 k 留槽，members 前 n 项密排；n=1 仍预留 K 槽，只监听一个返回，第一跳由 firstHopRow 读取；完整区域字节布局归 R07-01 |
 | `R07-04` | 已按用户要求低优先级延后，本轮无新增方案选择 | 保留尽力转发备忘；不做 X 超限检查、报错、降级或测试 |
 | `R08-01` | **随 R04-07/R04-08 确认并关闭：** ExpertOut 为未加权 expert 输出，relay 用真实权重归约；source 按 sourceMask 统一乘 expertScales，其中 partial 槽为 1.0 | 不新增结果类型载体；本轮确定公共职责，Combine 内部乘法/累加实现仍归其文档 |
-| `R08-02` | **部分确认：** 包/assistEx/group 使用 Dispatch 输入时的真实权重；source expertScales 经 Dispatch 原地改写后保持到 Combine 完成。剩余为 nullptr 语义及支持组合 | 建议沿用 Memory 非量化下 nullptr 表示 route weight 全为 1，Dispatch 向包/metadata 填 1 且不写空指针；备选强制非空，结合量化能力矩阵确认。旧 Memory 的非空拒绝条件不沿用 |
-| `R08-03` | 公共格式候选：先支持非量化 FP16/BF16 Dispatch，与输入同 dtype 输出；MXFP8 可作为后续独立确认的组合，尾部格式不依赖其是否启用 | expert output/返回 slot 的通信 dtype 与 stride 需作为 R07/R10 输入；Combine 内部 cast/归约/量化迁入 C15，不在本轮选定 |
-| `R10-01` | 以现有独立去重 Dispatch 声明为基线，新增 metadata 仍为 assistEx/sourceMask/group；expertScales 原地输入/输出后作为 Combine 同名输入，同语义的 Memory 参数优先沿用 | 继续落实方向注释、Combine 声明、支持矩阵和容量查询；不新增 sourceWeight/partialMask/tokenNum/返回计数，不把其他 backend 的 workspace 当作 Memory 已有参数 |
+| `R08-02` | **首版已确认：** 包/assistEx/group 使用真实输入权重，expertScales 必须非空 FP32 `[BS,K]`；expertScalesOut 独立输出 | nullptr 直接报错；测试端固定种子随机生成正权重，按 Token 归一化为和 1，不在算子中新增归一化或求和检查 |
+| `R08-03` | **Dispatch 部分已确认：** BF16/FP16 输入，quantMode=0 非量化及 quantMode=4 MXFP8，沿用 Memory 的 E4M3/E5M2；量化计算、scale 布局、输出接口复用 | expandXOut 紧密 [tokenNum,H]，MXFP8 每元素 1B，dynamicScalesOut 为 [tokenNum,align2(ceil(H/32))] 字节；expertOut/Combine 返回公共格式仍待讨论，内部数值见 C15/C16 |
+| `R10-01` | **权重及量化 ABI 已收口、待代码接入：** public 增加 expertScalesOut；量化复用已有 dynamicScalesOut/quantMode/expandXOutDtype，并传入 launch/Device | 共 13 个 GM_ADDR + 10 个 int64，184B；expertScalesOut offset=96、bs offset=104、quantMode offset=152、magic offset=176，无新增 shape/handle |
 | `R10-02` | **随 R04-02 确认并关闭：** 保持 Memory 行序，`tokenNum=sendCounts[L*R-1]`；按 capacity 分配、按 `tokenNum` 消费，不读取 padding 行 | 不新增 tokenNum 参数或通知；expert 内部若重排，由调用方在交给 Combine 前还原，不另设行映射 |
 | `R10-03` | 沿用 Memory 连续紧密行接口：输入 [BS,H]、Dispatch/expert 有效输出 `[tokenNum,H]`、最终 [BS,H]；32B 是 UB/通信对齐，不强制用户 H 字节已对齐 | 支持 dtype 依 R08-03，公开任意 stride 作为备选扩展；不能因 Memory 某格式有源码就视为去重已验证 |
-| `R10-04` | 沿用 BS>0、H>0；建议首版不扩展 BS=0。`tokenNum=0` 是合法接收结果，仍输出全零前缀并完成本 Rank 其他职责；其他输入输出建议不允许别名，expertScales 的已确认原地输入/输出除外 | BS/H 上限依新的 UB/窗口/字段宽度预算，不能原样使用旧容量拒绝条件；零长度空指针作为单独扩展，expertScales 的 nullptr 语义归 R08-02 |
+| `R10-04` | 沿用 BS>0、H>0；建议首版不扩展 BS=0。`tokenNum=0` 是合法接收结果，仍输出全零前缀并完成本 Rank 其他职责；其他输入输出建议不允许别名，expertScales/expertScalesOut 同样要求独立存储 | BS/H 上限依新的 UB/窗口/字段宽度预算，不能原样使用旧容量拒绝条件；其他零长度指针规则可作为单独扩展，expertScales 必须非空 |
 | `R10-05` | 沿用调用方共同约定及 Host 本地检查：R、BS、H、K、dtype、布局版本和调用顺序一致；globalBs 可取 0 自动推导为 R*BS | 不新增跨 Rank BS/top-k 扫描，不校验已保证的安全 route 或中转容量，不引入 X 输入 |
 | `R10-06` | 去重能力表：mask 为 NONE/null，shared 参数为 0，TP world 为 0/1 且 rank=0，shardType=0；支持的 weight 输入单列，其他未使用 scale/TP 输出按默认空值 | 非默认不支持配置在 Host 返回错误；不能泛化为“所有非空 expertScales 都拒绝”，也不回退旧入口 |
 | `R11-01` | 沿用 E06 的每次通信调用新 magic；持久 metadata 绑定原 Dispatch 身份、comm 和 layout，后续 Combine invocation 使用自己的通信轮次 | Plan 身份与窗口 magic 分开；固定版本首版可只在 Host 描述对象保存，无需每个 Token 重复携带 |
-| `R11-02` | 推荐允许同一不可变路由计划顺序 Combine，多次调用使用新 magic；expertOut 可更新数值但 row/H/dtype 不变，使用 Dispatch 改写后保持不变的 expertScales | 可选更严格的一次 Dispatch 配一次 Combine；下一轮 Dispatch 必须重新提供真实权重，不能把改写后 buffer 当原始路由权重；失败重试支持仍待确认 |
+| `R11-02` | 推荐允许同一不可变路由计划顺序 Combine，多次调用使用新 magic；expertOut 可更新数值但 row/H/dtype 不变，消费同一份 expertScalesOut | 可选一次 Dispatch 配一次 Combine；原始输入 expertScales 保持真实值，失败重试支持仍待确认 |
 | `R11-03` | 推荐首版同一 comm 单 stream、同一时刻一条 Dispatch/expert/Combine 调用链，调用方顺序一致 | 多 stream/多个未完成 plan 延后；旧 Memory 没有证明多份新 relay 状态可以共享窗口 |
-| `R11-04` | Dispatch 算子完成包含全部 GM 写入已由 R04-04 收口，含 expertScales 的 source 归约权重写回；本项仅保留 Host 异步调用及各资源释放时点的生命周期约定 | 本地 event 不自动证明所有远端已消费；metadata/改写后 expertScales 到最后 Combine 消费完成才可释放，公共窗口跨 Rank 复用约束保留 R11-05 |
-| `R11-05` | Counter 清零方案已确认：核 63 在本轮清零另一份首 4B，完成后供下一次 Dispatch 使用；首次零值沿用 peer memory 初始化 | 连续 Dispatch 的交替 buffer 如何对应共享 magic 仍待落实；Dispatch/Combine 都递增 magic，不能直接假定 magic%2 会在两次 Dispatch 间翻转。窗口旧 Flag 和存活数据的复用边界仍保留，Combine 内部机制迁入 C24 |
+| `R11-04` | Dispatch 算子完成包含全部 GM 写入已由 R04-04 收口，含 expertScalesOut 的 source 归约权重写出；本项仅保留 Host 异步调用及各资源释放时点的生命周期约定 | 本地 event 不自动证明所有远端已消费；metadata/expertScalesOut 到最后 Combine 消费完成才可释放，公共窗口跨 Rank 复用约束保留 R11-05 |
+| `R11-05` | Counter 清零方案已确认：本轮所有核结束任务后执行 SyncAll()，核 63 清零唯一 counter 的首 4B；首次零值沿用 peer memory 初始化 | 不再有 counter 乒乓或交替选窗映射问题；窗口旧 Flag、通信数据和 metadata 的复用边界仍保留，Combine 内部机制迁入 C24 |
 | `R12-01` | 适配 E09：独立遍历原始 expertIds 生成 route/q/期望行，另推导首跳和成员；检查 metadata/权重/引用及每条原始 expert 行恰好一次 | 测试不能要求 AtomicAdd 的 t 按原 Token 顺序；只检查唯一性和身份关联，避免以 kernel 生成表验证自身 |
-| `R12-03` | 沿用本节安全范围矩阵，覆盖 K=1/32、`tokenNum=0`、尾部、source 内 DIRECT、本卡/跨卡 relay、实际 group 数不超过 8*BS、乱序和跨轮 metadata 读取 | Dispatch 非量化数据按原值/位一致检查；量化另定误差。Combine 数值矩阵迁入 C23 |
+| `R12-03` | 沿用本节安全范围矩阵，覆盖 K=1/32、`tokenNum=0`、尾部、source 内 DIRECT、本卡/跨卡 relay、实际 group 数不超过 8*BS、乱序和跨轮 metadata 读取 | Dispatch 覆盖 BF16/FP16 的非量化及 MXFP8 E4M3/E5M2 六种组合；非量化按原值/位一致，MXFP8 沿用 Memory hidden/scale golden 检查，Combine 数值矩阵在 C23 |
 | `R12-04` | 适配 Memory demo/profile：在同配置同路由下报告 Dispatch 完整 latency 与真实字节，覆盖两类发送、relay、本地 copy、metadata 和 Flag，统计各 Rank median/min/max | 先保留典型 64/128P、384 expert、K=6/8/16、BS=256/H=7168 场景，确认容量后再设收益阈值；不把未测建议当作性能结论 |
 
 ## 已归并结论
 
 | 已确定内容 | 主设计位置 | 来源 |
 | --- | --- | --- |
-| 8P/Server、16P 至 128P、连续普通 expert 映射、多 expert、K=1..32、同 BS、安全输入及阶段一排除功能 | [支持范围](ep-memory-server-dedup.md#支持范围) | D01、D02、D08 |
+| 8P/Server、16P 至 128P、总 expert 数不超过 1024、连续均匀映射、允许 L=1、K<=min(32,moeExpertNum)、同 BS、安全输入及阶段一排除功能 | [支持范围](ep-memory-server-dedup.md#支持范围) | D01、D02、D08 |
 | 只做 Server 级去重，Server 内逐 expert 发送；source 直发所有原始 cnt | [路由与计数](ep-memory-server-dedup.md#路由与计数) | D01、D02 |
 | 仅对远端目标 Server 去重，源 Server 内逐 route DIRECT；远端按 top-k 首目标选 relay，本卡/跨卡转发统一取号和 Combine 返回 | [路由与计数](ep-memory-server-dedup.md#路由与计数) | R01 |
 | 源端按 Token 分核，各核先下发第一跳再下发 DIRECT，切换不加屏障或单独等待 MTE3；q/cnt 沿用 Memory，取消双 Group | [源端两阶段发送](ep-memory-server-dedup.md#源端两阶段发送) | R02 |
@@ -183,28 +195,28 @@ R04-06 的 X 记录及 R07-04 的超限处理低优先级延后。R08-04、R09 �
 cumsum 前监听或普通路径自动回退。共享专家继续延后。
 “远端单目标”按一条 route 理解；一张卡上的多条 expert route 已确认采用第一跳加本卡转发。
 远端 relay 的本卡转发同样分配 forwardTokenIdx 并走 Combine 返回；源 Server 内直发已由 R01 确认。
-持久表与权重的初版契约已在 R04 关闭；本轮 expertScales 原地复用结论暂记本文，待后续回写主设计。
+持久表与权重职责已在 R04 关闭；独立输出 ABI 已由 R10-01 给出具体结论，剩余为代码接入。
 
 ## 第二轮索引
 
 | 编号 | 议题 | 类型 | 需要形成的结论 | 来源 |
 | --- | --- | --- | --- | --- |
 | [R01](#r01) | Relay 选择与统一转发规则 | 已确认，关闭 | 仅跨 Server 去重、首目标 relay、本卡/跨卡统一转发和编号；源 Server 内逐 route DIRECT | D04、D06；C01 |
-| [R02](#r02) | 源端两阶段发送与 Memory 复用 | 已确认，关闭 | 各核独立先下发第一跳后 DIRECT，切换不增加屏障或 MTE3 等待；q/cnt 复用、取消双 Group | D04、D05 |
+| [R02](#r02) | 源端两阶段发送与 Memory 复用 | 已确认，关闭 | 各核先第一跳后 DIRECT，无阶段屏障；R02-01 已确认 serverRouteMask + directMask，cnt/cumsum/q 复用 | D04、D05 |
 | [R03](#r03) | 公共 Token 的字节布局与到达判定 | 已确认，关闭 | 16B entry、固定 K-1 容量、不清零无效区域及按有效长度解释均已确认，Payload/对齐/DataAsFlag 保持 | D03；C06 |
 | [R04](#r04) | 持久 Plan 布局与写入分工 | 初版已确认，关闭 | metadata、行关联、槽位及 GM 完成语义已确认；source 复用 expertScales 统一加权，无独立结果类型标记；仅 R04-06 低优先级遗留 | D06、D08；C01/C02/C03 |
-| [R05](#r05) | Dispatch 分核、原子与 UB/Event 资源 | 部分确认 + 实现核对 | R05-01/R05-02 已关闭，R05-03 取号和 counter 交替清零方案已确认；R05-04 至 R05-06 的发送资源回收、部分发送进度和 UB/Event 预算待落实，非阻塞查询只是候选 | D05、D06、D11 |
+| [R05](#r05) | Dispatch 分核、原子与 UB/Event 资源 | 数据转发部分待确认 | R05-01 至 R05-04 的核组、取号、源端 UB/Event 与写出方案已收口；R05-05/R05-06 数据转发流水另行设计 | D05、D06、D11 |
 | [R06](#r06) | Flag 清理时机与顺序 | 待确认 + 实现核对 | 核末或 Token/批次清理、具体排序与范围 | D07、D11；C06/C09 |
-| [R07](#r07) | 完整 Workspace 与槽位布局 | 部分确认；超限低优先级遗留 | 统一 `[8*BS,K]` 槽位及 recvSlot 已确认；R07-01 的完整区域预算待确认；初版无 X 超限校验/处理，尽力转发仅作备忘 | D07、D10；C09/C12 |
-| [R08](#r08) | 加权位置、权重与公共数值契约 | 部分确认 | R08-01 已关闭，真实权重与 source 归约权重职责已确认；nullptr 支持组合及接口 dtype 契约待确认；内部数值规则迁入 C15/C16 | D09；C03/C04/C05 |
+| [R07](#r07) | 完整 Workspace 与槽位布局 | 单份布局已收口；超限低优先级遗留 | 三块通信区的具体 offset、非量化 stride、完整预算已列出；跨调用复用归 R11，通信域扩容归框架；超限处理延后 | D07、D10；C09/C12 |
+| [R08](#r08) | 加权位置、权重与公共数值契约 | Dispatch 部分已确认 | 权重及 BF16/FP16 非量化/MXFP8 Dispatch 已收口；剩余为 expertOut/Combine 返回公共 dtype/stride，内部数值规则在 C15/C16 | D09；C03/C04/C05 |
 | [R09](#r09) | Combine 内部调度与 H 分块归约 | 已迁移 | 仅保留迁移索引；四类职责、累加器、慢成员和完成条件见 Combine C17-C22 | C07/C08/C12 |
-| [R10](#r10) | 双入口的具体 ABI 与 ExpertOut 契约 | 部分确认 | 有效行数/行序已随 R04-02 确认；具体参数/stride、调用约束和不支持参数规则待确认 | D08、D10；C02/C11 |
+| [R10](#r10) | 双入口的具体 ABI 与 ExpertOut 契约 | 部分确认 | 有效行数/行序及独立权重输出 ABI 已收口；其余 dtype/stride、调用约束和不支持参数规则继续讨论 | D08、D10；C02/C11 |
 | [R11](#r11) | Plan、执行轮次与异步生命周期 | 待确认 | generation/epoch、重复调用、并发与跨轮复用 | D08；C10/C12 |
 | [R12](#r12) | Dispatch 与公共契约验收标准 | 待确认 | Dispatch 路由/元数据/通信字节和公共生命周期验收；Combine 内部验证见 C23/C24 | D10；C13/C14 |
 
-R01/R02/R03 及 R04 初版设计已确认关闭。建议接着讨论 R08/R10，确定剩余格式支持和调用边界；
-再讨论 R05/R06/R07/R11 的执行机制；R09 转由 Combine 文档讨论。R12 随相关决定补齐。
-本顺序不要求重开第一轮已确认内容。
+R01/R03 及 R04 初版设计已确认关闭，R02 已确认的发送顺序及 Memory 复用保持。
+R02-01 已确认；源端 UB/Event、单份区域布局及权重 ABI 已给出可直接实现的结论，不再以这些项阻塞 sendData 和 recvData 前两部分。数据转发继续讨论 R05-05/R05-06。
+其余执行机制仍在 R05/R06/R07/R11，R09 转由 Combine 文档讨论，R12 随相关决定补齐；不重开已确认的 cnt/cumsum 设计。
 
 ## R01
 
@@ -212,7 +224,7 @@ R01/R02/R03 及 R04 初版设计已确认关闭。建议接着讨论 R08/R10，�
 
 **状态：已确认，关闭。** 跨 Server 适用范围、relay 选择、本卡/跨卡统一转发、编号和 Combine 处理均已确认，
 已合入[主设计](ep-memory-server-dedup.md#路由与计数)，本项无独立遗留问题。
-持久表布局和写入分工见 R04；本卡/跨卡统一槽位见已确认的 R07-02/R07-03，完整区域预算仍归 R07-01。
+持久表布局和写入分工见 R04；本卡/跨卡统一槽位见已确认的 R07-02/R07-03，完整单份区域预算见已收口的 R07-01。
 
 **已确认：**
 
@@ -267,7 +279,7 @@ R8/expert25 + returned expert26 result -> R8 partial -> R0/T8[returnK]
 则由 R8 接收一份第一跳再转发给 R9。后者的 R8 -> R9 虽为 Server 内发送，仍是跨 Server 去重后的必要展开。
 
 **关联议题：** R04 已确认同一编号下的持久记录、输出行定位及写入分工，GM 写入沿用 Dispatch 算子完成语义；
-R07-02/R07-03 已确认本卡及跨卡返回共享统一中转区，完整预算仍归 R07-01。关联设计均以本项统一转发规则为前提，
+R07-02/R07-03 已确认本卡及跨卡返回共享统一中转区，完整单份预算见已收口的 R07-01。关联设计均以本项统一转发规则为前提，
 不重新讨论纯本卡 group 是否取号或是否走 Combine 转发处理。
 
 **关闭结论：** 本项的适用范围、relay 规则、统一转发和编号均已确认；持久表及统一槽位分别见 R04/R07 的已确认结论。
@@ -276,8 +288,8 @@ R07-02/R07-03 已确认本卡及跨卡返回共享统一中转区，完整预算
 
 **议题：源端两阶段发送与 Memory 复用**
 
-**状态：已确认，关闭。** 两阶段仅为各发送核内部的任务下发顺序，阶段之间不插入屏障或单独等待 MTE3。
-按 Token 分核、q/cnt 沿用 Memory 及取消双 Group 均已确认，本项无独立遗留问题。
+**状态：已确认，关闭。** 各发送核对本核 Token 区间扫描两遍，先第一跳后 DIRECT，阶段之间不插入屏障或单独等待 MTE3。
+按 Token 分核、q/cnt/cumsum 整体沿用 Memory 及取消双 Group 均已确认；R02-01 的 serverRouteMask + directMask 分类与 UB 临时存放亦已确认。
 
 **已确认：**
 
@@ -290,7 +302,8 @@ R07-02/R07-03 已确认本卡及跨卡返回共享统一中转区，完整预算
   与发送分核和实际发送顺序无关；阶段一不采用新的分块统计加前缀算法。此项已确认，不再作为算法选择题。
 - Cnt 核按 Memory 分配的 expert 范围独立读取完整原始 expertIds，沿用 `CalAndSendCntByRankAndExpert` 统计，
   不消费源端去重预处理结果，因此不为共享该预处理结果新增 workspace 或同步协议。
-  既有 cnt 发送记录、接收、cumsum 计算及其必要同步继续沿用 Memory。此项已确认，不再讨论两种统计输入的选择。
+  既有范围筛选计数/逐 expert 计数分支、cnt 记录、接收、cumsum 计算、必要同步、状态清理及输出语义整体沿用 Memory，不只复用数值结果。
+  不因模块改名而拆开或重写既有函数；固定 48/16 核组、取消双 Group 和本版本区域地址是已确认适配。此项不再讨论算法或统计输入选择。
 - Cnt 始终由原始 source 为所有原始 expert route 发送，包含 DIRECT、第一跳和后续 relay route；不按两阶段拆分或只统计实际第一跳包。
 - 全核/非全核 cnt 的 BS<48 分界沿用 Memory；具体核数按 R05-01 的新配置：默认 64 核，BS<48 时 64 核发 cnt，BS>=48 时仅 cumsum 的 16 核发 cnt。
   Cnt 接收/cumsum 始终由固定 16 核负责，不沿用旧动态核数计算或最多 8 核的限制。
@@ -362,9 +375,60 @@ SourceMask 为 `0b1101`，保留 k0/k2/k3。Source 第二阶段不再发送已�
 两类任务使用发送资源时仍遵循每份 UB/Event 的正常复用依赖，R05 负责具体安排；
 该资源依赖不构成第一阶段结束时的单独 MTE3 等待，也不要求目标 relay 展开完成。
 
-**关闭结论：** Token 分核、核内第一跳优先顺序、无阶段屏障/单独 MTE3 等待、q/cnt 复用及取消双 Group 均已确认。
-随包编码与新 T 归 R03，持久格式归 R04，UB/Event 资源归 R05；本次字段表同步不新增 R02 待确认项。
+**已确认结论：** Token 分核、两遍扫描及核内第一跳优先顺序、无阶段屏障/单独 MTE3 等待、q/cnt/cumsum 复用及取消双 Group 均已确认。
+sendCountsOut 的 int32[L*R] 含当前项前缀、expertTokenNumsOut 的 int64[L] 计数/前缀语义均沿用 Memory，不另行选择 shape。
+零 cnt 和整卡 tokenNum=0 仍完成既有通知、等待、cumsum 输出与状态清理，后续不生成空区间的监听任务；这些均不再待定。
+随包编码与新 T 归 R03，持久格式归 R04；R02-01 的分类及 R05-04 的源端 UB/Event 均已收口。
 后续实现验证需覆盖混合 route、无第一跳任务和跨核进度不同的情况。
+
+### R02-01 两遍扫描的 route 分类（已确认，关闭）
+
+**已确认边界：** 两遍指对本核的完整 Token 任务区间先后扫描，第一遍下发所有远端多 route group 的第一跳，第二遍下发所有 DIRECT。
+不是对一个 Token 发完第一跳就立即发其 DIRECT，也不限制构造单个包时对其 K 条 UB 路由的局部访问次数。
+Cnt 和 q 继续使用 Memory 的原始 expertIds，不消费这里的临时分类结果。
+
+**已确认方案：当前 Token 的 Server 位图分组，加每 Token 一个临时 directMask。** 不新增 public 输出。
+
+| 临时值 | 存放/大小 | 用途与有效期 |
+| --- | --- | --- |
+| serverRouteMask[16] | 本核 UB，16 个 uint32，共 64B | 仅为当前 Token 分组，bit k 表示该 Server 命中原始第 k 条 route；每个 Token 使用前清零，可在下一 Token 复用 |
+| directMask[count_i] | 本核 UB，每 Token 一个 uint32，按 align32(4*count_i) 分配 | 第一遍记下第二遍需要直发的 k，保留到第二遍消费；不写 GM、不传给 Combine |
+| sourceMask[count_i] | 已确认的源端 UB 输出暂存 | 第一遍置已发 group 的 returnK 位，第二遍置 DIRECT 位，核末按已有规则写出 GM |
+
+第一遍处理每个 Token：
+
+1. 从 Memory 已加载的原始 expertIds UB 读取 K 个 ID，以 `serverId=(expertId/L)/8` 计算目标 Server，将 `uint32(1)<<k` 放入对应 serverRouteMask。
+2. 源 Server 的全部位归 DIRECT；远端 Server 的单 route 位也归 DIRECT，合并到本 Token 的 directMask。
+3. 对远端多 route 位图，取最小原始 k 作为第一跳，其余置位的 k 按升序构造 forwardEntries；同卡其他 expert 与跨卡 expert 同样进入 entries。
+4. 头部和每条 entry 的 q 分别按 `index=srcTokenId*K+originalK` 调用 Memory CalTokenSendExpertCnt；携带真实 route weight，发送第一跳并置 sourceMask 的 returnK 位。
+5. 该 group 的全部位（包括第一跳位）均不进入 directMask，第二遍无需再识别 relay 或重新分组。
+
+位图为 0 表示未命中；非零位图满足 `(bits & (bits-1))==0` 时为单 route。原始 expertIds 保持不变，不把筛选结果覆盖回输入 UB。
+取首位和按 k 升序枚举均是本核至多 K=32 的局部操作；不依赖新的跨核表、排序、原子计数或额外通知。
+这里的分类属于去重新增逻辑，不替换 Memory 的 cnt 范围筛选计数，也不添加重复 Top-k/非法 expert 的安全检查。
+
+第二遍遍历同一 Token 区间，只对 directMask 的有效 k 构造 DIRECT 包（forwardCount=0），q 仍按原始 index 计算。
+每发出一个 DIRECT，将其 k 位并入 sourceMask；不能直接用 sourceMask 筛选第二遍任务，因为其中还包含已经发出的 group 第一跳。
+两遍共用原发送池及包序号，无阶段屏障。随包权重始终从只读 expertScales 输入取值，source 归约权重写独立 expertScalesOut，输入不被覆盖。
+临时 serverRouteMask 可以复用的前提是有效头部/entries 已构造进受发送流水保护的 UB；在途发送不读取该分组表。
+
+**示例：** L=3，R0/T0 的 K=6 路由为 `[4,25,28,50,26,5]`。
+
+| Server | 原始 k / expert | 第一遍 | 第二遍 |
+| --- | --- | --- | --- |
+| S0（源 Server） | k0/E4、k5/E5 | 记入 directMask | 两条均 DIRECT，即使同卡多 expert 也不合并 |
+| S1 | k1/E25、k2/E28、k4/E26 | R8/E25 为第一跳，entries 为 R9/E28、R8/E26，forwardCount=2 | 三条均不再由 source 发送 |
+| S2 | k3/E50 | 记入 directMask | DIRECT |
+
+第一遍之后 directMask=`0b101001`，sourceMask=`0b000010`；第二遍之后 sourceMask=`0b101011`。
+无远端重复 Server 时第一遍无包，DIRECT 全在第二遍；K=1 同样成立。全为远端 group 时 directMask=0，第二遍无包。
+每个 Token 可包含多个远端 group，分别选择各自首 k、生成 entries，不将整个 Token 限定为单一目的 Server。
+
+**已确认的代价：** 用每 Token 额外 4B 的 UB 保存分类，第二遍不再重建 Server 分组。
+BS=256 时每核 5 或 6 个 Token，directMask 有效 20B/24B，按 32B 分配；连同可复用的 64B 分组表，额外 UB 为 96B/核，不含已有 sourceMask 和发送 buffer。
+采用保存 directMask 的方案，不再保留第二遍重建分组的设计选择；设备性能收益仍需实际测量。
+
+**关闭结论：** 用户已确认上述 serverRouteMask + directMask 方案，已合入主设计；cnt/cumsum/q 和发送 Event 流程不重新讨论。
 
 ## R03
 
@@ -375,7 +439,7 @@ SourceMask 为 `0b1101`，保留 k0/k2/k3。Source 第二阶段不再发送已�
 固定头部的八字段 32B 编码已随 R04 的 assistEx 布局确认；本轮 R03-01/R03-02 已确认每条 entry 16B、每包固定预留 K-1 条。
 R03-03 已确认采用不清零策略，通过 n/有效数据长度排除无效字节影响，已同步回写主设计。
 
-**已确定前提：** 保留原列表、公共发送 UB 和终端匹配 expert 已确定，目前未发现完整示例在已确认范围内存在功能冲突。
+**已确定前提：** 保留原列表、公共转发 UB 和终端匹配 expert 已确定，目前未发现完整示例在已确认范围内存在功能冲突。
 主设计已补充[尾部字段字节表](ep-memory-server-dedup.md#尾部字段字节表)、
 [各类包的字段值](ep-memory-server-dedup.md#各类包的字段值)、
 [entry 布局](ep-memory-server-dedup.md#forwardentries-条目字节表)及
@@ -462,7 +526,7 @@ Flag 清理归 R06-01 至 R06-04，UB 复用归 R05-04/R05-05，不在本项重�
 **已确定前提：** R01 已确认本卡/跨卡转发统一取号、记录和 Combine 返回，group 均以同一 forwardTokenIdx 关联。
 Dispatch 产出 Combine 所需的三类持久信息：`assistEx`、`sourceMask` 和 `group`；旧 `forwardPlan` 仅作为历史名称保留，不对应独立 tensor。
 已确认 assistEx 的 32B 行布局、sourceMask 的单核 UB 生成与核末写出，以及 relay group 的固定容量密排成员布局。
-R04-01 已确认 Dispatch 新增 assistEx/sourceMask/group 三个输出，Combine 对应新增三个输入；不引入 X 输入/输出，X 记录移入超限优化遗留。
+R04-01 已确认 Dispatch 新增 assistEx/sourceMask/group 三个 metadata 输出，Combine 对应新增三个输入；独立权重输出见 R04-08。不引入 X 输入/输出，X 记录移入超限优化遗留。
 R04-02/R04-03 已确认沿用 Memory 的有效行序，以及通过第一跳 assistEx 定位固定 stride 的 group[t]；firstHopRow 保存 dstPosition。
 R04-04 无需独立设计：沿用 Memory 的算子完成语义，所有核完成任务及 GM 写入后 Dispatch 才结束，后续 Combine 直接消费完整输出。
 R04-05/R07-02/R07-03 已确认一块统一中转区、8*BS 个 group 容量及 `recvSlot=t*K+originalK`；group 表同步扩为 8*BS 行。
@@ -515,7 +579,7 @@ expert 内部若重排，须在交给 Combine 前还原 Dispatch 行序，不增
 
 1. DIRECT：metaUB 八字段原样保留，无须重排；两个计数为 0，返回引用为 `(-1,-1)`。
 2. 第一跳：metaUB 保留接收头部的 k/weight 和正数 n；首次转发前取号一次，将本 Rank/t 补入 offset 24/28。
-   同一个 t 也填入公共发送 UB；发送 UB 的 forwardCount 改为 -1，metaUB 的 forwardCount 保持 n，不能先向 GM 写未分配的编号再回填。
+   同一个 t 也填入公共转发 UB；发送 UB 的 forwardCount 改为 -1，metaUB 的 forwardCount 保持 n，不能先向 GM 写未分配的编号再回填。
 3. 终端：以收到的头部为基础，仅用当前 expert 匹配 entry 的 originalK/weight 替换 offset 8/12 两项，再保存 32B 行。
    这只修改接收端生成的本行元数据，不修改 relay 共用的发送 UB，也不要求 relay 按目标 expert 构造不同副本；本卡转发同样处理。
 
@@ -542,40 +606,38 @@ GM shape 为 `[BS]`，元素按 srcTokenId 定位，每项 4B，每个元素仅�
 Mask UB 到对应写出完成前保持不变，Dispatch 对外完成包含该写入；每核 UB 有效容量为 `本核 Token 数*4B`。
 R05-01 已确认源端 Token 在 48 核连续均分；核末使用 DataCopyPad 写回 `本核 Token 数*4B`，最小写入一个 uint32（4B）。
 GM 目标起点和有效长度无需补齐到 32B；UB 保持自身对齐要求，填充不写到其他核拥有的 GM 元素。此处使用 DataCopyPad，不使用 DataCopy。
-主设计已同步此前的[生成与写出流程](ep-memory-server-dedup.md#sourcemask-生成与写出)，本轮连续分配及 DataCopyPad 细节留待后续归并。
+主设计已同步[生成与写出流程](ep-memory-server-dedup.md#sourcemask-生成与写出)，包含连续分配及 DataCopyPad 最小 4B 写回。
 
 该确认解决 sourceMask 的数据结构、生成核和存放时机；它表达有效槽位，实际到达仍由这些槽位的 Flag 判断。
 结合已确认的 expertScales 权重转换，source 无需另行区分 DIRECT/partial 类型。
 
 ### 复用 ExpertScales 的 source 归约权重（R04-07/R04-08，已确认）
 
-复用 Memory 的 `expertScales` 参数和 FP32 `[BS,K]` 索引方式，不新增 source/sourceWeight 或权重快照 tensor。
-去重 Dispatch 将该 buffer 明确定义为输入/输出，后续 Combine 通过同名权重输入读取同一 buffer；它不计入上面的三个新增 metadata buffer。
+Dispatch 权重输入和输出分离：expertScales 是非空只读 FP32 `[BS,K]` 输入，expertScalesOut 是同形状的独立输出。
+调用方将 expertScalesOut 传入 Combine 已有的 expertScales 参数，沿用原始 Token/k 索引；不新增 Combine 权重参数。
+三项 metadata 为 assistEx/sourceMask/group，独立权重输出另列，public/launch ABI 的具体实现归 R10-01。
 
 | 维度 | 已确认契约 |
 | --- | --- |
-| 功能定义 | Dispatch 输入为真实 route weight，输出为 source 最终归约权重；relay 仍使用真实权重完成本 Server 内加权求和 |
-| 数据结构 | FP32 `[BS,K]`，每元素 4B，以 `srcTokenId*K+originalK` 定位；DIRECT 保留真实值，每个 group 的 returnK 设为 1.0，sourceMask 为 0 的位置不消费、无需清零 |
-| 生产逻辑与存放 | 由原始 Token 的唯一数据发送核先取用真实权重并构造随包信息，再在本 Token 不再需要读取原始权重后原地写回 source 归约权重；写回只覆盖本核拥有的元素 |
-| Combine 使用逻辑 | Source 只等待 sourceMask 有效 k 的返回，并统一计算 result[k]*expertScales[token,k] 的和；relay 第一跳/成员权重分别取本地 assistEx/group 的真实值 |
+| 功能定义 | 输入为真实 route weight，输出为 source 最终归约权重；relay 使用真实权重完成本 Server 内加权求和 |
+| 数据结构 | 两个不重叠的 FP32 `[BS,K]` buffer，每个共 `BS*K*4B`；输出 DIRECT 为真实值，returnK 为 1.0，sourceMask 为 0 的位置不消费、无需赋值或清零 |
+| 生产逻辑与存放 | 原始 Token 的唯一发送核读取 expertScales 构造通信包，在本核 UB 生成 expertScalesOut，核末写到独立输出的本核 Token 区间 |
+| Combine 使用逻辑 | 将 Dispatch expertScalesOut 作为 Combine expertScales 输入，只对 sourceMask 有效 k 统一加权；relay 第一跳/成员取 assistEx/group 的真实权重 |
 
-**写入次序与生命周期：**
+**生产与生命周期：**
 
-1. Source 发送核读取本 Token 的真实权重。第一跳 header.weight、各 forwardEntries.weight 和 DIRECT header.weight 均取真实值。
-2. 完成本 Token 的真实权重取用后，再将各 group 的 returnK 权重写为 1.0；DIRECT 保持真实值，mask 为 0 的位置可保留原值。
-   不把改写后的 1.0 回填到通信包、relay 的 assistEx 或 group，避免第一跳 expert 贡献丢失真实权重。
-3. 已构造的发送 UB 保持到其 MTE3 使用完成；expertScales 写回的批量粒度、对齐尾部与 Event 复用归 R05。
-   此写回不要求在 R02 两个逻辑发送阶段之间插入 PIPE_ALL、SyncAll 或等待全部 MTE3。
-4. Dispatch 算子完成包含 expertScales 的写回；调用方将同一 buffer 传给 Combine，并保持其值和存储到消费完成。
-   下一轮 Dispatch 前必须重新提供真实 route weight，不能将已转换的 buffer 直接作为新一轮原始权重。
+1. 两遍发送都从只读输入 expertScales 取真实权重，第一跳 header、DIRECT header 和有效 entries 使用各自真实值。
+2. 在输出 UB 中生成 DIRECT 真实值和 returnK 的 1.0，不修改输入；输出构造不依赖输入全部读取结束。
+3. 源端核末写出 sourceMask 和 expertScalesOut。发送 UB 与权重输出 UB 分别保持到对应 MTE3 完成；按 R05-04 每核 DataCopyPad 有效区间，并用即时 S_MTE3/MTE3_S 发布和完成写出，不增加两遍之间的屏障或全部 MTE3 等待。
+4. Dispatch 算子完成包含输出 GM 写入。expertScalesOut 保持到 Combine 消费完成；输入只需遵守 Dispatch 输入生命周期，可继续复用其真实权重。
 
-是否支持同一份 metadata 顺序多次 Combine 仍归 R11-02；若支持，使用同一份保持不变的已转换 expertScales。
-无权重指针及量化支持组合仍归 R08-02，不因复用参数自动确认 nullptr 支持。
+是否支持同一份 metadata 顺序多次 Combine 仍归 R11-02；若支持，复用同一份 expertScalesOut 及真实成员权重。
+首版不支持 expertScales=nullptr；R08-03 已确认 BF16/FP16 非量化及 MXFP8 Dispatch，expertOut/返回公共 dtype 继续讨论。
 
 **例子：** R0/T0 的 k0 在源 Server 内 DIRECT，weight=0.4；k1 在 R8 为第一跳，weight=0.3；
 k2 转发到 R9，weight=0.2；k3 在另一 Server 的 R17 DIRECT，weight=0.1。
 
-| 位置 | Dispatch 输入真实权重 | Dispatch 后 sourceMask 位 | Dispatch 后 source expertScales | 返回内容 |
+| 位置 | Dispatch 输入真实权重 | Dispatch 后 sourceMask 位 | Dispatch 输出 expertScalesOut | 返回内容 |
 | --- | --- | --- | --- | --- |
 | k0 | 0.4 | 1 | 0.4 | 未加权 y0 |
 | k1 / returnK | 0.3 | 1 | 1.0 | R8 的 partial=0.3*y1+0.2*y2 |
@@ -635,7 +697,7 @@ K=8/16/32 时每行对齐后分别为 64/128/256B。该元数据表不含 H 维�
 分别对应 `(R8,k1)、(R9,k2)、(R9,k3)、(R9,k4)、(R10,k5)`；第一跳 w0 从 firstHopRow[7] 对应的 assistEx 取得，槽位 42 不使用、不等待。
 终端 Combine 从 assistEx 取得 relayRank/t/k，按同一公式写入目标 relay；本卡返回也执行写入和监听，不新增编号或包字段。
 成员表前 n 项密排，结果区按原始 k 预留 K 槽，两者不混用；n=1 时仍预留 K 槽，只监听一个返回。
-recvSlot 与本卡返回寻址已确认；参数声明归 R10，结果区 base/offset 和 slot stride 字节格式仍归 R07-01/R08-03。
+recvSlot 与本卡返回寻址已确认；参数声明归 R10，当前非量化结果区 base/offset/stride 已由 R07-01 收口，其他 dtype/scale 扩展归 R08-03。
 主设计已同步[成员表布局与生产/消费流程](ep-memory-server-dedup.md#relay-group-成员表)。
 
 ### X 接口移出初版（已确认）
@@ -664,30 +726,31 @@ X 的记录和使用仅作为 R04-06/R07-04 后续超限场景优化的低优先
 
 **子项状态：**
 
-- **R04-01：新增输出与对应输入，已确认并关闭。** Dispatch 新增 assistEx、sourceMask、group 三个输出，Combine 对应新增三个输入；不引入 X。具体函数声明和参数顺序归 R10-01，行关联及算子完成语义见以下已关闭子项。
+- **R04-01：新增 metadata 输出与对应输入，已确认并关闭。** Dispatch 新增 assistEx、sourceMask、group 三个 metadata 输出，Combine 对应新增三个输入；独立权重输出见 R04-08，不引入 X。具体函数声明和参数顺序归 R10-01，行关联及算子完成语义见以下已关闭子项。
 - **R04-02：Dispatch 与 ExpertOut 行关联，已确认并关闭。** 沿用 Memory 行序及 `tokenNum=sendCounts[L*R-1]`，expertOut[row] 与 assistEx[row] 一一对应；内部重排须在 Combine 前还原，不增加 public row map，不读取 padding 行。关联 R10-02 同步关闭。
 - **R04-03：Relay Group 存放与第一跳引用，已确认并关闭。** group[t] 固定 stride，firstHopRow 保存 dstPosition；有效 assistEx 行中 forwardCount>0 的第一跳通过 t 定位 group[t]。不输入 X，不读取未写入 group 行，不新增 groupCount/validMask/哨兵或整表初始化。
 - **R04-04：完整元数据发布，无需独立设计，关闭。** 沿用 Memory，所有核完成任务及 GM 写入后 Dispatch 算子才结束，后续 Combine 直接消费完整输出；不增加 metadata 发布协议、ready Flag 或额外同步。核内 UB/Event 复用归 R05，资源最终释放归 R11，均不重开本项。
 - **R04-05：RecvSlot 与返回地址一致，已确认并关闭。** Dispatch 按 `recvSlot=uint64(t)*K+entry.originalK` 填写 member；终端 Combine 从 assistEx 取得 relayRank/t/k，按同一公式返回。本卡/跨卡共用一块预留 8*BS 个 group、每组 K 槽的区域，不增加来源卡维度、新编号或包字段。关联 R07-02/R07-03 同步关闭。
 - **R04-06：X 记录，低优先级遗留。** 初版不引入 X 输入/输出或持久记录；是否及如何记录 X 留待后续优化超限场景时与 R07-04 一起讨论。此项不作为本轮关闭条件，内部 AtomicAdd 取号仍归 R05-03。
 - **R04-07：Source 统一加权，已确认并关闭。** DIRECT 权重保留真实值，group 的 returnK 权重设为 1.0；source 按 sourceMask 对有效结果统一乘 expertScales 累加，无需 partialMask 或其他结果类型标记。relay 第一跳和成员权重仍为真实值。
-- **R04-08：Source 权重接口复用，已确认并关闭。** 复用 FP32[BS,K] expertScales；去重 Dispatch 由唯一 Token 发送核先取用真实权重，再原地写回 source 归约权重，Combine 读取同一 buffer。不新增权重输出或快照 tensor；写回随算子完成，值保持至 Combine 完成，下一轮 Dispatch 重新提供真实权重。nullptr 支持组合归 R08-02，具体声明归 R10-01。
+- **R04-08：权重输入输出分离，已确认。** Dispatch 使用非空只读 FP32[BS,K] expertScales 输入及独立 expertScalesOut 输出；唯一 Token 发送核构造真实随包权重和 source 归约权重，核末写出输出。Combine 的 expertScales 参数接收该输出，保持到消费完成。输入不被覆盖，具体 ABI 归 R10-01。
 
 **后续衔接：** 沿用已确认的逐行 writer、字段转换、sourceMask 核内生成、有效行序、group 识别、recvSlot 编码及 expertScales 复用，落实 R05/R07/R08/R10 的资源、区域、公共格式和具体声明。
 Plan 只保存 Combine 所需的稳定信息，不复制整个通信包，也不指向可回收 UB/descriptor。
 字段精简须保留从任一 expert 行到其 source/group 的完整路径。
 
-**关闭状态：** R04 初版设计已确认，不再保留独立 source 类型或权重输出的待确认项；X 记录和超限优化低优先级延后。
-本轮权重结论只更新待确认文档，后续再归并主设计；已确认设计不等于实现或设备验证完成。
+**关闭状态：** R04 的 metadata 与权重输入输出分离已确认；独立权重输出 ABI 已在 R10-01 收口，待代码接入，无额外 source 类型标记；X 记录和超限优化低优先级延后。
+权重复用结论已同步主设计；已确认设计不等于实现或设备验证完成。
 
 ## R05
 
 **议题：Dispatch 分核、原子与 UB/Event 资源**
 
 **已确认边界：** 默认总 AIV 核数为 64，固定分为 48 核源端数据发送及 16 核 cnt 接收/cumsum/localwindowcopy/转发。
-16 核先完成 cumsum，再按最终 `tokenNum` 均分监听任务；中转包的检测与发送嵌入 localwindowcopy，复用同一组核。
+16 核先完成 cumsum，再按最终 `tokenNum` 均分监听任务；中转包的检测与数据转发嵌入 localwindowcopy，复用同一组核。
 源端连续均分及 DataCopyPad 精确写回已确认，R05-01 关闭。公共转发包、一次原子取号和下发后剔除均已确定。
-R05-02 的相对槽位编码和双表仅存 UB 已确认；R05-03 已确认取号及 counter 双缓冲清零方案，R05-04 至 R05-06 的资源回收、并发预算与在途模型仍待落实，非阻塞查询仅为候选实现。
+R05-02 的相对槽位编码和双表仅存 UB、R05-03 的取号及核末同步清零已确认。
+R05-04 源端 1 至 8 路环形发送、具体 ID 和权重写回均已收口；R05-05/R05-06 数据转发的资源预算与在途模型后续另行设计。
 
 ### R05-01 核组、分配与写回（已确认，关闭）
 
@@ -707,8 +770,8 @@ R05-02 的相对槽位编码和双表仅存 UB 已确认；R05-03 已确认取�
   Cnt buffer/Event 按既有资源依赖回收；R02 的第一跳/DIRECT 之间仍无 PIPE_ALL、SyncAll 或单独 MTE3 等待，旧双 Group 条带/双轮发送不恢复。
 - 只有固定 16 核负责 cnt 接收与 cumsum；全核发 cnt 不意味着全核算 cumsum 或全核接收 Token。
   Cumsum 结果就绪后，按最终 tokenNum 为这 16 核分配监听位置，负载差值至多 1；监听到第一跳中转包时，在同一 localwindowcopy 流程内处理取号及后续本卡/跨卡转发。
-- Localwindowcopy 的监听与发送仍按已确认的解耦方向设计：监听使用 MTE2/Vector/Scalar，发送使用可用的 MTE3 资源。
-  同组核执行不意味着逐 Token 串行等待发送完成，具体 UB/Event 池与在途进度继续由 R05-04 至 R05-06 落实。
+- Localwindowcopy 的监听与数据转发按已确认的解耦目标设计：监听使用 MTE2/Vector/Scalar，数据转发使用可用的 MTE3 资源。
+  同组核执行不意味着逐 Token 串行等待转发完成，具体数据转发 UB/Event 池与在途进度继续由 R05-05/R05-06 单独设计。
 
 **已确认的源端分配：** BS 在 48 核中采用 Memory `SplitToCore` 的连续区间和余数均分，余数优先分配给组内序号较小的核。
 每个 Token 的全部 K 条 route 及两阶段始终归同一 owner。设发送核的组内序号为 i，范围 `[0,48)`：
@@ -735,6 +798,10 @@ count_i=0 的核跳过 sourceMask 写回，但仍按前述规则完成其 cnt �
 去重版保留 cnt/q 的数值算法和 BS 分界，将本组核数固定为 16；相应 cumsum 状态/Flag 布局、分区索引和 UB 尺寸需要按 16 核统一核对，不能只改 launch 总核数后继续受旧 8 核上限截断。
 这些属于新配置的实现适配与 R07 区域预算核对，不重新讨论 cnt/q 算法，也不改变原 Memory 入口。
 
+总专家数不超过 1024 后，`rscvStatusNum=L*R<=1024`，16 核接收 cnt 时每核至多 64 条记录。
+每卡 L 的上界为 `floor(1024/R)`，16P 下可以达到 64；复用代码不能继续以固定 L<=32 限制或分配逐 expert 资源。
+该 cnt 上界不约束 tokenNum，监听 UB 双表仍按 R05-02 的实际接收量核算。
+
 ### R05-02 相对槽位编码与 UB 双表（已确认，关闭）
 
 每个接收核用 `tokenPos[j]` 记录本核第 j 个待监听 Token 的通信槽位位置，元素类型为 uint32，单位是完整 Token 通信槽位。
@@ -758,7 +825,7 @@ T 沿用 R03 确定的完整通信跨度，包含 Token Payload（数据及尾�
 
 两张表均只存 UB，不输出到 GM，也不采用 GM 存表、溢出转存或分批加载方案。
 删除 pendingIdx 不修改 tokenPos 原表，后者保留到本核负责区域的 Flag 清理完成；具体清理时机继续按 R06 讨论。
-pendingIdx 剔除不表示对应 MTE3 已完成，公共发送 UB 的最后使用者及回收仍归 R05-05。
+pendingIdx 剔除不表示对应 MTE3 已完成，公共转发 UB 的最后使用者及回收仍归 R05-05。
 
 **容量口径：** 均衡情况下每卡最终接收 `BS*K` 个 expert Token，16 核均分后，每核约 `BS*K/16` 项。
 不均衡时使用该卡实际的 tokenNum 计算，每核 m 最大为 `ceil(tokenNum/16)`；两张表分别按有效长度占 `4*m` 字节，UB 分配各自按 32B 对齐。
@@ -773,9 +840,9 @@ pendingIdx 剔除不表示对应 MTE3 已完成，公共发送 UB 的最后使�
 
 撤回此前用全局 route 集中到单卡的理论极值推导 GM 分批方案的建议；本阶段按目标 BS/K 和接收不均衡度核算 UB。
 约 1024 项是当前规模估算，不新增固定 1024 项的接口限制，也不将其视为所有配置和任意不均衡下的容量保证。
-双表与 Flag scratch、发送 buffer、metaUB/group 行 UB 的总预算继续归 R05-04，支持的 BS/H 等配置范围归 R10；存放位置和编码不重新讨论。
+双表与 Flag scratch、转发 buffer、metaUB/group 行 UB 的总预算继续归 R05-05，支持的 BS/H 等配置范围归 R10；存放位置和编码不重新讨论。
 
-### R05-03 原子取号与计数器双缓冲（方案已确认）
+### R05-03 原子取号与计数器清零（方案已确认）
 
 采用 CANN 9.1 的 Scalar `AscendC::AtomicAdd`，头文件为 `basic_api/kernel_operator_atomic_intf.h`。
 官网原型为 `template <typename T> __aicore__ inline T AtomicAdd(__gm__ T *address, T value)`；
@@ -795,59 +862,86 @@ AtomicAdd 绕过 DCache，且与 MTE2/MTE3 存在 GM 数据依赖时编译器不
 初始化写入须在所有取号前完成，清理旧脏缓存须避免覆盖已开始的原子更新，不能把“原子”解释成对所有流水和缓存的通用屏障。
 DataCacheCleanAndInvalid 的接口和 64B cache line 规则见文末；该 64B 规则不是 AtomicAdd 的地址对齐要求。
 
-**已确认的存放位置：** 在本 Rank 的 cnt/state 通信区现有两份乒乓 buffer 中，各划出一块 1KB 专用预留区，共预留 2KB。
-每份仅使用起点处的一个 uint32（4B）作为全卡共享 counter，剩余 1020B 不使用、不清零；不会为每个核分别建立计数器。
-两份使用相同的区内 offset，具体 offset 随 R07-01 的完整区域布局落实，不与 cnt、cumsum、DFX 等数据重叠。
+**已确认的存放位置：** 在本 Rank 的 cnt/state 通信区划出一块 1KB 专用预留区，共预留 1KB。
+仅使用起点处的一个 uint32（4B）作为全卡共享 counter，剩余 1020B 不使用、不清零；不会为每个核分别建立计数器。
+具体 offset 已在 R07-01 的完整区域布局中给出，不与 cnt、cumsum、DFX 等数据重叠。
 预留区按 1KB 边界放置以隔离相邻数据，这是内部布局选择，不是官网规定的 AtomicAdd 对齐要求。
 
-| 连续去重 Dispatch 轮次 | 本轮 AtomicAdd 使用 | 本 Rank 的核 63 额外执行 |
-| --- | --- | --- |
-| 0 | buffer 0 专用区的首 4B | 仅将 buffer 1 专用区的首 4B 写零 |
-| 1 | buffer 1 专用区的首 4B | 仅将 buffer 0 专用区的首 4B 写零 |
-| 2 | buffer 0 专用区的首 4B | 仅将 buffer 1 专用区的首 4B 写零 |
-| 后续 | 两份交替累加 | 始终清零另一份的首 4B，为下一轮准备 |
+| 执行阶段 | counter 使用 |
+| --- | --- |
+| 算子执行期间 | 所有需要创建 relay group 的核对同一首 4B 执行 AtomicAdd(counterGm, 1)，返回值直接作为 t |
+| 算子末尾同步 | 全部 64 个逻辑核完成自身任务后，执行一次全核 SyncAll()；同步返回后由核 63 将同一首 4B 写零 |
+| 算子退出后 | 计数器保持为 0，下一次 Dispatch 继续使用同一 1KB 区域 |
 
-核 63 是本 Rank 的逻辑 AIV 核号，仍承担原有 cnt/cumsum/监听/转发职责；每轮额外执行一次对侧 counter 清零，即使本核没有 Token 任务也须执行。
-清零可沿用已确认的 DataCopyPad：从 32B 对齐的零值 UB 精确写出 4B，不清整个 1KB，也不写正在累加的当前 counter。
-零值 UB 保持到该写出完成；核末 PIPE_ALL 和 Dispatch 算子完成边界覆盖这笔写入，下一轮使用该 counter 前上一轮 Dispatch 已完成。
+核 63 是本 Rank 的逻辑 AIV 核号，仍承担原有职责；即使本核没有 Token 任务，也必须参与算子末尾 SyncAll()，并在同步返回后执行清零。
+清零可沿用已确认的 DataCopyPad：从 32B 对齐的零值 UB 精确写出 4B，不清整个 1KB，也不在其他核仍可能取号时写 counter。
+核 63 保持零值 UB 到这笔 MTE3 写出完成，退出前确认首 4B 清零；Dispatch 算子完成覆盖该写入。
+本轮不在清零后再增加第二次全核同步；下一次 Dispatch 使用该 counter 前，须满足既有算子调用顺序和 stream 完成边界。
 Combine 从 assistEx/group 取得已保存的 t，不读取 counter；counter 清零与旧 group/通信槽位能否覆盖分别判断，持久数据寿命仍归 R11。
-由于清零的是下一轮计数器，本轮其他取号核无需等待核 63 完成这笔写入，不新增本轮全核初始化屏障。
 取号核只用 AtomicAdd 的返回值保存 t，不通过普通 GM 读写参与累加，也不在原子更新期间对该区写回旧脏缓存。
 
 **首次使用：** 当前 [TileXRComm::InitMem](../../src/comm/tilexr_comm.cpp#L1204) 在 peer memory 分配后已执行零初始化；专用预留区不被其他用途覆盖时，可沿用该初值启动轮次 0，不新增每轮 Host 清零。
-这是已有分配初始化的复用，不要求 Dispatch 清理未使用的 1020B。若 R07 改用其他通信区，仍需在该区首次使用前保证首 4B 为零。
+这是已有分配初始化的复用，不要求 Dispatch 清理未使用的 1020B。R07-01 的 counterOffset 首 4B 沿用通信区首次初始化的零值。
 
-**已确认与剩余边界：** API、1KB 预留、首 4B 使用范围、核 63 清零另一份和清零完成边界已确定，不再作为候选选择。
-AtomicAdd 正文未明确额外地址对齐数值的事实仅保留为官网证据边界；具体预留区 offset 归 R07-01，连续 Dispatch 轮次到两份 buffer 的实际映射归 R11-05。
-此处的 0/1 是连续去重 Dispatch 的交替轮次，不能未经核对就等同于 communicator 的共享 magic 奇偶。
+**已确认与剩余边界：** API、1KB 预留、首 4B 使用范围、算子末尾 SyncAll()、核 63 清零和清零完成边界已确定，不再作为候选选择。
+AtomicAdd 正文未明确额外地址对齐数值的事实仅保留为官网证据边界；具体预留区 offset 归 R07-01，算子结束后的窗口/数据生命周期归 R11-05。
 
-### R05-04 中非阻塞查询的用途
+### R05-04 本卡数据发送流水（Memory 复核已收口）
 
-非阻塞 MTE3 完成查询是“如何复用发送 UB/Event”的一种候选实现，并非用户已确认的必选 API，也不参与 AtomicAdd 取号。
-例如发送 UB A 已下发 MTE3，但仍可能被读取；核准备处理下一个 Token 时，需要决定何时可再次写 A。
-若能查询完成状态，A 未完成时可以选择其他可用 UB 或继续监听，完成时再回收 A，避免在公共监听路径等待一个忙资源。
-这不改变“Token 的全部发送任务下发后即可剔除 pendingIdx”的约定；剔除后仍须保护在途 UB，直到最后一笔 MTE3 使用结束。
-如果其他调度方式能保证相同的 UB 生命周期和监听/发送并行目标，就不要求必须有查询接口。
-官网未查到该接口只说明此候选缺少 API 依据；R05-04/R05-05 继续确认资源回收及复用方式，不将接口检索结果作为整个方案的必然阻塞项。
+“数据发送”仅指固定 48 核从本卡原始输入下发第一跳或 DIRECT；不包含目标卡接收后执行的数据转发。
+已同步主设计的[本卡数据发送流水](ep-memory-server-dedup.md#本卡数据发送流水)，完整 UB 分配及 Set/Wait 时序以该节为准。
+**单包顺序已确认：** CopyIn → 可选量化 → 在数据 Tensor 尾部填信息 → DataAsFlag 打包 → MTE3 发送，直接沿用 Memory。
+非量化尾部写在 xInTensor，量化尾部写在 quantTensor_；随后通过原有 Vector Copy 打包到 outBuf，不另增拼尾部 Tensor 或整包中间拷贝。
+该流水的变化是尾部字段更多、预留长度扩大，相关 Payload/分块数/Tensor 容量/T 随之重算；发送 Event 配对保持原方案。
+Flag 位置由发送池初始化准备，Vector 按 480B 数据 / 32B Flag 间隔打包；“拼接 Flag”不表示另加一套发布操作。
+接收端监听、localwindowcopy、assistEx/group 的 metaUB 和转发副本属于另 16 核的数据转发设计，继续由 R05-05/R05-06 讨论。
+
+| 已确认内容 | 当前结论 |
+| --- | --- |
+| 单 Token 尺寸 | `dedupTokenStride=T=ceil((align32(D)+align32(32+16*(K-1)))/480)*512`，同配置的第一跳和 DIRECT 使用相同跨度 |
+| 并发数 | `min(floor(remainUbSize/T),8)`；上限 8，随 UB 缩减，安全输入保证最小为 1，不增加 0 并发校验或错误分支 |
+| UB 申请 | 沿用 Memory 输入队列及连续 outBuf；非量化 xInTensor、量化结果 quantTensor_ 按新 packedPayloadBytes 扩容，量化原始输入仍按 hAlignSize_；先计入输入/量化/路由/输出 UB，再按剩余容量申请 `[sendTokenBufNum,T]` |
+| UB 复用 | 本核源端包序号 s 选择 `s%sendTokenBufNum`；使用前消费该槽位 MTE3_V，Vector 拼包后配对 V_MTE3，MTE3 下发后置 MTE3_V，环回时才等待复用 |
+| 事件边界 | MTE3_V 保护 Vector 改写 outBuf；Scalar 在 xInTensor 或 quantTensor_ 尾部改字段并建立 S_V，沿用 Memory 的 Tensor 组织与依赖 |
+| 两阶段与核末 | 第一跳优先、DIRECT 随后，保持同一池和序号，无阶段屏障或单独 MTE3 等待；核末消费末次事件后收敛写出，全部核再参与 counter 清零同步 |
+
+Memory 源码依据为 [CalcSendTokenBufNum](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L861)、
+[TokenToExpert/量化路径](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L655)及
+[SendToMoeExpert](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L793)。本版本不使用双 Group，不带入其条带或轮次机制。
+
+**本轮 Memory 复核结论：没有发现需要新方案的 UB/Event 冲突。** 先前把常规输出写回保留为待确认，范围过宽；按以下规则收口。
+
+| 范围 | 直接采用的结论 |
+| --- | --- |
+| 环形发送事件 | MTE3_V/V_MTE3 均以 lane 为固定显式 ID；尾部先经 Scalar→Vector 拼包，不改变 outBuf 的写入流水，无新增 Event 池 |
+| 权重输入 UB | 参考 Memory Combine ExpertScaleCopy，仅加载本核连续 Token 区间，align32(count_i*K*4)；MTE2_S 后两遍只读 |
+| 权重/分类输出 UB | 独立 sourceWeightOut 为 align32(count_i*K*4)，sourceMask/directMask 各 align32(count_i*4)，serverRouteMask 为 64B；在计算 outBuf 剩余容量前计入 |
+| 核末写出 | Scalar 产出的 sourceMask 和 expertScalesOut，经即时 S_MTE3 Set/Wait 后分别 DataCopyPad 有效 count_i*4B 和 count_i*K*4B；一次核末 MTE3_S 完成写出再释放 UB |
+| 依赖边界 | 输出的 S_MTE3/MTE3_S 与发送 lane 的 V_MTE3/MTE3_V 不同类；即时配对不占用新的在途 lane，不增加两遍间屏障或单独 MTE3 等待 |
+
+完整分配与核末顺序已写入主设计「源端输出 UB 与核末写出」。尚未实现或未做设备验证，不等于还存在待用户选择的设计。
+
+源端按 Memory 环形 Set/Wait 复用即可，不要求非阻塞 MTE3 完成查询，也不把避免所有资源等待设为额外条件。
+此前提出查询是为了探索数据转发中“监听与 MTE3 在途重叠”时的资源回收；官网未查到该候选接口的事实保留，
+但它既不阻塞本卡数据发送方案，也不是数据转发后续设计的必选 API。
 
 **需要确认：**
 
 - **R05-01：已确认并关闭。** 默认 64 核、固定 48 核源端发送和 16 核 cnt 接收/cumsum/localwindowcopy/转发；BS<48 时 64 核发 cnt，数据核先完成本核 cnt 再发数据，BS>=48 时仅 16 核发 cnt。源端 Token 连续均分、余数优先分配；sourceMask 核末使用 DataCopyPad 按有效字节写回 GM，最小 4B，无需 GM 起点/长度 32B 对齐。原核数、任务分配、cnt 时序及非整块尾部问题全部关闭。
-- **R05-02：已确认并关闭。** tokenPos 为 uint32 相对通信槽位偏移，按 base+uint64(tokenPos[j])*T 定位；tokenPos/pendingIdx 均仅存 UB，保留原位置表和末项覆盖删除规则。按 BS*K、接收不均衡度及 16 核分摊核算条目数，1024 项时单表 4KiB、双表 8KiB；不采用 GM 存表或分批加载，具体总 UB 预算归 R05-04。
-- **R05-03：取号及 counter 清零方案已确认。** uint32_t AtomicAdd 的旧值作为 t；两份 cnt buffer 各预留 1KB，仅首 4B 使用，核 63 每轮清零另一份首 4B，未用区域不清零。首次零值沿用 peer memory 初始化；具体 offset 与连续 Dispatch 选窗映射分别归 R07-01/R11-05。
-- **R05-04：部分 API 已确认，资源方案待确认。** 多少路发送 UB/Event，以及多少个独立 32B metaUB；如何回收资源并避免公共监听路径等待一个忙发送 UB？非阻塞 MTE3 查询仅为一种候选，官网未查到不等于必须等待该接口才能继续设计；其他方案须满足相同生命周期及并行目标。
-- **R05-05：** 部分发送的 next-entry、已分配编号和公共副本在哪里保存；最后一个 MTE3 使用者如何释放共享 UB？
-- **R05-06：** 一个目标仍未 ready 或发送资源暂满时，如何继续其他 Token，并保证本卡转发所依赖的接收任务可推进？
+- **R05-02：已确认并关闭。** tokenPos 为 uint32 相对通信槽位偏移，按 base+uint64(tokenPos[j])*T 定位；tokenPos/pendingIdx 均仅存 UB，保留原位置表和末项覆盖删除规则。按 BS*K、接收不均衡度及 16 核分摊核算条目数，1024 项时单表 4KiB、双表 8KiB；不采用 GM 存表或分批加载，具体数据转发 UB 预算归 R05-05。
+- **R05-03：取号及 counter 清零方案已确认。** uint32_t AtomicAdd 的旧值作为 t；保留一份 1KB counter 区，仅首 4B 使用，算子末尾全核 SyncAll() 后由核 63 清零，未用区域不清零。首次零值沿用 peer memory 初始化；具体 offset 归 R07-01，算子间生命周期归 R11-05。
+- **R05-04：源端设计已收口。** 按去重 T 计算 1 至 8 路，直接沿用 lane 的 MTE3_V/V_MTE3；独立权重/分类 UB、核末 S_MTE3/DataCopyPad/MTE3_S 的写出安排已明确，无剩余设计选择，待实现及设备验证。
+- **R05-05（数据转发后续）：** 转发任务的 next-entry、已分配编号和公共副本在哪里保存；最后一个 MTE3 使用者如何释放共享 UB？这些问题不从本卡源端数据发送流水推导。
+- **R05-06（数据转发后续）：** Token 尚未到达或转发资源暂忙时，如何继续其他 Token 并保证本卡转发所依赖的接收任务可推进？不增加目标端 ready/credit；本项不属于源端数据发送的并发确认。
 
-**讨论起点：** 每个第一跳 owner 保存一次取号结果和独立进度，公共 UB 在全部发送完成前只读；
-把“逻辑上允许并行”转为具体的 buffer/Event 生命周期。
-位置编码已确定为 uint32 相对槽位偏移，地址使用 uint64 运算；继续对目标配置核算 UB 双表及并发发送资源的总容量。
+**后续讨论边界：** 源端数据发送按主设计的环形 Set/Wait 及核末写出执行，具体 ID 和权重写回不再列为待确认。
+相对槽位编码已由 R05-02 确认；relay 的转发 buffer、元数据 UB 和在途进度仍需另行设计，不从源端流水推导。
 
 **实现核对：** 当前 ReduceGrad 的 `AscendC::AtomicAdd(status_,0)` 只提供源码用例；加一取号的返回值依据现已补齐为 CANN 9.1 官网正文。
 后续实现仍需验证实际 SDK/SoC 编译、counter 生命周期和并发唯一性；这些不影响已确认的 API 语义。
 参考依据及未覆盖范围见文末，不把 SetAtomicAdd 的累加写入等同于返回旧值的原子取号。
 
-**关闭条件：** 分核时序、资源尺寸、无重复取号的状态转换、共享 UB 最后使用者判定；
+**剩余关闭条件：** 数据转发的资源尺寸、部分转发状态与公共 UB 最后使用者判定；
 目标 API 核对与设备重叠/前进性验证分别记录，未验证性能不作为已确认收益。
 
 ## R06
@@ -878,38 +972,41 @@ PIPE_MTE3 约束该核所有前序 MTE3，不能只计算为当前 Token 的屏�
 
 **议题：完整 Workspace 与槽位布局**
 
-**已确定边界：** 一块统一中转结果区，预留 `8*BS` 个 group、每组 K 个槽位，逻辑 shape 为 `[8*BS,K,H]`；group 元数据同步预留 8*BS 行。
-全卡 AtomicAdd 分配唯一 t，范围 `[0,8*BS)`，`recvSlot=uint64(t)*K+originalK`，本卡及跨卡返回共用容量和公式。
-来源卡七/八分区候选已撤回。初版安全用例保证每个 relay 的实际 group 数合计不超过 8*BS，
-Dispatch/Combine 均不做超限比较、状态记录、校验、报错或降级，也不加入超限用例。
-R01 已确认本卡转发同样取号并走 Combine 返回，容量合计包含本卡与跨卡转发的不同 Token；R04-01 已确认不提供 X 输入/输出。
+**单份布局已按 Memory 复核收口。** 详细子区表、地址公式、生命周期和字节示例见[主设计 R07-01](ep-memory-server-dedup.md#r07-01-单份通信数据域布局)。
 
-**仍未明确：** R07-01 的完整区域 base/offset、返回 slot stride 字节格式、映射容量及同时存活区间。
-统一中转区在示例格式下的 180MiB 不含 Dispatch 接收区、持久表、source 最终结果区和其他 scratch，完整预算仍需补齐。
-R04-05 已确定成员表 recvSlot 与返回端使用同一公式，不再将来源卡分区或本卡返回位置列为待确认项。
+```text
+[状态区：已有 profiling / cnt / cumsum 交换 / 16份完整前缀 / 就绪Flag / 1KB counter]
+[数据接收区：source 返回子区 | Dispatch source/expert/q 子区]
+[中转 Token 区：Combine 的 8*BS*K 个返回槽位]
+```
+
+Memory 的 SetDataStatus 已在 Dispatch 槽位前预留 Combine source 返回空间；本版直接采用两个独立子区，不设计覆盖复用。
+Cnt 保持 `[L,R,32B]`；cumsum 交换为 `[16,16,32B]`，完整前缀仅保留 16 份，ready 为 `[16,16,32B]`。
+记录内容、发布/读取/清理代码继续复用，所有具体 offset 根据上述区域大小重算。已有 profiling 在状态区预留当前最大记录容量，避免空入口遗留的 offset=0 与 cnt 混用。
+Counter 仍是一份 1KB、首 4B 有效，算子末全核 SyncAll 后核 63 清零；不引入 counter 或中转窗口乒乓。
+
+记 N=R*L，T 为 Dispatch 去重包跨度；当前 FP16/BF16 非量化返回沿用 Memory 的 `U=ceil(H*2/480)*512`：
+
+| 大区/子区 | 字节数 | 寻址 |
+| --- | --- | --- |
+| 状态区 | 主设计逐项计算并按 512B 对齐 | cnt 按 expert/source；cumsum 按接收组内核号 0..15 |
+| source 返回 | BS*K*U | 原始 Token/k；DIRECT 与 partial 使用相同槽位格式，按 sourceMask 消费 |
+| Dispatch 接收 | N*BS*T | 保留 `(((srcRank+dstRank)%R*L+localExpert)*BS+q)*T` |
+| relay 返回 | 8*BS*K*U | 全卡统一 t，recvSlot=uint64(t)*K+originalK |
+
+后续公共通信 dtype/scale 若扩展，R08 只需提供对应 U_s/U_m；slot 数量、公共地址公式和已确认成员表不重开。
+R=128、L=3、BS=256、H=7168、K=6 时，状态区 66KiB，source 返回 22.5MiB，Dispatch 1488MiB，relay 返回 180MiB；
+单份数据域合计 1772685312B（约 1690.564MiB）。assistEx/sourceMask/group/expertScalesOut 在普通 GM 另算，不计入通信大区。
+所有地址和大小乘积采用 uint64，4GB 通信域扩容及分配/映射由框架负责，不处理容量上限问题。
 
 **子项状态：**
 
-- **R07-01：** 各区域的 base/offset、slot stride、容量和同时存活区间是什么；现有 peer window 是否足够？R05-03 的 counter 已确定在两份 cnt/state buffer 中各保留 1KB、仅用首 4B；本项只落实不与现有区域重叠的具体 offset，不再选择 counter 容量、owner 或清零范围。
-- **R07-02：统一中转容量，已确认并关闭。** 一块区域预留 8*BS 个 group，每组固定 K 槽；全卡统一取号且 group 表预留 8*BS 行，不再按来源卡分区。合计 group 数不超过 8*BS 由安全用例保证，该上限是容量选择，并非八卡拓扑天然保证。
-- **R07-03：统一 RecvSlot，已确认并关闭。** `recvSlot=uint64(forwardTokenIdx)*K+originalK`，返回地址为目标 relay 本轮中转区 base 加 recvSlot*stride；本卡与跨卡相同。已有 assistEx 的 relayRank/t/k 足够计算，无额外密排编号、控制包或字段。
-  第一跳从 firstHopRow 读取；结果区即使 n=1 也保留 K 槽，只监听 members[0:n] 记录的位置，不等待空洞。K=1 时无 relay group。
+- **R07-01：单份布局已收口，待代码接入。** 子区表已给出确定 base/offset/stride 和所需字节数；正常单次调用中各数据子区独立，不要求为本轮 sendData/cnt 实现另选复用方案。多 stream/跨调用生命周期仍归 R11，Combine 内部调度和结果清理归 Combine 文档。
+- **R07-02：统一中转容量，已确认并关闭。** 一块区域预留 8*BS 个 group，每组固定 K 槽；全卡统一取号，group 表预留 8*BS 行，不按来源卡分区。合计 group 数不超过 8*BS 由安全用例保证，不新增 X、校验、超限状态或错误路径。
+- **R07-03：统一 RecvSlot，已确认并关闭。** 终端使用 assistEx 的 relayRank/t/k，地址为 `B_relay+relayOffset+recvSlot*U_m`，本卡与跨卡相同。第一跳从 firstHopRow 读取，只监听 members[0:n] 的返回位置，空洞不等待；K=1 无 relay group。
 
-**讨论起点：** 在已确认的统一槽位映射及实际 group 数不超过 8*BS 的安全输入前提下，完成完整区域预算及正常执行生命周期。
-无 X 的有效 group 识别已由 R04-03 确认，内部 AtomicAdd API 核对归 R05-03；不增加 X 发布流程或初版准入判断。
-中转结果区字节数为 `8*BS*K*memberSlotStride`。BS=256、K=6 时预留 2048 个 group、12288 个槽位；
-按 H=7168、FP16/BF16、每槽 15360B 的示例格式，为 180MiB，group 表每行 64B、共 128KiB。
-group 扩容不改变 assistEx[tokenNum,8]、sourceMask[BS] 或 Token 尾部布局；每组只转发一次也保留 K 槽，无新取号步骤。
-
-**容量核对提示：** K=6 按已确认的 16B entry、K-1 容量计算，原始尾部为 112B，按已确认规则对齐后占用 128B；
-FP16/BF16 的 H=7168 hidden 为 14336B，已满足 32B 对齐。
-合并后按每块 480B 有效数据打包，则 T=`ceil((14336+128)/480)*512=15872B`。
-R=128、L=3、BS=256 的 Dispatch 数据槽位区域单独就有
-`128*3*256*15872=1560281088B=1488MiB`，不含状态等其他区域。
-尾部编码、预留容量和打包公式已确认，此数是该配置的 Dispatch 数据槽位预算；完整区域分配仍待 R07-01 确认，不能只看中转结果区的 180MiB。
-
-**初版关闭条件：** 完成 R07-01 的完整区域预算与生命周期表，使公共 base/offset/stride 满足已确认的统一槽位公式及贡献保存要求；
-R07-02/R07-03 不重新讨论，超限状态机不作为初版关闭条件。
+**关闭范围：** 单份数据域空间布局、非量化返回跨度、正常数据存活和来源卡无关寻址已经明确。代码/硬件验证仍需完成；
+其他 dtype 与跨调用并发分别在 R08/R11 讨论，超限优化低优先级延后，不重新要求框架容量确认。
 
 ### X 超限遗留
 
@@ -932,33 +1029,63 @@ X 的记录和使用与 R04-06 一同留待超限优化时讨论，初版不提�
 每条 expert route 的 weight 保存到其所在 Rank 的 `assistEx`；头部及 assistEx 中的 FP32 字段编码已确认。
 每条贡献必须在合并前加权且只加权一次；group 和 source 仍按已有 k 顺序消费。
 Group 由 relay 对第一跳及全部本卡/跨卡转发成员执行加权求和；转发 expert 返回未加权输出，relay 逐项乘对应 weight 后累加。
-Relay 向 source 返回已完成加权归约的 partial；Dispatch 已将 source expertScales 的 returnK 位置设为 1.0。
+Relay 向 source 返回已完成加权归约的 partial；Dispatch 已将 source expertScalesOut 的 returnK 位置设为 1.0。
 Source 对 sourceMask 指定的有效结果统一乘 expertScales 后累加：partial 乘 1.0，DIRECT 乘真实 weight，不重复乘 returnK 的原始 weight。
 源 Server 内逐 route DIRECT 不改为 group。调用方交给 Combine 的 expertOut 为未加权 expert 输出。
 
-**仍未明确：** 无 weight 指针的语义与支持组合，以及公共通信 dtype/stride；参数声明归 R10。
-R04-07/R04-08 已确认复用 expertScales 的原地转换和生命周期，不新增 source 类型标记、权重输出或快照 tensor。
-包、assistEx 和 group 保存 Dispatch 输入时的真实权重，source 使用本卡已转换的 expertScales，不能在两阶段之间或 Combine 前随意换权重。
+**Dispatch 格式已确认：** BF16/FP16 输入，非量化或 MXFP8；计算、scale 和输出布局按下节复用 Memory。
+**剩余公共项：** expertOut dtype 以及 Combine 各段返回的通信 dtype/stride；首版权重必须非空，不支持 `expertScales=nullptr`。
+R04-07/R04-08 已确认 expertScales 输入和 expertScalesOut 输出分离及各自生命周期；Combine 复用既有权重输入参数，不另设类型标记或权重快照。
+包、assistEx 和 group 保存 Dispatch 输入时的真实权重，source 使用本卡 Dispatch 输出的 expertScalesOut，不能在两阶段之间或 Combine 前随意换权重。
 relay 成员表布局、新增输出、行引用、recvSlot 编码及 GM 写入随 Dispatch 算子完成的语义已确认；两级归约的内部 dtype 和数值判据已迁入 Combine C15/C16。
 
 **具体场景：** k0/k3 形成一个 partial，k1/k2 为 DIRECT，sourceMask 只保留 k0/k1/k2。
-已确认 `partial = w0*y0 + w3*y3`；Dispatch 后 expertScales 为 `[1.0,w1,w2,x]`，x 不消费、无需清零。
+已确认 `partial = w0*y0 + w3*y3`；Dispatch 输出 expertScalesOut 为 `[1.0,w1,w2,x]`，x 不消费、无需清零。
 Source 统一计算 `output = 1.0*partial + w1*y1 + w2*y2`，其中 yk 是未加权 expert 输出；不等待 k3，也不再计算 `w0*partial`。
 
 **需要确认：**
 
 - **R08-01：随 R04-07/R04-08 确认并关闭。** expertOut 未加权，relay 对第一跳和转发返回使用真实权重，source 按 sourceMask 统一乘 expertScales，其中 partial 权重为 1.0。无需 source 类型载体，具体接口注释归 R10。
-- **R08-02：部分确认。** 包/assistEx/group 使用 Dispatch 输入时的真实权重；source expertScales 原地转换后保持到 Combine 完成，下一轮 Dispatch 重新提供真实权重。仅剩 nullptr 语义及支持组合待确认：推荐沿用 Memory 非量化下 nullptr 表示全 1，此时 Dispatch 给包/metadata 填 1 且不写空指针；备选要求非空，量化组合另列能力矩阵。
-- **R08-03：已拆分。** 本文仅保留 Dispatch Payload、ExpertOut 和返回区所需的公共 dtype/stride 契约；Combine 内部乘法、累加、cast/scale 和量化流程迁入 [C15](ep-memory-server-dedup-combine-open-topics.md#c15)。
+- **R08-02：首版已确认。** expertScales 必须非空 FP32 `[BS,K]`，nullptr 直接报错；包/assistEx/group 使用真实输入权重，expertScalesOut 独立生成并持有到 Combine 消费完成。测试端按固定种子构造随机正权重，逐 Token 归一化使 Top-K 和为 1；不在算子增加归一化或求和校验。
+- **R08-03：Dispatch 部分已确认并收口。** 支持 BF16/FP16 输入、quantMode=0/4，MXFP8 沿用 Memory 的 E4M3/E5M2、量化计算和 dynamicScalesOut 布局；当前尾部加长按去重公式重算 T。剩余仅为 expertOut 和 Combine 返回区的公共 dtype/stride；Combine 内部计算仍在 [C15](ep-memory-server-dedup-combine-open-topics.md#c15)。
 - **R08-04：已迁移。** 确定性、误差、高精度参考及 NaN/Inf/强抵消/零 weight 等 Combine 数值规则迁入 [C16](ep-memory-server-dedup-combine-open-topics.md#c16)，不作为本轮 Dispatch 关闭条件。
 
-**讨论起点：** 加权职责、权重载体、原地转换及 source 统一归约已确认；继续明确 nullptr 支持组合与公共 dtype/stride。
-R04 已确认 recvSlot/weight 成员表的行引用、槽位编码及算子完成语义，不重新引入 source 类型或权重输出。
+**讨论起点：** 加权职责、权重载体和 BF16/FP16 非量化/MXFP8 Dispatch 已确认；后续仅继续明确 expertOut/Combine 返回的公共 dtype/stride。
+R04 已确认 recvSlot/weight 成员表的行引用、槽位编码及算子完成语义，沿用独立 expertScalesOut 输出，不引入 source 类型标记。
 所有 route 保持完整传输，零 weight 不自行省略 ready 或贡献。
 本轮只确认 Dispatch/Combine 可见的 Payload、ExpertOut、返回区 dtype/stride；Combine 内部数值规则见 C15/C16。
 
-**关闭条件：** 完成 R08-02 剩余的 nullptr/支持组合及 R08-03 的 Dispatch/Combine 接口可见 dtype/stride 契约。
+**剩余关闭条件：** 完成 R08-03 的 expertOut/Combine 返回接口可见 dtype/stride；Dispatch 的六种组合、量化算法和 scale 布局不再待定，代码/设备验证另行完成。
 权重传递方式已确定，不再把 Combine 时另发一轮 weight 作为默认缺失项。
+
+### R08-03 Dispatch 量化复核结论
+
+**已确认：BF16/FP16 输入，同时支持非量化和 MXFP8。** 此前“先非量化、MXFP8 后续确认”的建议撤回，直接采用 Memory 已有组合。
+
+| quantMode | 输入 | 输出 hidden | scale 输出 |
+| --- | --- | --- | --- |
+| 0 | BF16 或 FP16 | 与输入同 dtype，[tokenNum,H]，行长 H*2B | dynamicScalesOut=nullptr |
+| 4 | BF16 或 FP16 | FP8 E4M3 或 E5M2，[tokenNum,H]，行长 HB | dynamicScalesOut 必须非空，[tokenNum,S] 字节，S=align2(ceil(H/32)) |
+
+MXFP8 由 expandXOutDtype 显式选择 E4M3/E5M2，其他 quantMode 不支持；不将 RESERVED 自动当作 FP8。
+每 32 个 hidden 元素共享一个 1B E8M0 scale，按两个 scale 补齐；scale 不复用 expertScales/expertScalesOut 的 FP32 路由权重存储。
+
+| 复核范围 | 结论 |
+| --- | --- |
+| 量化算法 | 直接复用 QuantMxfp8 及 TileXRMxfp8Quant 的 ComputeMaxExp/ComputeScale/ComputeFp8Data，包括 BF16/FP16 分支、舍入、饱和和特殊值处理 |
+| 计算 UB | Q=align256(H)，原始量化输入 Q*2B，计算 scale 数 Q/32；输入补零和工作区继续按 Memory 处理 |
+| 通信数据段 | FP8 hidden 从 0 开始，scale 从 Q 开始，S 字节有效跨度；D=Q+S，尾部在 align32(D) 处追加 |
+| 拼包/发送 | 量化完成后写去重尾部，复用 R05-04 的 DataAsFlag/Vector/Event/MTE3 流水；packedPayloadBytes、quantTensor_ 和 outBuf 按去重 T 重算 |
+| 接收 public 输出 | 沿用 Memory 的 hidden/scale 提取位置与 DataCopyPad 紧密行输出；按新 packedPayloadBytes 调整源 stride。监听调度和 assistEx 仍按去重方案 |
+| 转发 | 沿用到达包中的 FP8 hidden 和 scale，不在 relay 重新量化；具体转发流水仍在 R05-05/R05-06 |
+| Host/launch 接入 | 已有 public 参数足够；空入口尚未传 dynamicScalesOut/quantMode，且 layout 仍固定 2B hidden，需要按同语义接入，具体 ABI 已同步 R10-01 |
+
+H=7168、K=6 时，S=224、D=7392、去重尾部 128B、Payload=7520B、T=8192B；非量化同配置 T=15872B。
+详细尺寸及支持矩阵已合入[主设计](ep-memory-server-dedup.md#dispatch-dtype-与-mxfp8r08-03)。
+源码依据为 [Memory 类型分支](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1930)、[量化 helper](../../src/ep/kernels/tilexr_ep_mxfp8_quant.h)、
+[Host 参数组合](../../src/ep/host/ep_dispatch_memory_host.cpp#L74)、[hidden/scale 拆出](../../src/ep/kernels/tilexr_ep_dispatch_memory_kernel.h#L1506)。
+可以复用的是量化算法及这些公共约定；普通 Memory 对非空 expertScales 的拒绝条件、旧三字段 assist 和旧 LocalWindowCopy 调度不适用于去重入口。
+当前去重代码仍为空入口；本轮完成方案核对，不声称已接入或验证六种组合。后续验证沿用 Memory MXFP8 golden，覆盖 hidden 和 scale、H 非 32/256 整倍数时的尾部及去重路径。
 
 ## R09
 
@@ -984,28 +1111,32 @@ R04 已确认 recvSlot/weight 成员表的行引用、槽位编码及算子完�
 
 **已确定边界：** 原 Memory 和去重入口分开，去重实现独立 .h，不满足条件报错，不兼容回退。
 所有 Rank 的 BS 相同作为调用契约，不新增专门的跨 Rank BS 扫描或交换校验流程。
+总专家数满足 `0<moeExpertNum<=1024` 且能被 R 整除，L 由商值推导并允许为 1；K 还须不超过总专家数，以满足原始 route 互不重复的前提。
+当前 cnt/cumsum 增量的 Host/layout 已采用总专家数约束，允许 L=1 和 16P/L=64；计数 UB 与状态区容量按实际 shape 核算。
+已具备 Host/CPU 计数测试，CANN/A5 编译和设备通信须单独验证，不据此宣称完整 Dispatch 已支持这些组合。
 初版实际 group 数不超过 8*BS 同样由安全用例保证，不作为上述拒绝逻辑的检查项；不提供 X 输入/输出，超限状态与处理见 R07 低优先级遗留。
 
-**仍未明确：** 以当前公共头文件中的独立去重 Dispatch 声明为基线，核对最终参数方向、Combine 声明、支持矩阵及必要的容量查询。
+**本轮收口：** 权重输入输出方向、独立输出的 public/launch ABI 以及内部 layout helper 计算方式已有结论，见 R10-01。
+**仍未明确：** 其余公共参数的支持矩阵、Combine 完整声明及 R10-03 至 R10-06 中尚未关闭的调用契约。
 新增元数据清单已由 R04-01 确认，expert 计算到 Combine 的有效行数及行序已由 R04-02 确认，expertScales 复用已由 R04-07/R04-08 确认。
-两类入口互不承担兼容义务；语义不变的 Memory 参数优先沿用，语义变化的方向及支持范围显式标注，不能照搬普通 Dispatch 拒绝非空 expertScales 的检查。
+两类入口互不承担兼容义务；语义不变的 Memory 参数优先沿用，语义变化的方向及支持范围显式标注。去重入口必须显式要求非空 FP32 expertScales，不沿用普通 Memory 的空指针处理。
 
 **需要确认：**
 
-- **R10-01：** 以现有独立去重 Dispatch 声明为基线，如何落实 expertScales 输入/输出方向、Combine 对应声明和参数支持矩阵，以及 R07 所需的容量/映射查询？
-  沿用 Memory 的数据、weight/count、shape/dtype/stream 参数；新增 metadata 仍只有 assistEx/sourceMask/group，不增加 sourceWeight、partialMask、tokenNum、返回计数或 X。
+- **R10-01：权重及量化 ABI 已收口，待代码接入。** 公共签名在 groupOut 后、dtype 前加 float* expertScalesOut；量化直接沿用已有 public quantMode/dynamicScalesOut/expandXOutDtype。launch/Device 在 expandXOut 后加入 GM_ADDR dynamicScalesOut，在 groupOut 后、bs 前加入 GM_ADDR expertScalesOut，在 expertTokenNumsType 后、dtype 前加入 int64_t quantMode。共 13 个 GM_ADDR + 10 个 int64，184B，expertScalesOut/bs/quantMode/magic offset 分别为 96/104/152/176。权重输出按 layout.weightBytes 独立分配，Combine 复用已有 expertScales 输入；量化 hidden/scale 容量按 R08-03 分别计算，不新增布局查询 handle。
+  沿用 Memory 的数据、weight/count、shape/dtype/stream 参数；新增 metadata 仍只有 assistEx/sourceMask/group，权重输出为 expertScalesOut，不再增加重复的 sourceWeight 参数、权重快照、partialMask、tokenNum、返回计数或 X。
   Memory 公共接口没有 workspace 参数，不能将其他 backend 的参数当作复用依据；持久 tensor 不自动要求 public plan/workspace handle。旧 assistInfoForCombine 占位的实际使用规则需在支持矩阵明确，不要求重复产出旧三字段记录。
 - **R10-02：随 R04-02 确认并关闭。** ExpertOut 保持 Dispatch 行序和 `tokenNum=sendCounts[L*R-1]` 个有效行，与 assistEx 按 row 对应；expert 内部重排须在 Combine 前还原，不新增 row map，不消费 padding 行。
 - **R10-03：** 输入、expert 输出和最终输出的 H/stride/dtype/连续性是否必须一致，哪些由 plan 固定，哪些由调用参数提供？
-- **R10-04：** BS/H 的允许范围、BS=0、`tokenNum=0` 时空指针、其他输入输出的别名边界如何定义？expertScales 的原地输入/输出已确认，不纳入禁止别名建议；其 nullptr 语义归 R08-02。
+- **R10-04：部分确认。** 零 cnt/整卡 tokenNum=0 的通知、等待、cumsum 输出及状态清理均沿用 Memory，后续无 Token 时无监听任务，不再待定。剩余为 BS/H 的允许范围、BS=0、零长度时空指针及其他输入输出的别名边界；expertScales 输入与 expertScalesOut 输出分离已确认，且必须为非空 FP32 `[BS,K]`，nullptr 直接报错。
 - **R10-05：** 哪些参数需跨 Rank 共同约定，如何在现有调用模型内保证，而不把已保证的 BS/top-k 重新变成额外扫描？
-- **R10-06：** Mask、共享专家、TP 或其他未支持参数接受哪些空值/默认值；不合要求如何在可判断阶段拒绝？
+- **R10-06：** Mask、共享专家、TP 或其他未支持参数接受哪些空值/默认值；不合要求如何在可判断阶段拒绝？`expertScales` 不属于可选空值，必须提供非空 FP32 `[BS,K]` 输入。
 
-**讨论起点：** 沿用已确认的 ExpertOut/assistEx 行关联、有效 `tokenNum` 和 expertScales 复用，按前述“同语义接口复核”表明确其余参数、支持范围和容量查询，落实 public ABI。
+**讨论起点：** 沿用已确认的 ExpertOut/assistEx 行关联、有效 `tokenNum`、expertScales 复用及 R10-01 的权重 ABI，按前述“同语义接口复核”表明确其余参数和支持范围。
 有效行数及行序不重新讨论，也不从 Token 数值恢复身份。
 
-**关闭条件：** Dispatch/Combine 签名、参数方向及支持矩阵、必要的容量查询和错误返回方式与已确认的有效长度/行序及权重契约一致。
-现有去重声明和空 kernel 不代表上述行为已实现或验证。
+**关闭条件：** 其余 Dispatch/Combine 签名、支持矩阵和错误返回方式与已收口的有效长度/行序、权重 ABI 及内部字节计算契约一致。
+现有去重 kernel 仅实现 cnt/cumsum；非计数输出及完整 Dispatch/Combine ABI 仍需后续落实。
 
 ## R11
 
@@ -1021,16 +1152,11 @@ R04 已确认 recvSlot/weight 成员表的行引用、槽位编码及算子完�
 **需要确认：**
 
 - **R11-01：** Plan 的 communicator、布局版本、Dispatch 身份与本次 Combine invocation/epoch 如何绑定？
-- **R11-02：** 同一 plan 是否允许顺序重复 Combine、保持 row/H/dtype 但更换 expertOut 数值；失败后是否允许重试？权重保持已由 R04/R08 确认：若重复 Combine，沿用 Dispatch 转换后保持不变的 expertScales 及真实成员权重；新一轮 Dispatch 必须重新输入真实权重。
+- **R11-02：** 同一 plan 是否允许顺序重复 Combine、保持 row/H/dtype 但更换 expertOut 数值；失败后是否允许重试？若重复 Combine，沿用保持不变的 expertScalesOut 和真实成员权重。Dispatch 原始 expertScales 输入始终只读。
 - **R11-03：** 阶段一是否允许多 stream、多个未完成 plan、多个 microbatch，哪些资源需要隔离？
 - **R11-04：** Host 返回、stream event、所有对外发送结束及远端消费结束，分别释放哪些 buffer/plan？
-  Dispatch 算子完成包含全部 GM 写入已由 R04-04 收口，含 expertScales 写回；metadata 与转换后 expertScales 保持到最后一次 Combine 消费完成。本项只讨论异步调用及资源释放时点，不再设计元数据发布条件或额外信号。
-- **R11-05：部分已确认。** R05-03 已确定核 63 清零下一轮 counter 的首 4B，首次零值沿用已有初始化，写零完成由本轮 Dispatch 完成覆盖。仍需落实连续 Dispatch 轮次到 buffer 0/1 的交替映射，以及整个窗口旧标志失效、数据存活期和各 Rank 调用次序；不重新选择 counter owner 或清零方式。
-
-**Counter 选窗的源码核对：** [Memory 选窗](../../src/ep/common/ep_memory_window.h#L65)使用 `magic % 2`，而 [Dispatch](../../src/ep/host/ep_kernel_launch.cpp#L449)与 [Combine](../../src/ep/host/ep_kernel_launch.cpp#L507)每次调用都会取得新 magic；[NextMagic](../../src/comm/tilexr_comm.cpp#L1602)每次加一，去重 Dispatch 的[现有提交入口](../../src/ep/host/ep_memory_server_dedup_launch.cpp#L34)也使用该计数。
-因此 Dispatch→Combine→Dispatch 时，两次 Dispatch 的 magic 相差 2，直接取最低位会重复选中同一 counter，而上一轮清零的是另一份。
-用户已确认的是连续去重 Dispatch 交替使用 0/1；R11-05 需落实该轮次映射，不直接套用共享 magic 奇偶，也不预设固定调用配对后简单除二。
-这不重开 1KB/4B 和核 63 的清零规则，不在本轮引入新的 public 轮次参数或控制信号。
+  Dispatch 算子完成包含全部 GM 写入已由 R04-04 收口，含 expertScalesOut 写出；metadata 与 expertScalesOut 保持到最后一次 Combine 消费完成。本项只讨论异步调用及资源释放时点，不再设计元数据发布条件或额外信号。
+- **R11-05：部分已确认。** R05-03 已确定所有逻辑核在算子末尾执行一次全核 SyncAll()，同步返回后核 63 清零唯一 counter 的首 4B，首次零值沿用已有初始化。仍需落实整个窗口旧标志失效、数据存活期和各 Rank 调用次序；不重新选择 counter 容量、owner 或清零方式。
 
 **讨论起点：** 分离不可变 plan 身份与可变通信轮次，沿用 TileXRCommNextMagic；
 局部 Flag 清理不能代替轮次绑定。首先限定可支持的调用并发范围，再设计对应资源释放。
@@ -1058,13 +1184,13 @@ R04 已确认 recvSlot/weight 成员表的行引用、槽位编码及算子完�
 | 范围 | 后续应验证的行为 |
 | --- | --- |
 | 路由 | 源 Server 内本卡/跨卡多 expert 均 DIRECT、同 Token 混合 DIRECT 与远端 group 的两阶段发送、先发较晚 Token 时 q 仍保留原始前缀、远端 relay 本卡/跨卡转发及交错 k；D03 的原 T8 例子见主设计 |
-| 边界 | K=1/32、每卡最多 32 expert、零 cnt/整卡 `tokenNum=0`、H 尾部及共同支持的 BS/H；覆盖 BS=47/48 的 cnt 核组切换、BS<48 时无源端 Token 的核仍完成其 cnt 职责，以及固定 16 核接收/cumsum |
+| 边界 | K=1/32（K 不超过总专家数）、L=1、总 expert 数上限 1024；覆盖 (R,L)=(16,64)/(64,16)/(128,8) 及 24P/L=42 的整除边界，不将这些 shape 一律视作通信容量已满足；另含零 cnt/整卡 `tokenNum=0`、H 尾部及共同支持的 BS/H，BS=47/48 的 cnt 核组切换、无源端 Token 的核仍完成 cnt 职责，以及固定 16 核接收/cumsum（每核至多 64 条 cnt） |
 | 中转容量 | 实际 group 数为 0/BS/8*BS-1/8*BS、group 数不超过 8*BS 且转发结果条数 Y>8*BS、仅本卡转发也占一个 group、不同 source 相同 TokenId、本卡与跨卡 Token 的正常合计；不包含超限用例或 X 输出断言 |
 | 统一槽位 | 实际 group 数大于旧 BS 上限但不超过 8*BS；n=1 只列出一个返回位置、不等待其他 K 槽；同一卡返回多条不同 k、本卡/跨卡混合及交错 k 均按 t*K+k 唯一落槽 |
 | 并发 | 原子取号唯一且每 Token 一次、部分发送恢复、公共 UB 最后使用者、pendingIdx 末项换入不遗漏、各核第一跳/DIRECT 进度不同及在途 MTE3 跨逻辑阶段 |
 | 可见性 | 按统一 Payload 长度执行 Memory DataAsFlag 拼接/全块检测/剥离、恢复完整尾部、算子完成后 GM 输出完整、Flag 清理范围、MTE3 在途与接收乱序/延迟 |
 | 公共输出 | assistEx、sourceMask、group 三个新增输出能被独立解析，group 内的 recvSlot、行引用和返回地址一致；有效 group 识别按已确认的 R04-03 验证，不要求 X；Combine 内部消费/归约验证见 C23 |
-| 权重复用 | 包/assistEx/group 的第一跳与成员真实权重不被 source 写回覆盖；expertScales 仅将 returnK 转为 1.0，DIRECT 保留原值，sourceMask 空洞不等待/不消费；DIRECT 的真实 0 和 1 不能误作有效性或类型标记，不要求无效 k 权重清零 |
+| 权重输入输出 | 输入 expertScales 始终保持真实值；expertScalesOut 的 returnK 为 1.0、DIRECT 为真实值；随包/assistEx/group 使用真实权重，sourceMask 空洞不消费。测试输入随机归一化，K=1 时权重为 1，FP32 行和允许 1e-6 误差 |
 | 生命周期 | 支持范围内连续多轮、重复/并发调用、空职责与全部发送责任完成、支持范围内失败退出、旧 ready 不被复用；排除中转容量超限场景 |
 
 不增加重复 top-k、invalid expert、空 route、输入 mask 或中转容量超限的错误输入测试。
@@ -1117,14 +1243,14 @@ sharedRanks<R，moeExpertNum 可被 R-sharedRanks 整除。
 
 | 关联子项 | 官网接口与确认结论 | 剩余事项 |
 | --- | --- | --- |
-| `R05-03` | [AtomicAdd][api-atomic]：Scalar 对 GM 原子加，uint32_t 可用，返回旧值；950PR/950DT 支持 | 取号及双缓冲清零方案已确认，见 R05-03；官网未明确额外地址对齐数值不再作为独立方案选择 |
-| `R05-03、R07-01、R11-05` | [DataCacheCleanAndInvalid][api-cache]：支持 DCache/GM 一致性处理，950 支持 CACHELINE_ATOMIC；Scalar 原子与搬运的依赖需手动同步 | 两份专用区、首 4B 及核 63 清零 owner 已确定；按实际访问落实可见性，具体 offset 和轮次映射仍需完成 |
-| `R05-04 至 R05-06` | [SetFlag/WaitFlag][api-flags]：同步指定的源/目标流水，WaitFlag 会阻塞目标流水；[AllocEventID][api-alloc]、[FetchEventID][api-fetch]、[ReleaseEventID][api-release]管理 ID | API 语义已确认；非阻塞查询这一候选未查到，发送并发数、进度表和资源回收方式仍待确认，不要求必须采用查询接口 |
+| `R05-03` | [AtomicAdd][api-atomic]：Scalar 对 GM 原子加，uint32_t 可用，返回旧值；950PR/950DT 支持 | 取号及单计数器清零方案已确认，见 R05-03；官网未明确额外地址对齐数值不再作为独立方案选择 |
+| `R05-03、R07-01、R11-05` | [DataCacheCleanAndInvalid][api-cache]：支持 DCache/GM 一致性处理，950 支持 CACHELINE_ATOMIC；Scalar 原子与搬运的依赖需手动同步 | 一份 1KB 专用区、首 4B 及核 63 清零 owner 已确定；按实际访问落实可见性，具体 offset 已由 R07-01 给出 |
+| `R05-04 至 R05-06` | [SetFlag/WaitFlag][api-flags]：同步指定的源/目标流水，WaitFlag 会阻塞目标流水；[AllocEventID][api-alloc]、[FetchEventID][api-fetch]、[ReleaseEventID][api-release]管理 ID | API 语义已确认；非阻塞查询这一候选未查到，源端 1 至 8 路及 lane EventID 已收口，数据转发的进度/资源组织仍需讨论，不要求必须采用查询接口 |
 | `R05-01、R03、R04、R06-03` | [DataCopyPad UB→GM][api-copy-out] / [GM→UB][api-copy-in]：GM 无 32B 起点/长度约束，UB 起点须 32B 对齐，blockLen 以字节计且为 sizeof(T) 的倍数 | R05-01 的 uint32 最小 4B 写回已有官网依据；清理地址遍历仍按 R06 选择 |
-| `R04、R05-04/R05-05` | [DataCopy UB→UB][api-copy-ub]：连续拷贝的 count 是元素数，两端及总字节数须 32B 对齐；拷贝 32B uint32 头部使用 count=8 | 支持的逻辑通路为 VECIN→VECCALC、VECCALC→VECOUT；具体 Tensor 位置和 Event 需与资源布局匹配 |
-| `R05-02/R05-04` | [TPipe::InitBuffer][api-init]：TBuf 的 len 以字节计，分配向上补齐 32B；TPipe 析构释放内存 | 双表仍只存 UB；总 UB、buffer 数及同时存活范围须核算，不能由单个 API 推导并发路数 |
+| `R04、R05-05` | [DataCopy UB→UB][api-copy-ub]：连续拷贝的 count 是元素数，两端及总字节数须 32B 对齐；拷贝 32B uint32 头部使用 count=8 | 支持的逻辑通路为 VECIN→VECCALC、VECCALC→VECOUT；具体 Tensor 位置和 Event 需与资源布局匹配 |
+| `R05-02/R05-04/R05-05` | [TPipe::InitBuffer][api-init]：TBuf 的 len 以字节计，分配向上补齐 32B；TPipe 析构释放内存 | 双表仍只存 UB；总 UB、buffer 数及同时存活范围须核算，不能由单个 API 推导并发路数 |
 | `R06-02、R05-05` | [PipeBarrier][api-pipe]：PIPE_MTE3 排序本核前后 MTE3，PIPE_ALL 等待本核所有先前提交流水完成 | 语义已确认；清理粒度、跨流水 UB 复用及 Event 组织仍待确认 |
-| `R05-01、R11` | [SyncAll][api-sync]：核间同步；硬同步是全核同步，软同步另有 usedCores 参数 | 不据此在第一跳/DIRECT 间新增屏障，也不能让 16 核单独进入要求全核参与的硬同步；沿用 cnt/cumsum 已确认的时序约定 |
+| `R05-01、R05-03、R11` | [SyncAll][api-sync]：核间同步；硬同步是全核同步，软同步另有 usedCores 参数 | 本版本仅在算子末尾由全部 64 个逻辑核执行一次，用于 counter 清零前收敛；不在第一跳/DIRECT 间或其他发送阶段新增屏障。不能让 16 核单独进入要求全核参与的硬同步；具体窗口复用仍归 R11 |
 
 ### 原子与缓存的使用边界
 
@@ -1141,7 +1267,7 @@ __aicore__ inline void DataCacheCleanAndInvalid(const GlobalTensor<T>& dst);
 `SINGLE_CACHE_LINE` 按 64B cache line 处理；非 64B 对齐时，官网规定只处理传入地址至下一 64B 边界的部分。
 `CACHELINE_OUT` 用于 GM 一致性，`CACHELINE_ATOMIC` 在 950 上支持，另有 LocalTensor/CACHELINE_UB 形式。
 Clean 会写回脏数据，Invalid 会使缓存失效；官网多核示例明确提示：各核即使写同一 cache line 的不同位置，后续 clean 也可能相互覆盖。
-本设计已用两份各 1KB 的专用区隔离 counter，核 63 仅清零非活动区首 4B；落实具体 offset/轮次映射时保持该所有权，不把每次 AtomicAdd 后无条件刷整个 DCache 当成已确认方案。
+本设计已用一份 1KB 的专用区隔离 counter，算子末尾全核 SyncAll() 后由核 63 仅清零该区首 4B；落实具体 offset 时保持该所有权，不把每次 AtomicAdd 后无条件刷整个 DCache 当成已确认方案。
 32B 搬运对齐、64B cache line 与原子接口的地址要求是不同约束，不能互相替代。
 
 ### Event 与发送 UB 生命周期
@@ -1150,13 +1276,13 @@ Clean 会写回脏数据，Invalid 会使缓存失效；官网多核示例明确
 | --- | --- | --- |
 | `SetFlag<evt>(id)` | 源流水此前读写完成后置位；不阻塞源流水的下一条指令 | 可以建立发送完成信号，但置位指令的下发不等于 MTE3 已完成 |
 | `WaitFlag<evt>(id)` | 目标流水等待置位，成功后将该标志清零；返回类型为 void | 不是 bool 完成查询。MTE3→V/MTE2 的等待可能阻塞公共监听所需流水，MTE3→S 的等待会阻塞 Scalar |
-| `AllocEventID<evt>()` | 申请并占用 TEventID，直至对应 Release | 多个同时在途的同类事件应保持各自 ID 所有权；并发资源数仍归 R05-04 |
+| `AllocEventID<evt>()` | 申请并占用 TEventID，直至对应 Release | 多个同时在途的同类事件应保持各自 ID 所有权；源端直接沿用 R05-04 的显式 lane ID，数据转发资源归 R05-05 |
 | `FetchEventID<evt>()` / `FetchEventID(evt)` | 返回可用 ID，但不占用 | 适合短期配对同步；连续用于多个未完成的同类事件可能取得同一 ID，官网提示会出现卡死等未定义行为 |
 | `ReleaseEventID<evt>(id)` | 释放 Alloc 申请的 ID | 不提供 MTE3 完成检测或等待；应在对应同步消费完成、该所有者不再使用后释放 |
 
 SetFlag/WaitFlag 的 HardEvent 类型及 ID 必须一致，同类型同 ID 在前一次配对消费前重复 Set 属于未定义行为。
 950 的 eventID 范围为 0–7；静态 Tensor 文档建议使用 0–5，6 为系统规划、7 用于框架自动同步，不能据此承诺有 8 路可自由使用的发送资源。
-TPipe 编程须通过其分配接口取得 ID，预算还需计入检测、metadata 和其他同步的占用。
+TPipe 编程须通过其分配接口取得 ID，具体预算分别核对源端与数据转发核的同步占用。上述 API 约束用于实现核对，不重新选择已确认的源端 1 至 8 路算法范围。
 发送 UB 的最后使用者完成后，仍须建立到下一写入流水的依赖；pendingIdx 删除、Event ID 释放和 UB 可改写是不同状态。
 PIPE_MTE3 只排序 MTE3，不能独自允许 Scalar/Vector 提前改写发送 UB；PIPE_ALL 的核内完成也不等于远端已消费或跨核屏障。
 
@@ -1186,9 +1312,9 @@ InitBuffer 的 TBuf 原型为 `InitBuffer(TBuf<bufPos>& buf, uint32_t len)`；�
 
 ### 官网未查到的内容与后续边界
 
-- **非阻塞 MTE3 完成查询（R05-04）：该候选未查到。** 已检查 9.1 基础 API、核内同步、TPipe/TQue 和 C-API 同步目录，并检索 CheckEvent、CheckFlag、QueryEvent、GetEvent、TryWaitFlag、非阻塞/MTE3 等词，未找到可读取该完成状态的公开接口。它只用于考虑发送 UB/Event 的回收，不是已确认必选 API；允许继续讨论满足相同并行和生命周期要求的其他机制，不能虚构查询接口或将 WaitFlag 解释成非阻塞查询。
+- **非阻塞 MTE3 完成查询（早期 R05-04 候选，供后续数据转发讨论）：未查到。** 已检查 9.1 基础 API、核内同步、TPipe/TQue 和 C-API 同步目录，并检索 CheckEvent、CheckFlag、QueryEvent、GetEvent、TryWaitFlag、非阻塞/MTE3 等词，未找到可读取该完成状态的公开接口。本卡源端已采用 Memory 环形 Set/Wait，不依赖该查询；该候选仅供后续数据转发 UB/Event 回收讨论，不是已确认必选 API；允许继续讨论满足相同并行和生命周期要求的其他机制，不能虚构查询接口或将 WaitFlag 解释成非阻塞查询。
 - **额外原子地址对齐数值（R05-03）：AtomicAdd 正文未明确。** 本设计已选择在对齐的 1KB 专用区首 4B 取号；该官网缺省说明仅保留作实现依据边界，不继续占用独立方案待确认项，也不表示支持任意未对齐地址。
-- SyncAll 的能力已查明；纯 Vector 硬同步要求 `__mix__(0,1)`，且软/硬同步的参与核与 workspace 条件不同。此证据不决定本设计引入新的 barrier，具体初始化/复用同步仍归 R11。
+- SyncAll 的能力已查明；纯 Vector 硬同步要求 `__mix__(0,1)`，且软/硬同步的参与核与 workspace 条件不同。本版本将全核 SyncAll() 放在算子末尾，仅用于 counter 清零前的收敛；不在发送阶段或阶段切换处新增 barrier，窗口复用仍归 R11。
 
 **核对经验：** 官网 latest 会跨版本，搜索索引和正文目录可能不一致；应固定版本、读取完整原型/约束/产品支持表，再将结论映射到已有议题。
 本轮仅核对文档，未编译或运行 NPU；后续验证仍需覆盖实际 SDK/SoC、并发取号、缓存可见性及监听/发送前进性，不能将文档支持等同于已验证的重叠性能。
@@ -1256,7 +1382,7 @@ Relay 与跨 Server 适用边界已由 [R01](#r01) 确认；Token 分核、各�
 
 ## D09
 
-Weight 传递、成员记录布局及 relay/source 加权责任已合入主设计；本轮 [R04](#r04) 已关闭 source 统一加权及 expertScales 原地复用，不新增 source 类型或权重输出，本轮结论暂记待确认文档。nullptr 支持组合及公共数值格式继续在 [R08](#r08) 讨论。
+Weight 传递、成员记录布局及 relay/source 加权责任已合入主设计；[R04](#r04) 明确权重输入/输出分离，Combine 参数复用，首版输入非空。公共数值格式继续在 [R08](#r08) 讨论。
 
 ## D10
 

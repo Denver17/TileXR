@@ -24,11 +24,12 @@ def render_case_description(report):
     if not config:
         return "checkpoint=" + report.get("checkpoint", "unknown")
     return (
-        f"Dispatch server-dedup（空 kernel） mode={config['run_mode']} "
+        f"Dispatch server-dedup scope={config.get('kernel_scope', 'unknown')} mode={config['run_mode']} "
         f"loops={config['loops']} warmup={config['warmup']}\n"
         f"BS={config['bs']} H={config['h']} TopK={config['topk']} "
         f"experts={config['moe_expert_num']} dtype={config['dtype']} "
-        f"cards={report.get('rank_size', 'unknown')} quant_mode={config.get('quant_mode', 0)}"
+        f"cards={report.get('rank_size', 'unknown')} quant_mode={config.get('quant_mode', 0)} "
+        f"routes={config.get('route_mode', 'unknown')} seed={config.get('seed', 'unknown')}"
     )
 
 
@@ -154,7 +155,8 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     for record in ranks:
         validate_rank_measurements(record, chain_config)
     mode = chain_config["run_mode"]
-    summary = {"run_mode": mode, "backend": "memory", "native_status": "empty",
+    count_scope = chain_config.get("kernel_scope") == "cnt_cumsum"
+    summary = {"run_mode": mode, "backend": "memory", "native_status": "cnt_cumsum" if count_scope else "empty",
                "kernel": KERNEL_NAME, "kernel_sha256": kernel_sha,
                "rank_size": rank_size,
                "configuration": {name: chain_config[name] for name in
@@ -165,6 +167,16 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     summary.update(algorithm_communication_bytes=0, bandwidth="N/A")
     if mode == "performance":
         medians = [row["performance"]["median_us"] for row in ranks]
+        if count_scope:
+            # One 32B record per remote expert per source rank. This excludes
+            # self-target counts, local prefix traffic and polling reads.
+            remote_bytes = (chain_config["moe_expert_num"] - chain_config["moe_expert_num"] // rank_size) * 32
+            summary.update(algorithm_communication_bytes=remote_bytes * rank_size,
+                           communication_bytes_per_rank=remote_bytes,
+                           communication_scope="remote cnt records; excludes local traffic and polling",
+                           bandwidth="effective remote-count GB/s",
+                           bandwidth_gbps=_statistics([remote_bytes / (us * 1000) for us in medians]),
+                           route_mode=chain_config["route_mode"], seed=chain_config["seed"])
         summary["performance"] = {"unit": "us", "selection": "last_loops_after_warmup",
                                   "reduction": "statistics_of_rank_sample_medians",
                                   "rank_median_us": medians, **_statistics(medians, "_us")}
@@ -187,8 +199,8 @@ def render_measurements(summary):
     """生成与结构化结果一致的简短中文报告；functional 无性能输出。"""
     if summary["run_mode"] == "functional":
         return ""
-    lines = [f"单算子测量：mode={summary['run_mode']} backend=memory native=empty "
-             f"ranks={summary['rank_size']} 算法通信=0B 带宽=N/A",
+    lines = [f"单算子测量：mode={summary['run_mode']} backend=memory native={summary['native_status']} "
+             f"ranks={summary['rank_size']} 算法通信={summary['algorithm_communication_bytes']}B 带宽={summary['bandwidth']}",
              f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}"]
 
     def append(label, stats, unit, suffix=""):
@@ -197,7 +209,9 @@ def render_measurements(summary):
                      f"max={stats['maximum' + suffix]:.3f} {unit}")
 
     if "performance" in summary:
-        append("空 kernel（每 rank 测量轮次 median 的跨 rank 汇总）", summary["performance"], "us", "_us")
+        append("kernel（每 rank 测量轮次 median 的跨 rank 汇总）", summary["performance"], "us", "_us")
+    if "bandwidth_gbps" in summary:
+        append("有效远端 cnt 带宽（不含本卡访问和轮询）", summary["bandwidth_gbps"], "GB/s")
     if "breakdown" in summary:
         breakdown = summary["breakdown"]
         lines.append("GetSystemCycle：Ascend950PR/950DT，1 GHz，1000 ticks/us；原始 ticks 保留在 JSON。")

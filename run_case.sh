@@ -67,6 +67,7 @@ if status == 'PASS':
     average = performance.get('mean_us')
     if average is not None:
         result += (f' kernel min {performance.get("minimum_us", 0):.3f}us'
+                   f' median {performance.get("median_us", 0):.3f}us'
                    f' average {average:.3f}us max {performance.get("maximum_us", 0):.3f}us')
 if report.get('chain_configuration', {}).get('run_mode') == 'breakdown':
     if status == 'PASS':

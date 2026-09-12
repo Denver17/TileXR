@@ -1,8 +1,7 @@
 #include "ep_memory_server_dedup_launch.h"
-#include <cstdlib>
 #include "acl/acl_rt.h"
 #include "ep_kernel_launch.h"
-#include "ep_memory_layout.h"
+#include "ep_memory_server_dedup_count_layout.h"
 
 namespace TileXREp {
 
@@ -19,13 +18,10 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
         vectorCores <= 0 || vectorCores > UINT32_MAX) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
-    uint32_t blockDim = 0;
-    int ret = TileXREpResolveMemoryBlockDim(static_cast<uint32_t>(vectorCores), 1U,
-        std::getenv("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"), &blockDim);
-    if (ret != TileXR::TILEXR_SUCCESS) {
-        return ret;
+    if (vectorCores < kEpServerDedupCoreNum) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
-    ret = TileXREpRegisterDispatchMemoryServerDedupKernel();
+    int ret = TileXREpRegisterDispatchMemoryServerDedupKernel();
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
@@ -44,7 +40,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
         static_cast<int64_t>(layout.globalBs), p.expertTokenNumsType, static_cast<int64_t>(p.dtype),
         static_cast<int64_t>(p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype),
         magic};
-    return TileXREpSubmitDispatchMemoryServerDedupKernel(args, blockDim, p.stream);
+    return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);
 }
 
 } // namespace TileXREp

@@ -6,7 +6,7 @@
 
 namespace TileXREp {
 
-// 内部按值 launch ABI；顺序与空 AICore 入口逐项对应，不是公共 metadata。
+// Internal by-value launch ABI, matching the AICore entry; not public metadata.
 struct EpServerDedupKernelArgs {
     GM_ADDR commArgs;
     GM_ADDR x;

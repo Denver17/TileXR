@@ -7,7 +7,7 @@ small transfers, while UDMA generally performs better for large transfers.
 
 All EP Dispatch and Combine variants are supported only on A5-class SoCs
 (`Ascend950`, `Ascend910_9`, or `A5`). The build produces the four existing A5
-AICore objects plus the empty Server Dedup object, and never produces 910B EP kernels. The public API symbols remain
+AICore objects plus the Server Dedup count object, and never produces 910B EP kernels. The public API symbols remain
 available in the same Host library on non-A5 systems and return
 `TILEXR_ERROR_NOT_SUPPORT` before loading a kernel or consuming launch state.
 
@@ -34,52 +34,39 @@ bash build.sh source-only
 building the hardware demo. CCE compilation and hardware correctness must still
 be validated separately.
 
-## Server Dedup 第一阶段检查点
+## Server Dedup count/cumsum checkpoint
 
-独立入口 `TileXRMoeEpDispatchMemoryServerDedup` 使用 caller-owned 的
-`assistExOut/sourceMaskOut/groupOut`，普通 Memory ABI 不变。第二个检查点已接通 A5 空 kernel：
-通过 Host 校验后注册独立 artifact，再获取一次 magic 并调用 `rtKernelLaunchWithFlagV2`。
-成功仅表示异步提交成功；默认空 kernel 不读取输入或 comm，不写输出、ready 或 profiling。breakdown 构建只增加自己数据区的逐核计时记录。
+The current increment implements count send/receive, cumulative sums, complete prefix
+publication/consumption/cleanup, and both expert count output modes. Token data transfer,
+metadata generation, and Combine remain unimplemented. The public entry still requires
+its caller-owned data/metadata placeholders and non-null FP32 route weights.
 
-开发者可在无 NPU 环境运行现有 Host suite；服务器交付仍使用上面的七步入口：
+Use the [current validation guide](../../docs/EP_VALIDATION_GUIDE.md) for deployment and
+pass criteria. On the configured first server, `bash run_commit_validation.sh` builds,
+installs, distributes, and runs count correctness and profiling on the fixed
+16P / E=96 / BS=96 / K=6 / balance_shift baseline, with a 4 GiB domain per rank. The existing
+`ep-sdedup-p1-chain-multi` identifier now launches the count kernel. Real execution needs
+at least two eight-card A5 servers, with 64 AIVs per device. The kernel always launches
+64 AIVs in a 48/16 split; the old block dimension override and empty-kernel profiling
+implementation have been removed.
 
-```bash
-cmake -S tests/ep -B tests/ep/build-sdedup -DBUILD_TILEXR_EP_DEMO=OFF
-cmake --build tests/ep/build-sdedup -j4
-timeout 180s ctest --test-dir tests/ep/build-sdedup --output-on-failure
-```
-
-Host 测试沿用已有 ACL/runtime 替身。`public_abi` 只验证公共声明与调用边界；
-`test_tilexr_ep_kernel_launch` 编译真实注册和 launch 源码，检查全部 20 个参数、默认/显式核数、
-FP16/BF16、可空 weight/旧 assist、非 A5、artifact 缺失、注册失败和提交失败。
-`TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM` 默认使用设备 Vector 核数，覆盖值范围为 `[1,Vector核数]`，
-不沿用普通 Dispatch 的双 Group 限制。注册失败不消耗 magic；提交失败已消耗本次 magic，不能回退重用。
-
-`empty-kernel` 的 production 构建额外编译安装包 consumer，仅使用已安装公共头和真实 Host 库。
-它在每台主机的首个配置 device 上执行真实 binary/function 注册，复用 Host 库相对路径加载；不创建 communicator。
-ELF/导出/依赖检查仍只在构建完成后执行一次；同步、超时、清理和结果汇总复用原流程。
-维护时将新检查加入现有测试及 manifest，不另建 runner、重复预检或源码摘要门禁。
-
-容量仍为 `R*BS*min(K,L)` 行，AssistEx 每行 32B、sourceMask 每项 4B、group 每行
-`align32(4*(1+2*(K-1)))`，按最新设计预留 **8*BS 行**。裸指针入口只检查可见对齐与 shape；内部 allocation helper 检查声明容量、
-设备和区间不重叠。不能借用要求旧三字段 assist、拒绝 weight 的普通 Memory 校验器。
-空算子不扫描 route，不生成 metadata，也不确定后续通信容量或 Combine 契约。
-
-`chain-single` 在 production 模式编译安装 `test_tilexr_ep_server_dedup_chain`，由同一 controller 每台启动 8 个进程；不增加每节点 CTest 项。它创建已有 MemoryDomain communicator，验证 Host/device peer window，调用一次公开空 Dispatch，检查 stream 同步和两次 TCP Host barrier，最后检查资源释放。空 kernel 不使用旧 Dispatch 的 2 GiB 分区；窗口检查采用实际 MemoryDomain 的 8 MiB 数据区加 4 MiB flag 区。异步完成或轮末 barrier 未确认时，进程报错退出，不提前释放可能仍被使用的资源；已有 controller 负责有界退出和日志收集。
-
-`chain-multi` 只运行 Dispatch 单算子，与 Memory 连续多轮策略相同：同一 stream 连续提交，整批结束后才同步和 Host barrier。functional 默认 1 轮且不计时；performance 使用 msprof，breakdown 使用 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING` 独立编译开关；两种测量模式默认预热 50 轮、测量 50 轮，均可配置。预热和测量分别为独立批次，completed 只在整批完成后确认。配置和输出解释见[七步指南](../../docs/EP_VALIDATION_GUIDE.md)。
-
-breakdown 的 64B/核记录位于自己 MemoryDomain 数据区，连续覆盖后仅读取最后一轮；核对 marker/版本/身份/核数/generation 和时间戳，再汇总入口框架耗时。CANN 9.1.0 官方 950 计数器为 1000 ticks/us，原始 ticks 保留。记录写出不在打点区间，不能把最后一轮拆解当成多轮均值，也不能当作去重通信性能；performance 构建关闭设备打点。
-
-开发者行为回归不加入每节点 CTest，也不增加服务器入口：
+From the repository root, local tests without NPU hardware are:
 
 ```bash
+cmake -S tests/ep -B build/server-dedup-host
+cmake --build build/server-dedup-host -j8
+ctest --test-dir build/server-dedup-host --output-on-failure
 python3 tests/ep/integration/test_server_dedup_chain.py -v
-python3 tests/ep/integration/test_server_dedup_kernel_profile.py -v
-python3 -m unittest discover -s tools/validation -p 'test_*.py'
 ```
 
-这些测试编译真实 C++14 consumer/kernel，以 ACL/communicator/API 替身及真实 TCP barrier 覆盖两种 dtype、16 进程连续批次、profile ON/OFF、坏记录和失败清理；脚本用 msprof CSV/SQLite 样本验证统计。CANN 9.1 生产编译和 A5 三模式验证仍需服务器七步流程；设备结果按[进度文档](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md)中的配置和通过提交分别登记。
+The count unit test executes production kernel methods through synchronous CPU API
+substitutes and compares them with an independent route histogram. It checks uneven
+partitions, zero counts, E=1024, L=1/64, both prefix outputs, cleanup, and round reuse.
+The launch test checks the actual 20-argument ABI, fixed 64-AIV launch, and runtime failures.
+The integration test exercises the real C++ consumer using runtime substitutes and TCP
+barriers, including corrupted-output rejection. These tests do not prove CANN compilation
+or device MTE ordering; real hardware results belong in the
+[progress document](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md).
 
 ## Full Hardware Demo
 

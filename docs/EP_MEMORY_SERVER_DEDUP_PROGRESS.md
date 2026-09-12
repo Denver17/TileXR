@@ -34,6 +34,7 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 
 | 检查方向 | 状态 | 通过 commit |
 | --- | --- | --- |
+| cnt 发送/接收、cumsum | 代码与本地 CPU/Host 测试已完成；CANN 编译、真实 A5 通信待验证，见[当前验收步骤](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收) | — |
 | server grouping / 第一跳 | 未开始 | — |
 | relay 展开 / metadata | 未开始 | — |
 | Dispatch correctness / 完整验收 | 未开始 | — |

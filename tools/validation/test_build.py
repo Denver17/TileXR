@@ -248,9 +248,9 @@ class BuildTests(unittest.TestCase):
             workflow.build(self.config())
         runtime.assert_not_called()
 
-    def test_only_breakdown_build_enables_device_instrumentation(self):
+    def test_count_build_retires_empty_kernel_instrumentation(self):
         (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
-        for mode in ("functional", "performance", "breakdown"):
+        for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
                     "TILEXR_VALIDATION_CHECKPOINT": workflow.CHAIN_MULTI_CHECKPOINT,
                     "TILEXR_VALIDATION_RUN_MODE": mode, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
@@ -258,11 +258,19 @@ class BuildTests(unittest.TestCase):
                 self.build_fixture(self.config("production"))
                 configure = next(args for args, _, _ in self.commands
                                  if "-S" in args and str(self.root) in args)
-                enabled = "ON" if mode == "breakdown" else "OFF"
-                self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=" + enabled, configure)
-                os.environ["TILEXR_VALIDATION_RUN_MODE"] = "performance" if mode == "breakdown" else "breakdown"
+                self.assertFalse(any("SERVER_DEDUP_ENABLE_PROFILING" in str(arg) for arg in configure))
+                os.environ["TILEXR_VALIDATION_RUN_MODE"] = "breakdown"
                 with self.assertRaisesRegex(ValueError, "设备打点开关"):
                     workflow.verify_build(self.config("production"))
+
+    def test_removed_breakdown_build_fails_before_build_side_effects(self):
+        (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
+        with mock.patch.dict(os.environ, {
+                "TILEXR_VALIDATION_CHECKPOINT": workflow.CHAIN_MULTI_CHECKPOINT,
+                "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
+            with mock.patch.object(workflow, "clean_build_directory") as clean, self.assertRaises(ValueError):
+                workflow.build(self.config("production"))
+            clean.assert_not_called()
 
     def test_runtime_check_occurs_once_after_production_install_and_never_during_verify_sync(self):
         config = self.config("production")

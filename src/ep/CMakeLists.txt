@@ -8,8 +8,6 @@ option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Combine Memory kernel" OFF)
 option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
-option(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    "Enable per-AIV breakdown records in the EP Dispatch Server Dedup empty kernel" OFF)
 option(TILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST
     "Build the isolated A5 4 GiB peer-window boundary test" OFF)
 
@@ -144,16 +142,12 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_kernel
 
 set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP
     "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_dispatch_memory_server_dedup_kernel.o")
-set(_tilexr_server_dedup_definitions)
-if(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
-    list(APPEND _tilexr_server_dedup_definitions TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
-endif()
 tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"
     "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
-    DEFINITIONS ${_tilexr_server_dedup_definitions}
     DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_profile.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 

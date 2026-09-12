@@ -20,7 +20,7 @@ class BatchTests(unittest.TestCase):
             ("run_commit_validation.sh", "build_all", 1),
             ("run_commit_validation.sh", "sync", 2),
             ("run_commit_validation.sh", "run_case", 3),
-            ("run_commit_validation.sh", "none", 3),
+            ("run_commit_validation.sh", "none", 5),
         ):
             with self.subTest(entry=entry, failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -34,7 +34,7 @@ class BatchTests(unittest.TestCase):
                 self.assertEqual(len((root / "calls").read_text().splitlines()), expected)
                 if failure == "none":
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertIn("Batch PASS cases=1", result.stdout)
+                    self.assertIn("Batch PASS cases=3", result.stdout)
                 else:
                     self.assertEqual(result.returncode, 19, result.stderr)
                     self.assertNotIn("PASS", result.stdout)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""单轮/多轮空 launch 的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
+"""单轮/多轮计数验证的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
 
 import copy
 import os
@@ -20,9 +20,10 @@ class ChainTests(TemporaryRoot):
 
     def test_defaults_and_signature_include_actual_shape_and_endpoints(self):
         config = self.config()
-        self.assertEqual(config.chain, dict(bs=256, h=7168, topk=6, moe_expert_num=384, dtype="bf16",
+        self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0,
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
-                                           run_mode="functional", loops=1, warmup=0))
+                                           run_mode="functional", loops=1, warmup=0,
+                                           route_mode="balance_shift", seed=2026, kernel_scope="cnt_cumsum"))
         original = config.signature()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "1"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
@@ -37,7 +38,7 @@ class ChainTests(TemporaryRoot):
             "TILEXR_DEMO_BARRIER_ADDR": ["192.0.2.1:10177", "bad"],
             "TILEXR_VALIDATION_BS": ["0", "-1", str(1 << 63)],
             "TILEXR_VALIDATION_TOPK": ["33"],
-            "TILEXR_VALIDATION_MOE_EXPERT_NUM": ["16", "33", "528"],
+            "TILEXR_VALIDATION_MOE_EXPERT_NUM": ["0", "33", "1040"],
             "TILEXR_VALIDATION_DTYPE": ["fp32"],
             "TILEXR_VALIDATION_BLOCK_DIM": ["0", "-1", "1.5", str(1 << 32)],
         }.items():
@@ -46,18 +47,29 @@ class ChainTests(TemporaryRoot):
                         self.assertRaises(ValueError):
                     self.config().signature()
 
+    def test_total_expert_limit_allows_one_and_more_than_32_local_experts(self):
+        for ranks, experts in ((16, 16), (16, 528), (16, 1024), (24, 1008), (128, 1024)):
+            with self.subTest(ranks=ranks, experts=experts), mock.patch.dict(os.environ, {
+                    "TILEXR_VALIDATION_MOE_EXPERT_NUM": str(experts)}):
+                self.hostfile.write_text("\n".join(f"node-{i}" for i in range(ranks // 8)) + "\n")
+                config = self.config()
+                self.assertEqual(len(config.hosts()) * 8, ranks)
+                self.assertEqual(config.signature()["chain"]["moe_expert_num"], experts)
+
     def test_requires_both_current_markers_and_one_completed_launch(self):
         manifest = {"build_id": "build", "checkpoint": workflow.CHAIN_CHECKPOINT, "source": {"commit": "a" * 40}}
         mappings = workflow.rank_mapping(self.config().hosts())[:8]
         records = []
         for mapping in mappings:
             identity = dict(workflow.rank_record(mapping, "run", manifest), pid=mapping["rank"] + 100)
-            records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=1048576),
+            records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                                 submitted=1, completed=1, cleanup="complete"))
         workflow.validate_rank_records(records, mappings, "run", manifest)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
                                    (None, "cleanup", "failed"), (None, "chain", None),
                                    ("chain", "peer_count", 8), ("chain", "peer_mem_bytes", 0),
+                                   ("chain", "peer_mem_bytes", 12 * 1024 ** 2),
+                                   ("chain", "peer_mem_bytes", 4 * 1024 ** 3 + 32),
                                    ("chain", "pid", 777), ("chain", "run_id", "old-run"),
                                    ("chain", "checkpoint", workflow.DRY_RUN_CHECKPOINT)):
             changed = copy.deepcopy(records)
@@ -99,8 +111,8 @@ class ChainTests(TemporaryRoot):
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
         mapping = workflow.rank_mapping(config.hosts())[0]
         identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
-                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup")})
-        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=12 * 1024 * 1024),
+                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed")})
+        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                       submitted=5, completed=5, warmup_submitted=0, warmup_completed=0, cleanup="complete")
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
         for key, value in (("loops", 3), ("submitted", 4), ("completed", 4), ("completed", 6),
@@ -118,7 +130,7 @@ class ChainTests(TemporaryRoot):
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
         mapping = workflow.rank_mapping(config.hosts())[0]
         identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
-                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype")})
+                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed")})
         record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                       peer_mem_bytes=4 * 1024 ** 3, boundary_offset=4 * 1024 ** 3 - 32, probe_bytes=32,
                       submitted=1, completed=1, cleanup="complete", initial_zero=True, device_initial_zero=True,

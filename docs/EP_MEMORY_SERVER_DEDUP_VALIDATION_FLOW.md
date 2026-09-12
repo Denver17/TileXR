@@ -16,6 +16,12 @@
 `expertScales` 改为必填只读输入，新增独立 `expertScalesOut`；非量化和 MXFP8、固定 48/16 核组按下文阶段二契约验收。
 第一阶段的旧签名、空参数约定、动态核数和空 kernel 通过记录不能替代上述变更的实现与验证。
 
+专家数约束按最新主设计同步：总专家数不超过 1024 且能被 R 整除，不设独立单卡上限，允许 L=1。
+当前 cnt/cumsum 增量已适配 Host/layout/调度器限制；可执行步骤与数值判据见[当前提交验收](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收)。
+从本次计数测试直至完整 Dispatch/Combine Server Dedup 功能、性能验证完成，固定每 rank 4 GiB 通信域（4092 MiB 数据区 + 4 MiB Flag 区）；后续仅调整域内布局和算子逻辑。
+开发阶段 1～4 统一先用 16P、每卡 6 专家（总计 96）、BS=96、TopK=6、balance_shift 主场景验证流程及性能；边界条件检查留到完整流程的最终验收，不在各增量默认扫描。
+下文保留阶段规划，空 kernel 辅助打点及完整数据路径的布局/ABI 不代表当前计数实现；既有通过记录不作为新范围已经验证的证据。
+
 适用平台为 Ascend 910A5/Ascend950 A5 环境，目标工具链为 CANN 9.1.0，保持 C++14。
 910B Host 或 simulator 只能验证 Host/构建边界，不能作为 A5 kernel 执行证据。
 
@@ -274,7 +280,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
 | 项目 | 第一阶段约定 |
 | --- | --- |
 | 平台 | A5 才能执行；非 A5 返回 `TILEXR_ERROR_NOT_SUPPORT`，不注册 kernel 或消耗 magic |
-| Rank/expert | 每 Server 8P，R 为 16 至 128 且为 8 的倍数；rank 在 `[0,R)`；`moeExpertNum=R*L`，`2<=L<=32`；`1<=topK<=32` |
+| Rank/expert | 每 Server 8P，R 为 16 至 128 且为 8 的倍数；rank 在 `[0,R)`；`0<moeExpertNum<=1024` 且 `moeExpertNum=R*L`，L 由均匀分配推导并允许为 1；`1<=topK<=min(32,moeExpertNum)`；128P 下 L 至多为 8 |
 | Shape | `bs>0`、`h>0`；`globalBs=0` 时推导为 `R*bs`，非零时必须相等；EP world/rank 的默认值处理沿用当前 Memory Host 规则 |
 | 格式 | 空工程先接通 FP16/BF16、`quantMode=0`，输出 dtype 为输入 dtype 或 `RESERVED` 表示继承；不实现量化或转换 |
 | 核数 | 默认使用设备报告的 Vector 核数；显式 `block_dim` 必须为正且不超过该设备核数，不沿用旧算法双 Group 的限制 |
@@ -383,7 +389,7 @@ hostfile 不得硬编码到脚本；`rank_size` 可以由主机数乘每主机�
 
 | checkpoint | 必需执行范围 |
 | --- | --- |
-| `abi-host` | Host 测试覆盖 R=16/64/128、L=2/3/6/32、K=1/6/32 的代表性组合，以及非法 shape、空指针、对齐、布局溢出和 helper 容量负例；不要求全部笛卡尔积 |
+| `abi-host` | Host 测试覆盖 L=1、384 总专家的典型配置、1024 总专家上限 (R,L)=(16,64)/(64,16)/(128,8)，以及 24P/L=42（总数 1008）；K=1/6/32 只组合不超过总专家数的值。负例含总专家数超过 1024、不能均匀分配、其他非法 shape、空指针、对齐、布局溢出和 helper 容量；不要求全部笛卡尔积 |
 | `empty-kernel` | 目标 CANN 9.1/A5 artifact；每个实际使用的不同构建/安装环境验证生产 Host 链接与设备侧注册，不创建多 Rank communicator |
 | `dry-run` | 64P 和 128P 都检查全量 rank/device 映射及无 communicator 的进程退出 |
 | `chain-single` | 64P 和 128P 均全 Rank 完成一次空 launch；single 表示一轮，不表示单卡 |

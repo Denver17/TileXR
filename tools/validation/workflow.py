@@ -33,7 +33,8 @@ CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
-MEMORY_BOUNDARY_BYTES = 4 * 1024 ** 3
+SERVER_DEDUP_PEER_BYTES = 4 * 1024 ** 3
+MEMORY_BOUNDARY_BYTES = SERVER_DEDUP_PEER_BYTES
 CHAIN_CHECKPOINTS = (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
@@ -44,6 +45,7 @@ RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, *CHAIN_CHECKPOINTS)
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
+    "test_tilexr_ep_server_dedup_counts",
     "test_dispatch_memory_trace", "test_msprof_kernel_stats", "test_tilexr_ep_layout",
     "test_tilexr_ep_expert_ids", "test_tilexr_ep_host_validation", "test_tilexr_ep_kernel_launch",
     "test_tilexr_moonep_planner_public_abi", "test_tilexr_ep_plan_layout", "test_tilexr_ep_plan_reference",
@@ -285,8 +287,8 @@ class Config:
             if self.chain is not None and self.checkpoint != MEMORY_BOUNDARY_CHECKPOINT:
                 ranks = len(hosts) * 8
                 experts = self.chain["moe_expert_num"]
-                if experts % ranks or not 2 <= experts // ranks <= 32 or self.chain["topk"] > experts:
-                    raise ValueError("chain 检查点要求 moe_expert_num=rank_size*L，2<=L<=32，topk<=moe_expert_num")
+                if not 0 < experts <= 1024 or experts % ranks or self.chain["topk"] > experts:
+                    raise ValueError("chain 检查点要求 0<moe_expert_num<=1024，能被 rank_size 整除，topk<=moe_expert_num")
             return hosts
         except FileNotFoundError:
             raise ValueError(f"hostfile 不存在：{self.hostfile}；请按 hostfile.example 一次性配置主机清单，"
@@ -314,7 +316,7 @@ def chain_configuration(checkpoint):
             os.environ.get("TILEXR_VALIDATION_WARMUP", "0") != "0"):
         raise ValueError("memory-boundary 仅执行 functional，loops=1，warmup=0")
     shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
-             for name, default in (("bs", "256"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "384"))}
+             for name, default in (("bs", "96"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "96"))}
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
         raise ValueError("chain 检查点 shape 必须是正 int64，topk<=32")
     dtype = os.environ.get("TILEXR_VALIDATION_DTYPE", "bf16")
@@ -354,7 +356,8 @@ def chain_configuration(checkpoint):
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
-                 run_mode=run_mode, loops=loops, warmup=warmup)
+                 run_mode=run_mode, loops=loops, warmup=warmup,
+                 route_mode="balance_shift", seed=2026, kernel_scope="cnt_cumsum")
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -491,6 +494,9 @@ def build(config):
     def command(*args, **kwargs):
         return execute(*args, **kwargs, start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
 
+    if config.chain is not None and config.chain["run_mode"] == "breakdown":
+        raise ValueError("Server Dedup 空 kernel 打点已移除；计数增量请使用 functional/performance")
+
     build_id = uuid.uuid4().hex
     work = clean_build_directory(config)
     require_tools(["cmake", "ctest", "g++", "make"])
@@ -502,11 +508,9 @@ def build(config):
         command([tool, "--version"], log / (tool + "-version.log"))
     common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}"]
     if config.mode == "production":
-        profiling = config.chain is not None and config.chain["run_mode"] == "breakdown"
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
-                 f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
-                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if profiling else 'OFF'}"],
+                 f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs],
                 log / "production-build.log", timeout=3600)
@@ -527,7 +531,7 @@ def build(config):
     command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
     command(["cmake", "--install", host_build], log / "host-install.log")
     if chain and not (stage / "bin" / CHAIN_PROGRAM).is_file():
-        raise ValueError(f"空算子测试未安装：{CHAIN_PROGRAM}")
+        raise ValueError(f"Server Dedup 测试未安装：{CHAIN_PROGRAM}")
     try:
         listing = json.loads(command(["ctest", "--test-dir", host_build, "--show-only=json-v1"],
                                      log / "tests.json"))
@@ -742,7 +746,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
             if type(marker.get("pid")) is not int or marker["pid"] <= 0:
                 raise Failure("LOG_PARSE_FAILED", "rank 缺少有效的进程 PID", rank=mapping["rank"])
             if chain_config is not None and any(marker.get(key) != chain_config[key]
-                    for key in ("bs", "h", "topk", "moe_expert_num", "dtype")):
+                    for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed")):
                 raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype 与本次配置不一致", rank=mapping["rank"])
         if chain:
             linked = record["chain"]
@@ -763,7 +767,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     except (ValueError, TypeError, KeyError) as error:
                         raise Failure("RESULT_FAILED", f"rank 测量记录无效：{error}", rank=mapping["rank"]) from error
             if (linked.get("peer_count") != mapping["rank_size"] or
-                    type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] <= 0 or
+                    type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] != SERVER_DEDUP_PEER_BYTES or
                     linked["pid"] != record["pid"] or any(type(record.get(key)) is not int or record[key] != loops
                         for key in ("submitted", "completed")) or record.get("cleanup") != "complete"):
                 raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、指定轮数空 launch 或资源清理",
@@ -1186,7 +1190,7 @@ def run(config):
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
     elif config.checkpoint in CHAIN_CHECKPOINTS:
         rounds = "单轮" if config.checkpoint == CHAIN_CHECKPOINT else f"{config.chain['loops']} 轮"
-        scope += f"、{len(mappings)}P communicator/peer window、{rounds}空 Dispatch launch、整批 stream 同步与 Host barrier；未执行去重算法或验证数值。"
+        scope += f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、{rounds} cnt/cumsum 数值校验、整批 stream 同步与 Host barrier；不包含 Token 数据发送/接收或 Combine。"
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],

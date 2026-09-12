@@ -114,6 +114,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
 int main()
 {
     g_commArgs.rankSize = 64;
+    g_commArgs.peerMemBytes = 230400;
     g_commArgs.rank = 9;
     for (auto &peer : g_commArgs.peerMems) {
         peer = reinterpret_cast<GM_ADDR>(0xE000);
@@ -138,7 +139,7 @@ int main()
         g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 2048,
         "validated context and bounded output layout forwarded");
 
-    for (int test = 0; test < 28; ++test) {
+    for (int test = 0; test < 29; ++test) {
         auto params = valid;
         auto &v = params.dispatch;
         int error = TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -163,7 +164,7 @@ int main()
             case 17: v.globalBs = -1; break;
             case 18: v.epRankId = 8; break;
             case 19: v.epWorldSize = 16; break;
-            case 20: v.moeExpertNum = 64; break;
+            case 20: v.moeExpertNum = 1088; break;
             case 21: v.moeExpertNum = 193; break;
             case 22: v.bs = std::numeric_limits<int64_t>::max(); break;
             case 23: v.expertTokenNumsType = 2; break;
@@ -171,6 +172,7 @@ int main()
             case 25: v.expertScales = reinterpret_cast<void *>(0x3001); break;
             case 26: v.expertTokenNumsOut = reinterpret_cast<int64_t *>(0x7004); break;
             case 27: v.h = std::numeric_limits<int64_t>::max(); break;
+            case 28: v.expertScales = nullptr; break;
         }
         CheckRejected(params, error);
     }
@@ -199,11 +201,10 @@ int main()
     defaults.dispatch.expandXOutDtype = TILEXR_DATA_TYPE_RESERVED;
     defaults.dispatch.globalBs = defaults.dispatch.epWorldSize = defaults.dispatch.epRankId = 0;
     defaults.dispatch.tpWorldSize = defaults.dispatch.expertTokenNumsType = 0;
-    defaults.dispatch.expertScales = nullptr;
     defaults.dispatch.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0x1234);
     Check(Invoke(defaults) == TILEXR_SUCCESS && g_layout.globalBs == 256 &&
         g_submitted.dispatch.assistInfoForCombineOut == defaults.dispatch.assistInfoForCombineOut,
-        "FP16/defaults/null weight and legacy assist placeholder accepted");
+        "FP16/defaults/required weight and legacy assist placeholder accepted");
 
     g_a5 = false;
     const int hostCalls = g_hostCalls;
@@ -220,6 +221,13 @@ int main()
     g_commArgs.peerMems[63] = nullptr;
     CheckRejected(valid, TILEXR_ERROR_NOT_INITIALIZED);
     g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(0xE000);
+    g_commArgs.peerMemBytes = g_layout.countStateBytes - 1;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_commArgs.peerMemBytes = g_layout.countStateBytes;
+    Check(Invoke(valid) == TILEXR_SUCCESS, "exact count state capacity accepted");
+    g_commArgs.peerMems[63] += 1;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_commArgs.peerMems[63] -= 1;
     g_devRet = TILEXR_ERROR_MKIRT;
     CheckRejected(valid, TILEXR_ERROR_MKIRT);
     g_devRet = TILEXR_SUCCESS;

@@ -702,7 +702,7 @@ run, build, commit, host = sys.argv[1:5]
 host_index, local_rank, device, rank, rank_size = map(int, sys.argv[5:10])
 assert os.environ['TILEXR_COMM_ID'] == '192.0.2.1:10177'
 assert os.environ['TILEXR_DEMO_BARRIER_ADDR'] == '192.0.2.1:10274'
-assert os.environ['TILEXR_VALIDATION_BS'] == '256'
+assert os.environ['TILEXR_VALIDATION_BS'] == '96'
 checkpoint = os.environ['TILEXR_VALIDATION_CHECKPOINT']
 multi = checkpoint == 'ep-sdedup-p1-chain-multi'
 boundary = checkpoint == 'ep-sdedup-p1-memory-boundary'
@@ -716,6 +716,7 @@ record = dict(run_id=run, build_id=build, commit=None if commit == 'unknown' els
 record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
                for key in ('bs', 'h', 'topk', 'moe_expert_num')})
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
+record.update(route_mode='balance_shift', seed=2026)
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
 if behavior == 'wrong-shape':
     record['bs'] += 1
@@ -724,7 +725,7 @@ if behavior == 'launch-failure':
     sys.exit(9)
 if behavior != 'missing-chain':
     print('EP_SERVER_DEDUP_CHAIN_PASS ' + json.dumps(dict(record, peer_count=rank_size,
-                                                       peer_mem_bytes=4 * 1024 ** 3 if boundary else 1048576)))
+                                                       peer_mem_bytes=4 * 1024 ** 3)))
 if behavior == 'stale-round':
     record['run_id'] = 'old-run'
 if run_mode != 'functional':
@@ -766,7 +767,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
         self.assertEqual(summary["chain_configuration"]["loops"], 1)
         self.assertEqual(summary["chain_configuration"]["dtype"], "bf16")
-        self.assertIn("单轮空 Dispatch launch", summary["scope"])
+        self.assertIn("单轮 cnt/cumsum", summary["scope"])
         self.assertNotIn("未执行 NPU launch", summary["scope"])
         for node in summary["nodes"]:
             self.assertEqual(node["tests"], len(self.manifest["tests"]))
@@ -824,7 +825,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
         self.assertEqual(summary["chain_configuration"]["loops"], 7)
         self.assertNotIn("measurements", summary)
-        self.assertIn("7 轮空 Dispatch launch", summary["scope"])
+        self.assertIn("7 轮 cnt/cumsum", summary["scope"])
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual((rank["submitted"], rank["completed"], rank["loops"]), (7, 7, 7))

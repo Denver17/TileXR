@@ -207,10 +207,9 @@ void TestServerDedupRuntimeLaunch()
     TileXREp::EpMemoryServerDedupLayout layout {};
     layout.globalBs = 64 * 256;
     auto launch = [&]() { return TileXREp::TileXREpLaunchDispatchMemoryServerDedupKernel(params, context, layout); };
-    const char *overrideName = "TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM";
-    unsetenv(overrideName);
 
     ResetCapture();
+    gVectorCores = 64;
     gSocName = "Ascend910B3";
     Check(launch() == TileXR::TILEXR_ERROR_NOT_SUPPORT, "server dedup rejects non-A5");
     Check(TileXREp::TileXREpRegisterDispatchMemoryServerDedupKernel() == TileXR::TILEXR_ERROR_NOT_SUPPORT,
@@ -219,6 +218,7 @@ void TestServerDedupRuntimeLaunch()
     gSocName = "Ascend950PR_9589";
 
     ResetCapture();
+    gVectorCores = 64;
     gDeviceResult = 1;
     Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "device query failure propagates");
     gDeviceResult = ACL_SUCCESS;
@@ -227,27 +227,28 @@ void TestServerDedupRuntimeLaunch()
     gVectorCores = static_cast<int64_t>(UINT32_MAX) + 1;
     Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "core count narrowing overflow rejected");
     gVectorCores = 48;
-    for (const char *value : {"0", "49", "-1", "2x"}) {
-        setenv(overrideName, value, 1);
-        Check(launch() == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL, "invalid dedup block dimension rejected");
-    }
-    unsetenv(overrideName);
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_SUPPORT, "fewer than 64 AIVs rejected");
+    gVectorCores = 64;
     Check(gMagicCalls == 0 && gLoadedFiles.empty() && gLaunches.empty(), "bad launch settings consume no magic");
 
     ResetCapture();
+    gVectorCores = 64;
     gLoadResult = false;
     Check(launch() == TileXR::TILEXR_ERROR_NOT_INITIALIZED, "missing artifact is an error");
     Check(gMagicCalls == 0 && gBinaryRegisterCalls == 0 && gLaunches.empty(), "missing artifact does not register or launch");
     ResetCapture();
+    gVectorCores = 64;
     gBinaryRegisterResult = -1;
     Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "binary registration failure propagates");
     Check(gMagicCalls == 0 && gLaunches.empty(), "binary registration failure consumes no magic");
     ResetCapture();
+    gVectorCores = 64;
     gFunctionRegisterResult = -1;
     Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "function registration failure propagates");
     Check(gBinaryUnregisterCalls == 1 && gMagicCalls == 0 && gLaunches.empty(), "failed function registration rolls back binary");
 
     ResetCapture();
+    gVectorCores = 64;
     gMagicResult = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     Check(launch() == TileXR::TILEXR_ERROR_NOT_INITIALIZED, "magic allocation failure propagates");
     Check(gMagicCalls == 1 && gLaunches.empty(), "failed magic allocation prevents launch");
@@ -257,16 +258,18 @@ void TestServerDedupRuntimeLaunch()
         "dedup registers its own signature");
 
     ResetCapture();
-    Check(launch() == TileXR::TILEXR_SUCCESS, "empty server dedup launch succeeds");
+    gVectorCores = 64;
+    Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
     CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 20);
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
         0x1000, 0x2000, 0x3000, 0x5000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000,
         256, 7168, 6, 384, 64 * 256, 1, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.dtype), kNextMagic};
     Check(gLaunches[0].args == expected, "all twenty kernel arguments preserve order, widths and values");
-    Check(gLaunches[0].blockDim == 48 && gLaunches[0].stream == p.stream, "uses all vector cores and caller stream");
+    Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
     ResetCapture();
+    gVectorCores = 64;
     const int rounds = static_cast<int>(TileXR::PING_PONG_SIZE) + 3;
     for (int round = 0; round < rounds; ++round) {
         Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
@@ -279,20 +282,16 @@ void TestServerDedupRuntimeLaunch()
     Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
         "multiple rounds consume exactly one magic each without reloading the artifact");
 
-    for (const char *value : {"1", "47", "48"}) {
-        ResetCapture();
-        setenv(overrideName, value, 1);
-        p.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
-        p.expandXOutDtype = p.dtype;
-        p.expertScales = nullptr;
-        p.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0xc000);
-        Check(launch() == TileXR::TILEXR_SUCCESS, "valid block dimension needs no legacy two-group restriction");
-        Check(gLaunches[0].blockDim == std::strtoul(value, nullptr, 10) && gLaunches[0].args[3] == 0 &&
-            gLaunches[0].args[7] == 0xc000 && gLaunches[0].args[18] == static_cast<uint64_t>(p.dtype),
-            "block override, optional pointers and explicit FP16 forwarded");
-    }
-    unsetenv(overrideName);
     ResetCapture();
+    gVectorCores = 96;
+    p.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
+    p.expandXOutDtype = p.dtype;
+    p.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0xc000);
+    Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches[0].blockDim == 64 &&
+        gLaunches[0].args[7] == 0xc000 && gLaunches[0].args[18] == static_cast<uint64_t>(p.dtype),
+        "larger devices retain fixed 48/16 partition and explicit FP16 ABI");
+    ResetCapture();
+    gVectorCores = 64;
     gLaunchResult = -1;
     Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "runtime submission failure is never PASS");
     Check(gMagicCalls == 1 && gLaunches.size() == 1, "failed submission consumes only its own magic");

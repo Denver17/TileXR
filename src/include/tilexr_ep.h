@@ -50,8 +50,11 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
     TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype, aclrtStream stream);
 
-// 第一阶段空算子：A5 上提交独立空 kernel，成功仅表示异步提交成功。
-// Metadata 由 caller 持有；空 kernel 不读写输入、输出或通信状态。非 A5 返回 NOT_SUPPORT。
+// 当前增量仅实现 cnt 发送/接收及 cumsum；A5 固定 64 AIV，成功表示异步提交成功。
+// sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
+// expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
+// hidden 发送/接收和 metadata 生成尚未实现，其输出不可用于 expert/Combine。非 A5 返回 NOT_SUPPORT。
+// expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
 // groupOut 预留 8*bs 行，行字节数为 align32(4*(1+2*(topK-1)))；sourceMaskOut 仍为 bs 个 uint32。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
