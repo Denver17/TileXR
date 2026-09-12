@@ -287,7 +287,7 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertNotIn("launch", self.trace_lines(0))
 
     def test_count_corruption_never_reports_success(self):
-        for fault in ("prefix", "expert"):
+        for fault in ("prefix", "expert", "unwritten"):
             with self.subTest(fault=fault):
                 processes = [self.start(rank, environment={"TEST_COUNT_FAULT": fault} if rank == 1 else {})
                              for rank in range(16)]
@@ -297,6 +297,22 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertNotEqual(process.returncode, 0)
                         self.assertNotIn("EP_SERVER_DEDUP_SINGLE_ROUND_PASS", output)
                         self.assertIn("stage=count-read", errors)
+                        line = next(line for line in errors.splitlines() if "stage=count-read" in line)
+                        fields = dict(word.split('=', 1) for word in line.split() if '=' in word)
+                        self.assertEqual(int(fields['global_expert']), 2)
+                        self.assertEqual(int(fields['actual_window_start']), 0)
+                        window = json.loads(fields['actual_window'])
+                        self.assertEqual(window[0], int(fields['actual']))
+                        if fault == 'unwritten':
+                            self.assertEqual(window, [-1, -1, -1])
+                        else:
+                            self.assertEqual(int(fields['actual']), int(fields['expected']) + 1)
+                        if fault != 'expert':
+                            self.assertIn('sendCountsOut mismatch at 0', line)
+                            self.assertEqual(int(fields['source_rank']), 0)
+                        else:
+                            self.assertIn('expertTokenNumsOut mismatch at 0', line)
+                            self.assertNotIn('source_rank', fields)
                     else:
                         self.assertEqual(process.returncode, 0, errors)
                 for rank in range(16):

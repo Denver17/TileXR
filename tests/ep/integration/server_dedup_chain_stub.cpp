@@ -159,6 +159,8 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     }
     const int result = Call("launch");
     if (result == 0) {
+        const char *fault = std::getenv("TEST_COUNT_FAULT");
+        if (fault && std::strcmp(fault, "unwritten") == 0) return 0;
         std::fill(sendCounts, sendCounts + experts, 0);
         const int64_t localExperts = experts / world;
         for (int64_t source = 0; source < world; ++source) {
@@ -171,7 +173,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             sum += sendCounts[i]; sendCounts[i] = sum;
             if ((i + 1) % world == 0) { counts[i / world] = countType ? sum - last : sum; last = sum; }
         }
-        const char *fault = std::getenv("TEST_COUNT_FAULT");
         if (fault && std::strcmp(fault, "prefix") == 0) ++sendCounts[0];
         if (fault && std::strcmp(fault, "expert") == 0) ++counts[0];
     }

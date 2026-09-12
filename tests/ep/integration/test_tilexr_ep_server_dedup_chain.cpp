@@ -48,6 +48,26 @@ void Check(int code, const char *operation)
     Require(code == 0, std::string(operation) + " ret=" + std::to_string(code));
 }
 
+template <typename T>
+void CheckCountValue(const char *name, const std::vector<T> &actual, size_t index,
+    int64_t expected, int64_t globalExpert, int sourceRank = -1)
+{
+    if (actual[index] == expected) { return; }
+    const size_t begin = index > 2 ? index - 2 : 0;
+    const size_t end = std::min(actual.size(), index + 3);
+    std::ostringstream error;
+    error << name << " mismatch at " << index << " expected=" << expected
+        << " actual=" << actual[index] << " global_expert=" << globalExpert;
+    if (sourceRank >= 0) { error << " source_rank=" << sourceRank; }
+    error << " actual_window_start=" << begin << " actual_window=[";
+    for (size_t i = begin; i < end; ++i) {
+        if (i != begin) { error << ','; }
+        error << actual[i];
+    }
+    error << ']';
+    throw std::runtime_error(error.str());
+}
+
 int64_t Number(const char *text, const char *name)
 {
     Require(text != nullptr && *text != '\0', std::string("missing ") + name);
@@ -398,8 +418,10 @@ int Run(const Config &c)
         Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
         Check(aclrtMemcpy(buffers[8], layout.weightBytes, weightsHost.data(),
             weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
-        Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0, layout.expertTokenNumsBytes), "clear token counts");
-        Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0, layout.sendCountsBytes), "clear send counts");
+        // Valid count/prefix outputs are nonnegative. Preserve a distinct value
+        // when a successful launch fails to write an output element.
+        Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0xff, layout.expertTokenNumsBytes), "initialize token counts");
+        Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0xff, layout.sendCountsBytes), "initialize send counts");
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
             "caller allocation validation");
         stage = "chain-barrier";
@@ -452,10 +474,13 @@ int Run(const Config &c)
         int64_t cumulative = 0, previousExpert = 0;
         for (int64_t index = 0; index < c.experts; ++index) {
             cumulative += referenceCounts[index];
-            Require(actualPrefix[index] == cumulative, "sendCountsOut mismatch at " + std::to_string(index));
+            const int64_t globalExpert = c.rank * localExperts + index / c.rankSize;
+            CheckCountValue("sendCountsOut", actualPrefix, static_cast<size_t>(index),
+                cumulative, globalExpert, static_cast<int>(index % c.rankSize));
             if ((index + 1) % c.rankSize == 0) {
                 const int64_t expected = c.loops % 2 ? cumulative - previousExpert : cumulative;
-                Require(actualExperts[index / c.rankSize] == expected, "expertTokenNumsOut mismatch");
+                CheckCountValue("expertTokenNumsOut", actualExperts, static_cast<size_t>(index / c.rankSize),
+                    expected, globalExpert);
                 previousExpert = cumulative;
             }
         }

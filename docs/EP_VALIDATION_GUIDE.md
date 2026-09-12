@@ -99,6 +99,17 @@ bash run.sh run_mode=performance loops=50 warmup=50
 回传实际 commit、卡数、case summary 和失败 rank 日志即可判定覆盖范围。16P 通过不证明 128P；同 shape 多轮通过不证明跨 shape/并发调用安全。
 当前本地仅通过 CPU 逻辑、Host ABI/launch 以及替身 consumer 测试，CANN 编译和真实 A5 计数通信仍待目标环境验证。
 
+出现 `stage=count-read ... sendCountsOut mismatch at N` 时，该 rank 已完成整批 stream 同步和 Host barrier，
+但计数结果未通过。错误行保留 `expected`、`actual`、`global_expert`、`source_rank` 和最多五项相邻实际结果。
+当前固定场景下 rank 4 的 index 0 对应源 rank 0、全局专家 24，预期为 6；这一项不依赖其他接收核的分段和。
+保持 `balance_shift` 和原 shape，先用 `bash run.sh run_mode=functional loops=1 warmup=0` 查看是否单轮即可复现，
+再用 `bash run.sh run_mode=functional loops=3 warmup=0` 保留原失败轮数的详细结果。首次拉取诊断变更仍需手动编译、同步；
+只有单轮通过、多轮失败时，才将轮次复用列为优先假设，不能直接据此认定根因。
+
+count 输出在整批 launch 前初始化为 `-1`，帮助区分整批未写与合法的零计数；不在轮间清空输出或新增同步。
+相同路由多轮复用同一输出缓冲区，该哨兵不能证明具体哪一轮写过结果。只报不匹配索引而不记录实际值会迫使额外上机，
+因此保留首个不匹配值及有限邻域；CPU 错值/未写入注入只验证诊断和失败判据，不证明设备数值问题已修复。
+
 无需 NPU 的聚焦检查可独立执行：
 
 ```bash
