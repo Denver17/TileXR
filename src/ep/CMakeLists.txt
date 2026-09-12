@@ -64,7 +64,8 @@ function(tilexr_add_ep_aicore_kernel target source output)
             $<TARGET_OBJECTS:${target}_tmp>
             --static -o "${output}" --allow-multiple-definition
         COMMAND truncate -c -s 10485760 "${output}"
-        DEPENDS ${target}_tmp ${ARG_DEPENDS}
+        # OBJECT targets impose build order; the object files trigger relinking.
+        DEPENDS ${target}_tmp $<TARGET_OBJECTS:${target}_tmp> ${ARG_DEPENDS}
         COMMAND_EXPAND_LISTS
         VERBATIM
         COMMENT "Linking ${target} A5 AICore binary")
