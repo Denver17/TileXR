@@ -41,7 +41,7 @@ void CheckReceiveUnpack(uint32_t h, bool quantized)
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
-    uint32_t source = 0, uint32_t rounds = 1)
+    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {})
 {
     TileXR::CommArgs args {};
     args.rankSize = ranks;
@@ -68,6 +68,10 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         // three-route group. The next token changes which servers are grouped.
         const int32_t mixed[] = {4, 25, 28, 50, 26, 5, 26, 50, 27, 51, 28, 4};
         std::copy(mixed, mixed + 12U, ids.begin());
+    }
+    if (!routePattern.empty()) {
+        Check(routePattern.size() % k == 0U, "route pattern contains complete token rows");
+        for (uint32_t i = 0; i < ids.size(); ++i) ids[i] = routePattern[i % routePattern.size()];
     }
     const auto originalWeights = weights;
     auto packets = ServerDedupReference::SourcePackets(ids, weights, source, ranks, experts, k);
@@ -151,7 +155,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         Check(writes.size() == packets.size(), "exactly one send per expected physical packet");
         for (uint32_t core = 0; core < 48U; ++core) {
             bool directStarted = false;
-            uint32_t previousDirect = 0;
+            uint32_t previousDirect = 0, previousServerStep = 0;
             std::vector<uintptr_t> lanes;
             uint32_t issued = 0;
             for (const auto &write : writes) if (write.core == core) {
@@ -160,8 +164,13 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
-                    Check(!directStarted || index > previousDirect, "DIRECT consumes cached tasks in token/k order");
-                    directStarted = true; previousDirect = index;
+                    const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
+                    const uint32_t serverStep = (server + ranks / 8U - source / 8U) % (ranks / 8U);
+                    Check(!directStarted || serverStep >= previousServerStep,
+                        "DIRECT visits servers cyclically starting at the source server");
+                    Check(!directStarted || serverStep != previousServerStep || index > previousDirect,
+                        "DIRECT preserves token/k order within each destination server");
+                    directStarted = true; previousDirect = index; previousServerStep = serverStep;
                 } else Check(!directStarted, "all first hops on a core precede its DIRECT sends");
                 if (std::find(lanes.begin(), lanes.end(), write.lane) == lanes.end()) lanes.push_back(write.lane);
                 Check(lanes.size() <= 8U && write.lane == lanes[issued % lanes.size()], "both stages share a continuous lane sequence");
@@ -229,6 +238,21 @@ int main()
         CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
         CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
         CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
+        for (uint32_t source : {0U, 24U, 56U}) {
+            const uint32_t local = source / 8U;
+            const auto expert = [local](uint32_t step, uint32_t offset = 0U) {
+                return int32_t((local + step) % 8U * 48U + offset);
+            };
+            // Two rows per core: late local routes (own card and peer card),
+            // interleaved remote servers, and no tasks for relative server 6.
+            Run(64, 384, 96, 64, 6, false, source, 3, {
+                expert(2), expert(7), expert(1), expert(0, 42), expert(5), expert(0),
+                expert(4), expert(1, 1), expert(0, 1), expert(3), expert(7, 1), expert(2, 1)});
+            // First hops and singleton DIRECTs share the ring across the wrap.
+            Run(64, 384, 96, 64, 6, false, source, 3, {
+                expert(2), expert(5), expert(2, 1), expert(1), expert(0, 42), expert(0),
+                expert(7), expert(3), expert(0, 1), expert(4), expert(7, 1), expert(1, 1)});
+        }
         Run(16, 96, 96, 64, 6, true);
         Run(16, 96, 96, 64, 6, true, 15); // Cyclic (source+destination)%R slot mapping wraps.
         Run(24, 72, 256, 224, 6, true); // per-core 5/6 rows; metadata crosses a 480B boundary.

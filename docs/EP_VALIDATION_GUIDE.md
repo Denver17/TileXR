@@ -2,7 +2,11 @@
 
 ## 当前提交：完整源端发送（设计验证流程 §2.4）
 
-当前检查点为 `ep-sdedup-p2-source-send`：保留 cnt 发送/接收、cumsum 和第一跳发送，新增 DIRECT 执行。每个发送核先逐 Token 分类并发送全部第一跳，再按缓存的 tokenOffset/originalK/expertId/q 顺序执行直发表；两阶段共用发送池和包序号，之间无新增屏障。sourceMask/expertScalesOut 随本模块完成；接收转发、最终 expert 行整理、assistEx/group 生成及 Combine 留待后续模块。
+当前检查点为 `ep-sdedup-p2-source-send`：保留 cnt 发送/接收、cumsum 和第一跳发送，新增 DIRECT 执行。每个发送核先逐 Token 分类并发送全部第一跳，再从本 server 开始，按 `(rank/8 + step) % (rankSize/8)` 的顺序遍历目标 server 并执行直发表；同一 server 内保持原始 Token/k 顺序，沿用缓存的 tokenOffset/originalK/expertId/q。两阶段共用发送池和包序号，之间无新增屏障。sourceMask/expertScalesOut 随本模块完成；接收转发、最终 expert 行整理、assistEx/group 生成及 Combine 留待后续模块。
+
+例如 64P 的 server7 按 `7→0→1→2→3→4→5→6` 发送 DIRECT，本 server 包含本卡与同 server 其他卡。48 个发送核各自推进，本核对某 server 无任务就跳过；不增加 server 边界同步或 MTE3 排空，不能据此推断所有核同时切换 server，或先前 server 的 DMA 已完成。实现每个 server 扫描现有 16B 直发表一次，复用原 UB，无新增索引表；BS96/K6 下每核最多 12 项，64P 最多 96 次成员检查，128P 最多 192 次。仅调整发送顺序，不改变包数、通信字节或槽位。
+
+维护约束：按目标 server 重排时，q 必须仍取原始完整路由中的专家出现序号，不能按实际发送次序重算，否则同 expert 跨 Token 的目标槽位会改变。观察实际 GM 下发可检查循环顺序、server 内稳定顺序及原 q 槽位；CPU 替身不能证明 A5 上的异步完成顺序或性能收益，需使用同输入、同打点配置的 A5 测试比较。
 
 固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS=96、H=7168、TopK=6、BF16、balance_shift、seed=2026**。每 rank 始终申请 **4 GiB 通信域**：4092 MiB 数据区 + 4 MiB Flag 区，`peerMemBytes=4294967296`。直到完整 Dispatch/Combine 功能和性能验收结束，不随增量缩小通信域。底层另有 1 MiB 地址偏移余量，实际分配 4097 MiB/rank。
 
@@ -194,7 +198,7 @@ ctest --test-dir build/server-dedup-host --output-on-failure \
 python3 tests/ep/integration/test_server_dedup_chain.py
 ```
 
-本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用；在 GM 搬运替身记录实际发送，核对第一跳优先、DIRECT 的 token/k 顺序、每个槽位恰好一包及跨阶段 lane 序号连续。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用；在 GM 搬运替身记录实际发送，核对第一跳优先、DIRECT 从本 server 开始循环且同 server 内保持 Token/k 顺序、每个槽位恰好一包及跨阶段 lane 序号连续。64P/E384 乱序路由覆盖源 server0/3/7、本卡及同 server 跨卡、空目标 server、每核多 Token、第一跳与 DIRECT 混合及三轮复用，profiling OFF/ON 均执行。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 逐包打点的本地回归还核对每条记录与实际发送对应、空核头、容量/同步标志区边界、Host 容量拒绝、损坏记录拒绝、三个子阶段及最后一包的 trace 语义。纯 CPU 替身只验证记录和导出契约，真实 CANN 9.1 编译、A5 可见性及诊断开销仍需服务器运行确认。维护时不要在热路径逐包写 GM/DCCI，也不要为获取完成时间新增同步；相邻下发点才能保持这里约定的测量含义。
 
