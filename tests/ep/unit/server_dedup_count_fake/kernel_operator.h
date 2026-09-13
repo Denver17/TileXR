@@ -146,6 +146,9 @@ struct DataCopyParams { uint16_t blockCount, blockLen, srcStride, dstStride; };
 struct DataCopyExtParams { uint16_t blockCount; uint32_t blockLen, srcStride, dstStride, rsv; };
 struct CopyRepeatParams { uint8_t dstBlkStride, srcBlkStride, dstRepStride, srcRepStride; };
 template<class T> void Copy(LocalTensor<T> dst, LocalTensor<T> src, uint64_t mask, uint8_t repeats, CopyRepeatParams p) {
+    // A5 CopyImpl rejects b8 UB-to-UB copies (CANN dav_3510 diagnostic).
+    static_assert(sizeof(T) == 2 || sizeof(T) == 4, "UB Copy requires b16/b32 elements");
+    if (mask == 0 || mask > 256 / sizeof(T)) throw std::runtime_error("invalid Copy element mask");
     for (uint32_t r = 0; r < repeats; ++r) for (uint32_t i = 0; i < mask; ++i) {
         const uint32_t block = i / (32 / sizeof(T)), within = i % (32 / sizeof(T));
         dst.SetValue((r * p.dstRepStride + block * p.dstBlkStride) * 32 / sizeof(T) + within,

@@ -10,6 +10,20 @@
 
 实际执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
 
+开发者完成 Server Dedup 代码修改后，先尝试在已配置的 **blue 编译环境**使用真实 CANN 9.1 编译，再交付用户。Server Dedup **只编译 A5**：现有 EP CMake 固定 `dav-c310-vec` / `CATLASS_ARCH=3510`，无需增加 SoC 参数，也不由 blue 实际安装的 NPU 型号选择其他版本。纯 kernel 修改只构建对应目标；打点相关修改分别检查 OFF/ON。先加载 blue 已配置的 CANN 9.1 环境，在待验源码目录执行：
+
+```bash
+source scripts/common_env.sh
+cmake -S . -B build/server-dedup-a5-off -DTILEXR_BUILD_EP=ON \
+  -DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=OFF
+cmake --build build/server-dedup-a5-off --target tilexr_ep_dispatch_memory_server_dedup_kernel -j8
+cmake -S . -B build/server-dedup-a5-on -DTILEXR_BUILD_EP=ON \
+  -DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON
+cmake --build build/server-dedup-a5-on --target tilexr_ep_dispatch_memory_server_dedup_kernel -j8
+```
+
+涉及 Host/launch 修改时还需构建 `tilexr-ep`。保留待验源码版本、编译器版本、配置、返回码和编译日志；核对编译命令确实包含 A5 目标。blue 连接信息缺失、不可达或工具链不完整时，说明具体阻塞；本地替身或 Host Clang 通过不记为 CANN 编译通过。blue 编译不作为设备功能/性能通过证据，用户侧仍按下文手动编译、同步、运行三个脚本验证。
+
 ## 手动编译、同步、运行
 
 首次部署时准备环境文件与主机清单；已有文件只检查，不覆盖：
@@ -239,6 +253,8 @@ breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`�
 当前阶段 1 是空 Dispatch 框架，PASS 不证明去重通信或输出数值。64P/128P 仍待环境具备后验收，16P 通过不扩大到未测规模。提交验收仅保留本次受影响 case；测试脚本重构不要求重新执行已经通过的硬件检查点。
 
 ## 后续维护约束
+
+接收解包曾在 A5 `dav_3510` 编译时触发 `SupportBytes<unsigned char, 2, 4>()`：用户日志中的 CANN 9.2.0 `CopyImpl` 只支持 b16/b32，`recv.h:127` 是实例化提示，真正调用错误在 `Copy<uint8_t>`。用 b32 视图按 mask 64/56 分两次复制每包的 480B 数据，源/目标 repeat stride 分别为 16/15 个 32B block；repeat 是包数，不是 `包数*15`（H=7168 时后者为 450，转 uint8 会截断）。量化路径解包范围包含 padding 和 scales，现有两处同步分别对应 MTE2→V 与 V→MTE3。CPU 替身同步限制元素位宽，完整入口 profiling=0/1 编译和包布局回归验证类型、内容与 UB 边界；不能替代 CANN 9.1/A5 实编译或异步设备验证。判断工具链版本应依据真实 include 路径和版本信息，不能仅凭项目默认版本。
 
 分步开启 DIRECT 时必须一起更新检查点、Host 包集合、sourceMask/权重预期和流量统计，否则已发送的 DIRECT 会被旧校验误报为非目标槽位，或性能 JSON 仍把其流量记为零。最终槽位内容无法识别同址同值的重复发送；本地在搬运替身观察每包地址、身份和发送池顺序，补充次数与核内顺序证据，不在生产两阶段之间加同步。该证据不证明真实异步 MTE 顺序或 A5 性能。
 

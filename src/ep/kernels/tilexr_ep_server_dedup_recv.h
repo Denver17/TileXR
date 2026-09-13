@@ -8,6 +8,17 @@
 namespace TileXREp {
 using namespace AscendC;
 
+// Remove each 32B flag from 512B packets. Copy masks count b32 elements;
+// repeat strides count 32B blocks. The caller owns MTE2/V/MTE3 ordering.
+__aicore__ inline void UnpackServerDedupData(LocalTensor<uint8_t> hidden,
+    LocalTensor<uint8_t> packet, uint8_t blocks)
+{
+    auto hiddenWords = hidden.template ReinterpretCast<int32_t>();
+    auto packetWords = packet.template ReinterpretCast<int32_t>();
+    Copy(hiddenWords, packetWords, uint64_t(64), blocks, {1, 1, 15, 16});
+    Copy(hiddenWords[64], packetWords[64], uint64_t(56), blocks, {1, 1, 15, 16});
+}
+
 // The receive side owns the Dispatch slots of this rank.  Its work is kept
 // separate from ServerDedupCounts because the prefix table is the only
 // synchronization boundary between count exchange and payload processing.
@@ -231,14 +242,14 @@ private:
         GlobalTensor<uint8_t> sourceGlobal;
         sourceGlobal.SetGlobalBuffer(slot);
         DataCopy(packet, sourceGlobal, uint32_t(data_.tokenStride));
-        Sync<HardEvent::MTE2_S>();
+        Sync<HardEvent::MTE2_V>();
 
-        // Strip each 32B DataAsFlag block into a contiguous hidden tensor.
-        // Local-to-local DataCopy is not available on all CANN 9.1 headers,
-        // so use the vector Copy primitive with a 16-block source stride.
-        const uint32_t hiddenBlocks = uint32_t((hiddenBytes_ + 479U) / 480U);
-        Copy(hidden, packet, uint64_t(32), uint8_t(hiddenBlocks * 15U), {1, 1, 1, 16});
-        Sync<HardEvent::MTE2_S>();
+        // Include quantization padding/scales, matching hiddenBuf's allocation.
+        const uint32_t payloadDataBytes = uint32_t(Quantized ?
+            data_.quantCount + data_.scaleBytes : hiddenBytes_);
+        const uint32_t hiddenBlocks = (payloadDataBytes + 479U) / 480U;
+        UnpackServerDedupData(hidden, packet, uint8_t(hiddenBlocks));
+        Sync<HardEvent::V_MTE3>();
         DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], hidden,
             {1U, hiddenBytes_, 0U, 0U, 0U});
         if constexpr (Quantized) {

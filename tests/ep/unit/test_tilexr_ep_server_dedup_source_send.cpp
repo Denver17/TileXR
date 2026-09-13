@@ -3,12 +3,42 @@
 #include <numeric>
 #include <random>
 #include "tilexr_ep_server_dedup_send.h"
+#include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
 #include "../integration/server_dedup_source_send_reference.h"
 
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
 using ServerDedupTest::Check;
+
+void CheckReceiveUnpack(uint32_t h, bool quantized)
+{
+    const auto layout = TileXREp::TileXREpServerDedupDataLayout(96, h, 6, 96, quantized);
+    const uint32_t bytes = uint32_t(quantized ? layout.quantCount + layout.scaleBytes : h * 2U);
+    const uint32_t blocks = (bytes + 479U) / 480U;
+    AscendC::TPipe pipe;
+    AscendC::TBuf<> packetBuf, hiddenBuf;
+    pipe.InitBuffer(packetBuf, blocks * 512U);
+    pipe.InitBuffer(hiddenBuf, blocks * 480U + 64U);
+    auto packet = packetBuf.Get<uint8_t>();
+    auto hidden = hiddenBuf.Get<uint8_t>()[32];
+    std::vector<uint8_t> expected(blocks * 480U);
+    for (uint32_t i = 0; i < expected.size(); ++i) {
+        expected[i] = uint8_t((i * 37U + i / 480U) % 251U);
+        packet.SetValue(i / 480U * 512U + i % 480U, expected[i]);
+    }
+    for (uint32_t block = 0; block < blocks; ++block)
+        for (uint32_t i = 0; i < 32U; ++i) packet.SetValue(block * 512U + 480U + i, 0xff);
+    const auto originalPacket = packetBuf.storage->bytes;
+    TileXREp::UnpackServerDedupData(hidden, packet, uint8_t(blocks));
+    Check(std::memcmp(hidden.Data(expected.size()), expected.data(), expected.size()) == 0,
+        "receiver restores all payload bytes and quantization scales without flag bytes");
+    Check(packetBuf.storage->bytes == originalPacket, "receiver unpack leaves the packet unchanged");
+    const auto output = hiddenBuf.Get<uint8_t>();
+    for (uint32_t i = 0; i < 32U; ++i)
+        Check(output.GetValue(i) == 0xcd && output.GetValue(32U + expected.size() + i) == 0xcd,
+            "receiver unpack respects both UB guards");
+}
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped, uint32_t source = 0)
 {
@@ -187,6 +217,11 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
 int main()
 {
     try {
+        CheckReceiveUnpack(32, false);
+        CheckReceiveUnpack(240, false); // Exactly one 480B data block.
+        CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
+        CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
+        CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
         Run(16, 96, 96, 64, 6, true);
         Run(16, 96, 96, 64, 6, true, 15); // Cyclic (source+destination)%R slot mapping wraps.
         Run(24, 72, 256, 224, 6, true); // per-core 5/6 rows; metadata crosses a 480B boundary.
