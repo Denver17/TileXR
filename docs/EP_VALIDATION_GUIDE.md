@@ -242,7 +242,9 @@ breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`�
 
 分步开启 DIRECT 时必须一起更新检查点、Host 包集合、sourceMask/权重预期和流量统计，否则已发送的 DIRECT 会被旧校验误报为非目标槽位，或性能 JSON 仍把其流量记为零。最终槽位内容无法识别同址同值的重复发送；本地在搬运替身观察每包地址、身份和发送池顺序，补充次数与核内顺序证据，不在生产两阶段之间加同步。该证据不证明真实异步 MTE 顺序或 A5 性能。
 
-breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CANN 将 `GM_ADDR` 定义为指针宏，`const GM_ADDR` 实际限定指向的数据为只读；CPU 替身的 `using` 定义却限定指针本身，掩盖了问题。可写 profile 区应显式使用 `__gm__ uint8_t *const`，替身同步采用指针宏语义。此回归验证限定符和记录写入行为，不能代替 CANN 编译或设备 breakdown 验收。
+breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CANN 将 `GM_ADDR` 定义为指针宏，`const GM_ADDR` 实际限定指向的数据为只读；CPU 替身的 `using` 定义却限定指针本身，掩盖了问题。可写 profile 区应显式使用 `__gm__ uint8_t *const`，替身同步采用指针宏语义。
+
+接收侧 `PayloadReady(slot, flags)` / `ClearFlags(slot, flags)` 又暴露了地址空间遗漏：`slot` 来自 GM，但形参曾使用普通 `const uint8_t *`，`const_cast<uint8_t *>` 还试图去掉 GM 地址空间。沿槽位地址、Flag 读取/清零和转发目标始终保留 `__gm__`，只固定指针时写 `__gm__ uint8_t *const`；`CommArgs` 自身保留 const，读取其中的可写 peer 指针无需去除 const。普通 CPU 替身将 `__gm__` 置空会漏报此类错误；`test_server_dedup_address_space` 用 Host Clang 独立地址空间对完整生产入口做 profiling=0/1 语法编译，未修复源码可复现这两处调用错误，修复后通过。可运行 `python3 tests/ep/python/test_server_dedup_address_space.py`；缺少 Host clang++ 时显式跳过。此检查验证 C++ 地址空间/限定符，不证明 CANN API、设备行为或性能。接收头文件同时列入外部 kernel 构建依赖，防止只改头文件却复用旧产物。
 
 第一跳 Flag 初始化曾在 `Duplicate<float>` 处报 `no matching function`：[官方 asc-devkit v9.1.0 接口](https://gitcode.com/cann/asc-devkit/blob/e5451c7feba11f9e259f4fbc19c4bf82f8c0496c/include/basic_api/kernel_operator_vec_duplicate_intf.h) 的位掩码参数为 `uint64_t mask[]`，不能传 `const uint64_t[]`。应使用可写局部掩码，仍仅初始化每个 512B 块中的 32B Flag；CPU 替身也必须保持该重载的参数限定符和整数宽度。收紧替身后旧调用可复现同一编译错误，修复后用现有 sender/count/profile 测试检查包内容、边界和计数；该检查不替代真实 CANN 编译或 A5 运行。
 

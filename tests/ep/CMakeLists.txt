@@ -35,6 +35,9 @@ if(Python3_Interpreter_FOUND)
     add_test(NAME test_msprof_kernel_stats
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/test_msprof_kernel_stats.py")
+    add_test(NAME test_server_dedup_address_space
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/python/test_server_dedup_address_space.py")
 endif()
 set(ASCEND_HOME_PATH "${_tilexr_default_ascend_home_path}" CACHE PATH "Ascend toolkit path")
 

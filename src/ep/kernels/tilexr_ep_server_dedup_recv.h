@@ -19,7 +19,7 @@ public:
         uint32_t bs, uint32_t h,
         uint32_t k, uint32_t experts, TPipe *pipe)
     {
-        args_ = const_cast<__gm__ TileXR::CommArgs *>(args);
+        args_ = args;
         pipe_ = pipe;
         bs_ = bs;
         h_ = h;
@@ -140,15 +140,15 @@ private:
     __aicore__ inline GM_ADDR SlotAddress(uint32_t source, uint32_t localExpert, uint32_t q) const
     {
         const uint32_t destination = uint32_t(args_->rank);
-        return const_cast<uint8_t *>(args_->peerMems[destination]) + TileXREpServerDedupDispatchOffset(
+        return args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
             data_, source, destination, localExpert, q, uint32_t(args_->rankSize),
             localExperts_, bs_);
     }
 
-    __aicore__ inline bool PayloadReady(const uint8_t *slot, LocalTensor<float> flags)
+    __aicore__ inline bool PayloadReady(__gm__ uint8_t *slot, LocalTensor<float> flags)
     {
         GlobalTensor<float> flagGlobal;
-        flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(const_cast<uint8_t *>(slot + 480U)));
+        flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(slot + 480U));
         DataCopy(flags, flagGlobal, DataCopyParams{
             uint16_t(data_.blockCount), 1U, 15U, 0U});
         Sync<HardEvent::MTE2_V>();
@@ -160,12 +160,12 @@ private:
         return true;
     }
 
-    __aicore__ inline void ClearFlags(const uint8_t *slot, LocalTensor<float> flags)
+    __aicore__ inline void ClearFlags(__gm__ uint8_t *slot, LocalTensor<float> flags)
     {
         Duplicate<float>(flags, 0.0f, uint32_t(data_.blockCount) * 8U);
         Sync<HardEvent::S_MTE3>();
         GlobalTensor<float> flagGlobal;
-        flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(const_cast<uint8_t *>(slot + 480U)));
+        flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(slot + 480U));
         DataCopy(flagGlobal, flags, DataCopyParams{
             uint16_t(data_.blockCount), 1U, 0U, 15U});
         Sync<HardEvent::MTE3_S>();
@@ -211,7 +211,7 @@ private:
 
         const uint32_t destination = destinationExpert / localExperts_;
         GlobalTensor<uint8_t> destinationGm;
-        destinationGm.SetGlobalBuffer(const_cast<uint8_t *>(args_->peerMems[destination]) +
+        destinationGm.SetGlobalBuffer(args_->peerMems[destination] +
             TileXREpServerDedupDispatchOffset(data_, srcRank, destination,
                 destinationExpert % localExperts_, destinationQ,
                 uint32_t(args_->rankSize), localExperts_, bs_));
@@ -225,11 +225,11 @@ private:
         LocalTensor<float> flags, LocalTensor<uint8_t> relay, LocalTensor<uint32_t> group,
         LocalTensor<int32_t> scalar)
     {
-        const GM_ADDR slot = SlotAddress(source, localExpert, q);
+        __gm__ uint8_t *const slot = SlotAddress(source, localExpert, q);
         while (!PayloadReady(slot, flags)) {}
 
         GlobalTensor<uint8_t> sourceGlobal;
-        sourceGlobal.SetGlobalBuffer(const_cast<uint8_t *>(slot));
+        sourceGlobal.SetGlobalBuffer(slot);
         DataCopy(packet, sourceGlobal, uint32_t(data_.tokenStride));
         Sync<HardEvent::MTE2_S>();
 
@@ -282,7 +282,7 @@ private:
         (void)scalar;
     }
 
-    __gm__ TileXR::CommArgs *args_ = nullptr;
+    const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
     uint32_t bs_ = 0U, h_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U;
     uint32_t receiver_ = 0U;

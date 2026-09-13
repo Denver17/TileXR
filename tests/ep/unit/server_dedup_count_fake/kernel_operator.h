@@ -13,10 +13,15 @@
 
 #define __aicore__
 #define __global__
+#if defined(TILEXR_TEST_GM_ADDRESS_SPACE)
+// Clang syntax checks preserve GM pointer types; CPU execution leaves them flat.
+#define __gm__ __attribute__((address_space(1)))
+#else
 #define __gm__
+#endif
 #define __ubuf__
 #define __mix__(a, b)
-#define GM_ADDR uint8_t *
+#define GM_ADDR __gm__ uint8_t *
 using half = uint16_t;
 using bfloat16_t = uint16_t;
 
@@ -50,7 +55,7 @@ template<Pipeline> void PipeBarrier() { ++TestSyncOperations(); }
 template<int, int> int64_t GetCtrlSpr() { return 0; }
 template<int, int> void SetCtrlSpr(int64_t) {}
 inline void SyncAll() {}
-template<class T> inline T AtomicAdd(T *address, T value) {
+template<class T> inline T AtomicAdd(__gm__ T *address, T value) {
     T old = *address;
     *address += value;
     return old;
@@ -77,7 +82,10 @@ template<class T> struct LocalTensor {
 };
 template<class T> struct GlobalTensor {
     T *pointer = nullptr;
-    void SetGlobalBuffer(T *p, std::size_t = 0) { pointer = p; }
+    void SetGlobalBuffer(__gm__ T *p, std::size_t = 0) {
+        // Enforce the device API's GM argument before mapping to CPU backing.
+        pointer = reinterpret_cast<T *>(reinterpret_cast<uintptr_t>(p));
+    }
     GlobalTensor operator[](std::size_t i) const { return {pointer + i}; }
 };
 enum class CacheLine { SINGLE_CACHE_LINE };
