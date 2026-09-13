@@ -6,12 +6,13 @@
 #include <fstream>
 #include <map>
 #include <string>
+#include <tuple>
 #include "acl/acl.h"
 #include "tilexr_ep.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
 #include "ep_memory_server_dedup_profile.h"
-#include "server_dedup_source_send_fixture.h"
+#include "server_dedup_dispatch_reference.h"
 
 namespace {
 int deviceId = 0;
@@ -24,7 +25,7 @@ std::map<uintptr_t, std::vector<uint8_t>> packets;
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
 alignas(32) std::array<uint8_t, 32> localPeer {};
-std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum * 2> countProfile {};
+std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum * TileXREp::kEpServerDedupProfileSegments> countProfile {};
 std::vector<uint8_t> sendProfile;
 uint64_t sendProfileOffset = 0;
 bool profileReady = false;
@@ -108,14 +109,12 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
     const uintptr_t address = reinterpret_cast<uintptr_t>(source);
     const uintptr_t peer = rankId < 0 ? 0 : reinterpret_cast<uintptr_t>(args.peerMems[rankId]);
     if (peer && address >= peer && address - peer < args.peerMemBytes) {
-        const auto found = packets.find(address);
-        if (found != packets.end() && bytes == found->second.size())
-            std::memcpy(destination, found->second.data(), bytes);
-        else {
-            const auto flags = packets.find(address - 480U);
-            if (bytes == 32U && flags != packets.end()) std::memcpy(destination, flags->second.data() + 480U, bytes);
-            else std::memset(destination, 0, bytes);
-        }
+        auto found = packets.upper_bound(address);
+        if (found != packets.begin()) --found;
+        if (found != packets.end() && address >= found->first && address - found->first <= found->second.size() &&
+            bytes <= found->second.size() - (address - found->first))
+            std::memcpy(destination, found->second.data() + address - found->first, bytes);
+        else std::memset(destination, 0, bytes);
         return Call("packet-read");
     }
     std::memcpy(destination, source, bytes);
@@ -169,7 +168,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     uint32_t *sourceMask, uint32_t *group, float *weightsOut, TileXR::TileXRDataType dtype,
     TileXR::TileXRDataType outDtype, aclrtStream stream)
 {
-    if (x == nullptr || ids == nullptr || comm != &args || bs != 2 || h != 16 || topK != 3 ||
+    if (x == nullptr || ids == nullptr || comm != &args || bs <= 0 || h <= 0 || topK <= 0 || topK > 32 ||
         experts != world * 2 || rank != rankId || tpWorld != 1 || tpRank != 0 || shard != 0 ||
         shared != 0 || sharedRanks != 0 || (quant != 0 && quant != 4) || globalBs != world * bs || (countType != 0 && countType != 1) ||
         maskType != 0 || scales != nullptr || mask != nullptr || weights == nullptr || (quant == 4 ? dynamic == nullptr : dynamic != nullptr) ||
@@ -200,14 +199,14 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         if (mode && std::strcmp(mode, "breakdown") == 0) {
             using namespace TileXREp;
             profileReady = true;
-            for (uint32_t core = 0; core < kEpServerDedupCoreNum * 2U; ++core) {
+            for (uint32_t core = 0; core < kEpServerDedupCoreNum * kEpServerDedupProfileSegments; ++core) {
                 auto &p = countProfile[core];
                 p = EpServerDedupProfileRecord {};
                 p.marker = kEpServerDedupProfileMarker; p.version = kEpServerDedupProfileVersion;
-                p.recordBytes = sizeof(p); p.rank = uint32_t(rank); p.core = core / 2U; p.segment = core % 2U;
+                p.recordBytes = sizeof(p); p.rank = uint32_t(rank); p.core = core / kEpServerDedupProfileSegments; p.segment = core % kEpServerDedupProfileSegments;
                 p.blockDim = kEpServerDedupCoreNum; p.generation = calls["launch"];
                 for (uint32_t i = 0; i < 4U; ++i)
-                    p.time[i] = calls["launch"] * 1000 + core / 2U + (p.segment * 4U + i) * 10;
+                    p.time[i] = calls["launch"] * 1000 + core / kEpServerDedupProfileSegments + std::min(p.segment * 4U + i, 8U) * 10;
             }
             const char *fault = std::getenv("TEST_PROFILE_FAULT");
             const auto detailLayout = TileXREpServerDedupSendProfileLayout(args.peerMemBytes, uint32_t(bs), uint32_t(topK));
@@ -225,7 +224,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
                 std::vector<EpServerDedupSendProfilePacket> issued;
                 for (bool firstHop : {true, false}) for (const auto &packet : sent) {
                     if (packet.token < start || packet.token >= start + count || (packet.members.size() > 1U) != firstHop) continue;
-                    issued.push_back({countProfile[core * 2U].time[2] + 1U, packet.token, packet.members[0].k});
+                    issued.push_back({countProfile[core * kEpServerDedupProfileSegments].time[2] + 1U, packet.token, packet.members[0].k});
                     if (firstHop) ++header.firstHopCount;
                 }
                 header.packetCount = uint32_t(issued.size());
@@ -245,6 +244,9 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
                 if (std::strcmp(fault, "legacy") == 0) p.version = 1;
                 if (std::strcmp(fault, "core") == 0) p.core = 1;
                 if (std::strcmp(fault, "time") == 0) p.time[3] = p.time[2] - 1;
+                if (std::strcmp(fault, "recv-time") == 0) countProfile[1].time[3] = countProfile[1].time[2] - 1;
+                if (std::strcmp(fault, "last-segment") == 0) countProfile[2].marker = 0;
+                if (std::strcmp(fault, "reserved") == 0) ++countProfile[2].time[1];
             }
         }
         using namespace ServerDedupReference;
@@ -252,45 +254,86 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             dtype == TileXR::TILEXR_DATA_TYPE_BFP16, quant == 4, outDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3};
         const auto layout = TileXREp::TileXREpServerDedupDataLayout(shape.bs, shape.h, shape.k, shape.experts, shape.quantized);
         const char *packetFault = std::getenv("TEST_PACKET_FAULT");
-        const std::string packetFailure = packetFault == nullptr ? "" : packetFault;
+        const std::string failure = packetFault == nullptr ? "" : packetFault;
+        const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);
+        const uint64_t groupStride = (4U + 8U * (shape.k - 1U) + 31U) / 32U * 32U;
+        using GroupKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
+        std::map<GroupKey, uint32_t> groupIndices;
+        for (uint32_t relay = 0; relay < shape.ranks; ++relay) {
+            const auto relayRows = DispatchRows(shape, relay);
+            uint32_t count = 0;
+            for (const auto &row : relayRows) if (row.FirstHop()) ++count;
+            uint32_t ordinal = 0;
+            for (const auto &row : relayRows) if (row.FirstHop()) {
+                // Deliberately change the valid, nonmonotonic t assignment each
+                // generation; the consumer must validate associations, not order.
+                const uint32_t t = (count - 1U - ordinal++ + uint32_t(calls["launch"])) % (8U * shape.bs);
+                groupIndices[{row.source, row.token, row.packet.members.front().k, relay}] = t;
+            }
+        }
         std::fill(sourceMask, sourceMask + bs, 0);
-        for (uint32_t source = 0; source < shape.ranks; ++source) {
-            const auto expected = SourcePackets(Ids(shape, source), Weights(shape, source), source, shape.ranks, shape.experts, shape.k);
-            for (const auto &packet : expected) {
-                const auto &first = packet.members[0];
-                if (source == uint32_t(rank)) {
-                    sourceMask[packet.token] |= uint32_t(1) << first.k;
-                    weightsOut[packet.token * topK + first.k] = packet.members.size() > 1U ? 1.0f : first.weight;
-                    if (packet.members.size() == 1U && packetFailure == "direct-weight")
-                        weightsOut[packet.token * topK + first.k] = 0.0f;
-                }
-                const uint32_t local = shape.experts / shape.ranks;
-                if (first.expert / local != uint32_t(rank)) continue;
-                auto offset = TileXREp::TileXREpServerDedupDispatchOffset(layout, source, rank,
-                    first.expert % local, first.q, shape.ranks, local, shape.bs);
-                auto payload = Payload(shape, source, packet, layout);
-                if (packet.members.size() == 1U) {
-                    if (packetFailure == "direct-missing") continue;
-                    if (packetFailure == "direct-hidden") payload[0] ^= 1U;
-                    if (packetFailure == "direct-tail") Put(payload, layout.tailOffset + 16U, uint32_t(1));
-                    if (packetFailure == "direct-q") offset += layout.tokenStride;
-                }
-                packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) + offset] = Pack(payload);
-            }
+        const auto sourcePackets = SourcePackets(Ids(shape, rank), Weights(shape, rank), rank, world, experts, topK);
+        for (const auto &packet : sourcePackets) {
+            const auto &first = packet.members.front();
+            sourceMask[packet.token] |= uint32_t(1) << first.k;
+            weightsOut[packet.token * topK + first.k] = packet.members.size() > 1U ? 1.0f : first.weight;
         }
-        if (packetFault) {
-            const std::string fault(packetFault);
-            if (fault == "mask") sourceMask[0] ^= 1U;
-            if (fault == "input-weight") static_cast<float *>(weights)[0] += 1.0f;
-            if (fault == "source-weight") std::fill(weightsOut, weightsOut + bs * topK, 0.0f);
-            for (auto &packet : packets) {
-                uint64_t offset = 0;
-                if (fault == "flag") offset = packet.second.size() - 4U;
-                if (fault == "tail-q") offset = (layout.tailOffset + 36U) / 480U * 512U + (layout.tailOffset + 36U) % 480U;
-                if (fault == "header-weight") offset = (layout.tailOffset + 12U) / 480U * 512U + (layout.tailOffset + 12U) % 480U;
-                if (fault == "flag" || fault == "tail-q" || fault == "header-weight" || fault == "hidden") packet.second[offset] ^= 1U;
+        const auto outputRows = DispatchRows(shape, rank);
+        packets.clear();
+        uint32_t previousT = UINT32_MAX;
+        for (size_t index = 0; index < outputRows.size(); ++index) {
+            const auto &row = outputRows[index];
+            const auto payload = Payload(shape, row.source, row.packet, layout);
+            auto *hidden = static_cast<uint8_t *>(expandX) + index * hiddenStride;
+            std::memcpy(hidden, payload.data(), hiddenStride);
+            if (quant == 4) std::memcpy(static_cast<uint8_t *>(dynamic) + index * layout.scaleBytes,
+                payload.data() + layout.quantCount, layout.scaleBytes);
+            uint32_t t = row.Direct() ? UINT32_MAX : groupIndices.at({row.source, row.token, row.packet.members.front().k, row.relay});
+            if (row.FirstHop() && failure == "duplicate-t") {
+                if (previousT != UINT32_MAX) t = previousT;
+                previousT = t;
             }
+            auto metadata = DispatchAssist(row, t);
+            if (failure == "assist-source") metadata[0] ^= 1U;
+            if (failure == "assist-token") metadata[1] ^= 1U;
+            if (failure == "assist-k") metadata[2] ^= 1U;
+            if (failure == "assist-weight") metadata[3] ^= 1U;
+            if (failure == "assist-role") metadata[4] ^= 1U;
+            if (failure == "assist-count") metadata[5] ^= 1U;
+            if (failure == "assist-relay" && !row.Direct()) metadata[6] ^= 1U;
+            if (failure == "assist-t" && !row.Direct()) metadata[7] = 8U * shape.bs;
+            if (failure == "terminal-t" && !row.Direct() && !row.FirstHop()) metadata[7] = (t + 1U) % (8U * shape.bs);
+            if (failure != "missing-output") std::memcpy(assistEx + index * 8U, metadata.data(), 32U);
+            if (row.FirstHop()) {
+                auto *groupRow = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(group) + t * groupStride);
+                groupRow[0] = uint32_t(index);
+                for (uint32_t member = 1; member < row.packet.members.size(); ++member) {
+                    const auto &route = row.packet.members[member];
+                    groupRow[1U + (member - 1U) * 2U] = t * shape.k + route.k;
+                    groupRow[2U + (member - 1U) * 2U] = FloatBits(route.weight);
+                }
+                if (failure == "group-row") groupRow[0] ^= 1U;
+                if (failure == "group-slot") groupRow[1] ^= 1U;
+                if (failure == "group-weight") groupRow[2] ^= 1U;
+            }
+            auto wire = Pack(payload);
+            for (uint64_t block = 0; block < layout.blockCount; ++block)
+                std::memset(wire.data() + block * 512U + 480U, 0, 32U);
+            if (failure == "flag-first") wire[480U] = 1U;
+            if (failure == "flag-last") wire[wire.size() - 1U] = 1U;
+            packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) + DispatchSlot(shape, rank, row, layout)] = wire;
         }
+        if (!outputRows.empty()) {
+            if (failure == "hidden") static_cast<uint8_t *>(expandX)[0] ^= 1U;
+            if (failure == "scale" && quant == 4) static_cast<uint8_t *>(dynamic)[0] ^= 1U;
+            if (failure == "row-order" && outputRows.size() > 1U)
+                std::swap_ranges(assistEx, assistEx + 8U, assistEx + 8U);
+        }
+        if (failure == "mask") sourceMask[0] ^= 1U;
+        if (failure == "input-weight") static_cast<float *>(weights)[0] += 1.0f;
+        if (failure == "source-weight") std::fill(weightsOut, weightsOut + bs * topK, 0.0f);
+        if (failure == "counter") packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) +
+            TileXREp::TileXREpServerDedupCountLayout(shape.experts).counterOffset] = {1U, 0U, 0U, 0U};
         const char *fault = std::getenv("TEST_COUNT_FAULT");
         if (fault && std::strcmp(fault, "unwritten") == 0) return 0;
         std::fill(sendCounts, sendCounts + experts, 0);

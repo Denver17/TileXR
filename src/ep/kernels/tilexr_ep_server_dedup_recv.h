@@ -2,7 +2,6 @@
 #define TILEXR_EP_SERVER_DEDUP_RECV_H
 
 #include "kernel_operator.h"
-#include "ep_memory_server_dedup_data_layout.h"
 #include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_receive_tasks.h"
 #include "tilexr_ep_server_dedup_receive_packet.h"
@@ -10,203 +9,180 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// The receive side owns the Dispatch slots of this rank.  Its work is kept
-// separate from ServerDedupCounts because the prefix table is the only
-// synchronization boundary between count exchange and payload processing.
 template<class XType, bool Quantized, bool E4M3>
 class ServerDedupReceiver {
 public:
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args,
         GM_ADDR expandX, GM_ADDR dynamicScales, GM_ADDR assistEx, GM_ADDR group,
-        uint32_t bs, uint32_t h,
-        uint32_t k, uint32_t experts, TPipe *pipe)
+        uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe)
     {
-        args_ = args;
-        pipe_ = pipe;
-        bs_ = bs;
-        h_ = h;
-        k_ = k;
-        experts_ = experts;
-        localExperts_ = experts / static_cast<uint32_t>(args_->rankSize);
+        args_ = args; pipe_ = pipe; bs_ = bs; k_ = k; experts_ = experts;
+        localExperts_ = experts / uint32_t(args_->rankSize);
         receiver_ = GetBlockIdx() - kEpServerDedupSendCoreNum;
-        hiddenBytes_ = uint32_t(Quantized ? h : h * sizeof(XType));
+        hiddenBytes_ = Quantized ? h : h * uint32_t(sizeof(XType));
         data_ = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
-        expandX_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(expandX));
-        dynamicScales_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(dynamicScales));
+        groupStride_ = uint32_t(TileXREpDedupAlign(
+            kEpServerDedupGroupMembersOffset + uint64_t(k - 1U) * sizeof(EpServerDedupGroupMember), 32U));
+        expandX_.SetGlobalBuffer(expandX);
+        dynamicScales_.SetGlobalBuffer(dynamicScales);
         assistEx_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(assistEx));
         group_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(group));
     }
 
     __aicore__ inline void Process()
     {
-        // Prefix copies are published by CompleteCumsum.  Keep one complete
-        // copy local so slot enumeration never depends on a mutable pending
-        // index or on the arrival order of payloads.
-        const uint32_t prefixBytes = uint32_t(TileXREpDedupAlign(
-            uint64_t(experts_) * sizeof(int32_t), 32U));
-        const uint32_t packetBytes = uint32_t(data_.tokenStride);
-        const uint32_t blockCount = uint32_t(data_.blockCount);
-
+        // Caller has completed count-stage writes before this Reset. The GM
+        // prefix belongs to this receive core; old count UB is no longer used.
         pipe_->Reset();
-        TBuf<> prefixBuf, packetBuf, payloadBuf, flagBuf, relayBuf, groupBuf, metaBuf, sumBuf, reduceBuf;
-        pipe_->InitBuffer(prefixBuf, prefixBytes);
-        pipe_->InitBuffer(packetBuf, packetBytes);
-        pipe_->InitBuffer(payloadBuf, uint32_t(data_.packedPayloadBytes));
-        pipe_->InitBuffer(flagBuf, blockCount * 32U);
-        pipe_->InitBuffer(sumBuf, 32U);
-        pipe_->InitBuffer(reduceBuf, blockCount * 32U);
-        pipe_->InitBuffer(relayBuf, packetBytes);
-        pipe_->InitBuffer(groupBuf, uint32_t(TileXREpDedupAlign(
-            kEpServerDedupGroupMembersOffset + uint64_t(k_ - 1U) * sizeof(EpServerDedupGroupMember), 32U)));
-        pipe_->InitBuffer(metaBuf, 32U);
-
-        auto prefix = prefixBuf.Get<int32_t>();
+        const uint32_t prefixBytes = uint32_t(TileXREpDedupAlign(uint64_t(experts_) * 4U, 32U));
+        pipe_->InitBuffer(prefixBuf_, prefixBytes);
         GlobalTensor<int32_t> prefixGlobal;
-        const auto countLayout = TileXREpServerDedupCountLayout(experts_);
+        const auto counts = TileXREpServerDedupCountLayout(experts_);
         prefixGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-            args_->peerMems[args_->rank] + countLayout.cntOffset + countLayout.prefixOffset +
-            uint64_t(receiver_) * countLayout.prefixStride));
-        DataCopyPad(prefix, prefixGlobal,
-            {1U, prefixBytes, 0U, 0U, 0U}, {false, 0U, 0U, 0});
-        Sync<HardEvent::MTE2_S>();
+            args_->peerMems[args_->rank] + counts.cntOffset + counts.prefixOffset +
+            uint64_t(receiver_) * counts.prefixStride));
+        auto prefix = prefixBuf_.Get<int32_t>();
+        DataCopyPad(prefix, prefixGlobal, {1U, prefixBytes, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+        ServerDedupReceiveSync<HardEvent::MTE2_S>();
+        tasks_.Build(prefix, uint32_t(args_->rank), uint32_t(args_->rankSize), experts_, bs_, receiver_, pipe_);
+        if (tasks_.Count() == 0U) return;
 
-        ServerDedupReceiveTasks tasks;
-        tasks.Build(prefix, uint32_t(args_->rank), uint32_t(args_->rankSize),
-            experts_, bs_, receiver_, pipe_);
-        if (tasks.Count() == 0U) return;
+        const uint32_t blocks = uint32_t(data_.blockCount);
+        pipe_->InitBuffer(flagsBuf_, kProbeBatch * blocks * 32U);
+        pipe_->InitBuffer(sumBuf_, kProbeBatch * 32U);
+        pipe_->InitBuffer(workBuf_, blocks * 32U);
+        pipe_->InitBuffer(probeIdxBuf_, kProbeBatch * 4U);
+        const uint32_t tablesBytes = 2U * uint32_t(TileXREpDedupAlign(uint64_t(tasks_.Count()) * 4U, 32U));
+        const uint32_t fixed = prefixBytes + tablesBytes + (kProbeBatch + 1U) * blocks * 32U + kProbeBatch * 36U;
+        laneStride_ = uint32_t(data_.tokenStride) + 32U + groupStride_;
+        const uint32_t available = (kEpServerDedupCountUbBytes - fixed) / laneStride_;
+        lanes_ = available < 8U ? available : 8U; // Safe inputs guarantee at least one lane.
+        pipe_->InitBuffer(lanesBuf_, lanes_ * laneStride_);
+        for (uint32_t lane = 0; lane < lanes_; ++lane) SetFlag<HardEvent::MTE3_MTE2>(lane);
 
-        auto packet = packetBuf.Get<uint8_t>();
-        auto payload = payloadBuf.Get<uint8_t>();
-        auto flags = flagBuf.Get<float>();
-        auto relay = relayBuf.Get<uint8_t>();
-        auto group = groupBuf.Get<uint32_t>();
-        auto meta = metaBuf.Get<uint32_t>();
-        auto sum = sumBuf.Get<float>();
-        auto reduce = reduceBuf.Get<float>();
-
-        for (uint32_t pending = 0U; pending < tasks.PendingCount(); ++pending) {
-            const uint32_t stable = tasks.PendingIndex(pending);
-            const uint32_t encoded = tasks.Position(stable);
-            const uint32_t region = encoded / bs_;
-            const uint32_t q = encoded % bs_;
-            const uint32_t source = (region / localExperts_ + uint32_t(args_->rankSize) -
-                uint32_t(args_->rank)) % uint32_t(args_->rankSize);
-            ReceiveOne(source, region % localExperts_, q,
-                tasks.Begin() + stable, packet, payload, flags, relay, group, meta, sum, reduce);
+        auto snapshot = probeIdxBuf_.Get<uint32_t>();
+        uint32_t scan = 0U, issued = 0U;
+        while (tasks_.PendingCount() != 0U) {
+            if (scan >= tasks_.PendingCount()) scan = 0U;
+            const uint32_t remaining = tasks_.PendingCount() - scan;
+            const uint32_t count = remaining < kProbeBatch ? remaining : kProbeBatch;
+            const uint32_t ready = Probe(scan, count);
+            // Higher-index removals cannot change the remaining lower-index
+            // identities in this batch. Always consume the stable snapshot.
+            for (uint32_t i = count; i > 0U; --i) {
+                const uint32_t index = i - 1U;
+                if ((ready & (uint32_t(1) << index)) == 0U) continue;
+                ReceiveOne(snapshot.GetValue(index), issued % lanes_);
+                tasks_.RemovePending(scan + index);
+                ++issued;
+            }
+            if (ready == 0U) scan += count;
         }
+        for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_MTE2>(lane);
+        ClearFlags();
+        PipeBarrier<PIPE_ALL>();
     }
 
 private:
-    template<HardEvent event> __aicore__ inline void Sync()
+    static constexpr uint32_t kProbeBatch = 16U;
+    __aicore__ inline __gm__ uint8_t *Slot(uint32_t j)
     {
-        const TEventID id = pipe_->FetchEventID(event);
-        SetFlag<event>(id);
-        WaitFlag<event>(id);
+        return args_->peerMems[args_->rank] + data_.dispatchOffset + uint64_t(tasks_.Position(j)) * data_.tokenStride;
     }
 
-    __aicore__ inline __gm__ uint8_t *SlotAddress(uint32_t source, uint32_t localExpert, uint32_t q) const
+    __aicore__ inline uint32_t Probe(uint32_t start, uint32_t count)
     {
-        const uint32_t destination = uint32_t(args_->rank);
-        return args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
-            data_, source, destination, localExpert, q, uint32_t(args_->rankSize),
-            localExperts_, bs_);
-    }
-
-    __aicore__ inline void ClearFlags(__gm__ uint8_t *slot, LocalTensor<float> flags)
-    {
-        Duplicate<float>(flags, 0.0f, uint32_t(data_.blockCount) * 8U);
-        Sync<HardEvent::V_MTE3>();
-        GlobalTensor<float> flagGlobal;
-        flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(slot + 480U));
-        DataCopy(flagGlobal, flags, DataCopyParams{
-            uint16_t(data_.blockCount), 1U, 0U, 15U});
-        Sync<HardEvent::MTE3_S>();
-    }
-
-    __aicore__ inline void WriteAssist(uint32_t row, LocalTensor<uint32_t> tail)
-    {
-        Sync<HardEvent::S_MTE3>();
-        DataCopyPad(assistEx_[uint64_t(row) * 8U], tail,
-            {1U, uint32_t(sizeof(EpServerDedupAssistEx)), 0U, 0U, 0U});
-        Sync<HardEvent::MTE3_S>();
-    }
-
-    __aicore__ inline uint32_t AllocateRelayIndex()
-    {
-        auto layout = TileXREpServerDedupCountLayout(experts_);
-        auto *counter = reinterpret_cast<__gm__ uint32_t *>(
-            args_->peerMems[args_->rank] + layout.counterOffset);
-        return AtomicAdd(counter, 1U);
-    }
-
-    __aicore__ inline void SendForward(LocalTensor<uint8_t> relay,
-        uint32_t srcRank, uint32_t destinationExpert, uint32_t destinationQ)
-    {
-        const uint32_t destination = destinationExpert / localExperts_;
-        GlobalTensor<uint8_t> destinationGm;
-        destinationGm.SetGlobalBuffer(args_->peerMems[destination] +
-            TileXREpServerDedupDispatchOffset(data_, srcRank, destination,
-                destinationExpert % localExperts_, destinationQ,
-                uint32_t(args_->rankSize), localExperts_, bs_));
-        DataCopy(destinationGm, relay, uint32_t(data_.tokenStride));
-    }
-
-    __aicore__ inline void ReceiveOne(uint32_t source, uint32_t localExpert, uint32_t q,
-        uint32_t row, LocalTensor<uint8_t> packet, LocalTensor<uint8_t> payload,
-        LocalTensor<float> flags, LocalTensor<uint8_t> relay, LocalTensor<uint32_t> group,
-        LocalTensor<uint32_t> meta, LocalTensor<float> sum, LocalTensor<float> reduce)
-    {
-        __gm__ uint8_t *const slot = SlotAddress(source, localExpert, q);
-        while (!CheckServerDedupPayloadReady(slot, uint32_t(data_.blockCount), flags, sum, reduce, pipe_)) {}
-        LoadServerDedupPayload(slot, uint32_t(data_.blockCount), packet, payload, pipe_);
-        Sync<HardEvent::V_MTE3>();
-        DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], payload,
-            {1U, hiddenBytes_, 0U, 0U, 0U});
-        if constexpr (Quantized) {
-            DataCopyPad(dynamicScales_[uint64_t(row) * data_.scaleBytes],
-                payload[data_.quantCount],
-                {1U, uint32_t(data_.scaleBytes), 0U, 0U, 0U});
+        auto indices = probeIdxBuf_.Get<uint32_t>();
+        auto flags = flagsBuf_.Get<float>();
+        auto sums = sumBuf_.Get<float>();
+        auto work = workBuf_.Get<float>();
+        const uint32_t blocks = uint32_t(data_.blockCount);
+        for (uint32_t i = 0; i < count; ++i) {
+            const uint32_t j = tasks_.PendingIndex(start + i);
+            indices.SetValue(i, j);
+            ReadServerDedupFlags(Slot(j), blocks, flags[i * blocks * 8U]);
         }
-        Sync<HardEvent::MTE3_S>();
+        ServerDedupReceiveSync<HardEvent::MTE2_V>();
+        for (uint32_t i = 0; i < count; ++i) {
+            ReduceSum(sums[i * 8U], flags[i * blocks * 8U], work, 8U, uint8_t(blocks), 1U);
+            PipeBarrier<PIPE_V>(); // Reuse only the shared reduction scratch.
+        }
+        ServerDedupReceiveSync<HardEvent::V_S>();
+        uint32_t ready = 0U;
+        for (uint32_t i = 0; i < count; ++i)
+            if (sums.GetValue(i * 8U) == float(blocks * 8U)) ready |= uint32_t(1) << i;
+        return ready;
+    }
 
-        auto tail = payload[data_.tailOffset].template ReinterpretCast<uint32_t>();
-        const int32_t forwardCount = int32_t(tail.GetValue(4U));
+    __aicore__ inline void ReceiveOne(uint32_t j, uint32_t lane)
+    {
+        WaitFlag<HardEvent::MTE3_MTE2>(lane);
+        auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
+        auto meta = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
+        auto group = wire[uint32_t(data_.tokenStride) + 32U].template ReinterpretCast<uint32_t>();
+        GlobalTensor<uint8_t> source;
+        source.SetGlobalBuffer(Slot(j));
+        DataCopy(wire, source, uint32_t(data_.tokenStride));
+        SetFlag<HardEvent::MTE2_MTE3>(lane);
+        ServerDedupReceiveSync<HardEvent::MTE2_S>();
+        ServerDedupPacketTail tail(wire, uint32_t(data_.tailOffset));
+        const int32_t forwardCount = int32_t(tail.Word(4U));
+        const uint32_t row = tasks_.Begin() + j;
+        const uint32_t expert = uint32_t(args_->rank) * localExperts_ + tasks_.Position(j) / bs_ % localExperts_;
+        uint32_t t = 0U;
         if (forwardCount > 0) {
-            const uint32_t relayIndex = AllocateRelayIndex();
-            BuildServerDedupAssist(meta, tail, uint32_t(args_->rank) * localExperts_ + localExpert,
-                uint32_t(args_->rank), relayIndex);
-            WriteAssist(row, meta);
-            BuildServerDedupGroup(group, tail, row, relayIndex, k_);
-            PrepareServerDedupForward(relay, payload, data_, uint32_t(args_->rank), relayIndex, pipe_);
-
-            for (uint32_t i = 0U; i < uint32_t(forwardCount); ++i) {
-                const uint32_t entry = 8U + i * 4U;
-                const uint32_t destinationExpert = uint32_t(tail.GetValue(entry));
-                const uint32_t destinationQ = uint32_t(tail.GetValue(entry + 1U));
-                SendForward(relay, tail.GetValue(0U), destinationExpert, destinationQ);
-            }
-            const uint32_t groupStride = uint32_t(TileXREpDedupAlign(
-                kEpServerDedupGroupMembersOffset + uint64_t(k_ - 1U) * sizeof(EpServerDedupGroupMember), 32U));
-            DataCopyPad(group_[uint64_t(relayIndex) * groupStride / sizeof(uint32_t)], group,
-                {1U, groupStride, 0U, 0U, 0U});
-            Sync<HardEvent::MTE3_S>();
-        } else {
-            BuildServerDedupAssist(meta, tail, uint32_t(args_->rank) * localExperts_ + localExpert, 0U, 0U);
-            WriteAssist(row, meta);
+            auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[args_->rank] +
+                TileXREpServerDedupCountLayout(experts_).counterOffset);
+            t = AtomicAdd(counter, uint32_t(1));
         }
-        ClearFlags(slot, flags);
+        BuildServerDedupAssist(meta, tail, expert, uint32_t(args_->rank), t);
+        if (forwardCount > 0) {
+            BuildServerDedupGroup(group, tail, row, t, k_);
+            PrepareServerDedupForward(tail, uint32_t(args_->rank), t);
+        }
+        ServerDedupReceiveSync<HardEvent::S_MTE3>();
+        WaitFlag<HardEvent::MTE2_MTE3>(lane);
+        WriteServerDedupPayloadRange(expandX_[uint64_t(row) * hiddenBytes_], wire, 0U, hiddenBytes_);
+        if constexpr (Quantized)
+            WriteServerDedupPayloadRange(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire,
+                uint32_t(data_.quantCount), uint32_t(data_.scaleBytes));
+        DataCopyPad(assistEx_[uint64_t(row) * 8U], meta, {1U, 32U, 0U, 0U, 0U});
+        if (forwardCount > 0) {
+            DataCopyPad(group_[uint64_t(t) * groupStride_ / 4U], group, {1U, groupStride_, 0U, 0U, 0U});
+            for (uint32_t i = 0; i < uint32_t(forwardCount); ++i) {
+                const uint32_t expertId = tail.Word(8U + i * 4U);
+                const uint32_t destination = expertId / localExperts_;
+                GlobalTensor<uint8_t> output;
+                output.SetGlobalBuffer(args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
+                    data_, tail.Word(0U), destination, expertId % localExperts_, tail.Word(9U + i * 4U),
+                    uint32_t(args_->rankSize), localExperts_, bs_));
+                DataCopy(output, wire, uint32_t(data_.tokenStride));
+            }
+        }
+        SetFlag<HardEvent::MTE3_MTE2>(lane);
+    }
+
+    __aicore__ inline void ClearFlags()
+    {
+        auto zeros = flagsBuf_.Get<float>();
+        Duplicate(zeros, 0.0f, uint32_t(data_.blockCount) * 8U);
+        ServerDedupReceiveSync<HardEvent::V_MTE3>();
+        for (uint32_t j = 0; j < tasks_.Count(); ++j) {
+            GlobalTensor<float> output;
+            output.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(Slot(j) + 480U));
+            DataCopyPad(output, zeros, {uint16_t(data_.blockCount), 32U, 0U, 480U, 0U});
+        }
     }
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
-    uint32_t bs_ = 0U, h_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U;
-    uint32_t receiver_ = 0U;
-    uint32_t hiddenBytes_ = 0U;
+    uint32_t bs_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U, receiver_ = 0U;
+    uint32_t hiddenBytes_ = 0U, groupStride_ = 0U, laneStride_ = 0U, lanes_ = 0U;
     EpServerDedupDataLayout data_ {};
-    GlobalTensor<uint8_t> expandX_;
-    GlobalTensor<uint8_t> dynamicScales_;
+    ServerDedupReceiveTasks tasks_;
+    TBuf<> prefixBuf_, flagsBuf_, sumBuf_, workBuf_, probeIdxBuf_, lanesBuf_;
+    GlobalTensor<uint8_t> expandX_, dynamicScales_;
     GlobalTensor<uint32_t> assistEx_, group_;
 };
 } // namespace TileXREp
-
 #endif

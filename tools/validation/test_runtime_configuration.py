@@ -133,7 +133,7 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                     if code:
                         self.assertIn(f'workflow exit={code}', result.stderr)
 
-    def test_build_default_selects_counts_only_for_production(self):
+    def test_build_default_selects_dispatch_only_for_production(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json; print(json.dumps(dict(os.environ)))\n")
         # A prior installed boundary checkpoint must not select an obsolete build.
@@ -143,9 +143,9 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         cann = self.root / 'cann-env.sh'
         cann.write_text('# CANN environment fixture\n')
         for mode, override, arguments, expected, run_mode in (
-                ('production', None, [], workflow.SOURCE_SEND_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=0'], workflow.SOURCE_SEND_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=1'], workflow.SOURCE_SEND_CHECKPOINT, 'breakdown'),
+                ('production', None, [], workflow.DISPATCH_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=0'], workflow.DISPATCH_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=1'], workflow.DISPATCH_CHECKPOINT, 'breakdown'),
                 ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
                 ('host', None, [], None, 'functional')):
             with self.subTest(mode=mode, override=override, arguments=arguments):
@@ -276,7 +276,7 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         before = self.local.read_bytes()
         with mock.patch.dict(os.environ, dict(self.env, TILEXR_VALIDATION_ROOT=str(self.root),
                              TILEXR_VALIDATION_BUILD_MODE="production",
-                             TILEXR_VALIDATION_CHECKPOINT=workflow.SOURCE_SEND_CHECKPOINT,
+                             TILEXR_VALIDATION_CHECKPOINT=workflow.DISPATCH_CHECKPOINT,
                              TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_BLOCK_DIM="64",
                              TILEXR_COMM_ID="192.0.2.1:10177"), clear=True):
             config = workflow.Config()
@@ -287,7 +287,7 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertNotIn("TILEXR_VALIDATION_RUN_MODE", values)
         self.assertNotIn("TILEXR_VALIDATION_BLOCK_DIM", values)
-        self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], workflow.SOURCE_SEND_CHECKPOINT)
+        self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], workflow.DISPATCH_CHECKPOINT)
         self.assertEqual(self.local.read_bytes(), before)
 
 

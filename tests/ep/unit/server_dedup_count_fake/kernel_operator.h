@@ -41,19 +41,29 @@ inline uint32_t GetBlockNum() { return 64; }
 inline uint64_t GetSystemCycle() { static uint64_t ticks = 100; return ++ticks; }
 inline uint64_t &TestSyncOperations() { static uint64_t count = 0; return count; }
 template<class A, class B> inline uint32_t Ceil(A a, B b) { return uint32_t((a + b - 1) / b); }
-enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S };
+enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S, MTE2_MTE3, MTE3_MTE2 };
 enum Pipeline { PIPE_ALL, PIPE_V, PIPE_MTE3 };
 using TEventID = uint32_t;
+inline std::function<void(HardEvent, TEventID, bool)> &EventObserver() {
+    static std::function<void(HardEvent, TEventID, bool)> observer;
+    return observer;
+}
+inline std::function<void(const void *, const void *, uint32_t)> &PaddedWriteObserver() {
+    static std::function<void(const void *, const void *, uint32_t)> observer;
+    return observer;
+}
 template<HardEvent> std::array<bool, 8> &Events() { static std::array<bool, 8> state {}; return state; }
 template<HardEvent E> void SetFlag(TEventID id) {
     ++TestSyncOperations();
     if (id >= 8 || Events<E>()[id]) throw std::runtime_error("duplicate or invalid event publication");
     Events<E>()[id] = true;
+    if (EventObserver()) EventObserver()(E, id, true);
 }
 template<HardEvent E> void WaitFlag(TEventID id) {
     ++TestSyncOperations();
     if (id >= 8 || !Events<E>()[id]) throw std::runtime_error("waiting on an unpublished event");
     Events<E>()[id] = false;
+    if (EventObserver()) EventObserver()(E, id, false);
 }
 template<Pipeline> void PipeBarrier() { ++TestSyncOperations(); }
 template<int, int> int64_t GetCtrlSpr() { return 0; }
@@ -161,6 +171,7 @@ template<class T> void Copy(LocalTensor<T> dst, LocalTensor<T> src, uint64_t mas
 }
 template<class T> struct DataCopyPadExtParams { bool isPad; uint8_t leftPadding, rightPadding; T paddingValue; };
 template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, DataCopyParams p) {
+    if (GmReadObserver()) GmReadObserver()(src.pointer, p.blockCount * p.blockLen * 32U);
     ++testCopies;
     for (uint32_t b = 0; b < p.blockCount; ++b) {
         const auto to = dst[uint64_t(b) * (p.blockLen + p.dstStride) * 32 / sizeof(T)];
@@ -189,8 +200,17 @@ template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src, Data
     ++testCopies; std::memcpy(dst.Data(p.blockLen), src.pointer, p.blockLen);
 }
 template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src, DataCopyExtParams p) {
-    if (p.blockCount != 1) throw std::runtime_error("unexpected padded block count");
-    ++testCopies; std::memcpy(dst.pointer, src.Data(p.blockLen), p.blockLen);
+    if (src.offset % 32U) throw std::runtime_error("unaligned UB DataCopyPad source");
+    ++testCopies;
+    // CANN 9.1 UB->GM: source stride counts 32B blocks, destination stride bytes.
+    const uint64_t sourceStep = (p.blockLen + 31U) / 32U * 32U + uint64_t(p.srcStride) * 32U;
+    for (uint32_t block = 0; block < p.blockCount; ++block) {
+        if (PaddedWriteObserver()) PaddedWriteObserver()(
+            reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(block) * (p.blockLen + p.dstStride),
+            src.template ReinterpretCast<uint8_t>()[uint64_t(block) * sourceStep].Data(p.blockLen), p.blockLen);
+        std::memcpy(reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(block) * (p.blockLen + p.dstStride),
+            src.template ReinterpretCast<uint8_t>()[uint64_t(block) * sourceStep].Data(p.blockLen), p.blockLen);
+    }
 }
 template<class T> void Duplicate(LocalTensor<T> dst, T value, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) dst.SetValue(i, value);

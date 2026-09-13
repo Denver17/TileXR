@@ -7,11 +7,12 @@
 
 namespace TileXREp {
 constexpr uint32_t kEpServerDedupProfileMarker = 0x53445046U;
-constexpr uint16_t kEpServerDedupProfileVersion = 4U;
-constexpr uint32_t kEpServerDedupProfilePoints = 8U;
-constexpr uint32_t kEpServerDedupProfileSegments = 2U;
+constexpr uint16_t kEpServerDedupProfileVersion = 5U;
+constexpr uint32_t kEpServerDedupProfilePoints = 12U;
+constexpr uint32_t kEpServerDedupProfileSegments = 3U;
 
-// R07-01 reserves 200 rows of 64B at offset zero. Each of 64 cores uses two rows.
+// R07-01 reserves 200 rows of 64B. Each core uses three rows: nine meaningful
+// timestamps followed by three copies of end, retaining the 64B record ABI.
 struct alignas(64) EpServerDedupProfileRecord {
     uint32_t marker;
     uint16_t version;

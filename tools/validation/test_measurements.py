@@ -151,6 +151,76 @@ class MeasurementTests(unittest.TestCase):
             self.assertEqual(next(e["dur"] for e in events if e.get("cat") == "send_phase" and e["tid"] == core and e["name"] == missing), 0)
         self.assertFalse(any(e.get("cat") in ("mte3_issue", "send_issue_interval", "send_cleanup") and e["tid"] == 4 for e in events))
 
+    def dispatch_fixture(self):
+        config, ranks = self.detailed_fixture()
+        config["kernel_scope"] = "dispatch"
+        for row in ranks:
+            row.update(relay_packets=2, relay_received=2, relay_bytes=2*15872, data_bytes=9*15872)
+            row["same_server_data_bytes"] += row["relay_bytes"]
+            row["breakdown"].update(schema_version=5, kernel_scope="dispatch")
+            for core in row["breakdown"]["records"]:
+                core["recv_data_end"] = core["prefix_end"] if core["core"] < 48 else core["end"] - 5
+        return config, ranks
+
+    def test_dispatch_v5_separates_receive_and_finish_and_retains_source_issues(self):
+        config, ranks = self.dispatch_fixture()
+        result = measure.summarize_measurements(ranks, config, "d" * 64)
+        self.assertEqual(result["native_status"], "dispatch")
+        self.assertEqual(result["algorithm_communication_bytes"], 16 * (9 * 15872 + 90 * 32))
+        self.assertEqual(result["rank_traffic"][0]["relay_bytes"], 2 * 15872)
+        self.assertEqual(result["rank_traffic"][0]["data_bytes"], 9 * 15872)
+        self.assertEqual(result["breakdown"]["schema_version"], 5)
+        stages = result["breakdown"]["stages"]
+        self.assertEqual(stages["recv_data"]["median"], 25)
+        self.assertEqual(stages["dispatch_total"]["maximum"], 90)
+        self.assertEqual(stages["finish"]["median"], 20)
+        self.assertNotIn("source_send_total", stages)
+        index = measure.export_breakdown_traces(ranks, config, self.root / "dispatch-traces", "run", "d" * 64)
+        trace = json.loads(Path(index["ranks"]["0"]).read_text())
+        self.assertEqual(trace["otherData"]["schema_version"], 5)
+        events = trace["traceEvents"]
+        phases = [event for event in events if event.get("cat") == "kernel"]
+        self.assertEqual(len(phases), 64 * 8)
+        receive = next(event for event in phases if event["name"] == "recv_data" and event["tid"] == 63)
+        self.assertEqual((receive["args"]["start_ticks"], receive["args"]["end_ticks"]), (160, 185))
+        self.assertEqual(len([event for event in events if event.get("cat") == "mte3_issue"]), 7)
+        self.assertEqual([event["tid"] for event in events if event["name"] == "thread_name"], list(range(64)))
+
+    def test_dispatch_rejects_old_profile_missing_receive_or_incomplete_relay_traffic(self):
+        config, ranks = self.dispatch_fixture()
+        for fault in ("v4", "scope", "missing-receive", "early-receive", "late-receive", "detail", "relay-bytes", "relay-count", "total", "classification"):
+            changed = copy.deepcopy(ranks)
+            row = changed[0]
+            profile = row["breakdown"]
+            if fault == "v4": profile["schema_version"] = 4
+            if fault == "scope": profile["kernel_scope"] = "source_send"
+            if fault == "missing-receive": profile["records"][63].pop("recv_data_end")
+            if fault == "early-receive": profile["records"][63]["recv_data_end"] = 159
+            if fault == "late-receive": profile["records"][63]["recv_data_end"] = 191
+            if fault == "detail": profile["records"][0].pop("send_packets")
+            if fault == "relay-bytes": row["relay_bytes"] -= 1
+            if fault == "relay-count": row["relay_received"] += 1
+            if fault == "total": row["data_bytes"] -= row["relay_bytes"]
+            if fault == "classification": row["same_server_data_bytes"] -= row["relay_bytes"]
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                measure.summarize_measurements(changed, config, "d" * 64)
+        with self.assertRaisesRegex(ValueError, "scope"):
+            measure.validate_rank_measurements(ranks[0], dict(config, kernel_scope="source_send"))
+
+    def test_dispatch_performance_bandwidth_counts_relay_over_full_kernel(self):
+        config, ranks = self.dispatch_fixture()
+        config["run_mode"] = "performance"
+        for rank, row in enumerate(ranks):
+            row.pop("breakdown")
+            path = self.csv_profile([rank + 1], name=f"PROF_dispatch{rank}")
+            row["performance"] = measure.performance_record(path.parents[1], 1, 0)
+        result = measure.summarize_measurements(ranks, config, "d" * 64)
+        bytes_per_rank = 9 * 15872 + 90 * 32
+        self.assertEqual(result["algorithm_communication_bytes"], bytes_per_rank * 16)
+        self.assertAlmostEqual(result["bandwidth_gbps"]["minimum"], bytes_per_rank / 16000)
+        self.assertAlmostEqual(result["bandwidth_gbps"]["maximum"], bytes_per_rank / 1000)
+        self.assertIn("Dispatch with relay", measure.render_measurements(result))
+
     def test_send_detail_rejects_missing_overflow_stale_or_misidentified_packets(self):
         config, ranks = self.detailed_fixture()
         for fault in ("missing", "not-list", "count", "count-type", "capacity", "empty", "unordered", "before", "after",

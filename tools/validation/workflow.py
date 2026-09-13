@@ -32,14 +32,14 @@ DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
 CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
-SOURCE_SEND_CHECKPOINT = "ep-sdedup-p2-source-send"
-SOURCE_SEND_MARKER = "EP_SERVER_DEDUP_SOURCE_SEND_PASS "
-SOURCE_SEND_ABI = {"launch_bytes": 184, "layout": "r07-single", "kernel_scope": "source_send"}
+DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
+DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
+DISPATCH_ABI = {"launch_bytes": 184, "layout": "r07-single", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 4 * 1024 ** 3
 MEMORY_BOUNDARY_BYTES = SERVER_DEDUP_PEER_BYTES
-CHAIN_CHECKPOINTS = (SOURCE_SEND_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
+CHAIN_CHECKPOINTS = (DISPATCH_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
 BREAKDOWN_MARKER = "EP_SERVER_DEDUP_BREAKDOWN_PASS "
@@ -276,13 +276,13 @@ class Config:
             if breakdown not in ("0", "1"):
                 raise ValueError("编译 breakdown 必须为 0/1")
             self.profiling = breakdown == "1"
-        if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, "ep-sdedup-p2-first-hop"):
-            raise ValueError("旧 cnt-only/first-hop checkpoint 已由 ep-sdedup-p2-source-send 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
+        if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send"):
+            raise ValueError("旧 cnt-only/first-hop/source-send checkpoint 已由 ep-sdedup-p2-dispatch 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
             raise ValueError("不支持的 checkpoint：" + self.checkpoint)
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
-            raise ValueError("empty-kernel / source-send / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
+            raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
         if self.user and not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", self.user):
@@ -350,7 +350,7 @@ def chain_configuration(checkpoint):
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
         raise ValueError("chain 检查点 dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
     run_mode, loops, warmup = "functional", 1, 0
-    if checkpoint == SOURCE_SEND_CHECKPOINT:
+    if checkpoint == DISPATCH_CHECKPOINT:
         run_mode = os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional")
         if run_mode not in ("functional", "performance", "breakdown"):
             raise ValueError("RUN_MODE 必须为 functional/performance/breakdown")
@@ -359,7 +359,7 @@ def chain_configuration(checkpoint):
         if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
             raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
         if block_dim not in ("auto", "64"):
-            raise ValueError("源端发送固定 48/16 核组，block_dim 必须为 auto/64")
+            raise ValueError("Dispatch 固定 48/16 核组，block_dim 必须为 auto/64")
 
     def endpoint(value, name):
         try:
@@ -379,7 +379,7 @@ def chain_configuration(checkpoint):
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode="balance_shift", seed=2026, kernel_scope="source_send")
+                 route_mode="balance_shift", seed=2026, kernel_scope="dispatch")
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -484,16 +484,16 @@ def verify_build(config, *, check_run_mode=True):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
-    if config.checkpoint == SOURCE_SEND_CHECKPOINT:
-        if manifest.get("server_dedup_contract") != SOURCE_SEND_ABI:
-            raise ValueError("需要源端发送 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
+    if config.checkpoint == DISPATCH_CHECKPOINT:
+        if manifest.get("server_dedup_contract") != DISPATCH_ABI:
+            raise ValueError("需要完整 Dispatch 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and config.chain is not None and
                                            profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
-        if profiling and manifest.get("server_dedup_profile_version") != 4:
-            raise ValueError("需要源端逐包打点 breakdown v4 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
+        if profiling and manifest.get("server_dedup_profile_version") != 5:
+            raise ValueError("需要完整 Dispatch breakdown v5 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -599,11 +599,11 @@ def build(config):
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""), "tests": tests,
                 "artifacts": artifact_files(stage)}
-    if config.checkpoint == SOURCE_SEND_CHECKPOINT:
-        manifest["server_dedup_contract"] = dict(SOURCE_SEND_ABI)
+    if config.checkpoint == DISPATCH_CHECKPOINT:
+        manifest["server_dedup_contract"] = dict(DISPATCH_ABI)
         manifest["server_dedup_profiling"] = config.profiling
         if manifest["server_dedup_profiling"]:
-            manifest["server_dedup_profile_version"] = 4
+            manifest["server_dedup_profile_version"] = 5
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
@@ -756,6 +756,66 @@ def dry_run_rank(config, run_id, build_id, rank):
     return 0
 
 
+def validate_relay_links(record, config, rank_size):
+    """Validate a rank's final output associations before global t matching."""
+    links = record.get("relay_links")
+    if not isinstance(links, list):
+        raise ValueError("缺少 Dispatch relay_links")
+    first_hops = terminals = 0
+    routes = set()
+    for link in links:
+        if not isinstance(link, list) or len(link) != 7 or any(type(value) is not int for value in link):
+            raise ValueError("relay_links 必须为 7 整数记录")
+        source, token, first_k, relay, index, original_k, count = link
+        if (not 0 <= source < rank_size or not 0 <= token < config["bs"] or
+                not 0 <= first_k < config["topk"] or not 0 <= original_k < config["topk"] or
+                not 0 <= relay < rank_size or not 0 <= index < 8 * config["bs"] or
+                relay // 8 != record["rank"] // 8):
+            raise ValueError("relay_links 身份或 t 越界")
+        route = (source, token, original_k)
+        if route in routes:
+            raise ValueError("relay_links 重复原始 route")
+        routes.add(route)
+        if first_k == original_k:
+            if relay != record["rank"] or not 0 < count < config["topk"]:
+                raise ValueError("relay_links 第一跳 owner 或 forward_count 无效")
+            first_hops += 1
+        else:
+            if count != -1:
+                raise ValueError("relay_links 终端 forward_count 必须为 -1")
+            terminals += 1
+    if first_hops != record["first_hop_received"] or terminals != record["relay_received"]:
+        raise ValueError("relay_links 与第一跳/终端接收数量不一致")
+
+
+def validate_dispatch_links(records, config):
+    """Match terminal t to its first-hop allocation across all ranks."""
+    parents, children, allocated, routes = {}, {}, set(), set()
+    for record in records:
+        validate_relay_links(record, config, config["rank_size"])
+        for source, token, first_k, relay, index, original_k, count in record["relay_links"]:
+            route = (source, token, original_k)
+            if route in routes:
+                raise ValueError("跨 Rank relay_links 重复原始 route")
+            routes.add(route)
+            key = (source, token, first_k, relay)
+            if first_k == original_k:
+                if key in parents or (relay, index) in allocated:
+                    raise ValueError("第一跳重复或多个 Token 复用同一个 relay/t")
+                parents[key] = (index, count)
+                allocated.add((relay, index))
+            else:
+                children.setdefault(key, []).append(index)
+    if parents.keys() != children.keys():
+        raise ValueError("relay_links 缺少第一跳或终端")
+    for key, (index, count) in parents.items():
+        if len(children[key]) != count or any(value != index for value in children[key]):
+            raise ValueError("终端 t 或转发数量与第一跳不一致")
+    if sum(record[kind + "_packets"] for record in records for kind in ("first_hop", "direct", "relay")) != (
+            config["rank_size"] * config["bs"] * config["topk"]):
+        raise ValueError("完整 Dispatch 物理包总数与原始 route 总数不一致")
+
+
 def validate_rank_records(records, expected, run_id, manifest, chain_config=None):
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
         raise Failure("LOG_PARSE_FAILED", "rank 记录格式错误")
@@ -779,21 +839,24 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         if chain:
             linked = record["chain"]
             loops = 1
-            if manifest["checkpoint"] == SOURCE_SEND_CHECKPOINT:
+            if manifest["checkpoint"] == DISPATCH_CHECKPOINT:
                 if chain_config is None:
-                    raise Failure("RESULT_FAILED", "缺少本次源端发送配置", rank=mapping["rank"])
+                    raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
                 for key in ("quant_mode", "fp8_format", "kernel_scope"):
                     if record.get(key) != chain_config[key]:
-                        raise Failure("RESULT_FAILED", "源端发送实际类型或范围不一致", rank=mapping["rank"], field=key)
+                        raise Failure("RESULT_FAILED", "Dispatch 实际类型或范围不一致", rank=mapping["rank"], field=key)
                 stride = source_send_stride(chain_config)
                 if (any(record.get(key) is not True for key in
-                        ("first_hop_validated", "direct_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged")) or
-                        record.get("native_status") != "source_send" or record.get("token_stride") != stride):
-                    raise Failure("RESULT_FAILED", "源端发送包或源端输出缺少完整校验", rank=mapping["rank"])
+                        ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated",
+                         "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated",
+                         "group_validated", "flags_cleared", "counter_cleared")) or
+                        record.get("native_status") != "dispatch" or record.get("token_stride") != stride):
+                    raise Failure("RESULT_FAILED", "Dispatch 数据、metadata、group 或轮末清理缺少完整校验", rank=mapping["rank"])
                 try:
-                    measurements.validate_source_send_traffic(record, chain_config)
+                    measurements.validate_dispatch_traffic(record, chain_config)
+                    validate_relay_links(record, chain_config, mapping["rank_size"])
                 except (ValueError, TypeError, KeyError) as error:
-                    raise Failure("RESULT_FAILED", f"源端发送流量记录无效：{error}", rank=mapping["rank"]) from error
+                    raise Failure("RESULT_FAILED", f"Dispatch 流量记录无效：{error}", rank=mapping["rank"]) from error
                 loops = chain_config["loops"]
                 for marker in (record, linked):
                     if any(marker.get(key) != chain_config[key] for key in ("run_mode", "loops", "warmup")):
@@ -873,7 +936,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                             "--output=" + str(profile_dir)]
             output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
             if config.checkpoint in CHAIN_CHECKPOINTS:
-                marker = SOURCE_SEND_MARKER
+                marker = DISPATCH_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
                     marker = MEMORY_BOUNDARY_MARKER
                 record = parse_rank_marker(output, marker)
@@ -1254,8 +1317,8 @@ def run(config):
     elif config.checkpoint in CHAIN_CHECKPOINTS:
         scope += (f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、"
                   f"{config.chain['warmup']} 轮预热＋{config.chain['loops']} 轮测量（同域连续提交）、"
-                  "最后一轮 cnt/cumsum、第一跳/DIRECT 包 hidden/scale/尾表/q/全部 Flag、完整 route 覆盖、"
-                  "源端 mask/权重及只读输入校验；接收转发及 Combine 尚未启用。")
+                  "最后一轮 cnt/cumsum、DIRECT/第一跳/终端完整 route 覆盖、源端输出、"
+                  "最终 hidden/scales/assistEx/group、跨 Rank relay/t 关联及轮末 Flag/counter 清理校验；不包含 Combine。")
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
@@ -1269,17 +1332,21 @@ def run(config):
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
             report["chain_configuration"] = dict(config.chain)
-            if not errors and config.chain["run_mode"] != "functional":
+            if not errors and config.checkpoint == DISPATCH_CHECKPOINT:
                 try:
                     records = [rank for node in nodes for rank in node["reported_result"]["ranks"]]
+                    full_config = dict(config.chain, rank_size=len(mappings))
+                    validate_dispatch_links(records, full_config)
                     kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
-                    report["measurements"] = measurements.summarize_measurements(records,
-                        dict(config.chain, rank_size=len(mappings)), kernel_sha)
+                    aggregate = measurements.summarize_measurements(records, full_config, kernel_sha)
+                    if config.chain["run_mode"] != "functional":
+                        report["measurements"] = aggregate
+                    report["relay_links_validated"] = True
                     if config.chain["run_mode"] == "breakdown":
                         report["traces"] = measurements.export_breakdown_traces(records,
                             dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha)
                 except (ValueError, TypeError, KeyError, OSError) as error:
-                    failure = Failure("RESULT_FAILED", f"测量汇总失败：{error}").record()
+                    failure = Failure("RESULT_FAILED", f"Dispatch 结果或测量汇总失败：{error}").record()
                     errors.append(failure)
                     primary_error = failure
                     report.update(status="FAIL", primary_error=failure)

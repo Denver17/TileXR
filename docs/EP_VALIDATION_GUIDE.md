@@ -1,43 +1,24 @@
 # EP 验证与人工测试
 
-## 当前提交：完整源端发送（设计验证流程 §2.4）
+## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
-当前检查点为 `ep-sdedup-p2-source-send`：保留 cnt 发送/接收、cumsum 和第一跳发送，新增 DIRECT 执行。每个发送核先逐 Token 分类并发送全部第一跳，再从本 server 开始，按 `(rank/8 + step) % (rankSize/8)` 的顺序遍历目标 server 并执行直发表；同一 server 内保持原始 Token/k 顺序，沿用缓存的 tokenOffset/originalK/expertId/q。两阶段共用发送池和包序号，之间无新增屏障。sourceMask/expertScalesOut 随本模块完成；接收包处理及 assistEx/group 已有独立实现和 Host 测试，生产接收调度、最终 expert 行整理及 Combine 留待后续模块。
+当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理数据 Flag，再参与已有 SyncAll、counter 清零及跨 Rank 完成协议。Combine 尚未实现。本增量需通过下面的多卡 NPU 运行验收，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
-例如 64P 的 server7 按 `7→0→1→2→3→4→5→6` 发送 DIRECT，本 server 包含本卡与同 server 其他卡。48 个发送核各自推进，本核对某 server 无任务就跳过；不增加 server 边界同步或 MTE3 排空，不能据此推断所有核同时切换 server，或先前 server 的 DMA 已完成。实现每个 server 扫描现有 16B 直发表一次，复用原 UB，无新增索引表；BS96/K6 下每核最多 12 项，64P 最多 96 次成员检查，128P 最多 192 次。仅调整发送顺序，不改变包数、通信字节或槽位。
+固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 保持 **4 GiB 通信域**（4092 MiB 数据 + 4 MiB Flag），底层另有 1 MiB 地址偏移余量。总专家数 `0<E<=1024` 且能被 rank 数整除；完整 Dispatch/Combine 验收前不调整通信域大小。
 
-维护约束：按目标 server 重排时，q 必须仍取原始完整路由中的专家出现序号，不能按实际发送次序重算，否则同 expert 跨 Token 的目标槽位会改变。观察实际 GM 下发可检查循环顺序、server 内稳定顺序及原 q 槽位；CPU 替身不能证明 A5 上的异步完成顺序或性能收益，需使用同输入、同打点配置的 A5 测试比较。
+每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
 
-固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS=96、H=7168、TopK=6、BF16、balance_shift、seed=2026**。每 rank 始终申请 **4 GiB 通信域**：4092 MiB 数据区 + 4 MiB Flag 区，`peerMemBytes=4294967296`。直到完整 Dispatch/Combine 功能和性能验收结束，不随增量缩小通信域。底层另有 1 MiB 地址偏移余量，实际分配 4097 MiB/rank。
+接收以完整前缀确定连续输出行，在 16 核按 floor 分区；tokenPos/pendingIdx 均只存 UB。每批独立探测最多 16 个 Token 的全部块、全部 8 个 Flag word，记录稳定索引，按原 pending 位置逆序消费就绪项并末项覆盖删除。整批未就绪时继续扫描；有删除则重查批起点的换入项。
 
-本检查点支持 **loops>=1、warmup>=0**，默认仍为 1/0，functional/performance/breakdown 均可配置。一批复用同一 communicator、stream、输入/输出和通信域，固定同一组输入及路由，连续提交 warmup+loops 次；只在整批末尾做一次 stream 同步和 Host barrier。每轮源端覆盖本轮目标槽位，设备轮末完成协议保证所有 rank 的 cnt 消费/清理和发送完成后才进入下一轮。整批结束先在 `round-read` 校验每个 rank 的四份完成代次均等于 warmup+loops，再检查最后一轮数值/包；不能解释为每轮输出快照。
+每路只分配一份 T 字节带 Flag 包、32B metaUB 和对齐 group 行，数据池按扣除前缀、双表及 `544*blockCount+576` 字节监听区后的剩余 190KiB 预算选择 1～8 路。`MTE3_MTE2` 保护复用，`MTE2_MTE3` 发布搬入，`MTE2_S/S_MTE3` 保护 Scalar 元数据访问。hidden/scale 用 DataCopyPad 跳过 Flag 直接写 GM，同一 Token 的转发连续读取这一份包；完成事件在最后一笔写出后记录，下一次复用 lane 才等待。核末回收 lane 后统一清理本核稳定 tokenPos 的所有 Flag。
 
-当前入口明确停在源端发送检查点，未启用尚未闭环的 receiver/relay。旧入口曾调用 receiver，但其 prefix 基址遗漏 cntOffset，在固定 E96 场景未实际消费数据；不能将这段调用当作已验收接收功能。后续启用接收时，必须一起验证 packed 元数据、转发、pending 调度和 Flag 清理，再切换检查点。
+第一跳先生成保留正 forwardCount 的独立 assistEx/group，再把公共包改为终端角色；终端按 expert 匹配原 k/weight。权重按位复制，group 按 `t*K+originalK` 保存返回槽位，t 由并发取号产生，不预设其顺序。完整元数据关联由所有 rank 结果汇总后验收。
 
-接收准备增量已实现 `ServerDedupReceiveTasks`：消费已经就绪的完整 cumsum，在 16 核按 `[floor(i*tokenNum/16), floor((i+1)*tokenNum/16))` 划分连续输出行，构造仅存 UB 的稳定 `tokenPos` 和可变 `pendingIdx`。每张表按实际本核行数申请并对齐到 32B，空核不申请表，不新增固定 1024 项上限或 GM 转存。删除使用末项替换，换入项在原位置继续检查；稳定 j 对应输出行 `begin+j`，tokenPos 保留到未来核末 Flag 清理完成。该模块已接入暂存的 receiver 代码和 cnt/cumsum 本地测试，当前生产入口仍不调用 receiver；此次重跑 source-send 不会验证接收/转发。
+functional/performance/breakdown 都支持 `loops>=1、warmup>=0`，默认 1/0。调用复用同一 communicator/stream/输入输出，连续提交 warmup+loops 轮，整批末尾只同步一次并执行 Host barrier。每轮完成协议现在覆盖接收、转发及 Flag 清理；最终读取完成代次和最后一轮输出，不声称保存了每轮输出快照。
 
-接收准备维护约束：cnt 的逻辑顺序 `localExpert*R+source` 与物理槽位区 `((source+rank)%R)*L+localExpert` 不同，tokenPos 必须保存后者乘 BS 再加原 q。构表只遍历与本核行区间相交的 q，不为零 cnt 生成任务。地址乘完整 T 前扩为 uint64。读取 GM 前缀时，prefixOffset 相对 cnt 区，完整地址必须包含 `cntOffset + prefixOffset + receiver*prefixStride`；已有 UB 前缀可直接消费，但不得跨 TPipe Reset 保存旧 Tensor。本地回归从真实计数产物构表，与发送地址逐行比较，并检查不均匀分区、多轮/空结果、pending 替换、UB 预算及无额外 GM IO/同步；不证明真实监听、异步转发或数据 Flag 清理。R05-05 的完整接收 UB 总预算仍待确定，不能用独立构表通过推断任意接收不均衡均可容纳。
+实现维护约束：CompleteCumsum 的计数写出可能仍引用 UB，必须 PIPE_ALL 后再 Reset，并用 `cntOffset+prefixOffset+receiver*prefixStride` 重载 GM 前缀。尾部是逻辑偏移，字段位置必须逐项映射为 `p/480*512+p%480`，不能假定跨 Flag 的 entries 连续。DataCopyPad 完整块源 stride 为 1 个 32B、GM 目标 stride 为 0 字节；group 的字节 stride 用于 uint32 Tensor 时除以 4。批次稳定索引快照不能随着 pending 删除重新读取身份，pending 删除也不表示 lane 已释放。
 
-接收包增量实现完整 DataAsFlag 探测与解包，生成独立 32B assistEx、dense group 及一份公共转发包。探测覆盖全部块（包括仅含 metadata 的块）的 8 个 FP32 Flag word，通过后读取完整 T 并移除所有 32B Flag。第一跳保留自己的 k/weight 和正 forwardCount，填入 relayRank/t；公共终端包只修改 forwardCount=-1、relayRank/t，保留原头部 k/weight、有效 entry 数及全部 entry。终端按当前 expert 查找有效 entry，把匹配的原 k/weight 写入独立 assistEx。同 Token 的转发连续下发，不在各 entry 之间插入同步。
-
-本增量在服务器仓库根目录逐条执行以下命令即可验证，无需同步或启动多卡运行：
-
-```bash
-bash build_all.sh
-./install/validation/bin/test_tilexr_ep_server_dedup_receive_packet
-```
-
-第二条应返回 0 并输出 `EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet`。`BUILD_PASS` 仅证明构建、安装与清单检查完成，不代表执行了此测试；默认仍关闭设备打点，仅编译 A5 kernel。开发机可定点运行：
-
-```bash
-cmake -S tests/ep -B build-server-dedup-counts
-cmake --build build-server-dedup-counts --target test_tilexr_ep_server_dedup_receive_packet -j4
-ctest --test-dir build-server-dedup-counts --output-on-failure -R '^test_tilexr_ep_server_dedup_receive_packet$'
-```
-
-测试覆盖 K=1/6/32、量化/非量化字节布局、metadata-only 块、跨块 entries、稀疏 originalK、非整数权重位型及首尾 guard；暂存串行 receiver 夹具验证三角色的 hidden/scales/assist/group 写出、非零 t、本卡/跨卡目标地址和相同转发包。量化用例验证已有字节的搬运，不执行真实 MXFP8 运算；CPU 替身不证明异步流水或分布式进度。完整接收的 buffer 尺寸/数量/总 UB、EventID 分配及跨 Token 调度仍属 R05-05/R05-06，最终清理组织仍属 R06。生产入口尚未调用 receiver，source-send 的 NPU PASS 不能作为这些新函数的设备通过证据。
-
-维护约束：tailOffset 是剥离 Flag 后的逻辑偏移，不能直接索引 packed wire；旧实现只解 hidden 时会误读跨块尾部。应整包解包，重打包时用 `tailOffset/480*512 + tailOffset%480` 定位 32B 对齐头部，公共副本不按目标改写 k/weight 或清空 entry 数。FP32 权重按 uint32 位型复制；group 行 stride 是字节数，索引 uint32 GM Tensor 时必须除以 4。接收 helper 头文件须列入外部 kernel 构建依赖，避免仅改头文件后复用旧产物。格式、边界和串行输出由上述 Host 测试验证，完整接收生命周期需后续 A5 验证。
+本地接收测试覆盖量化/非量化字节布局、K1/6/32、24 项任务跨满批/尾批、整批未到达后继续推进、1/3/8 路复用、packet/meta/group 在途只读、空接收、同卡/跨卡转发及其他核槽位保护。Host 模型和地址空间检查不能证明真实 CANN API、异步设备流水或 NPU 性能；本次 CANN/A5 尚待用户环境执行，blue 编译调查按用户先前要求暂缓。
 
 生产多卡执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
 
@@ -78,20 +59,26 @@ bash sync.sh
 ```
 
 ```bash
-bash run.sh -n 2 -e 96 -m 0 -l 3 0
+bash run.sh -n 2 -e 96 -m 0 -l 1 0
 ```
 
 构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
 
-`build_all.sh` 默认关闭设备打点，production 默认选择新的 source-send 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 或 `ep-sdedup-p2-first-hop`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。184B ABI 和 R07 单份布局沿用上一增量；kernel、consumer 和检查点身份需一起重新编译和同步。
+`build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。184B ABI 和 R07 单份布局沿用上一增量；kernel、consumer 和检查点身份需一起重新编译和同步。
 
-同一普通产物可继续手动测量多轮完整 kernel：
+单轮通过后，用同一产物检查完整 Dispatch 多轮复用：
+
+```bash
+bash run.sh -n 2 -e 96 -m 0 -l 3 0
+```
+
+再手动测量完整 kernel：
 
 ```bash
 bash run.sh -n 2 -e 96 -m 1 -l 100 10
 ```
 
-每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为 cnt/cumsum、完整源端发送和设备轮末完成等待。有效带宽仍使用每次调用的第一跳/DIRECT 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留；此值不是纯网络带宽或完整 Dispatch 性能。sendData 内部打点保持相邻 MTE3 下发间隔，跨 rank 轮末等待计入 finish/完整 kernel。
+每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为完整 Dispatch，包含 cnt/cumsum、源端发送、接收转发、输出、清理和轮末完成等待。有效带宽使用每次调用的第一跳/DIRECT/relay 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留，此值不是纯网络带宽。sendData 细打点仍表示相邻 MTE3 下发间隔；recv_data 包括接收准备、等待、输出、转发与本核 Flag 清理，finish 包括全核及跨 rank 收尾。
 
 ## 整服务器调度与参数归属
 
@@ -156,7 +143,7 @@ run 在任何 rank 启动前核验所选节点的实际安装包；缺少同步�
 - 测量：旧集群工具取最后 50 次样本，先算每服务器各卡全部样本平均，再汇总服务器平均；当前取最后 loops 次、逐 rank 样本中位数后汇总。应统一样本选择、跨 rank median/min/max、kernel SHA、通信字节和带宽定义。
 - 打点：普通 Memory 使用独立的 `TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING` 和 v2 reader；当前 `build_all.sh breakdown=1` 只打开 Server Dedup 打点。性能对照两侧关闭设备诊断打点、保留 msprof；阶段对照使用各自 reader，不能仅替换 kernel 名。
 
-普通 Memory 的完整 kernel 包含接收及最终 expert 行写出，而当前 Server Dedup 只到 source-send。当前可准备 Memory 完整基线或分析对应阶段；在 Server Dedup 接收闭环前，不把二者整核耗时比值报告为完整 Dispatch 加速比。接入时复用公共编译/同步/启动/采样流程，通过算法适配层分别选择 API、输出校验、profile reader 和流量计算；尚无可直接使用的 `run.sh impl=memory` 参数。
+Server Dedup 已接入完整 Dispatch 接收路径，但新设备功能与性能仍须先验收。普通 Memory 对照需要统一输入、4GiB 域和样本口径后接入上述流程；当前尚无可直接使用的 `run.sh impl=memory` 参数，不能把现有单侧结果报告为加速比。
 
 ## 输入类型与验证内容
 
@@ -174,14 +161,17 @@ FP16 的量化组合使用相同命令并设置 `dtype=fp16`。两种 FP8 均为
 
 - communicator 的 Host/device 映射及固定 4 GiB 容量检查。
 - 原始全路由的 cnt/cumsum 数值检查。固定基线每源卡每 expert 为 6，每卡前缀 `6,12,...,576`，6 个 expert 的 count 均为 96。
-- 所有预期第一跳及 DIRECT 目标槽位、完整 hidden、量化 scale、32B 头部、有效 16B entries、原始 k/q/真实权重及每个 512B 块的 8 个 Flag。Flag 固定为 FP32 1.0 的位型；填充及未用 entries 不比较。
-- DIRECT 两个 forward 计数为 0、返回字段为 -1，头部保留原始 k/真实权重。第一跳头部、有效 entries 和 DIRECT 展开后覆盖所有原始 route；尚未转发的 entry 槽位 Flag 保持零。
-- sourceMask 保留各 group 的首 k 和全部 DIRECT k；expertScalesOut 对应为 1.0 和真实权重。原始 expertScales 逐字节不变，空洞不消费。
-- 正常资源清理完成后才输出 `EP_SERVER_DEDUP_SOURCE_SEND_PASS`，其 `submitted=completed=loops`、`warmup_submitted=warmup_completed=warmup`、`cleanup=complete`。提交失败保留预热/测量各自已提交数；只有整批 stream 同步和 Host barrier 均成功才填写 completed。仅 `EP_SERVER_DEDUP_CHAIN_PASS` 不算成功。
+- 依据原始 expertIds 独立生成 expert/source/q 行序，逐行比较紧密 hidden、量化 scale、8 字段 assistEx。
+- DIRECT 保留原 k/weight 且计数为 0、返回字段为 -1；第一跳保留正 n 并关联有效 group，终端为 -1 且引用同一 relay/t。只读 group 前 n 项，不消费空洞/padding。
+- sourceMask 保留各 group 首 k 和全部 DIRECT k；expertScalesOut 对应为 1.0 和真实权重，原始权重逐字节不变。
+- 所有原始 route 接收槽的全部块 Flag 均为零，唯一 counter 首 4B 为零。
+- 每 rank 正常清理后输出 `EP_SERVER_DEDUP_DISPATCH_PASS`，包含 `submitted=completed=loops`、预热完成计数和 `cleanup=complete`。汇总进一步检查跨 Rank 第一跳/终端的 `relay_links`、t 一致性及 route 完整性，最后才输出 `VALIDATION_PASS`；仅有 Host marker 或旧 SOURCE_SEND_PASS 不算完整 Dispatch 通过。
 
-固定 H/K 下非量化 T=15872B，MXFP8 T=8192B。`first_hop_packets/received/bytes`、`direct_packets/received/bytes` 和 `token_stride` 记录已校验物理包的流量。`local_data_bytes` 为本卡拷贝，`same_server_data_bytes` 为同 Server 跨卡，`cross_server_data_bytes` 为跨 Server；三者互斥并合计为全部包字节。JSON 同时要求 DIRECT、完整 route 覆盖及源端输出校验通过。全 Rank 第一跳和 DIRECT 的发送/读回包数分别一致；同址同值重复发送由本地发送观察测试检查，Host 最终读回不能单独识别。每源 rank 的远端 cnt 为 `(E-E/R)*32=2880B`，不包含轮询与本卡前缀访问。
+固定 H/K 下非量化 T=15872B，MXFP8 T=8192B。`first_hop_*`、`direct_*`、`relay_*` 分别记录三类实际路径包数与完整 T 字节；`data_bytes` 为三者之和。`local_data_bytes/same_server_data_bytes/cross_server_data_bytes` 互斥并覆盖全部发送字节。全 Rank 三类发送与接收数各自守恒，最终总接收数等于原始 route 数。远端 cnt 每源 rank 为 `(E-E/R)*32`，固定16P/E96时是2880B。
 
-调用方为真实权重输入和新增的 `expertScalesOut[BS,K]` 分别分配内存，两者不可重叠。公共签名在 `groupOut` 后新增权重输出；内部 launch 为 13 地址 + 10 个 int64，共 184B。最终 expandX/dynamicScales/assistEx/group 仍按完整容量分配，当前 checkpoint 不校验尚未产生的最终结果。
+`relay_links` 每项为 `[source,token,first_k,relay,t,original_k,n]`，第一跳 n 为正、终端 n=-1。汇总要求第一跳 t 在 relay 上唯一、恰有 n 个对应终端、每个 original_k 唯一且都引用同一 t。并发调度可改变分配顺序；只在本卡检查 t 范围不足以证明跨卡关联。
+
+公共 ABI 仍为 13 地址 + 10 个 int64（184B）。调用方为真实权重输入和 expertScalesOut 分别分配内存；完整输出都在当前 checkpoint 比较，未使用的 metadata 空洞/padding 不作为判据。
 
 运行会在本次 `<run_id>/inputs/` 保存 `rank-N-x.bin`、`rank-N-ids.bin`、`rank-N-weights.bin`（小端原始位型）。远端输入随日志收集到 `nodes/<节点序号>/inputs/`；shape、dtype、量化、seed、commit/build_id 在同次 summary 中。直接运行 C++ 可用 `TILEXR_VALIDATION_INPUT_DIR` 指定已存在目录。
 
@@ -211,7 +201,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 2 -l 3 2
 ```
 
-构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=4`，并标记 184B ABI、`r07-single` 布局及 `source_send` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
+构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=5`，并标记 184B ABI、`r07-single` 布局及 `dispatch` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
 
 成功结果和 trace 路径：
 
@@ -227,9 +217,9 @@ run/case-<时间>-<PID>/<run_id>/traces/index.json
 
 将 `.trace.json` 导入 Perfetto/Chrome tracing。`measurements.breakdown.stages_us` 给出各阶段核最大值的跨 rank median/min/max；`nodes[].reported_result.ranks[].breakdown.records[]` 保留 64 核的原始时间戳。
 
-阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`finish` 和 `source_send_total`。源端核未执行的计数接收阶段为零时长，计数接收核的 send_data 为零；finish 包含末尾全核 SyncAll、core63 counter 清零及跨 rank 完成等待。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。breakdown 仅保留最后一次测量的粗粒度和逐包记录，generation=warmup+loops；不生成每轮 trace。各卡独立归零，不能推断跨卡绝对时序。
+阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`recv_data`、`finish` 和 `dispatch_total`。源端核未执行的计数接收阶段为零时长，计数接收核的 send_data 为零；finish 包含末尾全核 SyncAll、core63 counter 清零及跨 rank 完成等待。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。breakdown 仅保留最后一次测量的粗粒度和逐包记录，generation=warmup+loops；不生成每轮 trace。各卡独立归零，不能推断跨卡绝对时序。
 
-v4 在每个发送核的 `send_data` 下细分三个连续区间，`stages_us` 同时汇总这三项：
+v5 沿用 v4 的发送细打点，在每个发送核的 `send_data` 下划分三个连续区间，`stages_us` 同时汇总这三项：
 
 | trace 名称 | 起止时间点 |
 | --- | --- |
@@ -241,9 +231,9 @@ v4 在每个发送核的 `send_data` 下细分三个连续区间，`stages_us` �
 
 `nodes[].reported_result.ranks[].breakdown.records[]` 的发送核增加 `first_hop_count` 和 `send_packets: [{issue, token, k}, ...]`。数组按实际发送顺序排列，前 `first_hop_count` 项为待中转包，其余为 DIRECT；同一输入 Token 可产生多个物理包，`token/k` 标识该包的原始路由头。trace 中每包都有 `MTE3 issue` 瞬时点，`send_issue_interval` 段表示 **本包下发 → 下一包下发**，跨 first-hop/DIRECT 切换的间隔归前一个包。它包含下一包准备、已有等待与下发开销，不表示本包 DMA 搬运完成耗时。最后一包没有下一下发点，只保留瞬时点，并将其后至 `send_data_end` 单列为 `send_drain_and_outputs`；该收尾包含已有 lane 排空、mask/weight 输出及粗边界同步，不冒充 Token 间隔。各段核最大值不可直接相加。
 
-R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v3/v4 粗粒度记录每核两个 64B 行，共 8192B。v4 逐包记录暂存在独立 UB，最终 `end` 取时后才写到通信域 payload 尾部，必须避开 `peerMemBytes` 中最后 4MiB 的 communicator flags。每核最多 `ceil(BS/48)*TopK` 个 16B 记录，加 32B 头后按 64B 对齐；48 核总区按 512B 对齐。固定 BS96/TopK6 时占用 12288B GM，每发送核增加 192B UB，计入 lane 容量计算，仍保留 8 个 lane。Host 拒绝数据区与诊断区重叠，现有 cnt/数据偏移和 4GiB 通信域大小不变。reader 校验版本、核/rank、generation、包数和时间范围，汇总再核对 first-hop/DIRECT 包数，禁止静默截断。
+R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v5 粗粒度记录每核三个 64B 行，共 12288B，仍落在原预留区内；存储前9个有效时间点，最后3个为 end 的副本。逐包记录暂存在独立 UB，最终 `end` 取时后才写到通信域 payload 尾部，必须避开 `peerMemBytes` 中最后 4MiB 的 communicator flags。每核最多 `ceil(BS/48)*TopK` 个 16B 记录，加 32B 头后按 64B 对齐；48 核总区按 512B 对齐。固定 BS96/TopK6 时占用 12288B GM，每发送核增加 192B UB，计入 lane 容量计算，仍保留 8 个 lane。Host 拒绝数据区与诊断区重叠，现有 cnt/数据偏移和 4GiB 通信域大小不变。reader 校验版本、核/rank、generation、包数和时间范围，汇总再核对 first-hop/DIRECT 包数，禁止静默截断。
 
-已有 v3/v4 成功 summary 可离线导出，无需再次启动设备；v3 只能显示原有粗粒度阶段，无法补出逐包时间点：
+已有 v3/v4/v5 成功 summary 可离线导出，无需再次启动设备；v3 只能显示原有粗粒度阶段，无法补出逐包时间点：
 
 ```bash
 python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summary.json
@@ -259,7 +249,7 @@ python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summ
 | 运行环境 | `run/case-*/environment.log` | CANN、Python、配置加载 |
 | 运行 | `run/case-*/workflow.log` 和终端指定的 `<run_id>/summary.json` | primary_error、errors、失败 rank 的日志与 stage |
 
-`stage=count-read` 或 `stage=source-send-read` 表示 stream 与 Host barrier 已完成，随后数值/包校验失败，不代表等待超时。错误保留首个不匹配字段、source/token/k/q 或 count 邻域。count 输出预填 -1，mask/权重输出预填哨兵；保留实际原始输入供复现。提交、同步或 barrier 失败而完成状态未知时，不释放可能仍在使用的设备资源，交由进程退出和调度器收尾。
+`stage=count-read` 或 `stage=dispatch-read` 表示 stream 与 Host barrier 已完成，随后数值/包校验失败，不代表等待超时。错误保留首个不匹配字段、source/token/k/q 或 count 邻域。count 输出预填 -1，mask/权重输出预填哨兵；保留实际原始输入供复现。提交、同步或 barrier 失败而完成状态未知时，不释放可能仍在使用的设备资源，交由进程退出和调度器收尾。
 
 不带 CANN/NPU 的聚焦检查：
 
@@ -269,7 +259,8 @@ cmake --build build/server-dedup-host --target \
   test_tilexr_ep_server_dedup_protocol test_tilexr_ep_server_dedup_layout \
   test_tilexr_ep_server_dedup_host_validation test_tilexr_ep_server_dedup_public_abi \
   test_tilexr_ep_kernel_launch test_tilexr_ep_server_dedup_counts \
-  test_tilexr_ep_server_dedup_profile test_tilexr_ep_server_dedup_source_send \
+  test_tilexr_ep_server_dedup_profile test_tilexr_ep_server_dedup_receive_packet \
+  test_tilexr_ep_server_dedup_source_send \
   test_tilexr_ep_server_dedup_source_send_profile test_tilexr_ep_server_dedup_host_profile_validation -j8
 ctest --test-dir build/server-dedup-host --output-on-failure \
   -R 'test_tilexr_ep_server_dedup_|test_tilexr_ep_kernel_launch$'
@@ -280,7 +271,7 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 
 逐包打点的本地回归还核对每条记录与实际发送对应、空核头、容量/同步标志区边界、Host 容量拒绝、损坏记录拒绝、三个子阶段及最后一包的 trace 语义。纯 CPU 替身只验证记录和导出契约，真实 CANN 9.1 编译、A5 可见性及诊断开销仍需服务器运行确认。维护时不要在热路径逐包写 GM/DCCI，也不要为获取完成时间新增同步；相邻下发点才能保持这里约定的测量含义。
 
-维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。源端发送批次在所有 rank 完成本轮后覆盖相同路由槽位，数据 Flag 保持 1；这只覆盖当前无数据消费者的检查点，不能证明未来接收/Combine 的清理复用。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
+维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。旧 source-send 检查点结束时数据 Flag 为1；完整 Dispatch 结束时所有消费槽 Flag 必须为0，因此必须一起切换 kernel、consumer、manifest、marker 和打点版本并重新 build/sync，不能沿用旧成功包。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
 
 单份 cnt/发送槽位的连续调用必须有跨 rank 完成边界；本卡 SyncAll 不能阻止快 rank 覆盖慢 rank 的上一轮记录。当前核63在已有全核收敛、counter 写零完成后，将本次 NextMagic 的四个 int64 副本写入各 rank 的专属 32B 行，再等待本地所有 rank 行均 >= 本代次。记录位于 4MiB communicator Flag 区的最后 4KiB（最多128行），不移动 payload、cnt 或 profile；这些行不清零，允许更晚代次满足已完成的旧代次。仅支持同一 communicator 上所有 rank 同序、同 stream 的 Dispatch 批次；不得与其他未完成操作并发复用此区域。本地回归覆盖迟到/部分/旧代次、后续代次越过等待、四轮复用和边界，设备可见性及实际等待开销仍须 A5 验证。
 
@@ -288,7 +279,7 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 
 ## 输出和验收范围
 
-以下保留历史检查点说明，原文中的“当前提交/当前阶段”指记录形成时的代码。当前源端发送操作步骤及通过条件以上文为准；不运行下面的旧空 kernel 或 breakdown 验收。
+以下保留历史检查点说明，原文中的“当前提交/当前阶段”指记录形成时的代码。当前完整 Dispatch 操作步骤及通过条件以上文为准；不运行下面的旧空 kernel 或 breakdown 验收。
 
 ### 每 Rank 4 GiB 通信域与边界访问
 
@@ -353,7 +344,7 @@ breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`�
 
 ## 后续维护约束
 
-接收解包曾在 A5 `dav_3510` 编译时触发 `SupportBytes<unsigned char, 2, 4>()`：用户日志中的 CANN 9.2.0 `CopyImpl` 只支持 b16/b32，`recv.h:127` 是实例化提示，真正调用错误在 `Copy<uint8_t>`。用 b32 视图按 mask 64/56 分两次复制每包的 480B 数据，源/目标 repeat stride 分别为 16/15 个 32B block；repeat 是包数，不是 `包数*15`（H=7168 时后者为 450，转 uint8 会截断）。量化路径解包范围包含 padding 和 scales，现有两处同步分别对应 MTE2→V 与 V→MTE3。CPU 替身同步限制元素位宽，完整入口 profiling=0/1 编译和包布局回归验证类型、内容与 UB 边界；不能替代 CANN 9.1/A5 实编译或异步设备验证。判断工具链版本应依据真实 include 路径和版本信息，不能仅凭项目默认版本。
+接收解包曾在 A5 `dav_3510` 编译时触发 `SupportBytes<unsigned char, 2, 4>()`：用户日志中的 CANN 9.2.0 `CopyImpl` 只支持 b16/b32，`recv.h:127` 是实例化提示，真正调用错误在 `Copy<uint8_t>`。用 b32 视图按 mask 64/56 分两次复制每包的 480B 数据，源/目标 repeat stride 分别为 16/15 个 32B block；repeat 是包数，不是 `包数*15`（H=7168 时后者为 450，转 uint8 会截断）。这是此前完整 UB 解包的修复；当前单副本接收已改为 UB→GM DataCopyPad 跳过 Flag，生产接收不再执行 Vector 整包剥离/重打包。CPU 替身同步限制元素位宽，完整入口 profiling=0/1 编译和包布局回归验证类型、内容与 UB 边界；不能替代 CANN 9.1/A5 实编译或异步设备验证。判断工具链版本应依据真实 include 路径和版本信息，不能仅凭项目默认版本。
 
 分步开启 DIRECT 时必须一起更新检查点、Host 包集合、sourceMask/权重预期和流量统计，否则已发送的 DIRECT 会被旧校验误报为非目标槽位，或性能 JSON 仍把其流量记为零。最终槽位内容无法识别同址同值的重复发送；本地在搬运替身观察每包地址、身份和发送池顺序，补充次数与核内顺序证据，不在生产两阶段之间加同步。该证据不证明真实异步 MTE 顺序或 A5 性能。
 

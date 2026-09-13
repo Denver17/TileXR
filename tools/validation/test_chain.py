@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""源端发送验证的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
+"""完整 Dispatch 验证的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
 
 import copy
 import math
@@ -14,7 +14,7 @@ from test_workflow import TemporaryRoot
 class ChainTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.SOURCE_SEND_CHECKPOINT,
+        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.DISPATCH_CHECKPOINT,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
@@ -24,7 +24,7 @@ class ChainTests(TemporaryRoot):
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
-                                           route_mode="balance_shift", seed=2026, kernel_scope="source_send"))
+                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch"))
         original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "64"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
@@ -61,7 +61,7 @@ class ChainTests(TemporaryRoot):
                 self.assertEqual(config.chain["moe_expert_num"], experts)
 
     def test_requires_both_current_markers_and_one_completed_launch(self):
-        manifest = {"build_id": "build", "checkpoint": workflow.SOURCE_SEND_CHECKPOINT, "source": {"commit": "a" * 40}}
+        manifest = {"build_id": "build", "checkpoint": workflow.DISPATCH_CHECKPOINT, "source": {"commit": "a" * 40}}
         config = self.config()
         mappings = workflow.rank_mapping(self.config().hosts())[:8]
         records = []
@@ -70,8 +70,12 @@ class ChainTests(TemporaryRoot):
             records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                                 submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                                 first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
-                                local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
-                                first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="source_send"))
+                                local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
+                                relay_packets=2, relay_received=2, relay_bytes=31744, data_bytes=111104,
+                                relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, counter_cleared=True,
+                                relay_links=[[0, token, 0, mapping["rank"], token, original_k, 1 if original_k == 0 else -1]
+                                             for token in range(2) for original_k in range(2)],
+                                first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch"))
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
                                    (None, "cleanup", "failed"), (None, "chain", None),
@@ -86,7 +90,7 @@ class ChainTests(TemporaryRoot):
             with self.subTest(marker=marker, key=key), self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records(changed, mappings, "run", manifest, config.chain)
 
-    def test_source_send_repeated_submissions_in_all_modes(self):
+    def test_dispatch_repeated_submissions_in_all_modes(self):
         for mode in ("functional", "performance", "breakdown"):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_RUN_MODE": mode}):
                 chain = self.config().chain
@@ -97,7 +101,7 @@ class ChainTests(TemporaryRoot):
                 for key, value in (("LOOPS", "0"), ("WARMUP", "-1")):
                     with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
                         self.config()
-        for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p2-first-hop"):
+        for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send"):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": checkpoint}), self.assertRaises(ValueError):
                 self.config()
         for quant, format, stride in (("0", "e4m3", 15872), ("4", "e4m3", 8192), ("4", "e5m2", 8192)):
@@ -105,7 +109,7 @@ class ChainTests(TemporaryRoot):
                 self.assertEqual(workflow.source_send_stride(self.config().chain), stride)
 
     def test_multi_requires_all_configured_rounds_and_batch_identity(self):
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.SOURCE_SEND_CHECKPOINT
+        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DISPATCH_CHECKPOINT
         os.environ["TILEXR_VALIDATION_LOOPS"] = "1"
         config = self.config()
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
@@ -115,11 +119,17 @@ class ChainTests(TemporaryRoot):
         record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                       submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                       first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
-                                local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
-                      first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="source_send")
+                                local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
+                                relay_packets=2, relay_received=2, relay_bytes=31744, data_bytes=111104,
+                                relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, counter_cleared=True,
+                                relay_links=[[0, token, 0, mapping["rank"], token, original_k, 1 if original_k == 0 else -1]
+                                             for token in range(2) for original_k in range(2)],
+                      first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch")
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
         for key, value in (("first_hop_validated", False), ("token_stride", 8192), ("first_hop_bytes", 1),
-                           ("direct_validated", False), ("route_coverage_validated", False), ("direct_bytes", 0),
+                           ("direct_validated", False), ("relay_validated", False), ("dispatch_outputs_validated", False),
+                           ("group_validated", False), ("flags_cleared", False), ("counter_cleared", False),
+                           ("relay_bytes", 0), ("relay_received", None), ("data_bytes", 79360), ("relay_links", []), ("route_coverage_validated", False), ("direct_bytes", 0),
                            ("direct_packets", True), ("direct_received", None), ("same_server_data_bytes", -1),
                            ("weights_unchanged", False), ("source_outputs_validated", False), ("direct_packets", 1),
                            ("quant_mode", 3), ("kernel_scope", "cnt_cumsum"), ("loops", 3), ("submitted", 4), ("completed", 4), ("completed", 6),
@@ -148,6 +158,36 @@ class ChainTests(TemporaryRoot):
                            ("host_boundary_ff", False), ("guard_zero", False), ("completed", 0)):
             with self.subTest(key=key), self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records([dict(record, **{key: value})], [mapping], "run", manifest, config.chain)
+
+    def test_dispatch_links_match_actual_relay_t_across_ranks_and_require_all_children(self):
+        config = dict(self.config().chain, rank_size=16, bs=2, topk=3)
+        records = []
+        for rank in range(16):
+            previous = rank // 8 * 8 + (rank + 7) % 8
+            records.append(dict(rank=rank, first_hop_packets=1, first_hop_received=1,
+                                relay_packets=1, relay_received=1, direct_packets=4,
+                                relay_links=[[(rank + 8) % 16, 0, 1, rank, 15 - rank, 1, 1],
+                                             [(previous + 8) % 16, 0, 1, previous, 15 - previous, 2, -1]]))
+        workflow.validate_dispatch_links(records, config)
+        for fault in ("missing", "shape", "type", "owner", "range", "count", "terminal-count", "t", "orphan", "duplicate", "reuse", "routes"):
+            changed = copy.deepcopy(records)
+            first, terminal = changed[0]["relay_links"]
+            if fault == "missing": changed[0].pop("relay_links")
+            if fault == "shape": first.pop()
+            if fault == "type": first[4] = True
+            if fault == "owner": first[3] = 1
+            if fault == "range": first[4] = 16
+            if fault == "count": first[6] = 2
+            if fault == "terminal-count": terminal[6] = 0
+            if fault == "t": terminal[4] += 1
+            if fault == "orphan": terminal[1] = 1
+            if fault == "duplicate": changed[0]["relay_links"].append(terminal[:])
+            if fault == "reuse":
+                changed[0]["relay_links"].append([8, 1, 1, 0, 15, 1, 1])
+                changed[0]["first_hop_received"] += 1
+            if fault == "routes": changed[0]["direct_packets"] -= 1
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                workflow.validate_dispatch_links(changed, config)
 
     def test_memory_boundary_is_one_functional_case(self):
         os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.MEMORY_BOUNDARY_CHECKPOINT

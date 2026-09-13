@@ -22,16 +22,10 @@ public:
         core_ = GetBlockIdx(); magic_ = magic; pipe_ = pipe;
         counterOffset_ = TileXREpServerDedupCountLayout(experts).counterOffset;
         counts_.Init(commArgs, expertIds, expertTokenNumsOut, sendCountsOut, bs, topK, experts, expertTokenNumsType, magic, pipe);
-        // Bind the complete output ABI; final expert rows are owned by the future receiver.
-        expandX_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(expandXOut));
-        dynamicScales_.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(dynamicScalesOut));
-        sourceWeights_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(expertScalesOut));
         if (core_ < kEpServerDedupSendCoreNum)
             sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe);
-        // The current checkpoint ends at source sends and count/cumsum.
-        // Receiver/relay is not qualified yet; do not execute its partial path.
-        (void)assistExOut;
-        (void)groupOut;
+        else
+            receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe);
         profile_.Mark(1);
     }
 
@@ -43,11 +37,16 @@ public:
             sender_.Process();
             profile_.Mark(3);
             profile_.Skip(4, 3); profile_.Skip(5, 3); profile_.Skip(6, 3);
+            profile_.Skip(7, 3);
         } else {
             profile_.Skip(3, 2);
             counts_.RecvCnt(); profile_.Mark(4);
             counts_.CalcCumsum(); profile_.Mark(5);
             counts_.CompleteCumsum(); profile_.Mark(6);
+            // CompleteCumsum may still be writing expert counts from its UB.
+            // Retire that stage before receiver resets the pipe and reloads GM.
+            PipeBarrier<PIPE_ALL>();
+            receiver_.Process(); profile_.Mark(7);
         }
         counts_.Finish();
         // All 64 cores participate exactly once, after their GM writes complete.
@@ -67,21 +66,21 @@ public:
             SetFlag<HardEvent::MTE3_S>(after); WaitFlag<HardEvent::MTE3_S>(after);
             CompleteServerDedupRound(args_, magic_, pipe_);
         }
-        profile_.Mark(7);
+        profile_.Mark(8);
+        for (uint32_t point = 9U; point < kEpServerDedupProfilePoints; ++point) profile_.Skip(point, 8U);
         profile_.Flush(args_, magic_);
         if (core_ < kEpServerDedupSendCoreNum) sender_.FlushProfile(magic_);
     }
 private:
     ServerDedupCounts counts_;
     ServerDedupSender<XType, Quantized, E4M3> sender_;
+    ServerDedupReceiver<XType, Quantized, E4M3> receiver_;
     ServerDedupProfile profile_;
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
     uint32_t core_ = 0;
     int64_t magic_ = 0;
     uint64_t counterOffset_ = 0;
-    GlobalTensor<uint8_t> expandX_, dynamicScales_;
-    GlobalTensor<float> sourceWeights_;
 };
 } // namespace TileXREp
 #endif

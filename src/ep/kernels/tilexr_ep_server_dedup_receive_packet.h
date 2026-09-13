@@ -7,111 +7,106 @@
 namespace TileXREp {
 using namespace AscendC;
 
+// Immediate events use different HardEvents from the fixed data lane IDs.
 template<HardEvent event>
-__aicore__ inline void ServerDedupReceiveSync(TPipe *pipe)
+__aicore__ inline void ServerDedupReceiveSync()
 {
-    const TEventID id = pipe->FetchEventID(event);
-    SetFlag<event>(id);
-    WaitFlag<event>(id);
+    SetFlag<event>(0U);
+    WaitFlag<event>(0U);
 }
 
-// One probe only: a miss returns to the caller without reading the payload or
-// waiting for MTE3. Scratch sizes are blocks*32B, 32B and blocks*32B.
-__aicore__ inline bool CheckServerDedupPayloadReady(GM_ADDR slot, uint32_t blocks,
-    LocalTensor<float> flags, LocalTensor<float> sum, LocalTensor<float> work, TPipe *pipe)
+__aicore__ inline uint32_t ServerDedupWireOffset(uint32_t logical)
+{
+    return logical / 480U * 512U + logical % 480U;
+}
+
+// All words and entries are individually aligned; the complete tail need not
+// be physically contiguous. The caller establishes MTE2_S before Scalar reads.
+class ServerDedupPacketTail {
+public:
+    __aicore__ inline ServerDedupPacketTail(LocalTensor<uint8_t> wire, uint32_t offset)
+        : wire_(wire), offset_(offset) {}
+    __aicore__ inline uint32_t Word(uint32_t index)
+    {
+        return wire_[ServerDedupWireOffset(offset_ + index * 4U)].ReinterpretCast<uint32_t>().GetValue(0);
+    }
+    __aicore__ inline void SetWord(uint32_t index, uint32_t value)
+    {
+        wire_[ServerDedupWireOffset(offset_ + index * 4U)].ReinterpretCast<uint32_t>().SetValue(0, value);
+    }
+private:
+    LocalTensor<uint8_t> wire_;
+    uint32_t offset_;
+};
+
+__aicore__ inline void ReadServerDedupFlags(GM_ADDR slot, uint32_t blocks, LocalTensor<float> flags)
 {
     GlobalTensor<float> input;
     input.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(slot + 480U));
     DataCopy(flags, input, DataCopyParams{uint16_t(blocks), 1U, 15U, 0U});
-    ServerDedupReceiveSync<HardEvent::MTE2_V>(pipe);
-    // Memory's strided Flag reduction, covering all eight words of each Flag
-    // and every payload block, including blocks containing only metadata.
-    ReduceSum(sum, flags, work, 8U, uint8_t(blocks), 1U);
-    ServerDedupReceiveSync<HardEvent::V_S>(pipe);
-    return sum.GetValue(0) == float(blocks * 8U);
 }
 
-// b32 Copy masks count elements; repeat strides count 32B blocks. Caller
-// supplies distinct packed (blocks*512B) and unpacked (blocks*480B) buffers.
-__aicore__ inline void UnpackServerDedupData(LocalTensor<uint8_t> payload,
-    LocalTensor<uint8_t> wire, uint8_t blocks)
+// Copy one logical output interval from the original packet, skipping Flag
+// blocks. Logical starts are 32B aligned; GM starts and final lengths may not be.
+__aicore__ inline void WriteServerDedupPayloadRange(GlobalTensor<uint8_t> output,
+    LocalTensor<uint8_t> wire, uint32_t logical, uint32_t bytes)
 {
-    auto output = payload.template ReinterpretCast<int32_t>();
-    auto input = wire.template ReinterpretCast<int32_t>();
-    Copy(output, input, uint64_t(64), blocks, {1, 1, 15, 16});
-    Copy(output[64], input[64], uint64_t(56), blocks, {1, 1, 15, 16});
+    uint32_t written = 0U;
+    const uint32_t within = logical % 480U;
+    if (within != 0U && bytes != 0U) {
+        const uint32_t available = 480U - within;
+        const uint32_t head = bytes < available ? bytes : available;
+        DataCopyPad(output, wire[ServerDedupWireOffset(logical)], {1U, head, 0U, 0U, 0U});
+        logical += head; bytes -= head; written += head;
+    }
+    const uint32_t full = bytes / 480U;
+    if (full != 0U) {
+        DataCopyPad(output[written], wire[ServerDedupWireOffset(logical)],
+            {uint16_t(full), 480U, 1U, 0U, 0U});
+        logical += full * 480U; bytes -= full * 480U; written += full * 480U;
+    }
+    if (bytes != 0U)
+        DataCopyPad(output[written], wire[ServerDedupWireOffset(logical)], {1U, bytes, 0U, 0U, 0U});
 }
 
-// Call after a successful full-packet probe. Metadata offsets are meaningful
-// only in the unpacked payload; include its entire reserved tail, not just H.
-__aicore__ inline void LoadServerDedupPayload(GM_ADDR slot, uint32_t blocks,
-    LocalTensor<uint8_t> wire, LocalTensor<uint8_t> payload, TPipe *pipe)
-{
-    GlobalTensor<uint8_t> input;
-    input.SetGlobalBuffer(slot);
-    DataCopy(wire, input, blocks * 512U);
-    ServerDedupReceiveSync<HardEvent::MTE2_V>(pipe);
-    UnpackServerDedupData(payload, wire, uint8_t(blocks));
-    ServerDedupReceiveSync<HardEvent::V_S>(pipe);
-}
-
-// meta is an independent 32B UB. The caller owns its S_MTE3 publication and
-// lifetime. Valid terminal packets have one matching expert in [0,n).
 __aicore__ inline void BuildServerDedupAssist(LocalTensor<uint32_t> meta,
-    LocalTensor<uint32_t> tail, uint32_t myExpert, uint32_t relayRank, uint32_t relayIndex)
+    ServerDedupPacketTail tail, uint32_t myExpert, uint32_t relayRank, uint32_t relayIndex)
 {
-    for (uint32_t word = 0; word < 8U; ++word) meta.SetValue(word, tail.GetValue(word));
-    const int32_t role = int32_t(tail.GetValue(4U));
+    for (uint32_t word = 0; word < 8U; ++word) meta.SetValue(word, tail.Word(word));
+    const int32_t role = int32_t(tail.Word(4U));
     if (role > 0) {
         meta.SetValue(6U, relayRank);
         meta.SetValue(7U, relayIndex);
     } else if (role == -1) {
-        const uint32_t entries = tail.GetValue(5U);
-        for (uint32_t i = 0; i < entries; ++i) {
+        for (uint32_t i = 0; i < tail.Word(5U); ++i) {
             const uint32_t entry = 8U + i * 4U;
-            if (tail.GetValue(entry) != myExpert) continue;
-            meta.SetValue(2U, tail.GetValue(entry + 2U));
-            meta.SetValue(3U, tail.GetValue(entry + 3U));
+            if (tail.Word(entry) != myExpert) continue;
+            meta.SetValue(2U, tail.Word(entry + 2U));
+            meta.SetValue(3U, tail.Word(entry + 3U));
             break;
         }
     }
 }
 
-// Only a first-hop owner builds a group; members preserve original weight bits.
 __aicore__ inline void BuildServerDedupGroup(LocalTensor<uint32_t> group,
-    LocalTensor<uint32_t> tail, uint32_t row, uint32_t relayIndex, uint32_t topK)
+    ServerDedupPacketTail tail, uint32_t row, uint32_t relayIndex, uint32_t topK)
 {
     group.SetValue(0U, row);
-    for (uint32_t i = 0; i < tail.GetValue(5U); ++i) {
+    for (uint32_t i = 0; i < tail.Word(5U); ++i) {
         const uint32_t entry = 8U + i * 4U;
-        group.SetValue(1U + i * 2U, relayIndex * topK + tail.GetValue(entry + 2U));
-        group.SetValue(2U + i * 2U, tail.GetValue(entry + 3U));
+        group.SetValue(1U + i * 2U, relayIndex * topK + tail.Word(entry + 2U));
+        group.SetValue(2U + i * 2U, tail.Word(entry + 3U));
     }
 }
 
-// Prepare one common packed copy for the whole first-hop group. Once ready,
-// all destination writes read it unchanged; buffer completion belongs to caller.
-__aicore__ inline void PrepareServerDedupForward(LocalTensor<uint8_t> wire,
-    LocalTensor<uint8_t> payload, const EpServerDedupDataLayout &layout,
-    uint32_t relayRank, uint32_t relayIndex, TPipe *pipe)
+// Save first-hop metadata before changing this same packet. All subsequent
+// destination writes consume it unchanged until the lane completion event.
+__aicore__ inline void PrepareServerDedupForward(ServerDedupPacketTail tail,
+    uint32_t relayRank, uint32_t relayIndex)
 {
-    auto output = wire.template ReinterpretCast<int32_t>();
-    auto input = payload.template ReinterpretCast<int32_t>();
-    uint64_t mask[2] = {0xffU, 0U};
-    Duplicate<float>(wire.template ReinterpretCast<float>()[120U], 1.0f,
-        mask, uint8_t(layout.blockCount), 1U, 16U);
-    Copy(output, input, uint64_t(64), uint8_t(layout.blockCount), {1, 1, 16, 15});
-    Copy(output[64], input[64], uint64_t(56), uint8_t(layout.blockCount), {1, 1, 16, 15});
-    ServerDedupReceiveSync<HardEvent::V_S>(pipe);
-    // The 32B aligned header fits within a 480B payload block. Only its role
-    // and return reference change; k/weight, entry count and all entries stay.
-    const uint32_t header = uint32_t(layout.tailOffset / 480U * 512U + layout.tailOffset % 480U);
-    auto tail = wire[header].template ReinterpretCast<uint32_t>();
-    tail.SetValue(4U, UINT32_MAX);
-    tail.SetValue(6U, relayRank);
-    tail.SetValue(7U, relayIndex);
-    ServerDedupReceiveSync<HardEvent::S_MTE3>(pipe);
+    tail.SetWord(4U, UINT32_MAX);
+    tail.SetWord(6U, relayRank);
+    tail.SetWord(7U, relayIndex);
 }
 } // namespace TileXREp
-
 #endif

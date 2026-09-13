@@ -28,7 +28,7 @@
 #include "ep_memory_server_dedup_layout.h"
 #include "ep_memory_server_dedup_profile.h"
 #include "../demo/tilexr_ep_expert_ids.h"
-#include "server_dedup_source_send_fixture.h"
+#include "server_dedup_dispatch_reference.h"
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_test.h"
 #endif
@@ -118,8 +118,8 @@ Config Parse(int argc, char **argv)
     Config c {};
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-source-send" : checkpoint;
-    Require(c.checkpoint == "ep-sdedup-p2-source-send" ||
+    c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-dispatch" : checkpoint;
+    Require(c.checkpoint == "ep-sdedup-p2-dispatch" ||
         c.checkpoint == "ep-sdedup-p1-memory-boundary",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
@@ -331,6 +331,7 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 }
 
 #include "server_dedup_source_send_consumer.h"
+#include "server_dedup_dispatch_consumer.h"
 
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_consumer.h"
@@ -353,7 +354,7 @@ int Run(const Config &c)
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
-    std::string stage = "acl-init", batch = "initialization", breakdown, sourceSend;
+    std::string stage = "acl-init", batch = "initialization", breakdown, dispatch;
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
         Check(aclInit(nullptr), "aclInit"); initialized = true;
@@ -407,6 +408,8 @@ int Run(const Config &c)
             weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
         Check(aclrtMemset(buffers[6], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
         Check(aclrtMemset(buffers[9], layout.weightBytes, 0xff, layout.weightBytes), "initialize source weights");
+        for (const uint32_t index : {2U, 5U, 7U, 10U})
+            if (sizes[index]) Check(aclrtMemset(buffers[index], sizes[index], 0xa5, sizes[index]), "initialize dispatch output");
         // Valid count/prefix outputs are nonnegative. Preserve a distinct value
         // when a successful launch fails to write an output element.
         Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0xff, layout.expertTokenNumsBytes), "initialize token counts");
@@ -483,11 +486,11 @@ int Run(const Config &c)
                 previousExpert = cumulative;
             }
         }
-        stage = "source-send-read";
-        sourceSend = ValidateSourceSend(c, *host, layout, buffers, weightsHost);
+        stage = "dispatch-read";
+        dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost);
         if (c.runMode == "breakdown") {
             stage = "breakdown-read";
-            breakdown = ReadSourceSendProfile(c, *host);
+            breakdown = ReadDispatchProfile(c, *host);
         }
         success = true;
     } catch (const std::exception &error) {
@@ -519,7 +522,7 @@ int Run(const Config &c)
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
         if (!breakdown.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown);
-        Marker(c, "EP_SERVER_DEDUP_SOURCE_SEND_PASS", details + sourceSend);
+        Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
     }
     return success ? 0 : 1;
 }

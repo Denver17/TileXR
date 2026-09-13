@@ -17,11 +17,10 @@ void CheckReceiveUnpack(uint32_t h, bool quantized)
     const uint32_t bytes = uint32_t(quantized ? layout.quantCount + layout.scaleBytes : h * 2U);
     const uint32_t blocks = (bytes + 479U) / 480U;
     AscendC::TPipe pipe;
-    AscendC::TBuf<> packetBuf, hiddenBuf;
+    AscendC::TBuf<> packetBuf;
     pipe.InitBuffer(packetBuf, blocks * 512U);
-    pipe.InitBuffer(hiddenBuf, blocks * 480U + 64U);
     auto packet = packetBuf.Get<uint8_t>();
-    auto hidden = hiddenBuf.Get<uint8_t>()[32];
+    std::vector<uint8_t> hidden(blocks * 480U + 64U, 0xcd);
     std::vector<uint8_t> expected(blocks * 480U);
     for (uint32_t i = 0; i < expected.size(); ++i) {
         expected[i] = uint8_t((i * 37U + i / 480U) % 251U);
@@ -30,14 +29,15 @@ void CheckReceiveUnpack(uint32_t h, bool quantized)
     for (uint32_t block = 0; block < blocks; ++block)
         for (uint32_t i = 0; i < 32U; ++i) packet.SetValue(block * 512U + 480U + i, 0xff);
     const auto originalPacket = packetBuf.storage->bytes;
-    TileXREp::UnpackServerDedupData(hidden, packet, uint8_t(blocks));
-    Check(std::memcmp(hidden.Data(expected.size()), expected.data(), expected.size()) == 0,
+    AscendC::GlobalTensor<uint8_t> outputGm;
+    outputGm.SetGlobalBuffer(hidden.data() + 32U);
+    TileXREp::WriteServerDedupPayloadRange(outputGm, packet, 0U, uint32_t(expected.size()));
+    Check(std::memcmp(hidden.data() + 32U, expected.data(), expected.size()) == 0,
         "receiver restores all payload bytes and quantization scales without flag bytes");
     Check(packetBuf.storage->bytes == originalPacket, "receiver unpack leaves the packet unchanged");
-    const auto output = hiddenBuf.Get<uint8_t>();
     for (uint32_t i = 0; i < 32U; ++i)
-        Check(output.GetValue(i) == 0xcd && output.GetValue(32U + expected.size() + i) == 0xcd,
-            "receiver unpack respects both UB guards");
+        Check(hidden[i] == 0xcd && hidden[32U + expected.size() + i] == 0xcd,
+            "receiver unpack respects both output guards");
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
@@ -125,7 +125,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::EpServerDedupSendProfileHeader header {};
             const auto *base = windows[source].data() + detail.offset + core * detail.coreStride;
             std::memcpy(&header, base, sizeof(header));
-            Check(header.marker == TileXREp::kEpServerDedupProfileMarker && header.version == 4 &&
+            Check(header.marker == TileXREp::kEpServerDedupProfileMarker && header.version == 5 &&
                 header.recordBytes == sizeof(TileXREp::EpServerDedupSendProfilePacket) && header.rank == source &&
                 header.core == core && header.generation == 7U + round, "issue header identifies core/rank/generation, including empty cores");
             uint32_t observed = 0, firstHops = 0;

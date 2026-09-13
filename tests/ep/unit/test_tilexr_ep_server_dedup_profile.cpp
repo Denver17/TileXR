@@ -25,13 +25,13 @@ int main()
         for (uint32_t core = 0; core < 64; ++core) {
             AscendC::testCore = core;
             ServerDedupProfile profile;
-            for (uint32_t point = 0; point < 8; ++point) profile.Mark(point);
+            for (uint32_t point = 0; point < 12; ++point) profile.Mark(point);
             profile.Flush(&args, generation);
-            const auto *rows = reinterpret_cast<EpServerDedupProfileRecord *>(base) + core * 2U;
+            const auto *rows = reinterpret_cast<EpServerDedupProfileRecord *>(base) + core * 3U;
             uint64_t previous = 0;
-            for (uint32_t segment = 0; segment < 2; ++segment) {
+            for (uint32_t segment = 0; segment < 3; ++segment) {
                 const auto &row = rows[segment];
-                Check(row.marker == kEpServerDedupProfileMarker && row.version == 4 && row.recordBytes == 64 &&
+                Check(row.marker == kEpServerDedupProfileMarker && row.version == 5 && row.recordBytes == 64 &&
                     row.rank == 0 && row.core == core && row.blockDim == 64 && row.segment == segment && row.generation == generation,
                     "64B profile rows retain complete identity and generation");
                 for (auto tick : row.time) { Check(tick > previous, "ordered timestamp segments"); previous = tick; }

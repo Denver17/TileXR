@@ -156,7 +156,7 @@ class BuildTests(unittest.TestCase):
     def test_production_build_needs_no_inventory_or_runtime_case(self):
         (self.root / "hostfile").unlink()
         with mock.patch.dict(os.environ, {
-                "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
+                "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
                 "TILEXR_VALIDATION_SERVERS": "invalid", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "invalid",
                 "TILEXR_VALIDATION_RUN_MODE": "invalid", "TILEXR_VALIDATION_LOOPS": "invalid",
                 "TILEXR_VALIDATION_TIMEOUT": "invalid", "TILEXR_COMM_ID": "invalid",
@@ -264,7 +264,7 @@ class BuildTests(unittest.TestCase):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
-                    "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
+                    "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
                     "TILEXR_VALIDATION_RUN_MODE": mode, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
                 self.commands.clear()
                 self.build_fixture(self.config("production"))
@@ -279,21 +279,21 @@ class BuildTests(unittest.TestCase):
     def test_breakdown_build_enables_count_profile_and_rejects_baseline_or_legacy_package(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {
-                "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
+                "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
                 "TILEXR_VALIDATION_BREAKDOWN": "1", "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
             config = self.config("production")
             manifest, _ = self.build_fixture(config)
             self.assertTrue(manifest["server_dedup_profiling"])
-            self.assertEqual(manifest["server_dedup_profile_version"], 4)
+            self.assertEqual(manifest["server_dedup_profile_version"], 5)
             configure = next(args for args, _, _ in self.commands if "-S" in args and str(self.root) in args)
             self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON", configure)
             with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="functional"):
                 self.assertEqual(workflow.verify_build(self.config("production", "run"), check_run_mode=False), manifest)
             manifest.pop("server_dedup_profile_version")
             workflow.write_json(config.install / "manifest.json", manifest)
-            with self.assertRaisesRegex(ValueError, "breakdown v4"):
+            with self.assertRaisesRegex(ValueError, "breakdown v5"):
                 workflow.verify_build(config)
-            with self.assertRaisesRegex(ValueError, "breakdown v4"):
+            with self.assertRaisesRegex(ValueError, "breakdown v5"):
                 workflow.verify_build(config, check_run_mode=False)
             with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="performance"):
                 with self.assertRaisesRegex(ValueError, "设备打点开关"):

@@ -1,5 +1,6 @@
 #include <cstring>
 #include <vector>
+#include <set>
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
 
@@ -53,43 +54,30 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
     Packet fixture(h, k, quantized, k == 1 ? 0 : 1);
     const auto &layout = fixture.layout;
     AscendC::TPipe pipe;
-    AscendC::TBuf<> flagsBuf, sumBuf, workBuf, wireBuf, payloadBuf, metaBuf, groupBuf, forwardBuf;
-    pipe.InitBuffer(flagsBuf, layout.blockCount * 32U);
-    pipe.InitBuffer(sumBuf, 32U);
-    pipe.InitBuffer(workBuf, layout.blockCount * 32U);
-    pipe.InitBuffer(wireBuf, layout.tokenStride);
-    pipe.InitBuffer(payloadBuf, layout.packedPayloadBytes + 64U);
+    AscendC::TBuf<> wireBuf, metaBuf, groupBuf;
+    pipe.InitBuffer(wireBuf, layout.tokenStride + 64U);
     pipe.InitBuffer(metaBuf, 96U);
     const uint32_t groupStride = uint32_t(TileXREpDedupAlign(4U + 8U * (k - 1U), 32U));
     pipe.InitBuffer(groupBuf, groupStride + 64U);
-    pipe.InitBuffer(forwardBuf, layout.tokenStride + 64U);
-    auto flags = flagsBuf.Get<float>(), sum = sumBuf.Get<float>(), work = workBuf.Get<float>();
-    auto wire = wireBuf.Get<uint8_t>(), payload = payloadBuf.Get<uint8_t>()[32U];
+    auto wire = wireBuf.Get<uint8_t>()[32U];
     auto meta = metaBuf.Get<uint32_t>()[8U], group = groupBuf.Get<uint32_t>()[8U];
-    auto forward = forwardBuf.Get<uint8_t>()[32U];
+    std::memcpy(wire.Data(fixture.wire.size()), fixture.wire.data(), fixture.wire.size());
+    ServerDedupPacketTail tail(wire, uint32_t(layout.tailOffset));
+    const auto originalWire = wireBuf.storage->bytes;
 
-    // An unrelated send event remains outstanding across all probes.
-    AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(7U);
-    for (uint32_t block = 0; block < layout.blockCount; ++block) {
-        for (uint32_t word : {0U, 7U}) {
-            fixture.SetFlagWord(block, word, 0U);
-            Check(!CheckServerDedupPayloadReady(fixture.wire.data(), layout.blockCount, flags, sum, work, &pipe),
-                "one missing flag word, including tail-only blocks, keeps the packet pending");
-            fixture.SetFlagWord(block, word, 0x3f800000U);
-        }
+    // Device output ranges include block tails and MXFP8 scale starts inside a block.
+    for (const auto &range : {std::pair<uint32_t,uint32_t>{0U, uint32_t(fixture.payload.size())},
+        {uint32_t(layout.quantCount), uint32_t(layout.scaleBytes)},
+        {32U, uint32_t(fixture.payload.size()) - 32U}}) {
+        std::vector<uint8_t> output(range.second + 64U, 0xcd);
+        AscendC::GlobalTensor<uint8_t> gm;
+        gm.SetGlobalBuffer(output.data() + 32U);
+        WriteServerDedupPayloadRange(gm, wire, range.first, range.second);
+        Check(std::memcmp(output.data() + 32U, fixture.payload.data() + range.first, range.second) == 0,
+            "direct UB-to-GM range strips Flag blocks and copies only valid bytes");
+        Check(std::all_of(output.begin(), output.begin() + 32U, [](uint8_t v) { return v == 0xcd; }) &&
+            std::all_of(output.end() - 32U, output.end(), [](uint8_t v) { return v == 0xcd; }), "range output guards");
     }
-    Check(AscendC::Events<AscendC::HardEvent::MTE3_V>()[7U], "probing never consumes an unrelated send event");
-    AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(7U);
-    Check(CheckServerDedupPayloadReady(fixture.wire.data(), layout.blockCount, flags, sum, work, &pipe),
-        "all payload and metadata flags make the complete packet ready");
-    Check(std::all_of(payloadBuf.storage->bytes.begin(), payloadBuf.storage->bytes.end(),
-        [](uint8_t v) { return v == 0xcd; }), "probes leave payload storage untouched");
-    LoadServerDedupPayload(fixture.wire.data(), layout.blockCount, wire, payload, &pipe);
-    Check(std::memcmp(payload.Data(fixture.payload.size()), fixture.payload.data(), fixture.payload.size()) == 0,
-        "load strips every flag and restores hidden, quantization scales and the complete tail");
-    auto tail = payload[layout.tailOffset].ReinterpretCast<uint32_t>();
-    const auto originalPayload = payloadBuf.storage->bytes;
-
     BuildServerDedupAssist(meta, tail, 48U, 8U, 7U);
     for (uint32_t word = 0; word < 8U; ++word) {
         const uint32_t expected = fixture.entries && word >= 6U ? (word == 6U ? 8U : 7U) : fixture.Word(word);
@@ -103,14 +91,12 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
                 "dense group members keep their sparse original-k return slots");
             Check(group.GetValue(2U + 2U * i) == fixture.Word(11U + 4U * i), "group preserves exact FP32 weight bits");
         }
-        PrepareServerDedupForward(forward, payload, layout, 8U, 7U, &pipe);
+        Check(wireBuf.storage->bytes == originalWire, "metadata extraction leaves input unchanged");
+        PrepareServerDedupForward(tail, 8U, 7U);
         auto expected = fixture;
         expected.SetWord(4U, UINT32_MAX); expected.SetWord(6U, 8U); expected.SetWord(7U, 7U); expected.Pack();
-        Check(std::memcmp(forward.Data(expected.wire.size()), expected.wire.data(), expected.wire.size()) == 0,
-            "one common forwarded packet changes only role/return reference and retains all flags and entries");
-        Check(payloadBuf.storage->bytes == originalPayload, "first-hop metadata and forwarding leave input payload read-only");
-        LoadServerDedupPayload(expected.wire.data(), layout.blockCount, wire, payload, &pipe);
-        tail = payload[layout.tailOffset].ReinterpretCast<uint32_t>();
+        Check(std::memcmp(wire.Data(expected.wire.size()), expected.wire.data(), expected.wire.size()) == 0,
+            "in-place common forwarded packet changes only role/return reference and retains all flags and entries");
         for (uint32_t i = 0; i < fixture.entries; ++i) {
             BuildServerDedupAssist(meta, tail, fixture.Word(8U + 4U * i), 99U, 99U);
             for (uint32_t word = 0; word < 8U; ++word) {
@@ -119,10 +105,10 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
                 Check(meta.GetValue(word) == value, "terminal assist selects its expert entry and retains the common return reference");
             }
         }
-        Check(std::memcmp(payload.Data(expected.payload.size()), expected.payload.data(), expected.payload.size()) == 0,
+        Check(std::memcmp(wire.Data(expected.wire.size()), expected.wire.data(), expected.wire.size()) == 0,
             "terminal metadata extraction leaves the common payload read-only");
-    } else Check(payloadBuf.storage->bytes == originalPayload, "DIRECT metadata extraction leaves payload read-only");
-    for (const auto *buffer : {&payloadBuf, &metaBuf, &groupBuf, &forwardBuf}) {
+    } else Check(wireBuf.storage->bytes == originalWire, "DIRECT metadata extraction leaves payload read-only");
+    for (const auto *buffer : {&wireBuf, &metaBuf, &groupBuf}) {
         const auto &bytes = buffer->storage->bytes;
         Check(std::all_of(bytes.begin(), bytes.begin() + 32U, [](uint8_t v) { return v == 0xcd; }) &&
             std::all_of(bytes.end() - 32U, bytes.end(), [](uint8_t v) { return v == 0xcd; }),
@@ -131,7 +117,7 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
 }
 
 template<bool Quantized>
-void CheckStagedReceiver(int32_t role)
+void CheckReceiver(int32_t role)
 {
     constexpr uint32_t h = 209U, k = 6U, rank = 8U, world = 16U, experts = 96U, bs = 2U;
     Packet fixture(h, k, Quantized, role);
@@ -169,7 +155,7 @@ void CheckStagedReceiver(int32_t role)
     uint64_t sendSync = 0;
     std::vector<uint8_t> firstCopy;
     AscendC::GmWriteObserver() = [&](const void *, const void *bytes, uint32_t size) {
-        Check(size == data.tokenStride, "each staged relay sends the complete packet");
+        Check(size == data.tokenStride, "each relay sends the complete packet");
         if (sends == 0) {
             sendSync = AscendC::TestSyncOperations();
             firstCopy.assign(static_cast<const uint8_t *>(bytes), static_cast<const uint8_t *>(bytes) + size);
@@ -181,15 +167,15 @@ void CheckStagedReceiver(int32_t role)
     receiver.Process();
     AscendC::GmWriteObserver() = {};
     Check(sends == (role > 0 ? fixture.entries : 0U), "DIRECT and terminal rows do not start relay groups");
-    Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "staged receiver writes the exact hidden row");
+    Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "receiver writes the exact hidden row");
     if (Quantized) Check(std::memcmp(scales.data() + 32U, fixture.payload.data() + data.quantCount, data.scaleBytes) == 0,
-        "staged receiver writes MXFP8 scale bytes from their logical payload offset");
+        "receiver writes MXFP8 scale bytes from their logical payload offset");
     for (uint32_t word = 0; word < 8U; ++word) {
         uint32_t expected = fixture.Word(word);
         if (role > 0 && word >= 6U) expected = word == 6U ? rank : initialCounter;
         if (role == -1 && word == 2U) expected = fixture.Word(18U);
         if (role == -1 && word == 3U) expected = fixture.Word(19U);
-        Check(assist[8U + word] == expected, "staged receiver writes a complete route-specific assist row");
+        Check(assist[8U + word] == expected, "receiver writes a complete route-specific assist row");
     }
     uint32_t counter;
     std::memcpy(&counter, local.data() + counts.counterOffset, 4U);
@@ -199,7 +185,7 @@ void CheckStagedReceiver(int32_t role)
         Check(groups[row] == 0U, "group byte stride is converted to uint32 element indexing");
         for (uint32_t i = 0; i < fixture.entries; ++i) {
             Check(groups[row + 1U + i * 2U] == initialCounter * k + fixture.Word(10U + i * 4U) &&
-                groups[row + 2U + i * 2U] == fixture.Word(11U + i * 4U), "staged group contains dense original-k/weight members");
+                groups[row + 2U + i * 2U] == fixture.Word(11U + i * 4U), "group contains dense original-k/weight members");
             const uint32_t expert = fixture.Word(8U + i * 4U), q = fixture.Word(9U + i * 4U);
             const auto address = TileXREpServerDedupDispatchOffset(data, 2U, expert / 6U, expert % 6U, q, world, 6U, bs);
             auto expected = fixture;
@@ -211,7 +197,7 @@ void CheckStagedReceiver(int32_t role)
         "non-first-hop packets leave group storage untouched");
     for (uint32_t block = 0; block < data.blockCount; ++block)
         Check(std::all_of(local.begin() + slot + block * 512U + 480U, local.begin() + slot + (block + 1U) * 512U,
-            [](uint8_t v) { return v == 0; }), "staged serial cleanup touches the consumed input flags");
+            [](uint8_t v) { return v == 0; }), "kernel-end cleanup touches the consumed input flags");
     for (const auto *bytes : {&hidden, &scales})
         Check(std::all_of(bytes->begin(), bytes->begin() + 32U, [](uint8_t v) { return v == 0xcd; }) &&
             std::all_of(bytes->end() - 32U, bytes->end(), [](uint8_t v) { return v == 0xcd; }), "output writes preserve guards");
@@ -220,22 +206,176 @@ void CheckStagedReceiver(int32_t role)
             std::all_of(words->end() - 8U, words->end(), [](uint32_t v) { return v == 0xcdcdcdcdU; }),
             "assist and group writes preserve both output guards");
 }
+// CPU hooks model buffer ownership, not asynchronous device execution. Keep
+// each issued MTE3 source snapshot until the corresponding lane wait, so an
+// early Scalar overwrite of packet/meta/group storage is observable.
+template<bool Quantized>
+void CheckBatchReceiver(uint32_t h)
+{
+    constexpr uint32_t bs = 64U, k = 6U, experts = 96U, world = 16U, rank = 8U, owned = 24U;
+    const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
+    const auto counts = TileXREpServerDedupCountLayout(experts);
+    const auto start = TileXREpServerDedupDispatchOffset(data, 0U, rank, 0U, 0U, world, 6U, bs);
+    std::vector<uint8_t> local(start + bs * data.tokenStride * 4U + 32U, 0xa5);
+    auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset);
+    for (uint32_t i = 0; i < experts; ++i) prefix[i] = (i / world + 1U) * bs;
+    uint32_t zero = 0;
+    std::memcpy(local.data() + counts.counterOffset, &zero, 4U);
+    std::vector<Packet> fixtures;
+    for (uint32_t q = 0; q < bs; ++q) {
+        fixtures.emplace_back(h, k, Quantized, q % 3U == 0U ? 1 : 0);
+        auto &packet = fixtures.back();
+        packet.SetWord(0U, 0U); packet.SetWord(1U, q);
+        packet.payload[0] = uint8_t(q);
+        for (uint32_t entry = 0; entry < packet.entries; ++entry) {
+            packet.SetWord(8U + entry * 4U, 49U + entry);
+            packet.SetWord(9U + entry * 4U, q);
+        }
+        packet.Pack();
+        std::memcpy(local.data() + start + q * data.tokenStride, packet.wire.data(), data.tokenStride);
+        if (q < 16U) {
+            // A single missing word anywhere, including tail-only blocks,
+            // must defer the whole packet; later rows are already available.
+            const uint32_t block = q % 2U ? uint32_t(data.blockCount) - 1U : q / 2U % data.blockCount;
+            const uint32_t word = q % 8U;
+            std::memcpy(local.data() + start + q * data.tokenStride + block * 512U + 480U + word * 4U, &zero, 4U);
+        }
+    }
+    TileXR::CommArgs args {};
+    args.rank = rank; args.rankSize = world; args.peerMems[rank] = local.data();
+    const uint32_t hiddenBytes = Quantized ? h : 2U * h;
+    const uint32_t groupStride = uint32_t(TileXREpDedupAlign(4U + 8U * (k - 1U), 32U));
+    std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
+    std::vector<uint32_t> assist(owned * 8U + 16U, 0xcdcdcdcdU);
+    std::vector<uint32_t> groups((8U * bs * groupStride + 64U) / 4U, 0xcdcdcdcdU);
+    AscendC::testCore = 48U;
+    AscendC::TPipe pipe;
+    ServerDedupReceiver<uint16_t, Quantized, false> receiver;
+    receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,
+        reinterpret_cast<uint8_t *>(assist.data() + 8U), reinterpret_cast<uint8_t *>(groups.data() + 8U),
+        bs, h, k, experts, &pipe);
+    bool released = false, inLane = false;
+    uint32_t flagReads = 0U, peak = 0U, currentLane = 0U;
+    std::vector<uint32_t> processed;
+    struct Read { const uint8_t *pointer; std::vector<uint8_t> bytes; };
+    std::array<std::vector<Read>, 8> reads;
+    std::array<bool, 8> queued {};
+    AscendC::EventObserver() = [&](AscendC::HardEvent event, uint32_t lane, bool set) {
+        if (event != AscendC::HardEvent::MTE3_MTE2) return;
+        if (!set) {
+            for (const auto &read : reads[lane])
+                Check(std::memcmp(read.pointer, read.bytes.data(), read.bytes.size()) == 0,
+                    "lane packet/meta/group remain unchanged until the completion wait");
+            reads[lane].clear(); queued[lane] = false; currentLane = lane;
+        } else if (!reads[lane].empty()) {
+            queued[lane] = true;
+            peak = std::max(peak, uint32_t(std::count(queued.begin(), queued.end(), true)));
+            inLane = false;
+        }
+    };
+    const auto preserve = [&](const void *, const void *pointer, uint32_t bytes) {
+        if (!inLane) {
+            Check(processed.size() == owned && std::none_of(queued.begin(), queued.end(), [](bool v) { return v; }),
+                "Flag cleanup starts only after every data/metadata lane has been drained");
+            return;
+        }
+        const auto *p = static_cast<const uint8_t *>(pointer);
+        reads[currentLane].push_back({p, std::vector<uint8_t>(p, p + bytes)});
+    };
+    AscendC::GmWriteObserver() = preserve;
+    AscendC::PaddedWriteObserver() = preserve;
+    AscendC::GmReadObserver() = [&](const void *pointer, uint32_t size) {
+        const auto offset = reinterpret_cast<uintptr_t>(pointer) - reinterpret_cast<uintptr_t>(local.data() + start);
+        if (offset >= bs * data.tokenStride) return;
+        const uint32_t q = uint32_t(offset / data.tokenStride);
+        if (offset % data.tokenStride == 480U) {
+            Check(++flagReads < 256U, "bounded pending progress");
+            if (q >= 16U && !released) {
+                Check(processed.empty(), "none of an unready first batch is consumed");
+                for (uint32_t pending = 0; pending < 16U; ++pending)
+                    std::memcpy(local.data() + start + pending * data.tokenStride,
+                        fixtures[pending].wire.data(), data.tokenStride);
+                released = true;
+            }
+        } else if (size == data.tokenStride) {
+            Check(released && q < owned, "ready packet belongs to this receive owner");
+            Check(std::find(processed.begin(), processed.end(), q) == processed.end(), "swap removal never consumes a stable row twice");
+            processed.push_back(q);
+            inLane = true;
+        }
+    };
+    receiver.Process();
+    AscendC::GmReadObserver() = {}; AscendC::GmWriteObserver() = {};
+    AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
+    Check(processed.size() == owned && processed.front() == 23U && processed[7U] == 16U,
+        "scan advances past an unready full batch and consumes a ready tail in reverse order");
+    const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
+    const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + 32U + groupStride));
+    Check(peak == lanes, "ready batches larger than the lane pool retain concurrent ownership");
+    Check(pipe.bytes == fixed + lanes * (data.tokenStride + 32U + groupStride), "UB contains one packet/meta/group per lane and an independent 16-slot probe pool");
+    std::set<uint32_t> groupIds;
+    for (uint32_t q = 0; q < owned; ++q) {
+        const auto &packet = fixtures[q];
+        Check(std::memcmp(hidden.data() + 32U + q * hiddenBytes, packet.payload.data(), hiddenBytes) == 0,
+            "each stable output row retains its source Token despite pending permutation");
+        if (Quantized) Check(std::memcmp(scales.data() + 32U + q * data.scaleBytes,
+            packet.payload.data() + data.quantCount, data.scaleBytes) == 0, "scale rows follow hidden rows");
+        const auto *meta = assist.data() + 8U + q * 8U;
+        Check(meta[0] == 0U && meta[1] == q && meta[3] == packet.Word(3U), "metadata lanes follow stable rows");
+        if (packet.entries) {
+            Check(meta[4] == packet.entries && meta[6] == rank && groupIds.insert(meta[7]).second,
+                "a first hop allocates a unique t and keeps its original role");
+            const auto *group = groups.data() + 8U + meta[7] * groupStride / 4U;
+            Check(group[0] == q, "group refers to the first-hop output row");
+            for (uint32_t i = 0; i < packet.entries; ++i) {
+                Check(group[1U + i * 2U] == meta[7] * k + packet.Word(10U + 4U * i) &&
+                    group[2U + i * 2U] == packet.Word(11U + 4U * i), "group lane preserves members and exact weights");
+                const uint64_t target = start + (uint64_t(i + 1U) * bs + q) * data.tokenStride;
+                auto expected = packet;
+                expected.SetWord(4U, UINT32_MAX); expected.SetWord(6U, rank); expected.SetWord(7U, meta[7]); expected.Pack();
+                Check(std::memcmp(local.data() + target, expected.wire.data(), expected.wire.size()) == 0,
+                    "same-card terminal slots remain ready for their other receive owner");
+            }
+        }
+        for (uint32_t block = 0; block < data.blockCount; ++block)
+            Check(std::all_of(local.begin() + start + q * data.tokenStride + block * 512U + 480U,
+                local.begin() + start + q * data.tokenStride + (block + 1U) * 512U, [](uint8_t v) { return v == 0; }),
+                "kernel-end cleanup clears every owned Flag block");
+    }
+    for (uint32_t q = owned; q < bs; ++q)
+        Check(std::memcmp(local.data() + start + q * data.tokenStride, fixtures[q].wire.data(), data.tokenStride) == 0,
+            "cleanup does not touch neighboring cores' slots");
+    for (const auto *bytes : {&hidden, &scales})
+        Check(std::all_of(bytes->begin(), bytes->begin() + 32U, [](uint8_t v) { return v == 0xcd; }) &&
+            std::all_of(bytes->end() - 32U, bytes->end(), [](uint8_t v) { return v == 0xcd; }), "batch output guards");
+    // The same object and TPipe must also handle an empty next receive set.
+    std::fill(prefix, prefix + experts, 0U);
+    const auto prior = hidden;
+    receiver.Process();
+    Check(hidden == prior && pipe.bytes == experts * 4U, "empty receive set has no data/probe/lane allocation or output writes");
+}
+
 } // namespace
 
 int main()
 {
     try {
         CheckPacket(1U, 1U, false);
+        CheckBatchReceiver<false>(7168U);
+        CheckBatchReceiver<true>(7168U);
+        CheckBatchReceiver<false>(20000U);
+        CheckBatchReceiver<false>(42000U);
         for (bool quantized : {false, true}) {
             for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
             CheckPacket(225U, 32U, quantized);
         }
         for (int32_t role : {0, 1, -1}) {
-            CheckStagedReceiver<false>(role);
-            CheckStagedReceiver<true>(role);
+            CheckReceiver<false>(role);
+            CheckReceiver<true>(role);
         }
     } catch (const std::exception &error) {
-        AscendC::GmWriteObserver() = {};
+        AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};
+        AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
         std::cerr << error.what() << '\n';
         return 1;
     }

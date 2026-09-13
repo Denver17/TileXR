@@ -31,7 +31,8 @@ public:
         const uint32_t core = AscendC::GetBlockIdx();
         for (uint32_t segment = 0; segment < kEpServerDedupProfileSegments; ++segment) {
             __gm__ EpServerDedupProfileRecord *record =
-                reinterpret_cast<__gm__ EpServerDedupProfileRecord *>(args->peerMems[args->rank]) + core * 2U + segment;
+                reinterpret_cast<__gm__ EpServerDedupProfileRecord *>(args->peerMems[args->rank]) +
+                    core * kEpServerDedupProfileSegments + segment;
             record->marker = kEpServerDedupProfileMarker;
             record->version = kEpServerDedupProfileVersion;
             record->recordBytes = sizeof(*record);
