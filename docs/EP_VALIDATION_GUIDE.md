@@ -81,7 +81,7 @@ FP16 的量化组合使用相同命令并设置 `dtype=fp16`。两种 FP8 均为
 python3 tools/validation/export_expert_ids.py /path/to/run/summary.json
 ```
 
-卡数、BS、TopK 和专家总数取自该 summary，输出保留 `expert_ids[rank][token][original_k]` 顺序及运行身份。
+卡数、BS、TopK 和专家总数取自该 summary，默认输出紧凑 JSON，保留 `expert_ids[rank][token][original_k]` 顺序及运行身份；需要人工阅读时追加 `--pretty`。
 分析 relay 选择时应使用本次保存的列表并保留原始 k 顺序；跨环境仅凭 seed 重建可能受 `std::shuffle` 实现影响。
 脚本仅扫描同次运行的 `inputs/` 和 `nodes/*/inputs/`，缺 rank、重复 rank、字节数错误或专家编号越界均报错，不导出部分结果；失败运行在输入齐全时也可导出用于诊断。汇总只证明输入可解析，不证明设备路由或中转负载均衡。
 

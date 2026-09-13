@@ -8,7 +8,7 @@ import struct
 import sys
 
 
-def export_expert_ids(summary_path):
+def export_expert_ids(summary_path, pretty=False):
     summary_path = Path(summary_path).expanduser().resolve()
     report = json.loads(summary_path.read_text(encoding="utf-8"))
     config = report["chain_configuration"]
@@ -60,16 +60,22 @@ def export_expert_ids(summary_path):
         "expert_ids": all_ids,
     }
     output = root / f"expert-ids-{ranks}ranks.json"
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    output.write_text(json.dumps(
+        result,
+        ensure_ascii=False,
+        indent=2 if pretty else None,
+        separators=None if pretty else (",", ":"),
+    ) + "\n", encoding="utf-8")
     return output, ranks, bs, k
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("summary", type=Path, help="本次运行的 summary.json 文件路径")
+    parser.add_argument("--pretty", action="store_true", help="使用缩进格式输出，默认输出紧凑 JSON")
     args = parser.parse_args()
     try:
-        output, ranks, bs, k = export_expert_ids(args.summary)
+        output, ranks, bs, k = export_expert_ids(args.summary, pretty=args.pretty)
     except (OSError, UnicodeError, ValueError, KeyError, TypeError) as error:
         print(f"ERROR: {error}", file=sys.stderr)
         return 1
