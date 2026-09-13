@@ -5,20 +5,10 @@
 #include "ep_memory_server_dedup_data_layout.h"
 #include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_receive_tasks.h"
+#include "tilexr_ep_server_dedup_receive_packet.h"
 
 namespace TileXREp {
 using namespace AscendC;
-
-// Remove each 32B flag from 512B packets. Copy masks count b32 elements;
-// repeat strides count 32B blocks. The caller owns MTE2/V/MTE3 ordering.
-__aicore__ inline void UnpackServerDedupData(LocalTensor<uint8_t> hidden,
-    LocalTensor<uint8_t> packet, uint8_t blocks)
-{
-    auto hiddenWords = hidden.template ReinterpretCast<int32_t>();
-    auto packetWords = packet.template ReinterpretCast<int32_t>();
-    Copy(hiddenWords, packetWords, uint64_t(64), blocks, {1, 1, 15, 16});
-    Copy(hiddenWords[64], packetWords[64], uint64_t(56), blocks, {1, 1, 15, 16});
-}
 
 // The receive side owns the Dispatch slots of this rank.  Its work is kept
 // separate from ServerDedupCounts because the prefix table is the only
@@ -55,22 +45,20 @@ public:
         const uint32_t prefixBytes = uint32_t(TileXREpDedupAlign(
             uint64_t(experts_) * sizeof(int32_t), 32U));
         const uint32_t packetBytes = uint32_t(data_.tokenStride);
-        const uint32_t hiddenBytes = uint32_t(Quantized ? h_ : h_ * sizeof(XType));
         const uint32_t blockCount = uint32_t(data_.blockCount);
-        const uint32_t payloadDataBytes = uint32_t(Quantized ? data_.quantCount + data_.scaleBytes : hiddenBytes);
-        const uint32_t hiddenBlocks = uint32_t((payloadDataBytes + 479U) / 480U);
-        const uint32_t hiddenPackedBytes = hiddenBlocks * 480U;
 
         pipe_->Reset();
-        TBuf<> prefixBuf, packetBuf, hiddenBuf, flagBuf, relayBuf, groupBuf, scalarBuf;
+        TBuf<> prefixBuf, packetBuf, payloadBuf, flagBuf, relayBuf, groupBuf, metaBuf, sumBuf, reduceBuf;
         pipe_->InitBuffer(prefixBuf, prefixBytes);
         pipe_->InitBuffer(packetBuf, packetBytes);
-        pipe_->InitBuffer(hiddenBuf, hiddenPackedBytes);
+        pipe_->InitBuffer(payloadBuf, uint32_t(data_.packedPayloadBytes));
         pipe_->InitBuffer(flagBuf, blockCount * 32U);
+        pipe_->InitBuffer(sumBuf, 32U);
+        pipe_->InitBuffer(reduceBuf, blockCount * 32U);
         pipe_->InitBuffer(relayBuf, packetBytes);
         pipe_->InitBuffer(groupBuf, uint32_t(TileXREpDedupAlign(
             kEpServerDedupGroupMembersOffset + uint64_t(k_ - 1U) * sizeof(EpServerDedupGroupMember), 32U)));
-        pipe_->InitBuffer(scalarBuf, 64U);
+        pipe_->InitBuffer(metaBuf, 32U);
 
         auto prefix = prefixBuf.Get<int32_t>();
         GlobalTensor<int32_t> prefixGlobal;
@@ -88,11 +76,13 @@ public:
         if (tasks.Count() == 0U) return;
 
         auto packet = packetBuf.Get<uint8_t>();
-        auto hidden = hiddenBuf.Get<uint8_t>();
+        auto payload = payloadBuf.Get<uint8_t>();
         auto flags = flagBuf.Get<float>();
         auto relay = relayBuf.Get<uint8_t>();
         auto group = groupBuf.Get<uint32_t>();
-        auto scalar = scalarBuf.Get<int32_t>();
+        auto meta = metaBuf.Get<uint32_t>();
+        auto sum = sumBuf.Get<float>();
+        auto reduce = reduceBuf.Get<float>();
 
         for (uint32_t pending = 0U; pending < tasks.PendingCount(); ++pending) {
             const uint32_t stable = tasks.PendingIndex(pending);
@@ -102,7 +92,7 @@ public:
             const uint32_t source = (region / localExperts_ + uint32_t(args_->rankSize) -
                 uint32_t(args_->rank)) % uint32_t(args_->rankSize);
             ReceiveOne(source, region % localExperts_, q,
-                tasks.Begin() + stable, packet, hidden, flags, relay, group, scalar);
+                tasks.Begin() + stable, packet, payload, flags, relay, group, meta, sum, reduce);
         }
     }
 
@@ -122,25 +112,10 @@ private:
             localExperts_, bs_);
     }
 
-    __aicore__ inline bool PayloadReady(__gm__ uint8_t *slot, LocalTensor<float> flags)
-    {
-        GlobalTensor<float> flagGlobal;
-        flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(slot + 480U));
-        DataCopy(flags, flagGlobal, DataCopyParams{
-            uint16_t(data_.blockCount), 1U, 15U, 0U});
-        Sync<HardEvent::MTE2_V>();
-        for (uint32_t block = 0U; block < data_.blockCount; ++block) {
-            for (uint32_t word = 0U; word < 8U; ++word) {
-                if (flags.GetValue(block * 8U + word) != 1.0f) return false;
-            }
-        }
-        return true;
-    }
-
     __aicore__ inline void ClearFlags(__gm__ uint8_t *slot, LocalTensor<float> flags)
     {
         Duplicate<float>(flags, 0.0f, uint32_t(data_.blockCount) * 8U);
-        Sync<HardEvent::S_MTE3>();
+        Sync<HardEvent::V_MTE3>();
         GlobalTensor<float> flagGlobal;
         flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(slot + 480U));
         DataCopy(flagGlobal, flags, DataCopyParams{
@@ -164,28 +139,9 @@ private:
         return AtomicAdd(counter, 1U);
     }
 
-    __aicore__ inline void SendForward(LocalTensor<uint8_t> packet, LocalTensor<uint8_t> relay,
-        LocalTensor<int32_t> tail, uint32_t srcRank, uint32_t destinationExpert,
-        uint32_t destinationQ, uint32_t originalK, uint32_t relayIndex, float weight)
+    __aicore__ inline void SendForward(LocalTensor<uint8_t> relay,
+        uint32_t srcRank, uint32_t destinationExpert, uint32_t destinationQ)
     {
-        auto packetWords = packet.template ReinterpretCast<int32_t>();
-        auto relayWords = relay.template ReinterpretCast<int32_t>();
-        Copy(relayWords, packetWords, uint64_t(64), uint8_t(data_.blockCount), {1, 1, 16, 15});
-        Copy(relayWords[64], packetWords[64], uint64_t(56), uint8_t(data_.blockCount), {1, 1, 16, 15});
-        Sync<HardEvent::V_S>();
-        auto relayTail = relay[data_.tailOffset].template ReinterpretCast<int32_t>();
-        for (uint32_t i = 0U; i < uint32_t(data_.payloadBytes - data_.tailOffset) / 4U; ++i) {
-            relayTail.SetValue(i, tail.GetValue(i));
-        }
-        auto relayWeights = relayTail.template ReinterpretCast<float>();
-        relayTail.SetValue(2U, int32_t(originalK));
-        relayWeights.SetValue(3U, weight);
-        relayTail.SetValue(4U, -1);
-        relayTail.SetValue(5U, 0);
-        relayTail.SetValue(6U, int32_t(args_->rank));
-        relayTail.SetValue(7U, int32_t(relayIndex));
-        Sync<HardEvent::S_MTE3>();
-
         const uint32_t destination = destinationExpert / localExperts_;
         GlobalTensor<uint8_t> destinationGm;
         destinationGm.SetGlobalBuffer(args_->peerMems[destination] +
@@ -193,70 +149,52 @@ private:
                 destinationExpert % localExperts_, destinationQ,
                 uint32_t(args_->rankSize), localExperts_, bs_));
         DataCopy(destinationGm, relay, uint32_t(data_.tokenStride));
-        Sync<HardEvent::MTE3_S>();
-        (void)packet;
     }
 
     __aicore__ inline void ReceiveOne(uint32_t source, uint32_t localExpert, uint32_t q,
-        uint32_t row, LocalTensor<uint8_t> packet, LocalTensor<uint8_t> hidden,
+        uint32_t row, LocalTensor<uint8_t> packet, LocalTensor<uint8_t> payload,
         LocalTensor<float> flags, LocalTensor<uint8_t> relay, LocalTensor<uint32_t> group,
-        LocalTensor<int32_t> scalar)
+        LocalTensor<uint32_t> meta, LocalTensor<float> sum, LocalTensor<float> reduce)
     {
         __gm__ uint8_t *const slot = SlotAddress(source, localExpert, q);
-        while (!PayloadReady(slot, flags)) {}
-
-        GlobalTensor<uint8_t> sourceGlobal;
-        sourceGlobal.SetGlobalBuffer(slot);
-        DataCopy(packet, sourceGlobal, uint32_t(data_.tokenStride));
-        Sync<HardEvent::MTE2_V>();
-
-        // Include quantization padding/scales, matching hiddenBuf's allocation.
-        const uint32_t payloadDataBytes = uint32_t(Quantized ?
-            data_.quantCount + data_.scaleBytes : hiddenBytes_);
-        const uint32_t hiddenBlocks = (payloadDataBytes + 479U) / 480U;
-        UnpackServerDedupData(hidden, packet, uint8_t(hiddenBlocks));
+        while (!CheckServerDedupPayloadReady(slot, uint32_t(data_.blockCount), flags, sum, reduce, pipe_)) {}
+        LoadServerDedupPayload(slot, uint32_t(data_.blockCount), packet, payload, pipe_);
         Sync<HardEvent::V_MTE3>();
-        DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], hidden,
+        DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], payload,
             {1U, hiddenBytes_, 0U, 0U, 0U});
         if constexpr (Quantized) {
             DataCopyPad(dynamicScales_[uint64_t(row) * data_.scaleBytes],
-                hidden[data_.quantCount],
+                payload[data_.quantCount],
                 {1U, uint32_t(data_.scaleBytes), 0U, 0U, 0U});
         }
         Sync<HardEvent::MTE3_S>();
 
-        auto tail = packet[data_.tailOffset].template ReinterpretCast<int32_t>();
-        const int32_t forwardCount = tail.GetValue(4U);
+        auto tail = payload[data_.tailOffset].template ReinterpretCast<uint32_t>();
+        const int32_t forwardCount = int32_t(tail.GetValue(4U));
         if (forwardCount > 0) {
             const uint32_t relayIndex = AllocateRelayIndex();
-            auto assist = tail.template ReinterpretCast<uint32_t>();
-            assist.SetValue(6U, int32_t(args_->rank));
-            assist.SetValue(7U, int32_t(relayIndex));
-            WriteAssist(row, assist);
+            BuildServerDedupAssist(meta, tail, uint32_t(args_->rank) * localExperts_ + localExpert,
+                uint32_t(args_->rank), relayIndex);
+            WriteAssist(row, meta);
+            BuildServerDedupGroup(group, tail, row, relayIndex, k_);
+            PrepareServerDedupForward(relay, payload, data_, uint32_t(args_->rank), relayIndex, pipe_);
 
-            const uint32_t strideWords = uint32_t(data_.payloadBytes - data_.tailOffset) / 4U;
             for (uint32_t i = 0U; i < uint32_t(forwardCount); ++i) {
                 const uint32_t entry = 8U + i * 4U;
                 const uint32_t destinationExpert = uint32_t(tail.GetValue(entry));
                 const uint32_t destinationQ = uint32_t(tail.GetValue(entry + 1U));
-                const uint32_t originalK = uint32_t(tail.GetValue(entry + 2U));
-                const float weight = tail.template ReinterpretCast<float>().GetValue(entry + 3U);
-                group.SetValue(0U, row);
-                group.SetValue(1U + i * 2U, relayIndex * k_ + originalK);
-                group.SetValue(2U + i * 2U, uint32_t(tail.GetValue(entry + 3U)));
-                SendForward(packet, relay, tail, uint32_t(tail.GetValue(0U)),
-                    destinationExpert, destinationQ, originalK, relayIndex, weight);
+                SendForward(relay, tail.GetValue(0U), destinationExpert, destinationQ);
             }
             const uint32_t groupStride = uint32_t(TileXREpDedupAlign(
                 kEpServerDedupGroupMembersOffset + uint64_t(k_ - 1U) * sizeof(EpServerDedupGroupMember), 32U));
-            DataCopyPad(group_[uint64_t(relayIndex) * groupStride], group,
+            DataCopyPad(group_[uint64_t(relayIndex) * groupStride / sizeof(uint32_t)], group,
                 {1U, groupStride, 0U, 0U, 0U});
             Sync<HardEvent::MTE3_S>();
         } else {
-            WriteAssist(row, tail.template ReinterpretCast<uint32_t>());
+            BuildServerDedupAssist(meta, tail, uint32_t(args_->rank) * localExperts_ + localExpert, 0U, 0U);
+            WriteAssist(row, meta);
         }
         ClearFlags(slot, flags);
-        (void)scalar;
     }
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;

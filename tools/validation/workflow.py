@@ -48,6 +48,7 @@ REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
 REQUIRED_TESTS = {f"test_tilexr_ep_server_dedup_{name}" for name in CHECKS} | {
     "test_tilexr_ep_server_dedup_counts", "test_tilexr_ep_server_dedup_source_send",
+    "test_tilexr_ep_server_dedup_receive_packet",
     "test_dispatch_memory_trace", "test_msprof_kernel_stats", "test_tilexr_ep_layout",
     "test_tilexr_ep_expert_ids", "test_tilexr_ep_host_validation", "test_tilexr_ep_kernel_launch",
     "test_tilexr_moonep_planner_public_abi", "test_tilexr_ep_plan_layout", "test_tilexr_ep_plan_reference",

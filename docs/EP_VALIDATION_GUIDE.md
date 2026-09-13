@@ -2,7 +2,7 @@
 
 ## 当前提交：完整源端发送（设计验证流程 §2.4）
 
-当前检查点为 `ep-sdedup-p2-source-send`：保留 cnt 发送/接收、cumsum 和第一跳发送，新增 DIRECT 执行。每个发送核先逐 Token 分类并发送全部第一跳，再从本 server 开始，按 `(rank/8 + step) % (rankSize/8)` 的顺序遍历目标 server 并执行直发表；同一 server 内保持原始 Token/k 顺序，沿用缓存的 tokenOffset/originalK/expertId/q。两阶段共用发送池和包序号，之间无新增屏障。sourceMask/expertScalesOut 随本模块完成；接收转发、最终 expert 行整理、assistEx/group 生成及 Combine 留待后续模块。
+当前检查点为 `ep-sdedup-p2-source-send`：保留 cnt 发送/接收、cumsum 和第一跳发送，新增 DIRECT 执行。每个发送核先逐 Token 分类并发送全部第一跳，再从本 server 开始，按 `(rank/8 + step) % (rankSize/8)` 的顺序遍历目标 server 并执行直发表；同一 server 内保持原始 Token/k 顺序，沿用缓存的 tokenOffset/originalK/expertId/q。两阶段共用发送池和包序号，之间无新增屏障。sourceMask/expertScalesOut 随本模块完成；接收包处理及 assistEx/group 已有独立实现和 Host 测试，生产接收调度、最终 expert 行整理及 Combine 留待后续模块。
 
 例如 64P 的 server7 按 `7→0→1→2→3→4→5→6` 发送 DIRECT，本 server 包含本卡与同 server 其他卡。48 个发送核各自推进，本核对某 server 无任务就跳过；不增加 server 边界同步或 MTE3 排空，不能据此推断所有核同时切换 server，或先前 server 的 DMA 已完成。实现每个 server 扫描现有 16B 直发表一次，复用原 UB，无新增索引表；BS96/K6 下每核最多 12 项，64P 最多 96 次成员检查，128P 最多 192 次。仅调整发送顺序，不改变包数、通信字节或槽位。
 
@@ -18,7 +18,28 @@
 
 接收准备维护约束：cnt 的逻辑顺序 `localExpert*R+source` 与物理槽位区 `((source+rank)%R)*L+localExpert` 不同，tokenPos 必须保存后者乘 BS 再加原 q。构表只遍历与本核行区间相交的 q，不为零 cnt 生成任务。地址乘完整 T 前扩为 uint64。读取 GM 前缀时，prefixOffset 相对 cnt 区，完整地址必须包含 `cntOffset + prefixOffset + receiver*prefixStride`；已有 UB 前缀可直接消费，但不得跨 TPipe Reset 保存旧 Tensor。本地回归从真实计数产物构表，与发送地址逐行比较，并检查不均匀分区、多轮/空结果、pending 替换、UB 预算及无额外 GM IO/同步；不证明真实监听、异步转发或数据 Flag 清理。R05-05 的完整接收 UB 总预算仍待确定，不能用独立构表通过推断任意接收不均衡均可容纳。
 
-实际执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
+接收包增量实现完整 DataAsFlag 探测与解包，生成独立 32B assistEx、dense group 及一份公共转发包。探测覆盖全部块（包括仅含 metadata 的块）的 8 个 FP32 Flag word，通过后读取完整 T 并移除所有 32B Flag。第一跳保留自己的 k/weight 和正 forwardCount，填入 relayRank/t；公共终端包只修改 forwardCount=-1、relayRank/t，保留原头部 k/weight、有效 entry 数及全部 entry。终端按当前 expert 查找有效 entry，把匹配的原 k/weight 写入独立 assistEx。同 Token 的转发连续下发，不在各 entry 之间插入同步。
+
+本增量在服务器仓库根目录逐条执行以下命令即可验证，无需同步或启动多卡运行：
+
+```bash
+bash build_all.sh
+./install/validation/bin/test_tilexr_ep_server_dedup_receive_packet
+```
+
+第二条应返回 0 并输出 `EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet`。`BUILD_PASS` 仅证明构建、安装与清单检查完成，不代表执行了此测试；默认仍关闭设备打点，仅编译 A5 kernel。开发机可定点运行：
+
+```bash
+cmake -S tests/ep -B build-server-dedup-counts
+cmake --build build-server-dedup-counts --target test_tilexr_ep_server_dedup_receive_packet -j4
+ctest --test-dir build-server-dedup-counts --output-on-failure -R '^test_tilexr_ep_server_dedup_receive_packet$'
+```
+
+测试覆盖 K=1/6/32、量化/非量化字节布局、metadata-only 块、跨块 entries、稀疏 originalK、非整数权重位型及首尾 guard；暂存串行 receiver 夹具验证三角色的 hidden/scales/assist/group 写出、非零 t、本卡/跨卡目标地址和相同转发包。量化用例验证已有字节的搬运，不执行真实 MXFP8 运算；CPU 替身不证明异步流水或分布式进度。完整接收的 buffer 尺寸/数量/总 UB、EventID 分配及跨 Token 调度仍属 R05-05/R05-06，最终清理组织仍属 R06。生产入口尚未调用 receiver，source-send 的 NPU PASS 不能作为这些新函数的设备通过证据。
+
+维护约束：tailOffset 是剥离 Flag 后的逻辑偏移，不能直接索引 packed wire；旧实现只解 hidden 时会误读跨块尾部。应整包解包，重打包时用 `tailOffset/480*512 + tailOffset%480` 定位 32B 对齐头部，公共副本不按目标改写 k/weight 或清空 entry 数。FP32 权重按 uint32 位型复制；group 行 stride 是字节数，索引 uint32 GM Tensor 时必须除以 4。接收 helper 头文件须列入外部 kernel 构建依赖，避免仅改头文件后复用旧产物。格式、边界和串行输出由上述 Host 测试验证，完整接收生命周期需后续 A5 验证。
+
+生产多卡执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
 
 开发者完成 Server Dedup 代码修改后，先尝试在已配置的 **blue 编译环境**使用真实 CANN 9.1 编译，再交付用户。Server Dedup **只编译 A5**：现有 EP CMake 固定 `dav-c310-vec` / `CATLASS_ARCH=3510`，无需增加 SoC 参数，也不由 blue 实际安装的 NPU 型号选择其他版本。纯 kernel 修改只构建对应目标；打点相关修改分别检查 OFF/ON。先加载 blue 已配置的 CANN 9.1 环境，在待验源码目录执行：
 
