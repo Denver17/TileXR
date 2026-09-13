@@ -4,6 +4,7 @@
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_data_layout.h"
 #include "ep_memory_server_dedup_protocol.h"
+#include "tilexr_ep_server_dedup_receive_tasks.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -75,20 +76,16 @@ public:
         GlobalTensor<int32_t> prefixGlobal;
         const auto countLayout = TileXREpServerDedupCountLayout(experts_);
         prefixGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-            args_->peerMems[args_->rank] + countLayout.prefixOffset +
+            args_->peerMems[args_->rank] + countLayout.cntOffset + countLayout.prefixOffset +
             uint64_t(receiver_) * countLayout.prefixStride));
         DataCopyPad(prefix, prefixGlobal,
             {1U, prefixBytes, 0U, 0U, 0U}, {false, 0U, 0U, 0});
         Sync<HardEvent::MTE2_S>();
 
-        const uint32_t total = prefix.GetValue(experts_ - 1U) < 0 ? 0U :
-            uint32_t(prefix.GetValue(experts_ - 1U));
-        uint32_t base = total / kEpServerDedupRecvCoreNum;
-        uint32_t rem = total % kEpServerDedupRecvCoreNum;
-        const uint32_t begin = receiver_ * base + (receiver_ < rem ? receiver_ : rem);
-        const uint32_t count = base + (receiver_ < rem ? 1U : 0U);
-        const uint32_t end = begin + count;
-        if (count == 0U) return;
+        ServerDedupReceiveTasks tasks;
+        tasks.Build(prefix, uint32_t(args_->rank), uint32_t(args_->rankSize),
+            experts_, bs_, receiver_, pipe_);
+        if (tasks.Count() == 0U) return;
 
         auto packet = packetBuf.Get<uint8_t>();
         auto hidden = hiddenBuf.Get<uint8_t>();
@@ -97,46 +94,15 @@ public:
         auto group = groupBuf.Get<uint32_t>();
         auto scalar = scalarBuf.Get<int32_t>();
 
-        const uint32_t tableBytes = uint32_t(TileXREpDedupAlign(uint64_t(count) * sizeof(uint32_t), 32U));
-        TBuf<> tokenPosBuf, pendingIdxBuf;
-        pipe_->InitBuffer(tokenPosBuf, tableBytes);
-        pipe_->InitBuffer(pendingIdxBuf, tableBytes);
-        auto tokenPos = tokenPosBuf.Get<uint32_t>();
-        auto pendingIdx = pendingIdxBuf.Get<uint32_t>();
-
-        uint32_t row = 0U;
-        uint32_t localCount = 0U;
-        uint32_t previous = 0U;
-        for (uint32_t record = 0U; record < experts_; ++record) {
-            const uint32_t cumulative = prefix.GetValue(record) < 0 ? previous :
-                uint32_t(prefix.GetValue(record));
-            const uint32_t recordCount = cumulative >= previous ? cumulative - previous : 0U;
-            const uint32_t source = record % uint32_t(args_->rankSize);
-            const uint32_t localExpert = record / uint32_t(args_->rankSize);
-            if (localExpert >= localExperts_) {
-                previous = cumulative;
-                continue;
-            }
-            for (uint32_t q = 0U; q < recordCount; ++q) {
-                if (row >= begin && row < end) {
-                    // Stable token position is independent of pendingIdx's
-                    // compacting order.  The record index is localExpert*R+source.
-                    tokenPos.SetValue(localCount, record * bs_ + q);
-                    pendingIdx.SetValue(localCount, localCount);
-                    ++localCount;
-                }
-                ++row;
-            }
-            previous = cumulative;
-            if (row >= end) break;
-        }
-        for (uint32_t pending = 0U; pending < localCount; ++pending) {
-            const uint32_t stable = pendingIdx.GetValue(pending);
-            const uint32_t encoded = tokenPos.GetValue(stable);
-            const uint32_t record = encoded / bs_;
+        for (uint32_t pending = 0U; pending < tasks.PendingCount(); ++pending) {
+            const uint32_t stable = tasks.PendingIndex(pending);
+            const uint32_t encoded = tasks.Position(stable);
+            const uint32_t region = encoded / bs_;
             const uint32_t q = encoded % bs_;
-            ReceiveOne(record % uint32_t(args_->rankSize), record / uint32_t(args_->rankSize), q,
-                begin + stable, packet, hidden, flags, relay, group, scalar);
+            const uint32_t source = (region / localExperts_ + uint32_t(args_->rankSize) -
+                uint32_t(args_->rank)) % uint32_t(args_->rankSize);
+            ReceiveOne(source, region % localExperts_, q,
+                tasks.Begin() + stable, packet, hidden, flags, relay, group, scalar);
         }
     }
 

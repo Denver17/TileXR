@@ -48,6 +48,8 @@ public:
     __aicore__ inline void RecvCnt();
     __aicore__ inline void CalcCumsum() { CalRecvAndSetFlag(); }
     __aicore__ inline void CompleteCumsum();
+    // Valid after CompleteCumsum and until this core's TPipe is reset.
+    __aicore__ inline LocalTensor<int32_t> Prefix() { return prefixBuf_.Get<int32_t>(); }
     __aicore__ inline void Finish()
     {
         PipeBarrier<PIPE_ALL>();

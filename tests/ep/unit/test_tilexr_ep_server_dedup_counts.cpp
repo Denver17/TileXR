@@ -4,6 +4,7 @@
 
 #include "tilexr_ep_server_dedup_counts.h"
 #include "tilexr_ep_server_dedup_round.h"
+#include "tilexr_ep_server_dedup_receive_tasks.h"
 #include "server_dedup_test_checks.h"
 
 namespace AscendC {
@@ -23,6 +24,64 @@ struct Rank {
     std::vector<AscendC::TPipe> pipes;
     std::vector<ServerDedupCounts> cores;
 };
+
+void CheckReceiveTasks(Rank &rank, const std::vector<int32_t> &counts,
+    uint32_t world, uint32_t experts, uint32_t bs, uint32_t k)
+{
+    // Independently enumerate the sender's actual destination slots in output
+    // row order. The listener must recover those addresses from its UB table.
+    const uint32_t localExperts = experts / world;
+    const auto data = TileXREp::TileXREpServerDedupDataLayout(bs, 7168, k, experts, false);
+    std::vector<uint64_t> addresses;
+    for (uint32_t expert = 0; expert < localExperts; ++expert)
+        for (uint32_t source = 0; source < world; ++source)
+            for (uint32_t q = 0; q < uint32_t(counts[expert * world + source]); ++q)
+                addresses.push_back(TileXREp::TileXREpServerDedupDispatchOffset(
+                    data, source, rank.args.rank, expert, q, world, localExperts, bs));
+
+    uint32_t nextRow = 0;
+    for (uint32_t receiver = 0; receiver < 16U; ++receiver) {
+        auto &pipe = rank.pipes[48U + receiver];
+        const uint64_t bytesBefore = pipe.bytes;
+        const uint64_t copiesBefore = AscendC::testCopies;
+        const uint64_t syncBefore = AscendC::TestSyncOperations();
+        TileXREp::ServerDedupReceiveTasks tasks;
+        tasks.Build(rank.cores[48U + receiver].Prefix(), rank.args.rank,
+            world, experts, bs, receiver, &pipe);
+        const uint32_t end = uint32_t(uint64_t(receiver + 1U) * addresses.size() / 16U);
+        Check(tasks.Begin() == nextRow && tasks.Count() == end - nextRow,
+            "sixteen receive ranges cover every output row once using floor boundaries");
+        Check(pipe.bytes - bytesBefore == 2U * TileXREp::TileXREpDedupAlign(uint64_t(tasks.Count()) * 4U, 32U),
+            "receive tables allocate only two aligned UB arrays, including empty cores");
+        std::vector<uint32_t> pending(tasks.Count());
+        std::iota(pending.begin(), pending.end(), 0U);
+        std::vector<uint32_t> positions;
+        for (uint32_t j = 0; j < tasks.Count(); ++j) {
+            positions.push_back(tasks.Position(j));
+            Check(data.dispatchOffset + uint64_t(tasks.Position(j)) * data.tokenStride == addresses[nextRow + j],
+                "listener physical slot matches the original source/expert/q send address");
+            Check(tasks.PendingIndex(j) == j, "pending list initially contains every stable index");
+        }
+        // Simulate arbitrary ready order without changing stable slot or row
+        // ownership. Removing a task is an issue decision, with no MTE wait.
+        while (!pending.empty()) {
+            const uint32_t p = uint32_t(pending.size() / 2U);
+            Check(tasks.PendingIndex(p) == pending[p], "pending swap retains the correct stable task");
+            tasks.RemovePending(p);
+            pending[p] = pending.back();
+            pending.pop_back();
+            Check(tasks.PendingCount() == pending.size(), "pending count tracks issued tasks");
+            if (p < pending.size())
+                Check(tasks.PendingIndex(p) == pending[p], "replacement at p is available for immediate recheck");
+        }
+        for (uint32_t j = 0; j < tasks.Count(); ++j)
+            Check(tasks.Position(j) == positions[j], "removed tasks retain stable positions for final flag cleanup");
+        Check(AscendC::testCopies == copiesBefore && AscendC::TestSyncOperations() == syncBefore,
+            "table construction and removal perform no GM IO or synchronization");
+        nextRow = end;
+    }
+    Check(nextRow == addresses.size(), "all expected receive slots have an owner");
+}
 
 void CheckCompletionEpochs()
 {
@@ -148,6 +207,8 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
         for (uint32_t id : order) if (id % 64 >= 48) ranks[id / 64].cores[id % 64].CalcCumsum();
         std::shuffle(order.begin(), order.end(), rng);
         for (uint32_t id : order) if (id % 64 >= 48) ranks[id / 64].cores[id % 64].CompleteCumsum();
+        for (uint32_t r = 0; r < world; ++r)
+            CheckReceiveTasks(ranks[r], expected[r], world, experts, bs, k);
         for (auto &rank : ranks) for (auto &core : rank.cores) core.Finish();
 
         for (uint32_t r = 0; r < world; ++r) {

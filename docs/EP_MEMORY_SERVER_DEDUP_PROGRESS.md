@@ -38,7 +38,9 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 | server grouping / 第一跳 | §2.3 用户确认单轮检查点 PASS；多轮及性能达标未验收 | [0df1db0](https://github.com/LingquLab/TileXR/commit/0df1db02bb139c447456c283afe05586ff9f3c5d) |
 | DIRECT / 完整源端发送 | §2.4 用户确认单轮检查点 PASS；后续多轮结果见下一行，性能达标未验收 | [631a1ff](https://github.com/LingquLab/TileXR/commit/631a1ffcc9cc138e583c1b657cd73ef1a6e64792) |
 | 源端发送多轮 / 量化 | 用户确认 64P、384 专家（每卡 6 专家）、量化/非量化多轮测试通过；具体输入类型、FP8 格式、轮次及运行模式未回传 | [d9eb0c4](https://github.com/LingquLab/TileXR/commit/d9eb0c45ecc7f13c7c10caedac697be7257ccd8c)（按最近交付登记） |
-| 接收监听 / 第一跳展开 / metadata | receiver 代码保留，当前 source-send 入口不执行。prefix 地址、packed 元数据、relay/pending 调度及 Flag 生命周期尚未闭环，未上机验收。 | — |
+| DIRECT 循环 server 顺序 | 用户确认本次交付测试通过；本次具体配置、轮次和时延未回传 | [c572a59](https://github.com/LingquLab/TileXR/commit/c572a596b9e5230b489cd1365fb784e7eddcae6d)（DIRECT 改动 b45b20c，按最近交付登记） |
+| 接收准备 / UB 监听表 | 已实现 R05-01/R05-02 的 16 核 floor 分区、物理 tokenPos 和 pendingIdx 末项替换；本地测试消费真实 cnt/cumsum 输出。生产 source-send 入口尚未执行接收准备，不新增上机通过记录。 | — |
+| 接收监听 / 第一跳展开 / metadata | receiver 代码保留，当前 source-send 入口不执行。前缀及监听槽位地址已按设计修正；packed 元数据、relay/pending 调度及 Flag 生命周期尚未闭环，未上机验收。 | — |
 | Dispatch correctness / 完整验收 | 未开始 | — |
 
 2026-09-12：依据用户“最新的提交验证通过”回传，按当前最新提交 `0bc6f1b` 登记 cnt/cumsum 检查点通过。
@@ -55,6 +57,8 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 2026-09-13：用户确认“64P 量化/非量化 384专家 多轮测试通过”。按最近交付的 `d9eb0c4` 登记；未直接读取服务器 summary 或 kernel SHA。通过范围为当前 source-send 的 cnt/cumsum、第一跳/DIRECT、源端输出及同域多轮完成协议，最终数值校验只读取最后一轮。此次反馈未给出输入 dtype、FP8 格式、BS/H/TopK、warmup/loops、run_mode 或时延，不推断两种 FP8 格式均通过，也不标记性能目标、接收/relay 或完整 Dispatch/Combine 已验收。
 
 接收侧实现经验：DataAsFlag 的 Payload 不能按单段连续字节读回，hidden 必须按每个 480B 数据块剥离 32B Flag 后再写出；接收 Flag 清理也必须使用相同的 16 个 32B 块跨度。当前实现已在 CPU fake API 下完成 C++ 编译和已有 server-dedup 测试回归，真实 CANN/A5 的事件顺序、跨 Rank relay 和多轮复用仍需服务器验证。
+
+2026-09-13：用户回传“目前测试通过了，继续完成下一步的功能点”，按最近交付 c572a59 登记 DIRECT 循环 server 顺序通过。未读取此次 summary 或 kernel SHA，不沿用上一记录的规模、量化格式、轮次或性能结论。下一增量先落实已确认的接收准备；完整接收/转发依赖 R05-05/R05-06 的 UB/Event 与跨 Token 调度、R06 清理方案收口。
 
 ## 阶段 3：Combine 空算子工程
 

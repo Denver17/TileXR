@@ -14,6 +14,10 @@
 
 当前入口明确停在源端发送检查点，未启用尚未闭环的 receiver/relay。旧入口曾调用 receiver，但其 prefix 基址遗漏 cntOffset，在固定 E96 场景未实际消费数据；不能将这段调用当作已验收接收功能。后续启用接收时，必须一起验证 packed 元数据、转发、pending 调度和 Flag 清理，再切换检查点。
 
+接收准备增量已实现 `ServerDedupReceiveTasks`：消费已经就绪的完整 cumsum，在 16 核按 `[floor(i*tokenNum/16), floor((i+1)*tokenNum/16))` 划分连续输出行，构造仅存 UB 的稳定 `tokenPos` 和可变 `pendingIdx`。每张表按实际本核行数申请并对齐到 32B，空核不申请表，不新增固定 1024 项上限或 GM 转存。删除使用末项替换，换入项在原位置继续检查；稳定 j 对应输出行 `begin+j`，tokenPos 保留到未来核末 Flag 清理完成。该模块已接入暂存的 receiver 代码和 cnt/cumsum 本地测试，当前生产入口仍不调用 receiver；此次重跑 source-send 不会验证接收/转发。
+
+接收准备维护约束：cnt 的逻辑顺序 `localExpert*R+source` 与物理槽位区 `((source+rank)%R)*L+localExpert` 不同，tokenPos 必须保存后者乘 BS 再加原 q。构表只遍历与本核行区间相交的 q，不为零 cnt 生成任务。地址乘完整 T 前扩为 uint64。读取 GM 前缀时，prefixOffset 相对 cnt 区，完整地址必须包含 `cntOffset + prefixOffset + receiver*prefixStride`；已有 UB 前缀可直接消费，但不得跨 TPipe Reset 保存旧 Tensor。本地回归从真实计数产物构表，与发送地址逐行比较，并检查不均匀分区、多轮/空结果、pending 替换、UB 预算及无额外 GM IO/同步；不证明真实监听、异步转发或数据 Flag 清理。R05-05 的完整接收 UB 总预算仍待确定，不能用独立构表通过推断任意接收不均衡均可容纳。
+
 实际执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
 
 开发者完成 Server Dedup 代码修改后，先尝试在已配置的 **blue 编译环境**使用真实 CANN 9.1 编译，再交付用户。Server Dedup **只编译 A5**：现有 EP CMake 固定 `dav-c310-vec` / `CATLASS_ARCH=3510`，无需增加 SoC 参数，也不由 blue 实际安装的 NPU 型号选择其他版本。纯 kernel 修改只构建对应目标；打点相关修改分别检查 OFF/ON。先加载 blue 已配置的 CANN 9.1 环境，在待验源码目录执行：
