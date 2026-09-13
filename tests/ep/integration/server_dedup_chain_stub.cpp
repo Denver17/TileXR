@@ -86,6 +86,13 @@ aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 }
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
+    if (rankId >= 0 && source == args.peerMems[rankId] + TileXREp::TileXREpServerDedupRoundOffset(args.peerMemBytes)
+        && bytes == uint64_t(args.rankSize) * 32U) {
+        auto *epochs = static_cast<int64_t *>(destination);
+        std::fill_n(epochs, bytes / sizeof(int64_t), int64_t(calls["launch"]));
+        if (std::getenv("TEST_ROUND_FAULT") != nullptr) --epochs[3];
+        return Call("round-read");
+    }
     if (profileReady && source == args.peerMems[rankId] && bytes == sizeof(countProfile)) {
         std::memcpy(destination, countProfile.data(), bytes);
         return Call("breakdown-read");
@@ -175,7 +182,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     if (dynamic) current.push_back(dynamic);
     if (calls["launch"] == 0) { firstBuffers = current; }
     if (current != firstBuffers || allocations.size() != current.size() || calls["comm-init"] != 1 ||
-        calls["create-stream"] != 1) { return 92; }
+        calls["create-stream"] != 1 || calls["sync"] != 0) { return 92; }
     for (auto buffer : current) { if (allocations.count(buffer) != 1) { return 92; } }
     const auto *routeWeights = static_cast<const float *>(weights);
     for (int64_t token = 0; token < bs; ++token) {

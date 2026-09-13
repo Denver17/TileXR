@@ -136,8 +136,6 @@ Config Parse(int argc, char **argv)
     Require(warmup <= UINT32_MAX, "TILEXR_VALIDATION_WARMUP must be in [0, UINT32_MAX]");
     c.loops = static_cast<uint32_t>(loops);
     c.warmup = static_cast<uint32_t>(warmup);
-    Require(c.loops == 1 && c.warmup == 0,
-        "source-send requires loops=1, warmup=0 until receive cleanup and cross-call reuse are implemented");
     Require(c.checkpoint != "ep-sdedup-p1-memory-boundary" ||
         (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
         "memory-boundary requires functional mode, loops=1, warmup=0");
@@ -420,27 +418,42 @@ int Run(const Config &c)
         barrier.Run(0);
         Marker(c, "EP_SERVER_DEDUP_CHAIN_PASS", ",\"peer_count\":" + std::to_string(c.rankSize) +
             ",\"peer_mem_bytes\":" + std::to_string(host->peerMemBytes));
-        // This checkpoint has no data receive/flag cleanup owner yet.
-        // Submit exactly once; Parse rejects warmup and repeated submissions.
-        batch = "measurement";
-        submission = 1;
-        stage = "launch";
         const auto outputDtype = c.quantMode == 0 ? TileXR::TILEXR_DATA_TYPE_RESERVED :
             (c.fp8Format == "e4m3" ? TileXR::TILEXR_DATA_TYPE_FP8E4M3 : TileXR::TILEXR_DATA_TYPE_FP8E5M2);
-        Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
-            nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[8], comm, c.bs, c.h, c.topK, c.experts,
-            c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
-            buffers[10], nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
-            nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
-            static_cast<uint32_t *>(buffers[7]), static_cast<float *>(buffers[9]), c.dtype, outputDtype, stream),
-            "TileXRMoeEpDispatchMemoryServerDedup");
-        submitted = 1;
+        // One communicator, stream and buffer set for the entire continuous
+        // batch. Device completion agreement protects cross-rank window reuse.
+        const uint64_t calls = uint64_t(c.warmup) + c.loops;
+        for (uint64_t call = 0; call < calls; ++call) {
+            const bool warming = call < c.warmup;
+            batch = warming ? "warmup" : "measurement";
+            submission = warming ? call + 1U : call - c.warmup + 1U;
+            stage = "launch";
+            Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
+                nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[8], comm, c.bs, c.h, c.topK, c.experts,
+                c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
+                buffers[10], nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
+                nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
+                static_cast<uint32_t *>(buffers[7]), static_cast<float *>(buffers[9]), c.dtype, outputDtype, stream),
+                "TileXRMoeEpDispatchMemoryServerDedup");
+            if (warming) ++warmupSubmitted;
+            else ++submitted;
+        }
         stage = "stream-sync";
         Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
         stage = "batch-barrier";
         barrier.Run(2);
-        completed = 1;
+        completed = submitted;
+        warmupCompleted = warmupSubmitted;
         safeCleanup = true;
+        stage = "round-read";
+        std::vector<int64_t> epochs(uint64_t(c.rankSize) * 4U);
+        Check(aclrtMemcpy(epochs.data(), epochs.size() * sizeof(int64_t),
+            host->peerMems[c.rank] + TileXREp::TileXREpServerDedupRoundOffset(host->peerMemBytes),
+            epochs.size() * sizeof(int64_t), ACL_MEMCPY_DEVICE_TO_HOST), "read completion epochs");
+        for (size_t word = 0; word < epochs.size(); ++word)
+            Require(epochs[word] == int64_t(calls), "completion epoch mismatch peer=" +
+                std::to_string(word / 4U) + " expected=" + std::to_string(calls) +
+                " actual=" + std::to_string(epochs[word]));
         stage = "count-read";
         std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
         std::vector<int64_t> actualExperts(c.experts / c.rankSize);

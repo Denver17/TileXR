@@ -20,7 +20,14 @@ class ServerDedupAddressSpaceTests(unittest.TestCase):
                            f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={profiling}"]
                 command.extend("-I" + str(ROOT / path) for path in includes)
                 command.append(str(ROOT / "src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"))
-                result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+                # Keep checking the staged receiver even while the current
+                # source-send checkpoint intentionally does not execute it.
+                command.extend(["-x", "c++", "-"])
+                receiver = '#include "tilexr_ep_server_dedup_recv.h"\n'
+                receiver += "template class TileXREp::ServerDedupReceiver<half, false, false>;\n"
+                receiver += "template class TileXREp::ServerDedupReceiver<half, true, false>;\n"
+                receiver += "template class TileXREp::ServerDedupReceiver<half, true, true>;\n"
+                result = subprocess.run(command, input=receiver, capture_output=True, text=True, timeout=60)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
 

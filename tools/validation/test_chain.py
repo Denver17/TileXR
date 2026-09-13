@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""单轮第一跳发送验证的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
+"""源端发送验证的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
 
 import copy
 import os
@@ -84,12 +84,15 @@ class ChainTests(TemporaryRoot):
             with self.subTest(marker=marker, key=key), self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records(changed, mappings, "run", manifest, config.chain)
 
-    def test_source_send_single_submission_in_all_modes(self):
+    def test_source_send_repeated_submissions_in_all_modes(self):
         for mode in ("functional", "performance", "breakdown"):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_RUN_MODE": mode}):
                 chain = self.config().chain
                 self.assertEqual((chain["run_mode"], chain["loops"], chain["warmup"]), (mode, 1, 0))
-                for key, value in (("LOOPS", "2"), ("WARMUP", "1"), ("LOOPS", "0"), ("WARMUP", "-1")):
+                with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_LOOPS": "3", "TILEXR_VALIDATION_WARMUP": "2"}):
+                    repeated = self.config().chain
+                    self.assertEqual((repeated["loops"], repeated["warmup"]), (3, 2))
+                for key, value in (("LOOPS", "0"), ("WARMUP", "-1")):
                     with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
                         self.config()
         for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p2-first-hop"):

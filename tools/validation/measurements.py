@@ -288,12 +288,13 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
                     "same_server_count_bytes": chain_config["moe_expert_num"] // rank_size * 7 * 32,
                     "local_count_bytes": chain_config["moe_expert_num"] // rank_size * 32}
                    for row in ranks]
-        summary.update(submission="single_launch_then_sync_and_host_barrier", measurement="single_cold_submission",
+        summary.update(measurement="single_cold_submission" if chain_config["loops"] == 1 and chain_config["warmup"] == 0
+                       else "continuous_batch",
                        route_mode=chain_config["route_mode"], seed=chain_config["seed"],
                        quant_mode=chain_config["quant_mode"], fp8_format=chain_config["fp8_format"],
                        rank_traffic=traffic,
                        algorithm_communication_bytes=sum(row["first_hop_bytes"] + row["direct_bytes"] + remote_bytes for row in ranks),
-                       communication_scope="first-hop and DIRECT full T including local copies, plus remote cnt records; excludes polling/local prefix traffic")
+                       communication_scope="first-hop and DIRECT full T including local copies, plus remote cnt records; excludes polling/local prefix/completion epoch traffic")
     if mode == "performance":
         medians = [row["performance"]["median_us"] for row in ranks]
         if count_scope:

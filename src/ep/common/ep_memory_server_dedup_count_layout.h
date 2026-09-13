@@ -12,6 +12,7 @@ constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
 constexpr uint64_t kEpServerDedupProfileReservedBytes = 12800U;
+constexpr uint64_t kEpServerDedupRoundBytes = uint64_t(TileXR::TILEXR_MAX_RANK_SIZE) * 32U;
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
 #define TILEXR_EP_DEDUP_INLINE FORCE_INLINE_AICORE
@@ -30,6 +31,13 @@ struct EpServerDedupCountLayout {
     uint64_t counterOffset;
     uint64_t stateBytes;
 };
+
+// The final 4 KiB of the communicator's 4 MiB flag window is reserved for
+// Server Dedup completion epochs; payload/count/profile offsets are unchanged.
+TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupRoundOffset(uint64_t peerBytes)
+{
+    return peerBytes - kEpServerDedupRoundBytes;
+}
 
 TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(uint32_t experts)
 {

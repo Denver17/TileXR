@@ -117,7 +117,7 @@ std::string ReadSourceSendProfile(const Config &c, const TileXR::CommArgs &args)
     std::vector<uint8_t> detail(detailLayout.bytes);
     Check(aclrtMemcpy(detail.data(), detail.size(), args.peerMems[c.rank] + detailLayout.offset,
         detail.size(), ACL_MEMCPY_DEVICE_TO_HOST), "read send issue breakdown");
-    const uint64_t generation = 1;
+    const uint64_t generation = uint64_t(c.warmup) + c.loops;
     const char *points[] = {"start", "init_end", "send_cnt_end", "send_data_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end"};
     std::ostringstream out;
     out << ",\"schema_version\":" << kEpServerDedupProfileVersion << ",\"kernel_scope\":\"source_send\",\"generation\":" << generation

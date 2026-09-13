@@ -351,8 +351,6 @@ def chain_configuration(checkpoint):
         warmup = int(os.environ.get("TILEXR_VALIDATION_WARMUP", "0"))
         if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
             raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
-        if loops != 1 or warmup != 0:
-            raise ValueError("源端发送当前仅支持 loops=1、warmup=0；接收清理及跨调用复用尚未启用")
         if block_dim not in ("auto", "64"):
             raise ValueError("源端发送固定 48/16 核组，block_dim 必须为 auto/64")
 
@@ -1233,7 +1231,10 @@ def run(config):
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
     elif config.checkpoint in CHAIN_CHECKPOINTS:
-        scope += f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、单轮 cnt/cumsum、第一跳/DIRECT 包 hidden/scale/尾表/q/全部 Flag、完整 route 覆盖、源端 mask/权重及只读输入校验；接收转发及 Combine 尚未启用。"
+        scope += (f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、"
+                  f"{config.chain['warmup']} 轮预热＋{config.chain['loops']} 轮测量（同域连续提交）、"
+                  "最后一轮 cnt/cumsum、第一跳/DIRECT 包 hidden/scale/尾表/q/全部 Flag、完整 route 覆盖、"
+                  "源端 mask/权重及只读输入校验；接收转发及 Combine 尚未启用。")
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],

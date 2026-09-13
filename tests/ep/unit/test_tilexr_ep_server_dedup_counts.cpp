@@ -3,6 +3,7 @@
 #include <random>
 
 #include "tilexr_ep_server_dedup_counts.h"
+#include "tilexr_ep_server_dedup_round.h"
 #include "server_dedup_test_checks.h"
 
 namespace AscendC {
@@ -22,6 +23,61 @@ struct Rank {
     std::vector<AscendC::TPipe> pipes;
     std::vector<ServerDedupCounts> cores;
 };
+
+void CheckCompletionEpochs()
+{
+    constexpr uint32_t world = 16;
+    constexpr uint64_t bytes = TileXREp::kEpServerDedupRoundBytes + 32U;
+    const uint64_t offset = TileXREp::TileXREpServerDedupRoundOffset(bytes);
+    Check(TileXREp::TileXREpServerDedupRoundOffset(UINT64_C(4) << 30) ==
+        (UINT64_C(4) << 30) - 4096U, "round records stay in the final flag window");
+    std::vector<std::vector<int64_t>> windows(world, std::vector<int64_t>((bytes + 32U) / 8U, 0));
+    TileXR::CommArgs args {};
+    args.rank = 0; args.rankSize = world; args.peerMemBytes = bytes;
+    for (uint32_t peer = 0; peer < world; ++peer) {
+        args.peerMems[peer] = reinterpret_cast<uint8_t *>(windows[peer].data());
+        std::fill_n(windows[peer].begin(), 4U, -9);
+        std::fill(windows[peer].end() - 4U, windows[peer].end(), -9);
+    }
+    for (int64_t epoch = 1; epoch <= 4; ++epoch) {
+        std::array<uint32_t, world> reads {};
+        uint32_t publications = 0;
+        AscendC::GmWriteObserver() = [&](const void *destination, const void *source, uint32_t count) {
+            Check(count == 32U, "one complete epoch record per peer");
+            Check(static_cast<const int64_t *>(source)[0] == epoch, "publish the current runtime magic");
+            bool owned = false;
+            for (uint32_t peer = 0; peer < world; ++peer)
+                owned = owned || destination == args.peerMems[peer] + offset;
+            Check(owned, "rank zero only writes its own slot on each peer");
+            ++publications;
+        };
+        AscendC::GmReadObserver() = [&](const void *source, uint32_t count) {
+            Check(publications == world, "publish to every peer before polling completion");
+            Check(count == 32U, "poll complete epoch records");
+            const uint64_t byte = static_cast<const uint8_t *>(source) - args.peerMems[0] - offset;
+            const uint32_t peer = uint32_t(byte / 32U);
+            if (peer >= world || ++reads[peer] > 4U) throw std::runtime_error("completion polling failed to progress");
+            auto *record = windows[0].data() + offset / 8U + peer * 4U;
+            if (peer != 0) {
+                // A delayed peer first exposes a partial new record. Old words
+                // must keep us waiting; a complete later epoch is also valid.
+                if (reads[peer] == 1U) record[0] = epoch;
+                if (reads[peer] == 3U) std::fill_n(record, 4U, epoch + (peer == 2 ? 1 : 0));
+            }
+        };
+        AscendC::TPipe pipe;
+        TileXREp::CompleteServerDedupRound(&args, epoch, &pipe);
+        AscendC::GmReadObserver() = {};
+        AscendC::GmWriteObserver() = {};
+        for (uint32_t peer = 1; peer < world; ++peer)
+            Check(reads[peer] == (peer == 2 && epoch % 2 == 0 ? 1U : 3U), "stale/partial epochs cannot release a new call");
+        for (const auto &window : windows) {
+            Check(std::all_of(window.begin(), window.begin() + 4U, [](int64_t v) { return v == -9; }) &&
+                std::all_of(window.end() - 4U, window.end(), [](int64_t v) { return v == -9; }),
+                "epoch writes preserve adjacent memory");
+        }
+    }
+}
 
 void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rounds)
 {
@@ -128,6 +184,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 int main()
 {
     try {
+        CheckCompletionEpochs();
         Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
         Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
         Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.

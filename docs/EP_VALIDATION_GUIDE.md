@@ -6,7 +6,9 @@
 
 固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS=96、H=7168、TopK=6、BF16、balance_shift、seed=2026**。每 rank 始终申请 **4 GiB 通信域**：4092 MiB 数据区 + 4 MiB Flag 区，`peerMemBytes=4294967296`。直到完整 Dispatch/Combine 功能和性能验收结束，不随增量缩小通信域。底层另有 1 MiB 地址偏移余量，实际分配 4097 MiB/rank。
 
-本检查点仅支持 **loops=1、warmup=0**，functional/performance/breakdown 均如此。数据接收清理和跨调用复用尚未启用，不能沿用 cnt-only 的连续多轮设置。每次运行重新创建 communicator；不通过逐轮 Host barrier 掩盖数据 Flag 复用问题。
+本检查点支持 **loops>=1、warmup>=0**，默认仍为 1/0，functional/performance/breakdown 均可配置。一批复用同一 communicator、stream、输入/输出和通信域，固定同一组输入及路由，连续提交 warmup+loops 次；只在整批末尾做一次 stream 同步和 Host barrier。每轮源端覆盖本轮目标槽位，设备轮末完成协议保证所有 rank 的 cnt 消费/清理和发送完成后才进入下一轮。整批结束先在 `round-read` 校验每个 rank 的四份完成代次均等于 warmup+loops，再检查最后一轮数值/包；不能解释为每轮输出快照。
+
+当前入口明确停在源端发送检查点，未启用尚未闭环的 receiver/relay。旧入口曾调用 receiver，但其 prefix 基址遗漏 cntOffset，在固定 E96 场景未实际消费数据；不能将这段调用当作已验收接收功能。后续启用接收时，必须一起验证 packed 元数据、转发、pending 调度和 Flag 清理，再切换检查点。
 
 实际执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
 
@@ -47,20 +49,20 @@ bash sync.sh
 ```
 
 ```bash
-bash run.sh run_mode=functional loops=1 warmup=0
+bash run.sh run_mode=functional loops=3 warmup=0
 ```
 
 构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
 
 `build_all.sh` 默认关闭设备打点，production 默认选择新的 source-send 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 或 `ep-sdedup-p2-first-hop`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。184B ABI 和 R07 单份布局沿用上一增量；kernel、consumer 和检查点身份需一起重新编译和同步。
 
-同一普通产物可继续手动测量一次完整 kernel：
+同一普通产物可继续手动测量多轮完整 kernel：
 
 ```bash
-bash run.sh run_mode=performance loops=1 warmup=0
+bash run.sh run_mode=performance loops=100 warmup=10
 ```
 
-这是无预热的单次样本，测量范围为 cnt/cumsum + 完整源端发送。各 rank 保留 msprof 原始样本和 kernel SHA256，并汇总跨 rank median/min/max。有效带宽采用第一跳和 DIRECT 包数乘完整 T（包含本卡拷贝），加远端 cnt 记录量，除以整个 kernel 耗时；不能解释为纯网络带宽或完整 Dispatch 性能。与 §2.3 基线比较时保持相同 shape、路由和测量条件；耗时差不能标为 DIRECT 的独立精确耗时，因为核组并行且 MTE3 可跨阶段在途。性能是否达标仍需同条件基准/阈值。
+每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为 cnt/cumsum、完整源端发送和设备轮末完成等待。有效带宽仍使用每次调用的第一跳/DIRECT 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留；此值不是纯网络带宽或完整 Dispatch 性能。sendData 内部打点保持相邻 MTE3 下发间隔，跨 rank 轮末等待计入 finish/完整 kernel。
 
 ## 输入类型与验证内容
 
@@ -81,7 +83,7 @@ FP16 的量化组合使用相同命令并设置 `dtype=fp16`。两种 FP8 均为
 - 所有预期第一跳及 DIRECT 目标槽位、完整 hidden、量化 scale、32B 头部、有效 16B entries、原始 k/q/真实权重及每个 512B 块的 8 个 Flag。Flag 固定为 FP32 1.0 的位型；填充及未用 entries 不比较。
 - DIRECT 两个 forward 计数为 0、返回字段为 -1，头部保留原始 k/真实权重。第一跳头部、有效 entries 和 DIRECT 展开后覆盖所有原始 route；尚未转发的 entry 槽位 Flag 保持零。
 - sourceMask 保留各 group 的首 k 和全部 DIRECT k；expertScalesOut 对应为 1.0 和真实权重。原始 expertScales 逐字节不变，空洞不消费。
-- 正常资源清理完成后才输出 `EP_SERVER_DEDUP_SOURCE_SEND_PASS`，其 `submitted=completed=1`、`warmup_submitted=warmup_completed=0`、`cleanup=complete`。仅 `EP_SERVER_DEDUP_CHAIN_PASS` 不算成功。
+- 正常资源清理完成后才输出 `EP_SERVER_DEDUP_SOURCE_SEND_PASS`，其 `submitted=completed=loops`、`warmup_submitted=warmup_completed=warmup`、`cleanup=complete`。提交失败保留预热/测量各自已提交数；只有整批 stream 同步和 Host barrier 均成功才填写 completed。仅 `EP_SERVER_DEDUP_CHAIN_PASS` 不算成功。
 
 固定 H/K 下非量化 T=15872B，MXFP8 T=8192B。`first_hop_packets/received/bytes`、`direct_packets/received/bytes` 和 `token_stride` 记录已校验物理包的流量。`local_data_bytes` 为本卡拷贝，`same_server_data_bytes` 为同 Server 跨卡，`cross_server_data_bytes` 为跨 Server；三者互斥并合计为全部包字节。JSON 同时要求 DIRECT、完整 route 覆盖及源端输出校验通过。全 Rank 第一跳和 DIRECT 的发送/读回包数分别一致；同址同值重复发送由本地发送观察测试检查，Host 最终读回不能单独识别。每源 rank 的远端 cnt 为 `(E-E/R)*32=2880B`，不包含轮询与本卡前缀访问。
 
@@ -112,7 +114,7 @@ bash sync.sh
 ```
 
 ```bash
-bash run.sh run_mode=breakdown loops=1 warmup=0
+bash run.sh run_mode=breakdown loops=3 warmup=2
 ```
 
 构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=4`，并标记 184B ABI、`r07-single` 布局及 `source_send` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
@@ -131,7 +133,7 @@ run/case-<时间>-<PID>/<run_id>/traces/index.json
 
 将 `.trace.json` 导入 Perfetto/Chrome tracing。`measurements.breakdown.stages_us` 给出各阶段核最大值的跨 rank median/min/max；`nodes[].reported_result.ranks[].breakdown.records[]` 保留 64 核的原始时间戳。
 
-阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`finish` 和 `source_send_total`。源端核未执行的接收阶段为零时长，接收核的 send_data 为零；finish 包含接收核的 receiver 工作、末尾全核 SyncAll 及 core63 counter 清零。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。当前 generation=1，各卡独立归零，不能推断跨卡绝对时序。
+阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`finish` 和 `source_send_total`。源端核未执行的计数接收阶段为零时长，计数接收核的 send_data 为零；finish 包含末尾全核 SyncAll、core63 counter 清零及跨 rank 完成等待。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。breakdown 仅保留最后一次测量的粗粒度和逐包记录，generation=warmup+loops；不生成每轮 trace。各卡独立归零，不能推断跨卡绝对时序。
 
 v4 在每个发送核的 `send_data` 下细分三个连续区间，`stages_us` 同时汇总这三项：
 
@@ -183,7 +185,9 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 
 逐包打点的本地回归还核对每条记录与实际发送对应、空核头、容量/同步标志区边界、Host 容量拒绝、损坏记录拒绝、三个子阶段及最后一包的 trace 语义。纯 CPU 替身只验证记录和导出契约，真实 CANN 9.1 编译、A5 可见性及诊断开销仍需服务器运行确认。维护时不要在热路径逐包写 GM/DCCI，也不要为获取完成时间新增同步；相邻下发点才能保持这里约定的测量含义。
 
-维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。数据 Flag 尚无清理 owner 时只开放单次提交；旧 cnt-only 多轮结果不能作为数据复用证据。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
+维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。源端发送批次在所有 rank 完成本轮后覆盖相同路由槽位，数据 Flag 保持 1；这只覆盖当前无数据消费者的检查点，不能证明未来接收/Combine 的清理复用。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
+
+单份 cnt/发送槽位的连续调用必须有跨 rank 完成边界；本卡 SyncAll 不能阻止快 rank 覆盖慢 rank 的上一轮记录。当前核63在已有全核收敛、counter 写零完成后，将本次 NextMagic 的四个 int64 副本写入各 rank 的专属 32B 行，再等待本地所有 rank 行均 >= 本代次。记录位于 4MiB communicator Flag 区的最后 4KiB（最多128行），不移动 payload、cnt 或 profile；这些行不清零，允许更晚代次满足已完成的旧代次。仅支持同一 communicator 上所有 rank 同序、同 stream 的 Dispatch 批次；不得与其他未完成操作并发复用此区域。本地回归覆盖迟到/部分/旧代次、后续代次越过等待、四轮复用和边界，设备可见性及实际等待开销仍须 A5 验证。
 
 新增 Host CTest 必须安装并输出与测试名对应的 marker（如 `EP_SERVER_DEDUP_ABI_HOST_PASS test=source_send`）。EP 自定义链接命令必须依赖 `$<TARGET_OBJECTS:...>`，保证对象重编后最终外部 kernel 重链；生产 Host 库继续相对加载、注册独立 AICore 二进制。CPU 编译/链接和故障注入只证明这些边界，不替代设备验证。
 

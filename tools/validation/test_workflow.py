@@ -778,7 +778,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
         self.assertEqual(summary["chain_configuration"]["loops"], 1)
         self.assertEqual(summary["chain_configuration"]["dtype"], "bf16")
-        self.assertIn("单轮 cnt/cumsum", summary["scope"])
+        self.assertIn("最后一轮 cnt/cumsum", summary["scope"])
         self.assertNotIn("未执行 NPU launch", summary["scope"])
         for node in summary["nodes"]:
             self.assertEqual(node["tests"], len(self.manifest["tests"]))
@@ -826,13 +826,12 @@ print(prefix + json.dumps(dict(record, submitted=loops,
                 self.assertEqual(result["errors"][0]["type"], kind)
                 self.assertEqual(result["cleanup"], "complete")
 
-    def test_source_send_rejects_multiple_submissions_before_run(self):
+    def test_source_send_runs_multiple_submissions(self):
         self.enable_chain()
         self.prepare_sync()
         for key, value in (("TILEXR_VALIDATION_LOOPS", "7"), ("TILEXR_VALIDATION_WARMUP", "2")):
-            command = self.invoke("run", environment={key: value})
-            self.assertNotEqual(command.returncode, 0)
-            self.assertIn("loops=1", command.stderr)
+            command = self.invoke("run", environment={key: value, "TILEXR_DIRECT_RUN": "1"})
+            self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
 
     def test_chain_multi_rejects_missing_rounds_or_single_marker(self):
         self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT)
@@ -867,11 +866,11 @@ with output.open('w', newline='') as f:
 ''', encoding="utf-8")
         profiler.chmod(0o755)
 
-    def test_source_send_performance_collects_one_cold_msprof_sample(self):
+    def test_source_send_performance_collects_multiple_samples_after_warmup(self):
         self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "performance")
         self.enable_msprof()
-        os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="1",
-                          TILEXR_VALIDATION_WARMUP="0")
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
         self.prepare_sync()
         command = self.invoke("run")
         self.assert_success(command)
@@ -879,8 +878,10 @@ with output.open('w', newline='') as f:
         self.assertEqual(summary["measurements"]["run_mode"], "performance")
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
-                self.assertEqual(rank["performance"]["sample_us"], [1])
-                self.assertEqual(rank["performance"]["median_us"], 1)
+                self.assertEqual(rank["performance"]["sample_us"], [3, 4, 5])
+                self.assertEqual(rank["performance"]["median_us"], 4)
+        self.assertEqual(summary["measurements"]["measurement"], "continuous_batch")
+        self.assertEqual(summary["measurements"]["submission"], "continuous_batch_then_sync_and_host_barrier")
 
     def test_dispatch_performance_missing_profiler_samples_fails(self):
         self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "performance")
@@ -896,8 +897,8 @@ with output.open('w', newline='') as f:
 
     def test_dispatch_breakdown_collects_all_rank_records(self):
         self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "breakdown")
-        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
-                          TILEXR_VALIDATION_WARMUP="0")
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
         # A plain sync has functional defaults, even when the installed kernel is profiled.
         ordinary_mode = dict(TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS="1",
                              TILEXR_VALIDATION_WARMUP="0")
@@ -914,7 +915,7 @@ with output.open('w', newline='') as f:
         self.assertEqual({event["pid"] for event in trace["traceEvents"] if event["ph"] == "X"}, set(range(16)))
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
-                self.assertEqual(rank["breakdown"]["generation"], 1)
+                self.assertEqual(rank["breakdown"]["generation"], 5)
 
     def test_dispatch_breakdown_missing_or_stale_record_fails(self):
         self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT, "breakdown")

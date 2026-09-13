@@ -33,6 +33,10 @@ inline std::function<void(const void *, const void *, uint32_t)> &GmWriteObserve
     return observer;
 }
 inline uint32_t GetBlockIdx() { return testCore; }
+inline std::function<void(const void *, uint32_t)> &GmReadObserver() {
+    static std::function<void(const void *, uint32_t)> observer;
+    return observer;
+}
 inline uint32_t GetBlockNum() { return 64; }
 inline uint64_t GetSystemCycle() { static uint64_t ticks = 100; return ++ticks; }
 inline uint64_t &TestSyncOperations() { static uint64_t count = 0; return count; }
@@ -173,6 +177,7 @@ template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, DataCop
     }
 }
 template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, uint32_t count) {
+    if (GmReadObserver()) GmReadObserver()(src.pointer, count * sizeof(T));
     ++testCopies; std::memcpy(dst.Data(count * sizeof(T)), src.pointer, count * sizeof(T));
 }
 template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, uint32_t count) {

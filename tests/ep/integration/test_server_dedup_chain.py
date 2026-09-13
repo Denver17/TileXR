@@ -219,8 +219,8 @@ class ChainConsumerTests(unittest.TestCase):
                     for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_checkpoint_and_loop_validation_precedes_initialization(self):
-        cases = [{"TILEXR_VALIDATION_LOOPS": value} for value in ("", "0", "2", "-1", "abc", "4294967295", "4294967296")]
-        cases += [{"TILEXR_VALIDATION_WARMUP": value} for value in ("", "1", "-1", "4294967296", "abc")]
+        cases = [{"TILEXR_VALIDATION_LOOPS": value} for value in ("", "0", "-1", "abc", "4294967296")]
+        cases += [{"TILEXR_VALIDATION_WARMUP": value} for value in ("", "-1", "4294967296", "abc")]
         cases += [{"TILEXR_VALIDATION_RUN_MODE": value} for value in ("", "unknown")]
         cases += [{"TILEXR_VALIDATION_CHECKPOINT": value} for value in
                   ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p1-profile", "ep-sdedup-p2-first-hop")]
@@ -233,6 +233,60 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertNotIn("_PASS ", output)
                 self.assertIn("stage=config", errors)
                 self.assertEqual(self.trace_lines(0), [])
+
+    def test_repeated_calls_reuse_buffers_and_sync_only_after_whole_batch(self):
+        for mode in ("functional", "performance"):
+            with self.subTest(mode=mode):
+                env = dict(TILEXR_VALIDATION_RUN_MODE=mode, TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
+                processes = [self.start(rank, environment=env) for rank in range(16)]
+                for rank, process in enumerate(processes):
+                    output, errors = process.communicate(timeout=15)
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    record, = self.records(output, "EP_SERVER_DEDUP_SOURCE_SEND_PASS")
+                    self.assertEqual((record["submitted"], record["completed"], record["warmup_submitted"],
+                                      record["warmup_completed"]), (3, 3, 2, 2))
+                    calls = self.trace_lines(rank)
+                    self.assertEqual(calls.count("comm-init-sized"), 1)
+                    self.assertEqual(calls.count("create-stream"), 1)
+                    self.assertEqual(calls.count("launch"), 5)
+                    self.assertEqual(calls.count("sync"), 1)
+                    self.assertGreater(calls.index("sync"), max(i for i, call in enumerate(calls) if call == "launch"))
+                    self.assertEqual(calls.count("malloc"), 10)
+                    self.assertEqual(calls.count("free"), 10)
+                for path in Path(self.trace.name).iterdir(): path.unlink()
+
+    def test_repeated_launch_failure_preserves_partial_batch_accounting(self):
+        for failed_call, batch, submission, submitted, warmed in ((2, "warmup", 2, 0, 1), (4, "measurement", 2, 1, 2)):
+            with self.subTest(failed_call=failed_call):
+                env = dict(TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
+                processes = [self.start(rank, environment=dict(env, **(
+                    {"TEST_FAIL_STAGE": "launch", "TEST_FAIL_CALL": str(failed_call)} if rank == 1 else {})))
+                    for rank in range(16)]
+                output, errors = processes[1].communicate(timeout=10)
+                self.assertNotEqual(processes[1].returncode, 0)
+                self.assertNotIn("EP_SERVER_DEDUP_SOURCE_SEND_PASS", output)
+                self.assertIn(f"batch={batch} submission={submission} submitted={submitted} completed=0", errors)
+                self.assertIn(f"warmup_submitted={warmed} warmup_completed=0", errors)
+                calls = self.trace_lines(1)
+                self.assertEqual(calls.count("launch"), failed_call)
+                self.assertNotIn("sync", calls)
+                self.assertNotIn("free", calls)
+                self.stop(); self.processes.clear()
+                for path in Path(self.trace.name).iterdir(): path.unlink()
+
+    def test_repeated_calls_reject_stale_device_completion(self):
+        env = dict(TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
+        processes = [self.start(rank, environment=dict(env, **(
+            {"TEST_ROUND_FAULT": "stale"} if rank == 1 else {}))) for rank in range(16)]
+        for rank, process in enumerate(processes):
+            output, errors = process.communicate(timeout=15)
+            if rank == 1:
+                self.assertNotEqual(process.returncode, 0)
+                self.assertNotIn("EP_SERVER_DEDUP_SOURCE_SEND_PASS", output)
+                self.assertIn("stage=round-read", errors)
+                self.assertIn("expected=5 actual=4", errors)
+            else:
+                self.assertEqual(process.returncode, 0, errors)
 
     def test_prelaunch_errors_never_launch_or_pass(self):
         cases = [{"TEST_FAIL_STAGE": stage} for stage in (
@@ -301,8 +355,8 @@ class ChainConsumerTests(unittest.TestCase):
         for fault in (None, "missing", "stale", "legacy", "core", "time", "issue-header", "issue-count", "issue-time"):
             with self.subTest(fault=fault):
                 env = dict(TILEXR_VALIDATION_CHECKPOINT="ep-sdedup-p2-source-send",
-                           TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
-                           TILEXR_VALIDATION_WARMUP="0")
+                           TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                           TILEXR_VALIDATION_WARMUP="2")
                 processes = [self.start(rank, environment=dict(env, **(
                     {"TEST_PROFILE_FAULT": fault} if rank == 1 and fault else {}))) for rank in range(16)]
                 for rank, process in enumerate(processes):
@@ -316,7 +370,7 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(process.returncode, 0, errors)
                         evidence = json.loads(next(line.split(" ", 1)[1] for line in output.splitlines()
                                                    if line.startswith("EP_SERVER_DEDUP_BREAKDOWN_PASS ")))
-                        self.assertEqual(evidence["generation"], 1)
+                        self.assertEqual(evidence["generation"], 5)
                         self.assertEqual(evidence["schema_version"], 4)
                         self.assertEqual(len(evidence["records"]), 64)
                         for core in evidence["records"][:48]:

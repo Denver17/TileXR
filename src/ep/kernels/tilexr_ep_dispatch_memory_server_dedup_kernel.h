@@ -5,6 +5,7 @@
 #include "tilexr_ep_server_dedup_send.h"
 #include "tilexr_ep_server_dedup_recv.h"
 #include "tilexr_ep_server_dedup_profile.h"
+#include "tilexr_ep_server_dedup_round.h"
 
 namespace TileXREp {
 template<class XType, bool Quantized, bool E4M3>
@@ -27,8 +28,10 @@ public:
         sourceWeights_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(expertScalesOut));
         if (core_ < kEpServerDedupSendCoreNum)
             sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe);
-        else
-            receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe);
+        // The current checkpoint ends at source sends and count/cumsum.
+        // Receiver/relay is not qualified yet; do not execute its partial path.
+        (void)assistExOut;
+        (void)groupOut;
         profile_.Mark(1);
     }
 
@@ -45,7 +48,6 @@ public:
             counts_.RecvCnt(); profile_.Mark(4);
             counts_.CalcCumsum(); profile_.Mark(5);
             counts_.CompleteCumsum(); profile_.Mark(6);
-            receiver_.Process();
         }
         counts_.Finish();
         // All 64 cores participate exactly once, after their GM writes complete.
@@ -63,6 +65,7 @@ public:
             DataCopyPad(output, zero, {1U, 4U, 0U, 0U, 0U});
             const TEventID after = pipe_->FetchEventID(HardEvent::MTE3_S);
             SetFlag<HardEvent::MTE3_S>(after); WaitFlag<HardEvent::MTE3_S>(after);
+            CompleteServerDedupRound(args_, magic_, pipe_);
         }
         profile_.Mark(7);
         profile_.Flush(args_, magic_);
@@ -71,7 +74,6 @@ public:
 private:
     ServerDedupCounts counts_;
     ServerDedupSender<XType, Quantized, E4M3> sender_;
-    ServerDedupReceiver<XType, Quantized, E4M3> receiver_;
     ServerDedupProfile profile_;
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
