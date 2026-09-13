@@ -16,13 +16,13 @@ class BatchTests(unittest.TestCase):
         if not bash.exists():
             bash = Path(shutil.which("bash"))
         for entry, failure, expected in (
-            ("run_batch.sh", "run_case", 1),
+            ("run_batch.sh", "run", 1),
             ("run_batch.sh", "none", 3),
         ):
             with self.subTest(entry=entry, failure=failure), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / entry).write_text((repo / entry).read_text())
-                for step in ("build_all", "sync", "run_case"):
+                for step in ("build_all", "sync", "run"):
                     (root / (step + ".sh")).write_text(
                         f"echo {step} >> calls\n"
                         + ("echo ERROR injected >&2\nexit 19\n" if step == failure else "exit 0\n"))
@@ -61,10 +61,10 @@ class BatchTests(unittest.TestCase):
             root = Path(directory)
             repo = Path(__file__).resolve().parents[2]
             shutil.copy2(repo / "run_batch.sh", root / "run_batch.sh")
-            (root / "run_case.sh").write_text(
+            (root / "run.sh").write_text(
                 "#!/usr/bin/env bash\nset -e\nprintf '%s\n' \"$*\" >> calls\n",
                 encoding="utf-8")
-            (root / "run_case.sh").chmod(0o755)
+            (root / "run.sh").chmod(0o755)
             bash = Path(sys.executable).parent / "bash"
             if not bash.exists():
                 bash = Path(shutil.which("bash"))
@@ -75,7 +75,7 @@ class BatchTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, output + result.stderr.decode("utf-8", errors="replace"))
             calls = (root / "calls").read_text(encoding="utf-8").splitlines()
             self.assertEqual(len(calls), 3)
-            self.assertTrue(all("run_mode=performance" in call for call in calls))
+            self.assertTrue(all("-n 2 -e 96 -m 1 -l 50 50" in call for call in calls))
             self.assertNotIn("build_all", "\n".join(calls))
             self.assertNotIn("sync", "\n".join(calls))
 

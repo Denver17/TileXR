@@ -73,7 +73,7 @@ class BuildTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "source"
         self.root.mkdir()
-        (self.root / "hostfile").write_text("localhost\n", encoding="utf-8")
+        (self.root / "hostfile").write_text("127.0.0.1\n", encoding="utf-8")
         (self.root / "CMakeLists.txt").write_text("# copied source without Git\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
@@ -87,9 +87,9 @@ class BuildTests(unittest.TestCase):
         self.commands = []
         self.generation = 0
 
-    def config(self, mode="host"):
+    def config(self, mode="host", action="build"):
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": mode}):
-            return workflow.Config()
+            return workflow.Config(action)
 
     def compiled_command(self, argv, log, **kwargs):
         """代替昂贵的 CMake；实际创建本次安装文件，并保留所有调用参数。"""
@@ -152,6 +152,18 @@ class BuildTests(unittest.TestCase):
         configurations = [args[args.index("-B") + 1] for args, _, _ in self.commands if "-B" in args]
         self.assertEqual(configurations, [str(work / "host"), str(work / "host")])
         self.assertEqual(len(list(config.logs.glob("build-*"))), 2)
+
+    def test_production_build_needs_no_inventory_or_runtime_case(self):
+        (self.root / "hostfile").unlink()
+        with mock.patch.dict(os.environ, {
+                "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
+                "TILEXR_VALIDATION_SERVERS": "invalid", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "invalid",
+                "TILEXR_VALIDATION_RUN_MODE": "invalid", "TILEXR_VALIDATION_LOOPS": "invalid",
+                "TILEXR_VALIDATION_TIMEOUT": "invalid", "TILEXR_COMM_ID": "invalid",
+                "TILEXR_VALIDATION_SSH_USER": "bad;user", "TILEXR_VALIDATION_HOSTFILE": "/missing/outside"}):
+            manifest, _ = self.build_fixture(self.config("production"))
+            self.assertFalse(manifest["server_dedup_profiling"])
+            self.assertFalse((self.root / "hostfile").exists())
 
     @unittest.skipUnless(os.name == "posix", "真实命令失败和进程组清理需要 POSIX")
     def test_failed_configuration_invalidates_previous_package_and_sync_receipt(self):
@@ -224,7 +236,7 @@ class BuildTests(unittest.TestCase):
         self.assertIn(f"-DTILEXR_INSTALL_PREFIX={self.root / 'build/validation/install'}", configure)
 
     def test_chain_build_installs_native_consumer_without_adding_per_host_test(self):
-        (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
+        (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for checkpoint in workflow.CHAIN_CHECKPOINTS:
             with self.subTest(checkpoint=checkpoint), mock.patch.dict(os.environ, {
                     "TILEXR_VALIDATION_CHECKPOINT": checkpoint, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
@@ -249,7 +261,7 @@ class BuildTests(unittest.TestCase):
         runtime.assert_not_called()
 
     def test_baseline_build_disables_breakdown_instrumentation(self):
-        (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
+        (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
                     "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
@@ -261,14 +273,14 @@ class BuildTests(unittest.TestCase):
                 self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=OFF", configure)
                 os.environ["TILEXR_VALIDATION_RUN_MODE"] = "breakdown"
                 with self.assertRaisesRegex(ValueError, "设备打点开关"):
-                    workflow.verify_build(self.config("production"))
-                self.assertFalse(workflow.verify_build(self.config("production"), check_run_mode=False)["server_dedup_profiling"])
+                    workflow.verify_build(self.config("production", "run"))
+                self.assertFalse(workflow.verify_build(self.config("production", "run"), check_run_mode=False)["server_dedup_profiling"])
 
     def test_breakdown_build_enables_count_profile_and_rejects_baseline_or_legacy_package(self):
-        (self.root / "hostfile").write_text("localhost\nnode-b\n", encoding="utf-8")
+        (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {
                 "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
-                "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
+                "TILEXR_VALIDATION_BREAKDOWN": "1", "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
             config = self.config("production")
             manifest, _ = self.build_fixture(config)
             self.assertTrue(manifest["server_dedup_profiling"])
@@ -276,7 +288,7 @@ class BuildTests(unittest.TestCase):
             configure = next(args for args, _, _ in self.commands if "-S" in args and str(self.root) in args)
             self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON", configure)
             with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="functional"):
-                self.assertEqual(workflow.verify_build(self.config("production"), check_run_mode=False), manifest)
+                self.assertEqual(workflow.verify_build(self.config("production", "run"), check_run_mode=False), manifest)
             manifest.pop("server_dedup_profile_version")
             workflow.write_json(config.install / "manifest.json", manifest)
             with self.assertRaisesRegex(ValueError, "breakdown v4"):
@@ -285,7 +297,7 @@ class BuildTests(unittest.TestCase):
                 workflow.verify_build(config, check_run_mode=False)
             with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="performance"):
                 with self.assertRaisesRegex(ValueError, "设备打点开关"):
-                    workflow.verify_build(self.config("production"))
+                    workflow.verify_build(self.config("production", "run"))
             manifest["server_dedup_profiling"] = "true"
             workflow.write_json(config.install / "manifest.json", manifest)
             with self.assertRaisesRegex(ValueError, "设备打点开关"):

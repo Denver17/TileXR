@@ -77,8 +77,8 @@ sys.exit(0 if report['status'] == 'PASS' else 15)
         before = self.local.read_bytes()
         for name, loops, bs in (("first", 3, 128), ("second", 7, 512)):
             output = self.root / "run" / name
-            result = subprocess.run([str(self.bash), "run.sh", "run_mode=functional",
-                                     f"loops={loops}", f"bs={bs}"], cwd=self.root,
+            result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", "-m", "0",
+                                     "-l", str(loops), "0", f"bs={bs}"], cwd=self.root,
                                     env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -88,7 +88,7 @@ sys.exit(0 if report['status'] == 'PASS' else 15)
             self.assertFalse(list(output.glob("*.bak")))
 
         stub.write_text(stub.read_text().replace("status='PASS'", "status='FAIL'"))
-        result = subprocess.run([str(self.bash), "run.sh", "run_mode=functional"], cwd=self.root,
+        result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96"], cwd=self.root,
                                 env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(self.root / "run/failed")),
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 15)
@@ -114,14 +114,14 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                 output = self.root / f"run/{entry}-{code}"
                 calls_path = self.root / 'calls.jsonl'
                 calls_path.unlink(missing_ok=True)
-                result = subprocess.run([str(self.bash), entry + ".sh"], cwd=self.root,
+                result = subprocess.run([str(self.bash), entry + ".sh", *(["-n", "2", "-e", "96"] if entry == "run" else [])], cwd=self.root,
                     env=dict(self.env, INJECT_EXIT=str(code), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
                     text=True, capture_output=True, timeout=10)
                 action = "build" if entry == "build_all" else entry
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
                 calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
                 self.assertEqual([call['action'] for call in calls], [action])
-                self.assertEqual(calls[0]['comm_id'], '192.0.2.1:10177')
+                self.assertEqual(calls[0]['comm_id'], None if entry == 'sync' else '192.0.2.1:10177')
                 self.assertIn(action + ' stdout detail', result.stdout)
                 self.assertIn(action + ' stderr detail', result.stdout + result.stderr)
                 if entry == 'run':
@@ -159,14 +159,15 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 values = json.loads(result.stdout.splitlines()[-1])
                 self.assertEqual(values.get('TILEXR_VALIDATION_CHECKPOINT'), expected)
-                self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], run_mode)
-                self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('1', '0'))
+                self.assertEqual(values['TILEXR_VALIDATION_BREAKDOWN'], '1' if run_mode == 'breakdown' else '0')
+                self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], 'breakdown')
+                self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('3', '2'))
 
     def test_environment_failure_shows_reason_and_log_without_running_workflow(self):
         (self.root / 'tools/validation/workflow.py').write_text("raise AssertionError('must not run')\n")
         output = self.root / 'run/environment-failure'
         missing = self.root / 'missing-cann-env.sh'
-        result = subprocess.run([str(self.bash), 'run.sh'], cwd=self.root,
+        result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96'], cwd=self.root,
             env=dict(self.env, TILEXR_VALIDATION_BUILD_MODE='production',
                      TILEXR_CANN_ENV_SCRIPT=str(missing), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
             text=True, capture_output=True, timeout=10)
@@ -181,7 +182,7 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         (self.root / 'tools/validation/workflow.py').write_text("print('workflow finished')\n")
         output = self.root / 'run/log-failure'
         (output / 'workflow.log').mkdir(parents=True)
-        result = subprocess.run([str(self.bash), 'run.sh'], cwd=self.root,
+        result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96'], cwd=self.root,
             env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
             text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
@@ -201,7 +202,7 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         self.assertEqual(result.returncode, 2)
         self.assertIn('unknown argument: typo=3', result.stderr)
         self.local.unlink()
-        result = subprocess.run([str(self.bash), 'run.sh'], cwd=self.root,
+        result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96'], cwd=self.root,
                                 env=self.env, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 2)
         self.assertIn(str(self.local), result.stderr)
@@ -215,8 +216,61 @@ sys.exit(int(os.environ['INJECT_EXIT']))
             os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.CHECKPOINT
             self.assertEqual(workflow.Config().checkpoint, workflow.CHECKPOINT)
 
+    def test_short_options_defaults_modes_and_stale_environment(self):
+        (self.root / 'tools/validation/workflow.py').write_text(
+            "import os,json; print(json.dumps(dict(os.environ)))\n")
+        stale = dict(self.env, TILEXR_VALIDATION_MOE_EXPERT_NUM="1024", TILEXR_VALIDATION_SERVERS="16",
+                     TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="999",
+                     TILEXR_VALIDATION_WARMUP="99", TILEXR_VALIDATION_BS="512",
+                     TILEXR_DIRECT_HOSTS_JSON='[]')
+        for mode, name in ((None, "functional"), ("0", "functional"), ("1", "performance"), ("2", "breakdown")):
+            args = ['-n', '6', '-e', '288'] + ([] if mode is None else ['-m', mode, '-l', '7', '2'])
+            command = subprocess.run([str(self.bash), 'run.sh', *args], cwd=self.root,
+                env=stale, capture_output=True, text=True, timeout=10)
+            self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+            values = json.loads(command.stdout.splitlines()[-1])
+            self.assertEqual(values['TILEXR_VALIDATION_SERVERS'], '6')
+            self.assertEqual(values['TILEXR_VALIDATION_MOE_EXPERT_NUM'], '288')
+            self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], name)
+            self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']),
+                             ('1', '0') if mode is None else ('7', '2'))
+            self.assertEqual(values['TILEXR_VALIDATION_BS'], '96')
+            self.assertNotIn('TILEXR_DIRECT_HOSTS_JSON', values)
+
+    def test_cli_errors_and_help_precede_environment_loading(self):
+        self.local.unlink()
+        for args in ([], [''], ['-n'], ['-n', '1', '-e', '96'], ['-n', '17', '-e', '96'],
+                     ['-n', '8', '-e', '96'], ['-n', '2', '-e', '1025'],
+                     ['-n', '2', '-e', '96', '-m', '3'], ['-n', '2', '-e', '96', '-l', '3'],
+                     ['-n', '2', '-e', '96', '-l', '3', '-1'],
+                     ['-n', '2', '-e', '96', '-l', '4294967296', '0'],
+                     ['-n', '2', '-e', '96', '-l', '1', '-m', '0'],
+                     ['-n', '2', '-e', '96', '-e', '192'],
+                     ['-n', '2', '-e', '96', 'bs=96', 'bs=128']):
+            with self.subTest(args=args):
+                command = subprocess.run([str(self.bash), 'run.sh', *args], cwd=self.root,
+                    env=self.env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(command.returncode, 2)
+                self.assertIn('[run] Failed:', command.stderr)
+                self.assertNotIn('validation.local.sh', command.stderr)
+        help_result = subprocess.run([str(self.bash), 'run.sh', '--help'], cwd=self.root,
+            env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(help_result.returncode, 0)
+        self.assertIn('-l', help_result.stdout)
+        self.assertFalse((self.root / 'run').exists())
+
+    def test_sync_does_not_load_cann_or_require_a_runtime_endpoint(self):
+        self.local.write_text('TILEXR_CANN_ENV_SCRIPT=/missing/cann/set_env.sh\nTILEXR_COMM_ID=invalid\n')
+        (self.root / 'scripts/common_env.sh').write_text('echo unexpected-toolchain-load >&2\nreturn 9\n')
+        (self.root / 'tools/validation/workflow.py').write_text("import sys; print(sys.argv[1])\n")
+        command = subprocess.run([str(self.bash), 'sync.sh'], cwd=self.root,
+            env=dict(self.env, TILEXR_VALIDATION_BUILD_MODE='production'), capture_output=True, text=True, timeout=10)
+        self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+        self.assertNotIn('unexpected-toolchain-load', command.stdout + command.stderr)
+        self.assertEqual(command.stdout.splitlines()[-1], 'sync')
+
     def test_remote_verify_receives_commit_mode_without_editing_remote_config(self):
-        (self.root / "hostfile").write_text("localhost\nworker\n")
+        (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n")
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json; print(json.dumps(dict(os.environ)))\n")
         before = self.local.read_bytes()
@@ -226,13 +280,13 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                              TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_BLOCK_DIM="64",
                              TILEXR_COMM_ID="192.0.2.1:10177"), clear=True):
             config = workflow.Config()
-            command = workflow.remote_argv(config, "worker", "verify", "test-build")[-1]
+            command = workflow.remote_argv(config, "192.0.2.2", "verify", "test-build")[-1]
         result = subprocess.run([str(self.bash), "-c", command], input=workflow.REMOTE_SCRIPT,
                                 cwd=self.root, env=self.env, text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout.splitlines()[-1])
-        self.assertEqual(values["TILEXR_VALIDATION_RUN_MODE"], "breakdown")
-        self.assertEqual(values["TILEXR_VALIDATION_BLOCK_DIM"], "64")
+        self.assertNotIn("TILEXR_VALIDATION_RUN_MODE", values)
+        self.assertNotIn("TILEXR_VALIDATION_BLOCK_DIM", values)
         self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], workflow.SOURCE_SEND_CHECKPOINT)
         self.assertEqual(self.local.read_bytes(), before)
 
