@@ -64,6 +64,19 @@ bash run.sh run_mode=performance loops=100 warmup=10
 
 每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为 cnt/cumsum、完整源端发送和设备轮末完成等待。有效带宽仍使用每次调用的第一跳/DIRECT 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留；此值不是纯网络带宽或完整 Dispatch 性能。sendData 内部打点保持相邻 MTE3 下发间隔，跨 rank 轮末等待计入 finish/完整 kernel。
 
+## 普通 Memory 性能对照的接入边界
+
+当前 `build_all.sh + sync.sh + run.sh` 尚未提供普通 Memory 算子的切换入口。构建会安装 `tilexr_ep_dispatch_memory_kernel.o`，但明确关闭 `BUILD_TILEXR_EP_DEMO`；运行固定启动 `test_tilexr_ep_server_dedup_chain`，consumer 固定调用 Server Dedup API。`measurements.py` 的 kernel 名、结果 marker、ABI/布局和 breakdown reader 也绑定 Server Dedup。JSON 中 `backend=memory` 表示 peer-memory 传输，不能据此认定执行了普通 Memory Dispatch。
+
+仓库已有普通 Memory 的 `tests/ep/demo/tilexr_ep_dispatch_demo.cpp`、`tests/ep/cluster/run_memory_dispatch_node.sh` 和独立 msprof/trace 工具，可复用其 API 调用及最终输出校验；它们尚未接入当前三脚本流程。进行对照前需统一以下条件：
+
+- 输入：旧 demo 的 `uniform/random/explicit` 没有选择当前 `balance_shift` 的分支；应共用实际 expert IDs 和 hidden 输入，不能只匹配 shape 或 seed。
+- 通信域与轮次：旧 demo 使用默认 2 GiB、双分区 communicator，性能模式在预热后额外同步/barrier，functional 逐轮同步；当前是固定 4 GiB、预热和测量连续提交、整批末尾同步。普通 Memory 可使用满足其容量下限的 4 GiB 域，但需保持自己的双分区布局并单独验证复用。
+- 测量：旧集群工具取最后 50 次样本，先算每服务器各卡全部样本平均，再汇总服务器平均；当前取最后 loops 次、逐 rank 样本中位数后汇总。应统一样本选择、跨 rank median/min/max、kernel SHA、通信字节和带宽定义。
+- 打点：普通 Memory 使用独立的 `TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING` 和 v2 reader；当前 `build_all.sh breakdown=1` 只打开 Server Dedup 打点。性能对照两侧关闭设备诊断打点、保留 msprof；阶段对照使用各自 reader，不能仅替换 kernel 名。
+
+普通 Memory 的完整 kernel 包含接收及最终 expert 行写出，而当前 Server Dedup 只到 source-send。当前可准备 Memory 完整基线或分析对应阶段；在 Server Dedup 接收闭环前，不把二者整核耗时比值报告为完整 Dispatch 加速比。接入时复用公共编译/同步/启动/采样流程，通过算法适配层分别选择 API、输出校验、profile reader 和流量计算；尚无可直接使用的 `run.sh impl=memory` 参数。
+
 ## 输入类型与验证内容
 
 六种已接入类型为 BF16/FP16 × 非量化/E4M3/E5M2；默认只运行上述 BF16 非量化基线。类型参数是运行参数，无需更改 kernel 构建：

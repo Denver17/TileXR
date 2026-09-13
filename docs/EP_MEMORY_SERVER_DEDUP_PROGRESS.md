@@ -1,7 +1,7 @@
 # EP Memory Server Dedup 调试进度
 
 记录检查点的服务器通过结果及当前增量状态；完整命令见[人工验证](EP_VALIDATION_GUIDE.md)。
-通过范围按实际配置登记，64P/128P 与目标 Linux 卡住/HUP 清理演练仍待验证。
+通过范围按实际配置登记。64P/E384 源端发送的量化/非量化多轮已获用户确认；128P、完整 Dispatch/Combine 与目标 Linux 卡住/HUP 清理演练仍待验证。
 
 ## 阶段 1：Dispatch 公共框架与空算子
 
@@ -36,8 +36,9 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 | --- | --- | --- |
 | cnt 发送/接收、cumsum | 用户确认最新提交验收通过 | [0bc6f1b](https://github.com/LingquLab/TileXR/commit/0bc6f1bbe64f25ab21a8fae23e70eed797dc48a5) |
 | server grouping / 第一跳 | §2.3 用户确认单轮检查点 PASS；多轮及性能达标未验收 | [0df1db0](https://github.com/LingquLab/TileXR/commit/0df1db02bb139c447456c283afe05586ff9f3c5d) |
-| DIRECT / 完整源端发送 | §2.4 用户确认单轮检查点 PASS；多轮及性能达标未验收 | [631a1ff](https://github.com/LingquLab/TileXR/commit/631a1ffcc9cc138e583c1b657cd73ef1a6e64792) |
-| 接收监听 / 第一跳展开 / metadata | 本地 receiver 已接入：按 16 个接收核均分 prefix 槽位，DataAsFlag 完整 Flag 监听与清理，写出 expandX/assistEx；第一跳分配 relay counter、写 group 并发送本卡/跨卡终端副本。尚未上机验收。 | 工作区未提交 |
+| DIRECT / 完整源端发送 | §2.4 用户确认单轮检查点 PASS；后续多轮结果见下一行，性能达标未验收 | [631a1ff](https://github.com/LingquLab/TileXR/commit/631a1ffcc9cc138e583c1b657cd73ef1a6e64792) |
+| 源端发送多轮 / 量化 | 用户确认 64P、384 专家（每卡 6 专家）、量化/非量化多轮测试通过；具体输入类型、FP8 格式、轮次及运行模式未回传 | [d9eb0c4](https://github.com/LingquLab/TileXR/commit/d9eb0c45ecc7f13c7c10caedac697be7257ccd8c)（按最近交付登记） |
+| 接收监听 / 第一跳展开 / metadata | receiver 代码保留，当前 source-send 入口不执行。prefix 地址、packed 元数据、relay/pending 调度及 Flag 生命周期尚未闭环，未上机验收。 | — |
 | Dispatch correctness / 完整验收 | 未开始 | — |
 
 2026-09-12：依据用户“最新的提交验证通过”回传，按当前最新提交 `0bc6f1b` 登记 cnt/cumsum 检查点通过。
@@ -50,6 +51,8 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 2026-09-12：修复第一跳 `Duplicate` 掩码限定符编译错误后，用户回传“1轮测试通过，最终结果pass”。按最近交付的 `0df1db0` 登记 `ep-sdedup-p2-first-hop` 单轮检查点通过；未直接读取服务器 summary，实际 SHA、配置和运行模式以该次结果为准。通过范围为当前 cnt/cumsum + 第一跳包及源端输出校验，不扩展为量化组合、breakdown、多轮复用或性能达标已验收。下一增量按验证流程 §2.4 叠加 DIRECT 直发。
 
 2026-09-12：用户确认 `ep-sdedup-p2-source-send` 测试通过。按最近交付的 `631a1ff` 登记单轮完整源端发送检查点通过；未直接读取服务器 summary，实际 SHA、配置、模式和性能数据以该次结果为准。通过范围为 cnt/cumsum、第一跳、DIRECT、完整 route 覆盖及 sourceMask/expertScalesOut 校验，不扩展为多轮复用、接收/relay、Combine 或性能达标已验收。
+
+2026-09-13：用户确认“64P 量化/非量化 384专家 多轮测试通过”。按最近交付的 `d9eb0c4` 登记；未直接读取服务器 summary 或 kernel SHA。通过范围为当前 source-send 的 cnt/cumsum、第一跳/DIRECT、源端输出及同域多轮完成协议，最终数值校验只读取最后一轮。此次反馈未给出输入 dtype、FP8 格式、BS/H/TopK、warmup/loops、run_mode 或时延，不推断两种 FP8 格式均通过，也不标记性能目标、接收/relay 或完整 Dispatch/Combine 已验收。
 
 接收侧实现经验：DataAsFlag 的 Payload 不能按单段连续字节读回，hidden 必须按每个 480B 数据块剥离 32B Flag 后再写出；接收 Flag 清理也必须使用相同的 16 个 32B 块跨度。当前实现已在 CPU fake API 下完成 C++ 编译和已有 server-dedup 测试回归，真实 CANN/A5 的事件顺序、跨 Rank relay 和多轮复用仍需服务器验证。
 
@@ -70,4 +73,4 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 | source 归约 | 未开始 | — |
 | correctness / 性能验收 | 未开始 | — |
 
-后续阶段按最新设计逐模块推进；当前交付 `ep-sdedup-p2-source-send`，单轮验证第一跳 + DIRECT；16P/L6/BS96/H7168/K6/BF16/balance_shift/seed2026、每 rank 4 GiB 及 loops=1/warmup=0 基线延续。完整数据多轮复用仍待接收清理契约。
+后续阶段按最新设计逐模块推进；当前交付 `ep-sdedup-p2-source-send`，支持第一跳 + DIRECT 的同域连续多轮。默认仍为 16P/L6/BS96/H7168/K6/BF16/balance_shift/seed2026、每 rank 4 GiB、loops=1/warmup=0；64P/E384 的新增通过范围见上文。完整 Dispatch 多轮复用仍待接收清理契约。
