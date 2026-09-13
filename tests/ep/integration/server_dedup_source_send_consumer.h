@@ -111,6 +111,12 @@ std::string ReadSourceSendProfile(const Config &c, const TileXR::CommArgs &args)
     std::array<EpServerDedupProfileRecord, kEpServerDedupCoreNum * kEpServerDedupProfileSegments> records {};
     Check(aclrtMemcpy(records.data(), sizeof(records), args.peerMems[c.rank], sizeof(records), ACL_MEMCPY_DEVICE_TO_HOST),
         "read source-send breakdown");
+    const auto detailLayout = TileXREpServerDedupSendProfileLayout(args.peerMemBytes, uint32_t(c.bs), uint32_t(c.topK));
+    const auto dataLayout = TileXREpServerDedupDataLayout(c.bs, c.h, c.topK, c.experts, c.quantMode == 4);
+    Require(detailLayout.offset >= dataLayout.requiredBytes, "send profile overlaps data or communicator flags");
+    std::vector<uint8_t> detail(detailLayout.bytes);
+    Check(aclrtMemcpy(detail.data(), detail.size(), args.peerMems[c.rank] + detailLayout.offset,
+        detail.size(), ACL_MEMCPY_DEVICE_TO_HOST), "read send issue breakdown");
     const uint64_t generation = 1;
     const char *points[] = {"start", "init_end", "send_cnt_end", "send_data_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end"};
     std::ostringstream out;
@@ -132,6 +138,33 @@ std::string ReadSourceSendProfile(const Config &c, const TileXR::CommArgs &args)
         for (uint32_t i = 0; i < 8; ++i) {
             Require(i == 0 || time[i] >= time[i - 1], "unordered source-send breakdown timestamps");
             out << ",\"" << points[i] << "\":" << time[i];
+        }
+        if (core < kEpServerDedupSendCoreNum) {
+            EpServerDedupSendProfileHeader header {};
+            const auto *base = detail.data() + core * detailLayout.coreStride;
+            std::memcpy(&header, base, sizeof(header));
+            const uint32_t count = c.bs / kEpServerDedupSendCoreNum + (core < c.bs % kEpServerDedupSendCoreNum);
+            const uint32_t start = core * (c.bs / kEpServerDedupSendCoreNum) +
+                std::min(core, uint32_t(c.bs % kEpServerDedupSendCoreNum));
+            Require(header.marker == kEpServerDedupProfileMarker && header.version == kEpServerDedupProfileVersion &&
+                header.recordBytes == sizeof(EpServerDedupSendProfilePacket) && header.rank == uint32_t(c.rank) &&
+                header.core == core && header.generation == generation && header.packetCount <= detailLayout.capacity &&
+                header.packetCount >= count && header.packetCount <= count * c.topK && header.firstHopCount <= header.packetCount,
+                "invalid send issue header core=" + std::to_string(core));
+            out << ",\"first_hop_count\":" << header.firstHopCount << ",\"send_packets\":[";
+            uint64_t previous = time[2];
+            std::set<uint64_t> routes;
+            for (uint32_t packet = 0; packet < header.packetCount; ++packet) {
+                EpServerDedupSendProfilePacket p {};
+                std::memcpy(&p, base + sizeof(header) + packet * sizeof(p), sizeof(p));
+                Require(p.issue >= previous && p.issue <= time[3] && p.token >= start && p.token < start + count &&
+                    p.k < uint32_t(c.topK) && routes.insert(uint64_t(p.token) * c.topK + p.k).second,
+                    "invalid send issue packet core=" + std::to_string(core) + " packet=" + std::to_string(packet));
+                if (packet != 0U) out << ',';
+                out << "{\"issue\":" << p.issue << ",\"token\":" << p.token << ",\"k\":" << p.k << '}';
+                previous = p.issue;
+            }
+            out << ']';
         }
         out << '}';
     }

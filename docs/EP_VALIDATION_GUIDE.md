@@ -101,7 +101,7 @@ bash sync.sh
 bash run.sh run_mode=breakdown loops=1 warmup=0
 ```
 
-构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=3`，并标记 184B ABI、`r07-single` 布局及 `source_send` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
+构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=4`，并标记 184B ABI、`r07-single` 布局及 `source_send` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
 
 成功结果和 trace 路径：
 
@@ -117,13 +117,23 @@ run/case-<时间>-<PID>/<run_id>/traces/index.json
 
 将 `.trace.json` 导入 Perfetto/Chrome tracing。`measurements.breakdown.stages_us` 给出各阶段核最大值的跨 rank median/min/max；`nodes[].reported_result.ranks[].breakdown.records[]` 保留 64 核的原始时间戳。
 
-阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`finish` 和 `source_send_total`。源端核未执行的接收阶段为零时长，接收核的 send_data 为零；finish 包含末尾全核 SyncAll 及 core63 counter 清零。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。当前 generation=1，各卡独立归零，不能推断跨卡绝对时序。
+阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`finish` 和 `source_send_total`。源端核未执行的接收阶段为零时长，接收核的 send_data 为零；finish 包含接收核的 receiver 工作、末尾全核 SyncAll 及 core63 counter 清零。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。当前 generation=1，各卡独立归零，不能推断跨卡绝对时序。
 
-打点构建在时间戳边界插入 PIPE_ALL，会影响耗时；各段核最大值不可直接相加。普通性能基线关闭设备打点，performance 的 msprof 仍保留。恢复普通产物需再次手动执行 `bash build_all.sh`、`bash sync.sh`。
+v4 在每个发送核的 `send_data` 下细分三个连续区间，`stages_us` 同时汇总这三项：
 
-R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v3 每核使用两个 64B 行，实际记录占 8192B。旧 v2 位于计数状态之后，不能按旧 offset/行宽读取新包。reader 同时检查 schema、segment、核/rank、generation 和时间戳顺序。
+| trace 名称 | 起止时间点 |
+| --- | --- |
+| `send_prepare` | `send_cnt_end` → 第一个物理包的 MTE3 下发点，包含首包准备 |
+| `send_first_hop` | 第一个待中转包的 MTE3 下发点 → 第一个 DIRECT 包下发点；没有 DIRECT 时终止于 `send_data_end` |
+| `send_direct` | 第一个 DIRECT 包下发点 → `send_data_end` |
 
-已有成功 summary 可离线导出，无需再次启动设备：
+缺少某类包时对应发送阶段为零；本核无 Token 时只有准备区间。每个物理包在 `DataCopy` 下发后立即调用 `GetSystemCycle`，没有新增 `PIPE_ALL`、SetFlag/WaitFlag 或完成等待。已有粗粒度时间戳仍保留原来的 PIPE_ALL；读时钟和 UB 标量记录本身仍有诊断开销。普通性能基线关闭设备打点，performance 的 msprof 仍保留。恢复普通产物需再次手动执行 `bash build_all.sh`、`bash sync.sh`。
+
+`nodes[].reported_result.ranks[].breakdown.records[]` 的发送核增加 `first_hop_count` 和 `send_packets: [{issue, token, k}, ...]`。数组按实际发送顺序排列，前 `first_hop_count` 项为待中转包，其余为 DIRECT；同一输入 Token 可产生多个物理包，`token/k` 标识该包的原始路由头。trace 中每包都有 `MTE3 issue` 瞬时点，`send_issue_interval` 段表示 **本包下发 → 下一包下发**，跨 first-hop/DIRECT 切换的间隔归前一个包。它包含下一包准备、已有等待与下发开销，不表示本包 DMA 搬运完成耗时。最后一包没有下一下发点，只保留瞬时点，并将其后至 `send_data_end` 单列为 `send_drain_and_outputs`；该收尾包含已有 lane 排空、mask/weight 输出及粗边界同步，不冒充 Token 间隔。各段核最大值不可直接相加。
+
+R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v3/v4 粗粒度记录每核两个 64B 行，共 8192B。v4 逐包记录暂存在独立 UB，最终 `end` 取时后才写到通信域 payload 尾部，必须避开 `peerMemBytes` 中最后 4MiB 的 communicator flags。每核最多 `ceil(BS/48)*TopK` 个 16B 记录，加 32B 头后按 64B 对齐；48 核总区按 512B 对齐。固定 BS96/TopK6 时占用 12288B GM，每发送核增加 192B UB，计入 lane 容量计算，仍保留 8 个 lane。Host 拒绝数据区与诊断区重叠，现有 cnt/数据偏移和 4GiB 通信域大小不变。reader 校验版本、核/rank、generation、包数和时间范围，汇总再核对 first-hop/DIRECT 包数，禁止静默截断。
+
+已有 v3/v4 成功 summary 可离线导出，无需再次启动设备；v3 只能显示原有粗粒度阶段，无法补出逐包时间点：
 
 ```bash
 python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summary.json
@@ -148,13 +158,16 @@ cmake --build build/server-dedup-host --target \
   test_tilexr_ep_server_dedup_protocol test_tilexr_ep_server_dedup_layout \
   test_tilexr_ep_server_dedup_host_validation test_tilexr_ep_server_dedup_public_abi \
   test_tilexr_ep_kernel_launch test_tilexr_ep_server_dedup_counts \
-  test_tilexr_ep_server_dedup_profile test_tilexr_ep_server_dedup_source_send -j8
+  test_tilexr_ep_server_dedup_profile test_tilexr_ep_server_dedup_source_send \
+  test_tilexr_ep_server_dedup_source_send_profile test_tilexr_ep_server_dedup_host_profile_validation -j8
 ctest --test-dir build/server-dedup-host --output-on-failure \
   -R 'test_tilexr_ep_server_dedup_|test_tilexr_ep_kernel_launch$'
 python3 tests/ep/integration/test_server_dedup_chain.py
 ```
 
 本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用；在 GM 搬运替身记录实际发送，核对第一跳优先、DIRECT 的 token/k 顺序、每个槽位恰好一包及跨阶段 lane 序号连续。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+
+逐包打点的本地回归还核对每条记录与实际发送对应、空核头、容量/同步标志区边界、Host 容量拒绝、损坏记录拒绝、三个子阶段及最后一包的 trace 语义。纯 CPU 替身只验证记录和导出契约，真实 CANN 9.1 编译、A5 可见性及诊断开销仍需服务器运行确认。维护时不要在热路径逐包写 GM/DCCI，也不要为获取完成时间新增同步；相邻下发点才能保持这里约定的测量含义。
 
 维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。数据 Flag 尚无清理 owner 时只开放单次提交；旧 cnt-only 多轮结果不能作为数据复用证据。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
 

@@ -100,6 +100,93 @@ class MeasurementTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 measure.validate_rank_measurements(bad, config)
 
+    def detailed_fixture(self):
+        config = dict(self.config, run_mode="breakdown", rank_size=16, loops=1, warmup=0,
+                      bs=4, topk=6, h=7168, moe_expert_num=96, quant_mode=0, fp8_format="e4m3",
+                      route_mode="balance_shift", seed=2026, kernel_scope="source_send")
+        cores = []
+        for core in range(64):
+            time = [100, 110, 120, 160, 160, 160, 160, 180] if core < 48 else [100, 110, 120, 120, 140, 150, 160, 190]
+            row = dict(core=core, **dict(zip(measure.SOURCE_SEND_POINTS, time)))
+            if core < 48:
+                issue = ([125, 135, 150], [130], [125, 130], [140])[core] if core < 4 else []
+                row.update(first_hop_count=(2, 1, 0, 0)[core] if core < 4 else 0,
+                           send_packets=[dict(issue=tick, token=core, k=index*2) for index, tick in enumerate(issue)])
+            cores.append(row)
+        ranks = [dict(rank=rank, first_hop_packets=3, first_hop_received=3, first_hop_bytes=3*15872,
+                      direct_packets=4, direct_received=4, direct_bytes=4*15872, token_stride=15872,
+                      local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=5*15872,
+                      breakdown=dict(schema_version=4, kernel_scope="source_send", generation=1,
+                                     run_mode="breakdown", loops=1, warmup=0, block_dim=64, records=copy.deepcopy(cores)))
+                 for rank in range(16)]
+        return config, ranks
+
+    def test_send_detail_phases_partition_send_data_and_preserve_issue_intervals(self):
+        config, ranks = self.detailed_fixture()
+        result = measure.summarize_measurements(ranks, config, "a" * 64)
+        self.assertEqual(result["breakdown"]["schema_version"], 4)
+        self.assertEqual(result["breakdown"]["stages_us"]["send_prepare"]["median"], 0.040)
+        self.assertEqual(result["breakdown"]["stages"]["send_first_hop"]["maximum"], 30)
+        self.assertEqual(result["breakdown"]["stages"]["send_direct"]["minimum"], 35)
+        for core in ranks[0]["breakdown"]["records"][:48]:
+            self.assertEqual(sum(end - begin for _, begin, end in measure._send_detail_spans(core)), 40)
+        traces = measure.export_breakdown_traces(ranks, config, self.root / "detail", "detail-run", "a" * 64)
+        trace = json.loads(Path(traces["ranks"]["0"]).read_text())
+        self.assertEqual(trace["otherData"]["schema_version"], 4)
+        events = trace["traceEvents"]
+        phases = {e["name"]: e["dur"] for e in events if e.get("cat") == "send_phase" and e["tid"] == 0}
+        self.assertEqual(phases, dict(send_prepare=0.005, send_first_hop=0.025, send_direct=0.010))
+        # Floating ts are only for the viewer; exact ticks are retained in args.
+        intervals = [e for e in events if e.get("cat") == "send_issue_interval" and e["tid"] == 0]
+        self.assertEqual([(e["args"]["start_ticks"], e["args"]["end_ticks"]) for e in intervals], [(125, 135), (135, 150)])
+        self.assertEqual([e["args"]["kind"] for e in intervals], ["first_hop", "first_hop"])
+        self.assertEqual(intervals[-1]["args"]["next_k"], 4)
+        points = [e for e in events if e.get("cat") == "mte3_issue" and e["tid"] == 0]
+        self.assertEqual([e["args"]["issue_ticks"] for e in points], [125, 135, 150])
+        tail = next(e for e in events if e.get("cat") == "send_cleanup" and e["tid"] == 0)
+        self.assertEqual(tail["name"], "send_drain_and_outputs")
+        self.assertEqual(tail["args"]["start_ticks"], 150)
+        self.assertEqual(tail["dur"], 0.010)
+        for core, missing in ((1, "send_direct"), (2, "send_first_hop"), (4, "send_first_hop")):
+            self.assertEqual(next(e["dur"] for e in events if e.get("cat") == "send_phase" and e["tid"] == core and e["name"] == missing), 0)
+        self.assertFalse(any(e.get("cat") in ("mte3_issue", "send_issue_interval", "send_cleanup") and e["tid"] == 4 for e in events))
+
+    def test_send_detail_rejects_missing_overflow_stale_or_misidentified_packets(self):
+        config, ranks = self.detailed_fixture()
+        for fault in ("missing", "not-list", "count", "count-type", "capacity", "empty", "unordered", "before", "after",
+                      "token", "k", "duplicate", "receiver", "traffic", "missing-core"):
+            row = copy.deepcopy(ranks[0])
+            core = row["breakdown"]["records"][0]
+            packet = core["send_packets"][0]
+            if fault == "missing": core.pop("send_packets")
+            if fault == "not-list": core["send_packets"] = "bad"
+            if fault == "count": core["first_hop_count"] = 4
+            if fault == "count-type": core["first_hop_count"] = True
+            if fault == "capacity": core["send_packets"] *= 3
+            if fault == "empty": core["send_packets"] = []; core["first_hop_count"] = 0
+            if fault == "unordered": core["send_packets"][1]["issue"] = 124
+            if fault == "before": packet["issue"] = 119
+            if fault == "after": packet["issue"] = 161
+            if fault == "token": packet["token"] = 1
+            if fault == "k": packet["k"] = 6
+            if fault == "duplicate": core["send_packets"][1]["k"] = 0
+            if fault == "receiver": row["breakdown"]["records"][48]["send_packets"] = [packet]
+            if fault == "traffic": row["first_hop_packets"] += 1
+            if fault == "missing-core": row["breakdown"]["records"].pop()
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                measure.validate_rank_measurements(row, config)
+        ranks[1]["breakdown"]["schema_version"] = 3
+        with self.assertRaisesRegex(ValueError, "版本不一致"):
+            measure.summarize_measurements(ranks, config, "a" * 64)
+
+    def test_send_detail_accepts_equal_ticks_without_losing_issue_points(self):
+        config, ranks = self.detailed_fixture()
+        ranks[0]["breakdown"]["records"][0]["send_packets"][1]["issue"] = 125
+        measure.validate_rank_measurements(ranks[0], config)
+        events = measure._send_detail_events(ranks[0]["breakdown"]["records"][0], 0, 100, 1)
+        self.assertEqual(len([e for e in events if e["ph"] == "i"]), 3)
+        self.assertEqual(next(e["dur"] for e in events if e["cat"] == "send_issue_interval"), 0)
+
     def test_source_send_performance_includes_direct_and_local_copy_bytes(self):
         config = dict(self.config, rank_size=16, bs=96, moe_expert_num=96, loops=1, warmup=0,
                       kernel_scope="source_send", route_mode="balance_shift", seed=2026, quant_mode=0, fp8_format="e4m3")

@@ -694,7 +694,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
         self.manifest.update(checkpoint=checkpoint, mode="production", server_dedup_profiling=run_mode == "breakdown")
         if run_mode == "breakdown":
-            self.manifest["server_dedup_profile_version"] = 3
+            self.manifest["server_dedup_profile_version"] = 4
         self.manifest["server_dedup_contract"] = dict(workflow.SOURCE_SEND_ABI)
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.parent.mkdir()
@@ -720,8 +720,9 @@ record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
 record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
               fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='source_send', native_status='source_send',
-              first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
-              local_data_bytes=15872, same_server_data_bytes=15872, cross_server_data_bytes=47616,
+              first_hop_packets=48, first_hop_received=48, first_hop_bytes=48*15872, token_stride=15872,
+              direct_packets=48, direct_received=48, direct_bytes=48*15872,
+              local_data_bytes=24*15872, same_server_data_bytes=24*15872, cross_server_data_bytes=48*15872,
               first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True)
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
 if behavior == 'wrong-shape':
@@ -737,9 +738,12 @@ if behavior == 'stale-round':
 if run_mode != 'functional':
     record['timing_us'] = dict(submit=4, sync=3, barrier=2, batch_total=10)
 if run_mode == 'breakdown':
-    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=3, kernel_scope='source_send',
+    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=4, kernel_scope='source_send',
                    records=[dict(core=core, start=100, init_end=110, send_cnt_end=120, send_data_end=125, recv_cnt_end=130,
                                  cumsum_end=140, prefix_end=150, end=160) for core in range(64)])
+    for core in profile['records'][:48]:
+        core.update(first_hop_count=1, send_packets=[dict(issue=121, token=core['core']*2, k=0),
+                                                    dict(issue=123, token=core['core']*2+1, k=0)])
     if behavior == 'stale-breakdown':
         profile['generation'] -= 1
     if behavior != 'missing-breakdown':

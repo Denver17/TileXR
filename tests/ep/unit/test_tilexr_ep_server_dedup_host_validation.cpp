@@ -2,6 +2,7 @@
 
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_launch.h"
+#include "ep_memory_server_dedup_profile.h"
 #include "server_dedup_test_checks.h"
 
 namespace {
@@ -248,7 +249,17 @@ int main()
     g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024 - 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024;
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    const uint64_t detailBytes = TileXREpServerDedupSendProfileLayout(0, p.bs, p.topK).bytes;
+    g_commArgs.peerMemBytes += detailBytes;
+    Check(Invoke(valid) == TILEXR_SUCCESS, "exact data plus detailed trace and communicator flags accepted");
+    --g_commArgs.peerMemBytes;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    ++g_commArgs.peerMemBytes;
+#else
     Check(Invoke(valid) == TILEXR_SUCCESS, "exact data domain plus flag capacity accepted");
+#endif
     g_commArgs.peerMems[63] += 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMems[63] -= 1;
@@ -261,5 +272,9 @@ int main()
     g_submitRet = TILEXR_ERROR_MKIRT;
     Check(Invoke(valid) == TILEXR_ERROR_MKIRT, "submission error propagated");
     Check(g_magicCalls == 0, "Host checkpoint never allocates a launch magic");
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    return ServerDedupTest::Finish("host_profile_validation");
+#else
     return ServerDedupTest::Finish("host_validation");
+#endif
 }

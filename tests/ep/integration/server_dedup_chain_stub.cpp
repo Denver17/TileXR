@@ -25,6 +25,8 @@ std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
 alignas(32) std::array<uint8_t, 32> localPeer {};
 std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum * 2> countProfile {};
+std::vector<uint8_t> sendProfile;
+uint64_t sendProfileOffset = 0;
 bool profileReady = false;
 int Call(const char *name)
 {
@@ -87,6 +89,10 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
     if (profileReady && source == args.peerMems[rankId] && bytes == sizeof(countProfile)) {
         std::memcpy(destination, countProfile.data(), bytes);
         return Call("breakdown-read");
+    }
+    if (profileReady && source == args.peerMems[rankId] + sendProfileOffset && bytes == sendProfile.size()) {
+        std::memcpy(destination, sendProfile.data(), bytes);
+        return Call("send-breakdown-read");
     }
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
@@ -197,6 +203,34 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
                     p.time[i] = calls["launch"] * 1000 + core / 2U + (p.segment * 4U + i) * 10;
             }
             const char *fault = std::getenv("TEST_PROFILE_FAULT");
+            const auto detailLayout = TileXREpServerDedupSendProfileLayout(args.peerMemBytes, uint32_t(bs), uint32_t(topK));
+            sendProfile.assign(detailLayout.bytes, 0);
+            sendProfileOffset = detailLayout.offset;
+            const ServerDedupReference::Shape profileShape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h),
+                uint32_t(topK), dtype == TileXR::TILEXR_DATA_TYPE_BFP16, quant == 4, outDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3};
+            const auto sent = ServerDedupReference::SourcePackets(ServerDedupReference::Ids(profileShape, rank),
+                ServerDedupReference::Weights(profileShape, rank), rank, world, experts, topK);
+            for (uint32_t core = 0; core < kEpServerDedupSendCoreNum; ++core) {
+                EpServerDedupSendProfileHeader header {kEpServerDedupProfileMarker, kEpServerDedupProfileVersion,
+                    sizeof(EpServerDedupSendProfilePacket), uint32_t(rank), core, calls["launch"], 0, 0};
+                const uint32_t count = bs / 48U + (core < bs % 48U);
+                const uint32_t start = core * (bs / 48U) + std::min(core, uint32_t(bs % 48U));
+                std::vector<EpServerDedupSendProfilePacket> issued;
+                for (bool firstHop : {true, false}) for (const auto &packet : sent) {
+                    if (packet.token < start || packet.token >= start + count || (packet.members.size() > 1U) != firstHop) continue;
+                    issued.push_back({countProfile[core * 2U].time[2] + 1U, packet.token, packet.members[0].k});
+                    if (firstHop) ++header.firstHopCount;
+                }
+                header.packetCount = uint32_t(issued.size());
+                if (core == 0U && fault) {
+                    if (std::strcmp(fault, "issue-header") == 0) --header.generation;
+                    if (std::strcmp(fault, "issue-count") == 0) header.packetCount = detailLayout.capacity + 1U;
+                    if (std::strcmp(fault, "issue-time") == 0 && !issued.empty()) issued[0].issue = 1U;
+                }
+                auto *base = sendProfile.data() + core * detailLayout.coreStride;
+                std::memcpy(base, &header, sizeof(header));
+                if (!issued.empty()) std::memcpy(base + sizeof(header), issued.data(), issued.size() * sizeof(issued[0]));
+            }
             if (fault) {
                 auto &p = countProfile[0];
                 if (std::strcmp(fault, "missing") == 0) p.marker = 0;

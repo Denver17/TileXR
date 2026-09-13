@@ -38,6 +38,7 @@ COUNT_POINTS = ("start", "init_end", "send_cnt_end", "recv_cnt_end", "cumsum_end
 COUNT_STAGES = ("init", "send_cnt", "recv_cnt", "cumsum", "prefix_consume", "finish", "count_total")
 SOURCE_SEND_POINTS = ("start", "init_end", "send_cnt_end", "send_data_end", "recv_cnt_end", "cumsum_end", "prefix_end", "end")
 SOURCE_SEND_STAGES = ("init", "send_cnt", "send_data", "recv_cnt", "cumsum", "prefix_consume", "finish", "source_send_total")
+SEND_DETAIL_STAGES = ("send_prepare", "send_first_hop", "send_direct")
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。
 A5_SYSTEM_TICKS_PER_US = 1000
 SYSTEM_CLOCK_SOURCE = {
@@ -93,13 +94,13 @@ def _breakdown_spans(row, count_scope, source_send=False):
     return list(zip(names[:-1], values[:-1], values[1:])) + [(names[-1], values[0], values[-1])]
 
 
-def _breakdown_values(record):
+def _breakdown_values(record, chain_config=None):
     evidence = record.get("breakdown")
     if not isinstance(evidence, dict):
         raise ValueError("缺少 breakdown 设备记录")
     _integer(evidence.get("generation"), "breakdown generation", 1)
     cores = _integer(evidence.get("block_dim"), "breakdown block_dim", 1)
-    source_send = evidence.get("schema_version") == 3
+    source_send = evidence.get("schema_version") in (3, 4)
     if source_send and (cores != 64 or evidence.get("kernel_scope") != "source_send"):
         raise ValueError("source-send breakdown 需要 64 核及正确 scope")
     count_scope = evidence.get("schema_version") == 2
@@ -114,7 +115,61 @@ def _breakdown_values(record):
     for row in rows:
         for name, start, end in _breakdown_spans(row, count_scope, source_send):
             samples[name].append(end - start)
+    if evidence.get("schema_version") == 4:
+        if chain_config is not None:
+            _validate_send_details(record, chain_config)
+        for name in SEND_DETAIL_STAGES:
+            samples[name] = [end - begin for row in rows if row["core"] < 48
+                             for stage, begin, end in _send_detail_spans(row) if stage == name]
     return {name: max(values) for name, values in samples.items()}
+
+
+def _send_detail_spans(core):
+    packets = core["send_packets"]
+    first_hop = core["first_hop_count"]
+    begin, end = core["send_cnt_end"], core["send_data_end"]
+    first = packets[0]["issue"] if packets else end
+    direct = packets[first_hop]["issue"] if first_hop < len(packets) else end
+    return list(zip(SEND_DETAIL_STAGES, (begin, first, direct), (first, direct, end)))
+
+
+def _validate_send_details(record, config):
+    """Reject incomplete detail before rendering; never invent missing issue times."""
+    bs = _integer(config.get("bs"), "bs", 1)
+    k = _integer(config.get("topk"), "topk", 1)
+    totals = {"first_hop": 0, "direct": 0}
+    for core in record["breakdown"]["records"]:
+        cid = core["core"]
+        if cid >= 48:
+            if core.get("send_packets") or core.get("first_hop_count", 0):
+                raise ValueError("接收核不能包含源端发送打点")
+            continue
+        packets = core.get("send_packets")
+        first_hop = _integer(core.get("first_hop_count"), "first_hop_count")
+        count = bs // 48 + (cid < bs % 48)
+        start = cid * (bs // 48) + min(cid, bs % 48)
+        if (not isinstance(packets, list) or not count <= len(packets) <= count * k or first_hop > len(packets)):
+            raise ValueError("send_packets 缺失或包数超出本核 Token 范围")
+        previous = core["send_cnt_end"]
+        routes, tokens = set(), set()
+        for packet in packets:
+            if not isinstance(packet, dict):
+                raise ValueError("无效 send_packets 记录")
+            issue = _integer(packet.get("issue"), "MTE3 issue", 1)
+            token = _integer(packet.get("token"), "send token")
+            route = _integer(packet.get("k"), "send k")
+            if (not previous <= issue <= core["send_data_end"] or not start <= token < start + count
+                    or route >= k or (token, route) in routes):
+                raise ValueError("MTE3 下发时间点或 Token/k 无效、越界、重复")
+            previous = issue
+            routes.add((token, route))
+            tokens.add(token)
+        if len(tokens) != count:
+            raise ValueError("send_packets 遗漏本核 Token")
+        totals["first_hop"] += first_hop
+        totals["direct"] += len(packets) - first_hop
+    if any(record.get(kind + "_packets") != total for kind, total in totals.items()):
+        raise ValueError("send_packets 与实际 first-hop/DIRECT 包数不一致")
 
 
 def validate_rank_measurements(record, chain_config):
@@ -127,16 +182,18 @@ def validate_rank_measurements(record, chain_config):
     loops = _integer(chain_config["loops"], "loops", 1)
     warmup = _integer(chain_config["warmup"], "warmup")
     if mode == "breakdown":
-        _breakdown_values(record)
-        evidence = record["breakdown"]
-        if chain_config.get("kernel_scope") == "source_send" and evidence.get("schema_version") != 3:
-            raise ValueError("source-send 必须使用 breakdown v3")
-        if evidence.get("schema_version") == 3 and chain_config.get("kernel_scope") != "source_send":
+        evidence = record.get("breakdown", {})
+        if not isinstance(evidence, dict):
+            raise ValueError("缺少 breakdown 设备记录")
+        if chain_config.get("kernel_scope") == "source_send" and evidence.get("schema_version") not in (3, 4):
+            raise ValueError("source-send 必须使用 breakdown v3/v4")
+        if evidence.get("schema_version") in (3, 4) and chain_config.get("kernel_scope") != "source_send":
             raise ValueError("breakdown scope 与本次配置不一致")
         if chain_config.get("kernel_scope") == "cnt_cumsum" and evidence.get("schema_version") != 2:
             raise ValueError("cnt/cumsum 不能使用旧空 kernel breakdown")
         if evidence.get("schema_version") == 2 and chain_config.get("kernel_scope") != "cnt_cumsum":
             raise ValueError("breakdown scope 与本次配置不一致")
+        _breakdown_values(record, chain_config)
         if (evidence.get("run_mode") != mode or evidence["generation"] != warmup + loops
                 or any(_integer(evidence.get(key), "breakdown " + key) != value
                        for key, value in (("loops", loops), ("warmup", warmup)))):
@@ -251,8 +308,10 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
                                   "reduction": "statistics_of_rank_sample_medians",
                                   "rank_median_us": medians, **_statistics(medians, "_us")}
     else:
+        if len({row["breakdown"].get("schema_version") for row in ranks}) != 1:
+            raise ValueError("各 rank breakdown 版本不一致")
         values = [_breakdown_values(row) for row in ranks]
-        stage_names = SOURCE_SEND_STAGES if source_send else COUNT_STAGES if count_scope else BREAKDOWN_STAGES
+        stage_names = values[0].keys()
         breakdown = {"unit": "ticks", "selection": "final_measured_iteration",
                      "reduction": "core_max_per_stage_then_statistics_across_ranks",
                      "stages": {name: _statistics([row[name] for row in values]) for name in stage_names},
@@ -262,8 +321,14 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
             breakdown.update(schema_version=2, scope="cnt/cumsum stages; final trace write excluded",
                              phase_barriers="PIPE_ALL at timestamp boundaries; diagnostic build only")
         if source_send:
-            breakdown.update(schema_version=3, scope="cnt/cumsum plus first-hop and DIRECT send; relay disabled; final trace write excluded",
-                             phase_barriers="PIPE_ALL at timestamp boundaries; diagnostic build only")
+            version = ranks[0]["breakdown"]["schema_version"]
+            breakdown.update(schema_version=version,
+                             scope="cnt/cumsum and source send; finish includes receiver work and final synchronization; final trace writes excluded"
+                                   if version == 4 else "cnt/cumsum plus first-hop and DIRECT send; final trace write excluded",
+                             phase_barriers="existing coarse boundaries use PIPE_ALL; packet issue samples add no barriers or events"
+                                            if version == 4 else "PIPE_ALL at timestamp boundaries; diagnostic build only")
+            if version == 4:
+                breakdown["send_packet_timing"] = "sample immediately after MTE3 issue; interval to next packet issue, not DMA completion; final tail is cleanup"
         breakdown["ticks_per_us"] = A5_SYSTEM_TICKS_PER_US
         breakdown["clock"] = dict(SYSTEM_CLOCK_SOURCE)
         breakdown["stages_us"] = {name: {key: value / A5_SYSTEM_TICKS_PER_US for key, value in stats.items()}
@@ -294,8 +359,10 @@ def render_measurements(summary):
         lines.append("GetSystemCycle：Ascend950PR/950DT，1 GHz，1000 ticks/us；原始 ticks 保留在 JSON。")
         for name in breakdown["stages_us"]:
             append("最后一轮各核最大值 " + name, breakdown["stages_us"][name], "us")
-        if breakdown.get("schema_version") in (2, 3):
+        if breakdown.get("schema_version") in (2, 3, 4):
             lines.append("各阶段含诊断同步；未计量最终记录写出，各段最大值不保证可相加；性能基线使用 performance 产物。")
+            if breakdown.get("schema_version") == 4:
+                lines.append("Token 段表示相邻 MTE3 下发点间隔，不等于搬运完成耗时；逐包打点未新增同步，最后一包之后单列收尾。")
         else:
             lines.append("breakdown 仅为空入口检查和记录准备，未计量最终记录写出；各段最大值不保证可相加。")
     return "\n".join(lines)
@@ -321,7 +388,9 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                       clock=SYSTEM_CLOCK_SOURCE, native_status=summary["native_status"],
                       scope=summary["breakdown"]["scope"])
     if count_scope or source_send:
-        provenance.update(schema_version=3 if source_send else 2, phase_barriers=summary["breakdown"]["phase_barriers"])
+        provenance.update(schema_version=summary["breakdown"]["schema_version"], phase_barriers=summary["breakdown"]["phase_barriers"])
+        if summary["breakdown"].get("schema_version") == 4:
+            provenance["send_packet_timing"] = summary["breakdown"]["send_packet_timing"]
 
     def write(name, events, **extra):
         path = output_dir / name
@@ -344,6 +413,8 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                                    ts=(begin - origin) / A5_SYSTEM_TICKS_PER_US,
                                    dur=(end - begin) / A5_SYSTEM_TICKS_PER_US,
                                    args=dict(start_ticks=begin, end_ticks=end, generation=row["breakdown"]["generation"])))
+            if row["breakdown"].get("schema_version") == 4 and tid < 48:
+                events.extend(_send_detail_events(core, rank, origin, row["breakdown"]["generation"]))
         rank_events[rank] = events
         all_events.extend(events)
         per_rank[str(rank)] = write(f"rank-{rank}.trace.json", events, rank=rank, origin_ticks=origin)
@@ -354,6 +425,34 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                  rank_order=[dict(rank=rank, elapsed_us=elapsed) for elapsed, rank in order])
     (output_dir / "index.json").write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
     return index
+
+
+def _send_detail_events(core, rank, origin, generation):
+    """Nest the three phases and issue intervals under the existing send_data span."""
+    events = []
+
+    def span(name, begin, end, category, **args):
+        events.append(dict(ph="X", cat=category, name=name, pid=rank, tid=core["core"],
+                           ts=(begin - origin) / A5_SYSTEM_TICKS_PER_US, dur=(end - begin) / A5_SYSTEM_TICKS_PER_US,
+                           args=dict(start_ticks=begin, end_ticks=end, generation=generation, **args)))
+
+    for name, begin, end in _send_detail_spans(core):
+        span(name, begin, end, "send_phase")
+    packets = core["send_packets"]
+    for index, packet in enumerate(packets):
+        kind = "first_hop" if index < core["first_hop_count"] else "direct"
+        args = dict(packet_index=index, kind=kind, token=packet["token"], k=packet["k"], issue_ticks=packet["issue"])
+        # Every physical packet retains a point, including the final packet.
+        events.append(dict(ph="i", s="t", cat="mte3_issue", name=f"{kind} MTE3 issue", pid=rank, tid=core["core"],
+                           ts=(packet["issue"] - origin) / A5_SYSTEM_TICKS_PER_US, args=dict(generation=generation, **args)))
+        if index + 1 < len(packets):
+            nxt = packets[index + 1]
+            span(f"{kind} token={packet['token']} k={packet['k']} → next issue", packet["issue"], nxt["issue"],
+                 "send_issue_interval", next_token=nxt["token"], next_k=nxt["k"], **args)
+        else:
+            span("send_drain_and_outputs", packet["issue"], core["send_data_end"], "send_cleanup",
+                 timing="last issue to send_data_end; not an issue-to-issue interval", **args)
+    return events
 
 
 if __name__ == "__main__":

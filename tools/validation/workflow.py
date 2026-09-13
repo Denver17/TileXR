@@ -486,8 +486,8 @@ def verify_build(config, *, check_run_mode=True):
         if type(profiling) is not bool or (check_run_mode and profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
-        if profiling and manifest.get("server_dedup_profile_version") != 3:
-            raise ValueError("需要源端发送 breakdown v3 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
+        if profiling and manifest.get("server_dedup_profile_version") != 4:
+            raise ValueError("需要源端逐包打点 breakdown v4 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -597,7 +597,7 @@ def build(config):
         manifest["server_dedup_contract"] = dict(SOURCE_SEND_ABI)
         manifest["server_dedup_profiling"] = config.chain["run_mode"] == "breakdown"
         if manifest["server_dedup_profiling"]:
-            manifest["server_dedup_profile_version"] = 3
+            manifest["server_dedup_profile_version"] = 4
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
@@ -801,6 +801,9 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     raise Failure("RESULT_FAILED", "rank 未完成指定预热批次", rank=mapping["rank"])
                 if chain_config["run_mode"] != "functional":
                     try:
+                        if (chain_config["run_mode"] == "breakdown" and
+                                record.get("breakdown", {}).get("schema_version") != manifest.get("server_dedup_profile_version")):
+                            raise ValueError("breakdown 设备记录版本与安装产物不一致")
                         measurements.validate_rank_measurements(record, chain_config)
                     except (ValueError, TypeError, KeyError) as error:
                         raise Failure("RESULT_FAILED", f"rank 测量记录无效：{error}", rank=mapping["rank"]) from error

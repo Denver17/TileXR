@@ -30,20 +30,23 @@ inline std::function<void(const void *, const void *, uint32_t)> &GmWriteObserve
 inline uint32_t GetBlockIdx() { return testCore; }
 inline uint32_t GetBlockNum() { return 64; }
 inline uint64_t GetSystemCycle() { static uint64_t ticks = 100; return ++ticks; }
+inline uint64_t &TestSyncOperations() { static uint64_t count = 0; return count; }
 template<class A, class B> inline uint32_t Ceil(A a, B b) { return uint32_t((a + b - 1) / b); }
 enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S };
 enum Pipeline { PIPE_ALL, PIPE_V, PIPE_MTE3 };
 using TEventID = uint32_t;
 template<HardEvent> std::array<bool, 8> &Events() { static std::array<bool, 8> state {}; return state; }
 template<HardEvent E> void SetFlag(TEventID id) {
+    ++TestSyncOperations();
     if (id >= 8 || Events<E>()[id]) throw std::runtime_error("duplicate or invalid event publication");
     Events<E>()[id] = true;
 }
 template<HardEvent E> void WaitFlag(TEventID id) {
+    ++TestSyncOperations();
     if (id >= 8 || !Events<E>()[id]) throw std::runtime_error("waiting on an unpublished event");
     Events<E>()[id] = false;
 }
-template<Pipeline> void PipeBarrier() {}
+template<Pipeline> void PipeBarrier() { ++TestSyncOperations(); }
 template<int, int> int64_t GetCtrlSpr() { return 0; }
 template<int, int> void SetCtrlSpr(int64_t) {}
 inline void SyncAll() {}

@@ -298,7 +298,7 @@ class ChainConsumerTests(unittest.TestCase):
                     (Path(self.trace.name) / str(rank)).unlink()
 
     def test_count_breakdown_reads_final_generation_and_rejects_bad_records(self):
-        for fault in (None, "missing", "stale", "legacy", "core", "time"):
+        for fault in (None, "missing", "stale", "legacy", "core", "time", "issue-header", "issue-count", "issue-time"):
             with self.subTest(fault=fault):
                 env = dict(TILEXR_VALIDATION_CHECKPOINT="ep-sdedup-p2-source-send",
                            TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
@@ -317,8 +317,11 @@ class ChainConsumerTests(unittest.TestCase):
                         evidence = json.loads(next(line.split(" ", 1)[1] for line in output.splitlines()
                                                    if line.startswith("EP_SERVER_DEDUP_BREAKDOWN_PASS ")))
                         self.assertEqual(evidence["generation"], 1)
-                        self.assertEqual(evidence["schema_version"], 3)
+                        self.assertEqual(evidence["schema_version"], 4)
                         self.assertEqual(len(evidence["records"]), 64)
+                        for core in evidence["records"][:48]:
+                            self.assertEqual(bool(core["send_packets"]), core["core"] < evidence["bs"])
+                            self.assertLessEqual(core["first_hop_count"], len(core["send_packets"]))
                         self.assertEqual(self.trace_lines(rank).count("sync"), 1)
                     (Path(self.trace.name) / str(rank)).unlink()
 

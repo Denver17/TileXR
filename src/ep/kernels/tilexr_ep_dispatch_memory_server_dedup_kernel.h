@@ -66,6 +66,7 @@ public:
         }
         profile_.Mark(7);
         profile_.Flush(args_, magic_);
+        if (core_ < kEpServerDedupSendCoreNum) sender_.FlushProfile(magic_);
     }
 private:
     ServerDedupCounts counts_;

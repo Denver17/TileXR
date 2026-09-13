@@ -1,6 +1,7 @@
 #include "ep_memory_server_dedup_host.h"
 
 #include "ep_memory_server_dedup_protocol.h"
+#include "ep_memory_server_dedup_profile.h"
 
 namespace TileXREp {
 namespace {
@@ -76,6 +77,12 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     if (commArgs.peerMemBytes < flagBytes || next.data.requiredBytes > commArgs.peerMemBytes - flagBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    if (next.data.requiredBytes > TileXREpServerDedupSendProfileLayout(
+        commArgs.peerMemBytes, uint32_t(p.bs), uint32_t(p.topK)).offset) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+#endif
     for (int rank = 0; rank < commArgs.rankSize; ++rank) {
         if (commArgs.peerMems[rank] == nullptr) {
             return TileXR::TILEXR_ERROR_NOT_INITIALIZED;

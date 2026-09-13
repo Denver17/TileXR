@@ -4,6 +4,7 @@
 #include "kernel_operator.h"
 #include <tilexr_ep_mxfp8_quant.h>
 #include "ep_memory_server_dedup_data_layout.h"
+#include "ep_memory_server_dedup_profile.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -69,6 +70,9 @@ public:
         const uint32_t remoteServers = args_->rankSize / 8U - 1U;
         const uint32_t maxGroups = remoteServers < k_ / 2U ? remoteServers : k_ / 2U;
         if (maxGroups != 0U) Allocate(firstHopBuf_, uint32_t(TileXREpDedupAlign(maxGroups * 4U, 32U)));
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+        Allocate(issueBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * sizeof(EpServerDedupSendProfilePacket), 32U)));
+#endif
 
         // The design's safe input contract guarantees room for at least one lane.
         const uint32_t available = (kEpServerDedupCountUbBytes - usedBytes_) / uint32_t(data_.tokenStride);
@@ -133,6 +137,40 @@ public:
         DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
         DataCopyPad(weightOut_[uint64_t(start_) * k_], sourceWeights_, {1U, count_ * k_ * 4U, 0U, 0U, 0U});
         Sync<HardEvent::MTE3_S>();
+    }
+
+    // Called after the existing final timestamp. No GM trace stores, cache
+    // cleans, or additional synchronization in the timed packet issue path.
+    __aicore__ inline void FlushProfile(uint64_t generation)
+    {
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+        const auto layout = TileXREpServerDedupSendProfileLayout(args_->peerMemBytes, bs_, k_);
+        __gm__ uint8_t *base = args_->peerMems[args_->rank] + layout.offset + GetBlockIdx() * layout.coreStride;
+        auto *header = reinterpret_cast<__gm__ EpServerDedupSendProfileHeader *>(base);
+        header->marker = kEpServerDedupProfileMarker;
+        header->version = kEpServerDedupProfileVersion;
+        header->recordBytes = sizeof(EpServerDedupSendProfilePacket);
+        header->rank = args_->rank; header->core = GetBlockIdx(); header->generation = generation;
+        header->packetCount = packets_; header->firstHopCount = firstHopCount_;
+        auto *records = reinterpret_cast<__gm__ EpServerDedupSendProfilePacket *>(base + sizeof(*header));
+        if (packets_ != 0U) {
+            auto ticks = issueBuf_.Get<uint64_t>();
+            auto metadata = issueBuf_.Get<uint32_t>();
+            for (uint32_t i = 0; i < packets_; ++i) {
+                records[i].issue = ticks.GetValue(i * 2U);
+                records[i].token = metadata.GetValue(i * 4U + 2U);
+                records[i].k = metadata.GetValue(i * 4U + 3U);
+            }
+        }
+        const uint32_t bytes = sizeof(*header) + packets_ * sizeof(*records);
+        for (uint32_t offset = 0; offset < bytes; offset += 64U) {
+            GlobalTensor<uint8_t> output;
+            output.SetGlobalBuffer(base + offset);
+            DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(output);
+        }
+#else
+        (void)generation;
+#endif
     }
 
 private:
@@ -260,6 +298,16 @@ private:
         destinationGm.SetGlobalBuffer(args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
             data_, args_->rank, destination, expert % localExperts_, q, args_->rankSize, localExperts_, bs_));
         DataCopy(destinationGm, out, uint32_t(data_.tokenStride));
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+        // Sample immediately after issuing this packet's MTE3, without waiting
+        // for completion. Adjacent samples describe issue-to-issue intervals.
+        const uint64_t issue = static_cast<uint64_t>(GetSystemCycle());
+        issueBuf_.Get<uint64_t>().SetValue(packets_ * 2U, issue);
+        auto metadata = issueBuf_.Get<uint32_t>();
+        metadata.SetValue(packets_ * 4U + 2U, tokenId);
+        metadata.SetValue(packets_ * 4U + 3U, firstK);
+        if (mask != 0U) ++firstHopCount_;
+#endif
         SetFlag<HardEvent::MTE3_V>(lane);
         ++packets_;
     }
@@ -278,6 +326,10 @@ private:
     LocalTensor<int32_t> routeIds_;
     LocalTensor<float> routeWeights_, sourceWeights_;
     LocalTensor<uint32_t> sourceMasks_, directTasks_, serverState_, firstHopMasks_;
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    TBuf<> issueBuf_;
+    uint32_t firstHopCount_ = 0;
+#endif
 };
 } // namespace TileXREp
 #endif

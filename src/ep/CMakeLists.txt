@@ -194,6 +194,8 @@ add_library(tilexr-ep SHARED
 )
 
 add_dependencies(tilexr-ep ${TILEXR_EP_KERNEL_TARGETS})
+target_compile_definitions(tilexr-ep PRIVATE
+    TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>)
 tilexr_attach_kernel_artifacts(tilexr-ep
     FILES ${TILEXR_EP_KERNEL_OBJECTS}
     TARGETS ${TILEXR_EP_KERNEL_TARGETS})
