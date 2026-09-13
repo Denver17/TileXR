@@ -137,7 +137,7 @@ private:
         WaitFlag<event>(id);
     }
 
-    __aicore__ inline GM_ADDR SlotAddress(uint32_t source, uint32_t localExpert, uint32_t q) const
+    __aicore__ inline __gm__ uint8_t *SlotAddress(uint32_t source, uint32_t localExpert, uint32_t q) const
     {
         const uint32_t destination = uint32_t(args_->rank);
         return args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
