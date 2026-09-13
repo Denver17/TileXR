@@ -26,7 +26,7 @@ class TemporaryRoot(unittest.TestCase):
         self.root = Path(self.temporary.name) / "coordinator"
         self.root.mkdir()
         self.hostfile = self.root / "hostfile"
-        self.hostfile.write_text("localhost devices=0,2\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
         environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
@@ -46,23 +46,23 @@ class HostfileTests(TemporaryRoot):
         self.hostfile.write_text(text, encoding="utf-8")
         return workflow.hosts_from_file(self.hostfile)
 
-    def test_comments_bom_explicit_devices_and_default(self):
-        self.assertEqual(self.parse("\ufeff# group\nnode-a devices=2,7 # physical IDs\n\nnode_b\n"),
-                         [{"host": "node-a", "devices": [2, 7]},
-                          {"host": "node_b", "devices": list(range(8))}])
+    def test_comments_bom_and_whole_servers(self):
+        self.assertEqual(self.parse("\ufeff# group\n192.0.2.1 # physical IDs\n\n192.0.2.3\n"),
+                         [{"host": "192.0.2.1", "devices": list(range(8))},
+                          {"host": "192.0.2.3", "devices": list(range(8))}])
 
     def test_rejects_bad_inventory(self):
-        for text in ("", "# only comments\n", "node-a\nnode-a devices=1\n",
-                     "node-a devices=1,1\n", "node-a devices=256\n",
-                     "node-a devices=-1\n", "node-a devices=\n",
-                     "node-a devices=0 extra\n", "user@node-a\n",
-                     "-oProxyCommand=x\n", "node-a;command\n",
-                     "\n".join("node-" + str(index) for index in range(65))):
+        for text in ("", "# only comments\n", "192.0.2.1\n192.0.2.1\n",
+                     "192.0.2.1 devices=0,1,2,3,4,5,6,7\n", "192.0.2.256\n", "worker01\n",
+                     "192.0.2.1 devices=-1\n", "192.0.2.1 devices=\n",
+                     "192.0.2.1 extra\n", "user@192.0.2.1\n",
+                     "-oProxyCommand=x\n", "192.0.2.1;command\n",
+                     "\n".join("192.0.2." + str(index + 1) for index in range(65))):
             with self.subTest(text=text[:80]), self.assertRaises(ValueError):
                 self.parse(text)
 
-    def test_accepts_64_nodes_and_device_boundary(self):
-        text = "\n".join(f"node-{index} devices=0,255" for index in range(64))
+    def test_accepts_64_server_inventory(self):
+        text = "\n".join(f"192.0.2.{index + 1}" for index in range(64))
         self.assertEqual(len(self.parse(text)), 64)
 
 
@@ -91,26 +91,19 @@ class ConfigTests(TemporaryRoot):
             with self.assertRaisesRegex(RuntimeError, "production CMake reached"):
                 workflow.build(self.config())
 
-    def test_signature_tracks_distribution_and_runtime_configuration(self):
-        baseline = self.config().signature()
-        self.assertEqual(baseline, self.config().signature())
-        changes = [{"TILEXR_VALIDATION_TIMEOUT": "60"},
-                   {"TILEXR_VALIDATION_SSH_USER": "test-user"},
-                   {"TILEXR_VALIDATION_BUILD_MODE": "production"}]
-        for change in changes:
-            with self.subTest(change=change), mock.patch.dict(os.environ, change):
-                self.assertNotEqual(baseline, self.config().signature())
-        local = self.root / "validation.local.sh"
-        local.write_text("export CANN_TEST_PATH=/one\n", encoding="utf-8")
-        configured = self.config().signature()
-        self.assertEqual(baseline, configured)
-        local.write_text("export CANN_TEST_PATH=/two\n", encoding="utf-8")
-        self.assertEqual(configured, self.config().signature())
-        with mock.patch.dict(os.environ, {"ASCEND_HOME_PATH": "/cann/changed"}):
-            self.assertNotEqual(configured, self.config().signature())
-        local.unlink()
-        self.hostfile.write_text("localhost devices=1\n", encoding="utf-8")
-        self.assertNotEqual(baseline, self.config().signature())
+    def test_sync_ignores_case_configuration_and_selects_entire_inventory(self):
+        self.hostfile.write_text("\n".join(f"192.0.2.{i + 1}" for i in range(8)))
+        with mock.patch.dict(os.environ, {
+                "TILEXR_VALIDATION_CHECKPOINT": workflow.SOURCE_SEND_CHECKPOINT,
+                "TILEXR_VALIDATION_BUILD_MODE": "production", "TILEXR_VALIDATION_SERVERS": "bad",
+                "TILEXR_VALIDATION_BS": "bad", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "96",
+                "TILEXR_VALIDATION_RUN_MODE": "bad", "TILEXR_VALIDATION_TIMEOUT": "bad",
+                "TILEXR_COMM_ID": "bad"}):
+            config = workflow.Config("sync")
+            self.assertIsNone(config.chain)
+            self.assertEqual(len(config.hosts()), 8)
+            self.assertIsNone(workflow.Config("verify").chain)
+            self.assertIsNone(workflow.Config("build").chain)
 
     def test_rejects_unsupported_or_unbounded_configuration(self):
         for key, value in (("BUILD_MODE", "npu"), ("CHECKPOINT", "device-dedup"),
@@ -118,11 +111,11 @@ class ConfigTests(TemporaryRoot):
                            ("TIMEOUT", "181"), ("SSH_USER", "user;command")):
             with self.subTest(key=key, value=value), mock.patch.dict(
                     os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
-                self.config()
+                workflow.Config("build" if key == "JOBS" else "run")
 
     def test_hostfile_must_be_inside_synchronized_root(self):
         outside = Path(self.temporary.name) / "hostfile"
-        outside.write_text("localhost\n", encoding="utf-8")
+        outside.write_text("127.0.0.1\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_HOSTFILE": str(outside)}):
             with self.assertRaises(ValueError):
                 self.config()
@@ -321,6 +314,10 @@ root = pathlib.Path(os.environ["FAKE_ROOT"])
 remote = pathlib.Path(os.environ["FAKE_REMOTE"])
 scenario = os.environ.get("FAKE_SCENARIO", "")
 args = sys.argv[1:]
+if os.environ.get("FAKE_REMOTE_MAP"):
+    import json
+    target = args[-2] if kind == "ssh" else (args[-2] if ":" in args[-2] else args[-1]).split(":", 1)[0]
+    remote = pathlib.Path(json.loads(os.environ["FAKE_REMOTE_MAP"])[target.split("@")[-1]])
 
 def mapped(value):
     return remote / pathlib.Path(value).relative_to(root)
@@ -332,7 +329,7 @@ if kind == "ssh":
         direct = command.pop(0).split("=", 1)[1].replace(str(root), str(remote))
     payload = sys.stdin.read()
     if command == ["hostname"]:
-        print("node-b")
+        print("192.0.2.2")
         sys.exit(0)
     command[0] = os.environ["FAKE_BASH"]
     command[3] = str(mapped(command[3]))
@@ -416,8 +413,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
 
     def setUp(self):
         super().setUp()
-        self.remote = Path(self.temporary.name) / "node-b"
-        self.hostfile.write_text("localhost devices=0\nnode-b devices=2,3\n", encoding="utf-8")
+        self.remote = Path(self.temporary.name) / "192.0.2.2"
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         tool_root = self.root / "tools/validation"
         tool_root.mkdir(parents=True)
         for name in ("workflow.py", "source.py", "measurements.py"):
@@ -504,7 +501,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assert_success(result)
         summary = self.summary()
         self.assertEqual(summary["status"], "PASS")
-        self.assertEqual({node["host"] for node in summary["nodes"]}, {"localhost", "node-b"})
+        self.assertEqual({node["host"] for node in summary["nodes"]}, {"127.0.0.1", "192.0.2.2"})
         self.assertTrue(all(node["tests"] == len(self.manifest["tests"]) for node in summary["nodes"]))
         self.assertEqual(summary["errors"], [])
         self.assertEqual(summary["commit"], self.manifest["source"]["commit"])
@@ -514,7 +511,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual(list(self.remote.rglob("pid.json")), [])
 
     def test_empty_kernel_uses_first_device_per_host_with_existing_entry_points(self):
-        self.hostfile.write_text("localhost devices=2,7\nnode-b devices=3,5\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         entry = self.root / "set_env.sh"
         entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
         self.manifest.update(mode="production", checkpoint=workflow.EMPTY_KERNEL_CHECKPOINT)
@@ -535,7 +532,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual(self.summary()["scope"],
                          "ABI/Host、A5 空 kernel 安装与设备注册；未执行 NPU launch 或去重通信。")
         self.assertIn("范围：" + self.summary()["scope"], result.stdout)
-        for root, device in ((self.root, 2), (self.remote, 3)):
+        for root, device in ((self.root, 0), (self.remote, 0)):
             logs = list((root / "run/validation").glob("*/" + workflow.REGISTRATION_TEST + ".log"))
             self.assertEqual(len(logs), 1)
             self.assertIn(f"device={device}\n", logs[0].read_text())
@@ -551,7 +548,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertIn("LOG_PARSE_FAILED", result.stdout)
 
     def enable_dry_run(self, injected_rank_code=""):
-        self.hostfile.write_text("localhost devices=7,2,5,0,6,1,4,3\nnode-b\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DRY_RUN_CHECKPOINT
         self.manifest["checkpoint"] = workflow.DRY_RUN_CHECKPOINT
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
@@ -574,7 +571,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
         self.assertIn("ranks=16/16", command.stdout)
         self.assertIn("不创建设备上下文或 communicator", summary["scope"])
-        self.assertEqual([item["device"] for item in summary["rank_mapping"][:8]], [7, 2, 5, 0, 6, 1, 4, 3])
+        self.assertEqual([item["device"] for item in summary["rank_mapping"][:8]], list(range(8)))
         records = [rank for node in summary["nodes"] for rank in node["reported_result"]["ranks"]]
         workflow.validate_rank_records(records, summary["rank_mapping"], summary["run_id"], self.manifest)
         run_log = self.config_instance.logs / summary["run_id"]
@@ -594,7 +591,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         summary = self.summary()
         self.assertEqual(summary["primary_error"]["rank"], 8)
         self.assertEqual(summary["primary_error"]["returncode"], 9)
-        self.assertEqual(summary["primary_error"]["host"], "node-b")
+        self.assertEqual(summary["primary_error"]["host"], "192.0.2.2")
         self.assertTrue(all(node["reported_result"]["cleanup"] == "complete" for node in summary["nodes"]))
         self.assertEqual(list(self.root.rglob("pid.json")) + list(self.remote.rglob("pid.json")), [])
 
@@ -685,7 +682,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assert_hanging_ranks_cleaned("rank-hangup")
 
     def enable_chain(self, checkpoint=workflow.SOURCE_SEND_CHECKPOINT, run_mode="functional"):
-        self.hostfile.write_text("localhost devices=7,2,5,0,6,1,4,3\nnode-b\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         os.environ.update(TILEXR_VALIDATION_CHECKPOINT=checkpoint,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177",
                           TILEXR_VALIDATION_RUN_MODE=run_mode)
@@ -833,6 +830,44 @@ print(prefix + json.dumps(dict(record, submitted=loops,
             command = self.invoke("run", environment={key: value, "TILEXR_DIRECT_RUN": "1"})
             self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
 
+    def test_one_sync_to_eight_servers_runs_16_32_48_64p_and_different_experts(self):
+        self.enable_chain()
+        ips = ["127.0.0.1"] + [f"192.0.2.{i}" for i in range(2, 9)]
+        self.hostfile.write_text("\n".join(ips) + "\n")
+        remotes = {ip: str(Path(self.temporary.name) / ip) for ip in ips[1:]}
+        with mock.patch.dict(os.environ, {"FAKE_REMOTE_MAP": workflow.json.dumps(remotes)}):
+            # Distribution does not need a valid endpoint, expert count or run mode.
+            self.assert_success(self.invoke("sync", environment={
+                "TILEXR_VALIDATION_MOE_EXPERT_NUM": "invalid", "TILEXR_VALIDATION_BS": "invalid",
+                "TILEXR_VALIDATION_SERVERS": "invalid", "TILEXR_VALIDATION_RUN_MODE": "invalid",
+                "TILEXR_COMM_ID": "invalid"}))
+            receipt = (self.config_instance.logs / "sync.json").read_bytes()
+            for servers, experts in ((2, 96), (4, 192), (6, 288), (8, 384), (8, 512)):
+                with self.subTest(servers=servers, experts=experts):
+                    command = self.invoke("run", environment={"TILEXR_VALIDATION_SERVERS": str(servers),
+                        "TILEXR_VALIDATION_MOE_EXPERT_NUM": str(experts), "TILEXR_VALIDATION_LOOPS": "3",
+                        "TILEXR_VALIDATION_WARMUP": "1"})
+                    self.assert_success(command)
+                    summaries = list(self.config_instance.logs.glob("*/summary.json"))
+                    summary = workflow.read_json(max(summaries, key=lambda p: p.stat().st_mtime_ns))
+                    self.assertEqual(summary["build_id"], self.manifest["build_id"])
+                    self.assertEqual(summary["completed_ranks"], servers * 8)
+                    self.assertEqual([h["host"] for h in summary["expected_hosts"]], ips[:servers])
+                    self.assertEqual(summary["chain_configuration"]["moe_expert_num"], experts)
+                    for ip in ips[servers:]:
+                        self.assertFalse((Path(remotes[ip]) / "run/validation" / summary["run_id"]).exists())
+            self.assertEqual((self.config_instance.logs / "sync.json").read_bytes(), receipt)
+
+    def test_selected_node_artifact_failure_prevents_all_rank_launches(self):
+        self.enable_chain()
+        self.prepare_sync()
+        (self.remote / "install/validation/artifact").write_text("stale binary")
+        command = self.invoke("run")
+        self.assertNotEqual(command.returncode, 0)
+        self.assertIn("192.0.2.2", command.stderr)
+        self.assertFalse(list(self.config_instance.logs.glob("*/launch-*.log")))
+        self.assertFalse(list(self.config_instance.logs.glob("*/pid.json")))
+
     def test_chain_multi_rejects_missing_rounds_or_single_marker(self):
         self.enable_chain(workflow.SOURCE_SEND_CHECKPOINT)
         for behavior, kind in (("incomplete-round", "RESULT_FAILED"), ("single-marker", "LOG_PARSE_FAILED"),
@@ -979,20 +1014,19 @@ with output.open('w', newline='') as f:
                 self.assertTrue(lock.is_dir())
                 self.assertFalse((self.config_instance.logs / ".operation.lock").exists())
 
-    def test_run_requires_sync_receipt(self):
+    def test_run_rejects_missing_remote_installation(self):
         result = self.invoke("run")
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn("VALIDATION_PASS", result.stdout)
 
-    def test_configuration_change_requires_resync(self):
+    def test_case_and_timeout_changes_reuse_installed_artifacts(self):
         self.prepare_sync()
         (self.root / "validation.local.sh").write_text("# changed local config\n", encoding="utf-8")
         with self.hostfile.open("a") as output:
             output.write("# comment only\n\n")
         self.assert_success(self.invoke("run"))
         result = self.invoke("run", environment={"TILEXR_VALIDATION_TIMEOUT": "60"})
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("sync.sh", result.stderr)
+        self.assert_success(result)
 
     def test_modified_installed_artifact_blocks_launch(self):
         self.prepare_sync()
@@ -1015,9 +1049,9 @@ with output.open('w', newline='') as f:
         self.assertNotEqual(result.returncode, 0)
         summary = self.summary()
         self.assertEqual(summary["status"], "FAIL")
-        self.assertTrue(any(error.get("host") == "node-b" for error in summary["errors"]))
+        self.assertTrue(any(error.get("host") == "192.0.2.2" for error in summary["errors"]))
         self.assertIn("PASS/FAIL marker", result.stdout + result.stderr)
-        remote_errors = [error["type"] for error in summary["errors"] if error.get("host") == "node-b"]
+        remote_errors = [error["type"] for error in summary["errors"] if error.get("host") == "192.0.2.2"]
         self.assertEqual(remote_errors, ["LOG_PARSE_FAILED"])
 
     def assert_remote_failure(self, scenario, kind):
@@ -1031,7 +1065,7 @@ with output.open('w', newline='') as f:
     def test_ssh_failure_is_launch_failure(self):
         summary = self.assert_remote_failure("ssh-fail", "LAUNCH_FAILED")
         self.assertFalse(any(error["type"] in ("EXIT_FAILED", "RESULT_FAILED", "LOG_PARSE_FAILED")
-                             for error in summary["errors"] if error.get("host") == "node-b"))
+                             for error in summary["errors"] if error.get("host") == "192.0.2.2"))
 
     def test_abnormal_exit_after_start_is_exit_failure(self):
         self.assert_remote_failure("exit-after-start", "EXIT_FAILED")
@@ -1044,7 +1078,7 @@ with output.open('w', newline='') as f:
 
     def test_completed_fail_marker_is_result_failure(self):
         summary = self.assert_remote_failure("result-fail", "RESULT_FAILED")
-        self.assertEqual([error["type"] for error in summary["errors"] if error.get("host") == "node-b"],
+        self.assertEqual([error["type"] for error in summary["errors"] if error.get("host") == "192.0.2.2"],
                          ["RESULT_FAILED"])
 
     def test_corrupt_collected_json_is_log_parse_failure(self):
@@ -1052,7 +1086,7 @@ with output.open('w', newline='') as f:
 
     def test_collection_failure_preserves_test_failure_from_launch_log(self):
         summary = self.assert_remote_failure("node-fail-collect-fail", "LOG_PARSE_FAILED")
-        self.assertEqual({error["type"] for error in summary["errors"] if error.get("host") == "node-b"},
+        self.assertEqual({error["type"] for error in summary["errors"] if error.get("host") == "192.0.2.2"},
                          {"LOG_PARSE_FAILED", "LOG_COLLECT_FAILED"})
 
     def test_cleanup_failure_keeps_primary_error_and_controller_lock(self):
@@ -1090,7 +1124,7 @@ with output.open('w', newline='') as f:
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.summary()["status"], "FAIL")
         self.assertTrue(any(error["type"] == "LOG_COLLECT_FAILED" for error in self.summary()["errors"]))
-        remote = next(node for node in self.summary()["nodes"] if node["host"] == "node-b")
+        remote = next(node for node in self.summary()["nodes"] if node["host"] == "192.0.2.2")
         self.assertEqual(remote["status"], "FAIL")
         self.assertEqual(remote["reported_result"]["status"], "PASS")
         self.assertEqual(remote["tests"], len(self.manifest["tests"]))
@@ -1219,7 +1253,7 @@ class EnvironmentEntryTests(TemporaryRoot):
         self.assertFalse(self.hostfile.exists())
 
     def test_source_preserves_configured_cluster_and_reports_size(self):
-        contents = "localhost devices=0,2\nworker02 devices=1,3\n"
+        contents = "127.0.0.1\nworker02\n"
         self.hostfile.write_text(contents)
         result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1228,7 +1262,7 @@ class EnvironmentEntryTests(TemporaryRoot):
         self.assertIn("ENV_READY", result.stdout)
 
     def test_source_accepts_dry_run_with_eight_devices_per_host(self):
-        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.DRY_RUN_CHECKPOINT}):
             result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -1271,7 +1305,7 @@ class EnvironmentEntryTests(TemporaryRoot):
                         "assert root == pathlib.Path(__file__).resolve().parents[2]\n"
                         "assert pathlib.Path(os.environ['TILEXR_VALIDATION_HOSTFILE']) == root / 'hostfile'\n"
                         "print('ENV_STUB_PASS')\n", encoding="utf-8")
-        (root / "hostfile").write_text("localhost\n", encoding="utf-8")
+        (root / "hostfile").write_text("127.0.0.1\n", encoding="utf-8")
         bundled_bash = Path(sys.executable).parent / "bash"
         bash = str(bundled_bash) if bundled_bash.exists() else shutil.which("bash")
         environment = dict(os.environ, TILEXR_VALIDATION_ROOT=str(root),

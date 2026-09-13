@@ -7,6 +7,7 @@ from contextlib import contextmanager
 import hashlib
 import ipaddress
 import json
+import math
 import os
 from pathlib import Path
 import platform
@@ -74,6 +75,7 @@ exec timeout --signal=TERM --kill-after=10s "$limit" bash -c '
 set -eo pipefail
 cd -- "$1"
 shift
+export TILEXR_VALIDATION_ACTION="$1"
 source ./set_env.sh
 if [ -n "${TILEXR_DIRECT_CONFIG:-}" ]; then
     eval "${TILEXR_DIRECT_CONFIG}"
@@ -215,18 +217,15 @@ def hosts_from_file(path):
         fields = line.split("#", 1)[0].split()
         if not fields:
             continue
-        if len(fields) > 2 or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", fields[0]):
-            raise ValueError(f"hostfile 第 {number} 行格式错误：host [devices=0,1,...]")
-        devices = list(range(8))
-        if len(fields) == 2:
-            if not re.fullmatch(r"devices=\d+(,\d+)*", fields[1]):
-                raise ValueError(f"hostfile 第 {number} 行 devices 格式错误")
-            devices = [int(value) for value in fields[1][8:].split(",")]
-        if len(set(devices)) != len(devices) or any(device > 255 for device in devices):
-            raise ValueError(f"hostfile 第 {number} 行有重复或无效的 device ID")
+        try:
+            if len(fields) != 1:
+                raise ValueError()
+            ipaddress.IPv4Address(fields[0])
+        except ValueError:
+            raise ValueError(f"hostfile 第 {number} 行格式错误：每行只填写一个 IPv4，整机使用 device 0..7") from None
         if fields[0] in [item["host"] for item in hosts]:
             raise ValueError(f"hostfile 主机重复：{fields[0]}")
-        hosts.append({"host": fields[0], "devices": devices})
+        hosts.append({"host": fields[0], "devices": list(range(8))})
     if not 1 <= len(hosts) <= 64:
         raise ValueError("hostfile 必须包含 1 至 64 台主机")
     return hosts
@@ -241,17 +240,18 @@ def hosts_from_json(raw):
         raise ValueError("直接运行的 hostfile 配置必须是数组")
     for item in hosts:
         if (not isinstance(item, dict) or not isinstance(item.get("host"), str)
-                or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", item["host"])
-                or not isinstance(item.get("devices"), list)
-                or any(type(device) is not int or not 0 <= device <= 255 for device in item["devices"])):
+                or item.get("devices") != list(range(8))):
             raise ValueError("直接运行的 hostfile 配置无效")
+        ipaddress.IPv4Address(item["host"])
     if not 1 <= len(hosts) <= 64 or len({item["host"] for item in hosts}) != len(hosts):
         raise ValueError("直接运行的 hostfile 主机数量或主机重复")
     return hosts
 
 
 class Config:
-    def __init__(self):
+    def __init__(self, action="run"):
+        self.action = action
+        self.is_run = action in ("run", "node", "rank")
         self.root = Path(os.environ.get("TILEXR_VALIDATION_ROOT", Path(__file__).resolve().parents[2])).resolve()
         self.mode = os.environ.get("TILEXR_VALIDATION_BUILD_MODE", "production")
         # 同步和人工测试继承安装检查点；build_all.sh 选择当前生产增量。
@@ -259,10 +259,22 @@ class Config:
         if not self.checkpoint:
             installed = self.root / "install/validation/manifest.json"
             self.checkpoint = read_json(installed)["checkpoint"] if installed.exists() else CHECKPOINT
-        self.hostfile = Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile"))
-        self.user = os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
-        self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4"))
-        self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180"))
+        self.hostfile = (self.root / "hostfile" if action in ("build", "verify") else
+                         Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile")))
+        self.user = "" if action in ("build", "verify") else os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
+        self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4")) if action == "build" else 4
+        self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180")) if self.is_run else 180
+        self.server_count = None
+        if self.is_run and os.environ.get("TILEXR_VALIDATION_SERVERS") is not None:
+            self.server_count = int(os.environ["TILEXR_VALIDATION_SERVERS"])
+            if not 2 <= self.server_count <= 16:
+                raise ValueError("-n 必须为 2..16 台服务器")
+        self.profiling = False
+        if action == "build":
+            breakdown = os.environ.get("TILEXR_VALIDATION_BREAKDOWN", "0")
+            if breakdown not in ("0", "1"):
+                raise ValueError("编译 breakdown 必须为 0/1")
+            self.profiling = breakdown == "1"
         if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, "ep-sdedup-p2-first-hop"):
             raise ValueError("旧 cnt-only/first-hop checkpoint 已由 ep-sdedup-p2-source-send 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
@@ -278,20 +290,27 @@ class Config:
         self.hostfile.relative_to(self.root)  # 同步契约：配置属于当前工作目录。
         self.install = self.root / "install/validation"
         self.logs = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", self.root / "run/validation")).resolve()
-        self.chain = chain_configuration(self.checkpoint) if self.checkpoint in CHAIN_CHECKPOINTS else None
+        self.chain = chain_configuration(self.checkpoint) if self.is_run and self.checkpoint in CHAIN_CHECKPOINTS else None
 
     def hosts(self):
         try:
             hosts = (hosts_from_json(os.environ["TILEXR_DIRECT_HOSTS_JSON"])
-                     if os.environ.get("TILEXR_DIRECT_HOSTS_JSON")
+                     if self.is_run and os.environ.get("TILEXR_DIRECT_HOSTS_JSON")
                      else hosts_from_file(self.hostfile))
-            if self.checkpoint in RANK_CHECKPOINTS:
+            if self.server_count is not None:
+                if self.server_count > len(hosts):
+                    raise ValueError(f"-n {self.server_count} 超过 hostfile 中的 {len(hosts)} 台服务器")
+                hosts = hosts[:self.server_count]
+            if self.is_run and self.checkpoint in RANK_CHECKPOINTS:
                 rank_mapping(hosts)
             if self.chain is not None and self.checkpoint != MEMORY_BOUNDARY_CHECKPOINT:
                 ranks = len(hosts) * 8
                 experts = self.chain["moe_expert_num"]
                 if not 0 < experts <= 1024 or experts % ranks or self.chain["topk"] > experts:
                     raise ValueError("chain 检查点要求 0<moe_expert_num<=1024，能被 rank_size 整除，topk<=moe_expert_num")
+                epoch = experts // math.gcd(experts, self.chain["topk"])
+                if self.chain["bs"] * ranks % epoch:
+                    raise ValueError("balance_shift 要求全局 Token 数能被 E/gcd(E,TopK) 整除")
             return hosts
         except FileNotFoundError:
             raise ValueError(f"hostfile 不存在：{self.hostfile}；请按 hostfile.example 一次性配置主机清单，"
@@ -299,19 +318,6 @@ class Config:
 
     def target(self, host):
         return f"{self.user}@{host}" if self.user else host
-
-    def signature(self):
-        signature = {"mode": self.mode, "checkpoint": self.checkpoint, "hosts": self.hosts(),
-                "ssh_user": self.user, "timeout": self.timeout,
-                "cann_script": os.environ.get("TILEXR_CANN_ENV_SCRIPT", ""),
-                "cann": os.environ.get("ASCEND_HOME_PATH", ""),
-                "driver": os.environ.get("ASCEND_DRIVER_PATH", ""),
-                # Record the configured command, not the interpreter's alias
-                # (/usr/bin/python vs /usr/bin/python.exe can differ in MSYS).
-                "python": os.environ.get("TILEXR_VALIDATION_PYTHON", "python3")}
-        if self.chain is not None:
-            signature["chain"] = self.chain
-        return signature
 
 
 def source_send_stride(config):
@@ -481,7 +487,8 @@ def verify_build(config, *, check_run_mode=True):
         if manifest.get("server_dedup_contract") != SOURCE_SEND_ABI:
             raise ValueError("需要源端发送 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
-        if type(profiling) is not bool or (check_run_mode and profiling is not (config.chain["run_mode"] == "breakdown")):
+        if type(profiling) is not bool or (check_run_mode and config.chain is not None and
+                                           profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
         if profiling and manifest.get("server_dedup_profile_version") != 4:
@@ -528,7 +535,7 @@ def build(config):
     if config.mode == "production":
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
-                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if config.chain and config.chain['run_mode'] == 'breakdown' else 'OFF'}",
+                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if config.profiling else 'OFF'}",
                  f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs],
@@ -593,7 +600,7 @@ def build(config):
                 "artifacts": artifact_files(stage)}
     if config.checkpoint == SOURCE_SEND_CHECKPOINT:
         manifest["server_dedup_contract"] = dict(SOURCE_SEND_ABI)
-        manifest["server_dedup_profiling"] = config.chain["run_mode"] == "breakdown"
+        manifest["server_dedup_profiling"] = config.profiling
         if manifest["server_dedup_profiling"]:
             manifest["server_dedup_profile_version"] = 4
     write_json(stage / "manifest.json", manifest)
@@ -611,27 +618,21 @@ def build(config):
 
 def remote_argv(config, host, action, *arguments):
     command = "bash -s -- " + " ".join(shlex.quote(str(value)) for value in (config.root, action, *arguments))
-    if action in ("verify", "node") or os.environ.get("TILEXR_DIRECT_RUN"):
+    if action in ("verify", "node"):
         values = {
             "TILEXR_VALIDATION_CHECKPOINT": config.checkpoint,
             "TILEXR_VALIDATION_BUILD_MODE": config.mode,
-            "TILEXR_VALIDATION_BS": config.chain.get("bs") if config.chain else None,
-            "TILEXR_VALIDATION_H": config.chain.get("h") if config.chain else None,
-            "TILEXR_VALIDATION_TOPK": config.chain.get("topk") if config.chain else None,
-            "TILEXR_VALIDATION_MOE_EXPERT_NUM": config.chain.get("moe_expert_num") if config.chain else None,
-            "TILEXR_VALIDATION_DTYPE": config.chain.get("dtype") if config.chain else None,
-            "TILEXR_VALIDATION_QUANT_MODE": config.chain.get("quant_mode") if config.chain else None,
-            "TILEXR_VALIDATION_FP8_FORMAT": config.chain.get("fp8_format") if config.chain else None,
-            "TILEXR_VALIDATION_BLOCK_DIM": config.chain.get("block_dim") if config.chain else None,
-            "TILEXR_VALIDATION_LOOPS": config.chain.get("loops") if config.chain else None,
-            "TILEXR_VALIDATION_WARMUP": config.chain.get("warmup") if config.chain else None,
-            "TILEXR_VALIDATION_RUN_MODE": config.chain.get("run_mode") if config.chain else None,
-            "TILEXR_COMM_ID": config.chain.get("comm_id") if config.chain else None,
-            "TILEXR_DEMO_BARRIER_ADDR": config.chain.get("barrier_addr") if config.chain else None,
-            "TILEXR_VALIDATION_MSPROF": config.chain.get("msprof") if config.chain else None,
             "TILEXR_VALIDATION_RESULT_ROOT": str(config.logs),
-            "TILEXR_DIRECT_HOSTS_JSON": json.dumps(config.hosts(), separators=(",", ":")),
         }
+        if action == "node":
+            values.update(TILEXR_VALIDATION_SERVERS=config.server_count,
+                          TILEXR_DIRECT_HOSTS_JSON=json.dumps(config.hosts(), separators=(",", ":")))
+            if config.chain:
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format",
+                            "block_dim", "loops", "warmup", "run_mode", "msprof"):
+                    values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
+                values["TILEXR_COMM_ID"] = config.chain["comm_id"]
+                values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
         exports = "; ".join("export " + key + "=" + shlex.quote(str(value))
                              for key, value in values.items() if value is not None)
         command = "TILEXR_DIRECT_CONFIG=" + shlex.quote(exports) + " " + command
@@ -708,7 +709,9 @@ PY
         futures = [pool.submit(send, index, host) for index, host in enumerate(hosts) if index]
         for future in concurrent.futures.as_completed(futures):
             print(f"SYNC_NODE_PASS host={future.result()}", flush=True)
-    write_json(receipt, {"build_id": manifest["build_id"], "configuration": config.signature()})
+    write_json(receipt, {"build_id": manifest["build_id"], "artifacts": manifest["artifacts"],
+                        "install": str(config.install.relative_to(config.root)),
+                        "hosts": [host["host"] for host in hosts]})
     print(f"SYNC_PASS hosts={len(hosts)} build_id={manifest['build_id']}\n日志：{log}", flush=True)
 
 
@@ -1103,9 +1106,26 @@ def run(config):
     run_id = uuid.uuid4().hex
     log = config.logs / run_id
     manifest = verify_build(config)
-    receipt = read_json(config.logs / "sync.json") if (config.logs / "sync.json").exists() else None
-    if not os.environ.get("TILEXR_DIRECT_RUN") and receipt != {"build_id": manifest["build_id"], "configuration": config.signature()}:
-        raise ValueError("生效配置或构建版本自同步后发生变化，请重新执行 sync.sh")
+
+    # Verify actual installations on this run's subset before launching any rank.
+    # A sync receipt is provenance, not a signature of the requested case.
+    def verify_selected(host):
+        try:
+            execute(remote_argv(config, host["host"], "verify", manifest["build_id"]),
+                    log / ("verify-" + host["host"] + ".log"), timeout=60, stdin=REMOTE_SCRIPT,
+                    start_failure="CONFIG_FAILED", exit_failure="CONFIG_FAILED")
+        except Exception as error:
+            raise Failure("CONFIG_FAILED", f"节点 {host['host']} 产物检查失败，请检查或同步该节点：{error}",
+                          host=host["host"]) from error
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(hosts)) as pool:
+        for future in concurrent.futures.as_completed([pool.submit(verify_selected, host) for host in hosts[1:]]):
+            future.result()
+    # Forward a resolved subset even to local child processes.
+    os.environ["TILEXR_DIRECT_HOSTS_JSON"] = json.dumps(hosts, separators=(",", ":"))
+    print("RUN_CONFIG " + json.dumps({"servers": len(hosts), "rank_size": len(hosts) * 8,
+          "hosts": [host["host"] for host in hosts], "devices_per_server": list(range(8)),
+          "build_id": manifest["build_id"], "local_experts": config.chain["moe_expert_num"] // (8 * len(hosts)) if config.chain else None,
+          "case": config.chain}, ensure_ascii=False), flush=True)
     print(f"开始测试：hosts={len(hosts)} checkpoint={config.checkpoint} mode={config.mode}\n日志：{log}", flush=True)
 
     def launch(index, host):
@@ -1240,7 +1260,7 @@ def run(config):
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
               "source_provenance": manifest["source"]["provenance"],
               "checkpoint": config.checkpoint, "mode": config.mode, "status": "FAIL" if errors else "PASS",
-              "expected_hosts": hosts, "nodes": nodes, "primary_error": primary_error, "errors": errors,
+              "expected_hosts": hosts, "server_count": len(hosts), "nodes": nodes, "primary_error": primary_error, "errors": errors,
               "scope": scope}
     rank_summary = ""
     if mappings is not None:
@@ -1296,7 +1316,7 @@ def main():
                 logs = Path(__file__).resolve().parents[2] / "run/validation"
             cancel(CancelConfig(), *args.arguments)
             return 0
-        config = Config()
+        config = Config(args.action)
         if args.action == "env":
             hosts = config.hosts()
             print(f"ENV_READY checkpoint={config.checkpoint} mode={config.mode} "

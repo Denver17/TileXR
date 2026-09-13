@@ -2,6 +2,7 @@
 """源端发送验证的配置和结果判据；真实设备调用由 C++ consumer 完成。"""
 
 import copy
+import math
 import os
 import unittest
 from unittest import mock
@@ -16,20 +17,20 @@ class ChainTests(TemporaryRoot):
         os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.SOURCE_SEND_CHECKPOINT,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
-        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
 
-    def test_defaults_and_signature_include_actual_shape_and_endpoints(self):
+    def test_runtime_defaults_include_actual_shape_and_endpoints(self):
         config = self.config()
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
                                            route_mode="balance_shift", seed=2026, kernel_scope="source_send"))
-        original = config.signature()
+        original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "64"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
                            ("TILEXR_DEMO_BARRIER_ADDR", "192.0.2.1:20100")):
             with self.subTest(key=key), mock.patch.dict(os.environ, {key: value}):
-                self.assertNotEqual(self.config().signature(), original)
+                self.assertNotEqual(self.config().chain, original)
 
     def test_rejects_host_mode_bad_endpoints_and_unsupported_shapes(self):
         for key, values in {
@@ -47,16 +48,17 @@ class ChainTests(TemporaryRoot):
             for value in values:
                 with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {key: value}), \
                         self.assertRaises(ValueError):
-                    self.config().signature()
+                    self.config().hosts()
 
     def test_total_expert_limit_allows_one_and_more_than_32_local_experts(self):
         for ranks, experts in ((16, 16), (16, 528), (16, 1024), (24, 1008), (128, 1024)):
             with self.subTest(ranks=ranks, experts=experts), mock.patch.dict(os.environ, {
-                    "TILEXR_VALIDATION_MOE_EXPERT_NUM": str(experts)}):
-                self.hostfile.write_text("\n".join(f"node-{i}" for i in range(ranks // 8)) + "\n")
+                    "TILEXR_VALIDATION_MOE_EXPERT_NUM": str(experts),
+                    "TILEXR_VALIDATION_BS": str(experts // math.gcd(experts, ranks * 6))}):
+                self.hostfile.write_text("\n".join(f"192.0.2.{i + 1}" for i in range(ranks // 8)) + "\n")
                 config = self.config()
                 self.assertEqual(len(config.hosts()) * 8, ranks)
-                self.assertEqual(config.signature()["chain"]["moe_expert_num"], experts)
+                self.assertEqual(config.chain["moe_expert_num"], experts)
 
     def test_requires_both_current_markers_and_one_completed_launch(self):
         manifest = {"build_id": "build", "checkpoint": workflow.SOURCE_SEND_CHECKPOINT, "source": {"commit": "a" * 40}}

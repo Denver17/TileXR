@@ -40,7 +40,7 @@ test -f validation.local.sh || cp validation.local.sh.example validation.local.s
 test -f hostfile || cp hostfile.example hostfile
 ```
 
-`validation.local.sh` 只保存 CANN/driver、Python/msprof、SSH 用户、hostfile 和首节点可跨机访问的 `TILEXR_COMM_ID`。`hostfile` 第一项为当前首节点，每台恰好 8 个可用 device。脚本向其余节点同一绝对路径分发，目标必须为空或有 `.tilexr-validation-root` 的受管理目录。
+`validation.local.sh` 只保存 CANN/driver、Python/msprof、SSH 用户、hostfile 和首节点可跨机访问的 `TILEXR_COMM_ID`。`hostfile` 每行只填写一个 IPv4，第一项为当前首节点；每台固定使用 device 0..7，允许空行和注释。脚本向其余节点同一绝对路径分发，目标必须为空或有 `.tilexr-validation-root` 的受管理目录。
 
 按顺序逐条执行，每步成功后再执行下一步：
 
@@ -53,7 +53,7 @@ bash sync.sh
 ```
 
 ```bash
-bash run.sh run_mode=functional loops=3 warmup=0
+bash run.sh -n 2 -e 96 -m 0 -l 3 0
 ```
 
 构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
@@ -63,10 +63,62 @@ bash run.sh run_mode=functional loops=3 warmup=0
 同一普通产物可继续手动测量多轮完整 kernel：
 
 ```bash
-bash run.sh run_mode=performance loops=100 warmup=10
+bash run.sh -n 2 -e 96 -m 1 -l 100 10
 ```
 
 每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为 cnt/cumsum、完整源端发送和设备轮末完成等待。有效带宽仍使用每次调用的第一跳/DIRECT 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留；此值不是纯网络带宽或完整 Dispatch 性能。sendData 内部打点保持相邻 MTE3 下发间隔，跨 rank 轮末等待计入 finish/完整 kernel。
+
+## 整服务器调度与参数归属
+
+同一 A5 产物同步到 8 台服务器后，可以连续运行 16P/32P/48P/64P 和不同专家数。
+`hostfile` 是分发清单；`sync.sh` 使用完整清单，`run.sh -n N` 只选择前 N 台。
+每台固定使用 0..7 卡，按清单顺序分配连续 rank。未选中节点不执行本次用例。
+
+```bash
+bash run.sh -n 2 -e 96 -m 0 -l 3 0
+bash run.sh -n 4 -e 192 -m 0 -l 3 0
+bash run.sh -n 6 -e 288 -m 0 -l 3 0
+bash run.sh -n 8 -e 384 -m 1 -l 100 10
+bash run.sh -n 8 -e 512 -m 0 -l 3 0
+```
+
+| 参数 | 含义 | 默认值/约束 |
+| --- | --- | --- |
+| `-n N` | 服务器数，总卡数为 8N | 必填，2..16，清单必须有足够机器 |
+| `-e E` | 总专家数，单卡专家数为 E/(8N) | 必填，1..1024，须被 8N 整除 |
+| `-m M` | 0=functional、1=performance、2=breakdown | 默认 0 |
+| `-l L W` | 测量 L 轮、预热 W 轮 | 默认 1 0；L>=1、W>=0，均为 uint32 |
+
+`bs=... h=... topk=... dtype=... quant_mode=... fp8_format=... block_dim=...`
+继续作为可选覆盖项，默认 BS96/H7168/TopK6/BF16/非量化/auto。当前 route_mode
+固定 balance_shift，seed=2026，每 rank 通信域固定 4 GiB。
+`comm_id=... barrier_addr=... msprof=... hostfile=...` 可覆盖本次部署配置；
+相对 hostfile 路径相对于仓库根目录。`-h`/`--help` 不加载 CANN。
+`run_case.sh` 仅兼容转交到 `run.sh`，`run_batch.sh` 统一调用同一入口。
+旧 `run_mode=... loops=... warmup=... moe_expert_num=...` 改用上述短参数。
+
+参数每次从默认值和命令行重新解析，不继承终端遗留的 shape、模式、轮次或机器选择。
+`-l` 缺少第二个值、重复参数、未知参数或非法整数在加载运行环境前报错。
+运行时再校验选择范围、TopK、balance_shift 全局 epoch 整除条件；算子 Host
+保留公共布局、UB 与固定通信域容量检查。启动前的 `RUN_CONFIG` 显示 IP 列表、
+卡数、专家数、模式/轮次、shape 和 build_id；summary 保留 server_count、
+expected_hosts、rank_mapping 和完整 chain_configuration。
+
+| 阶段 | 参数与验证边界 |
+| --- | --- |
+| build | 仅编译参数、工具链和产物；不要求 hostfile、运行地址或有效用例。`breakdown=0/1` 直接选择编译开关。 |
+| sync/verify | 分发清单、SSH、路径、安装包与摘要；不加载 CANN，不解析运行参数，也不核验专家数/卡数关系。 |
+| run | 本次选中机器、用例合法性、编译打点兼容性、各参与节点产物一致性及实际结果。 |
+
+同步凭据记录 build_id、安装路径、产物摘要和机器列表，不再记录用例签名。
+run 在任何 rank 启动前核验所选节点的实际安装包；缺少同步凭据本身不阻断已正确部署的产物。
+改变规模、专家数、shape、轮次或端口无需重新同步；缺失/陈旧产物会指出对应 IP。
+普通产物用于模式 0/1，breakdown 产物用于模式 2；切换编译打点开关后仍需编译并同步。
+
+曾因共用 Config 在 build/sync 中解析运行用例，导致专家数不能被分发卡数整除时同步失败，
+完整用例签名又使换参数触发无必要的重新同步。配置现在按 action 解析，分发清单和运行子集
+分别处理；远端接收首节点解析好的子集，不再自行使用整个分发清单。回归以真实 Bash/Python
+进程和模拟 SSH/rsync 验证编排、产物身份及故障边界，不作为真实多机 NPU 功能/性能证据。
 
 ## 普通 Memory 性能对照的接入边界
 
@@ -86,9 +138,9 @@ bash run.sh run_mode=performance loops=100 warmup=10
 六种已接入类型为 BF16/FP16 × 非量化/E4M3/E5M2；默认只运行上述 BF16 非量化基线。类型参数是运行参数，无需更改 kernel 构建：
 
 ```bash
-bash run.sh run_mode=functional loops=1 warmup=0 dtype=fp16 quant_mode=0
-bash run.sh run_mode=functional loops=1 warmup=0 dtype=bf16 quant_mode=4 fp8_format=e4m3
-bash run.sh run_mode=functional loops=1 warmup=0 dtype=bf16 quant_mode=4 fp8_format=e5m2
+bash run.sh -n 2 -e 96 -m 0 -l 1 0 dtype=fp16 quant_mode=0
+bash run.sh -n 2 -e 96 -m 0 -l 1 0 dtype=bf16 quant_mode=4 fp8_format=e4m3
+bash run.sh -n 2 -e 96 -m 0 -l 1 0 dtype=bf16 quant_mode=4 fp8_format=e5m2
 ```
 
 FP16 的量化组合使用相同命令并设置 `dtype=fp16`。两种 FP8 均为 `quant_mode=4`，由输出 dtype 选择格式，不使用 `quant_mode=3`。设备调用沿用 Memory 的 MXFP8 函数；Host 保留 BF16/FP16 输入，使用现有 MXFP8 golden 比较包内结果。
@@ -131,7 +183,7 @@ bash sync.sh
 ```
 
 ```bash
-bash run.sh run_mode=breakdown loops=3 warmup=2
+bash run.sh -n 2 -e 96 -m 2 -l 3 2
 ```
 
 构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=4`，并标记 184B ABI、`r07-single` 布局及 `source_send` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
@@ -178,6 +230,7 @@ python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summ
 | --- | --- | --- |
 | 编译 | `run/validation/build-*/production-*.log`、`host-*.log` | 终端指出的编译/链接命令及错误 |
 | 同步 | `run/validation/sync-*/<节点>/prepare.log`、`transfer.log`、`verify.log` | SSH、分发路径和安装包身份 |
+| 启动前产物检查 | `run/case-*/<run_id>/verify-<IP>.log` | 对应节点安装包及 build_id |
 | 运行环境 | `run/case-*/environment.log` | CANN、Python、配置加载 |
 | 运行 | `run/case-*/workflow.log` 和终端指定的 `<run_id>/summary.json` | primary_error、errors、失败 rank 的日志与 stage |
 
@@ -222,7 +275,7 @@ bash run_commit_validation.sh
 ```
 
 该入口构建并同步新的通信库、测试 Host 库和独立 A5 kernel。相同安装产物再次执行只需
-`bash run.sh run_mode=functional loops=1 warmup=0`，不必重新构建/同步。
+`bash run.sh -n 2 -e 96 -m 0 -l 1 0`，不必重新构建/同步。
 
 - `TileXRCommInitRankMemoryDomainWithSize(0, 4092, ...)`：4092 MiB 数据区 + 4 MiB Flag 区，
   `peerMemBytes` 必须恰为 `4294967296`。底层另有 1 MiB 地址偏移余量，实际分配 4097 MiB/Rank。
@@ -326,6 +379,8 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 同日可选 spdlog 修正：新增回归先复现 production 模式被空 spdlog 目录阻断，移除预检后确认能进入生产 CMake 配置调用（测试在调用边界停止，不代表生产构建成功）。52 项脚本回归中 51 项通过，1 项 symlink 跳过。在临时目录仅复制真实 `tilexr_log.h`，不提供 spdlog 头文件、不定义 `TILEXR_LOG_DISABLE_SPDLOG`，按项目默认 GNU C++14 模式编译并运行现有日志测试通过，编译断言确认使用自动替代路径；现有 fake-spdlog API 测试亦通过。MSYS 严格 `-std=c++14` 下现有测试的 POSIX `setenv`/`unsetenv` 声明不可见，故使用与 CMake 一致的 `-std=gnu++14`；未修改生产日志代码或测试源码。CANN 生产编译与 NPU 执行未在本地验证。
 
 ## 七步流程检查审计与落实（2026-09-09）
+
+> 下列历史审计表中的 hostfile device 字段、全配置同步签名及 run_case 参数描述已由上文“整服务器调度与参数归属”替代。
 
 原审计源码版本为 `04e16e98cf2c3502d765436c87be43616a172192`。保留以下 50 项 ID 便于逐项核对；“原审计位置”和“原操作”描述该历史提交，代码链接固定到该提交，不随当前行号变化。“本次决定与当前行为”描述本次精简后的实现。范围覆盖根目录入口、环境/源码/工作流工具、可选 PC 导出和 CMake；没有访问实际服务器、用户 Mutagen 配置或已安装 CANN 环境脚本，也没有测量真实集群耗时。
 

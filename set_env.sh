@@ -7,7 +7,7 @@
 #   TILEXR_VALIDATION_SSH_USER=your_user
 #   TILEXR_VALIDATION_HOSTFILE=hostfile
 #   TILEXR_VALIDATION_JOBS=8
-# hostfile：第一行必须是当前服务器；每行 host [devices=0,1,2,3,4,5,6,7]。
+# hostfile：第一行必须是当前服务器；每行一个 IPv4，整机使用 0..7 卡。
 # 本入口只加载环境；测试参数属于调用脚本。
 # 局部作用域隔离旧配置文件遗留的测试参数，保留调用方传入值。
 _tilexr_load_deployment_config() {
@@ -16,6 +16,7 @@ _tilexr_load_deployment_config() {
     local TILEXR_VALIDATION_BS TILEXR_VALIDATION_H TILEXR_VALIDATION_TOPK
     local TILEXR_VALIDATION_MOE_EXPERT_NUM TILEXR_VALIDATION_DTYPE TILEXR_VALIDATION_BLOCK_DIM
     local TILEXR_VALIDATION_QUANT_MODE TILEXR_VALIDATION_FP8_FORMAT
+    local TILEXR_VALIDATION_SERVERS TILEXR_VALIDATION_BREAKDOWN TILEXR_VALIDATION_ACTION
     local TILEXR_VALIDATION_TIMEOUT
     source "$1"
 }
@@ -36,6 +37,13 @@ _tilexr_validation_env() {
     export TILEXR_VALIDATION_PYTHON="${TILEXR_VALIDATION_PYTHON:-python3}"
     if [[ "$TILEXR_VALIDATION_HOSTFILE" != /* ]]; then
         export TILEXR_VALIDATION_HOSTFILE="$root/$TILEXR_VALIDATION_HOSTFILE"
+    fi
+    # File distribution and installed-artifact verification do not load CANN or
+    # resolve runtime endpoints. The configured Python and SSH suffice.
+    if [[ ${TILEXR_VALIDATION_ACTION:-} == sync || ${TILEXR_VALIDATION_ACTION:-} == verify ]]; then
+        command -v "$TILEXR_VALIDATION_PYTHON" >/dev/null || return 1
+        printf 'ENV_READY root=%s\n' "$root"
+        return 0
     fi
     case "$TILEXR_VALIDATION_BUILD_MODE" in
         production)

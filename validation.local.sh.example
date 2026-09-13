@@ -1,9 +1,10 @@
 # 一次性环境配置：保存为 validation.local.sh，环境变化时才修改。
-# 不填写 checkpoint、模式、轮次、shape；这些只在测试脚本中配置。
+# 不填写服务器数、专家数、模式、轮次或 shape；由 run.sh 参数指定。
 # 各节点路径不同时可按 hostname 分支；请使用 LF 换行。
 TILEXR_CANN_ENV_SCRIPT=/path/to/cann-9.1.0/set_env.sh
 ASCEND_DRIVER_PATH=/usr/local/Ascend/driver
 TILEXR_VALIDATION_HOSTFILE=hostfile
+# hostfile 每行一个服务器 IPv4；sync 分发全部，run.sh -n N 使用前 N 台。
 TILEXR_VALIDATION_SSH_USER=""
 TILEXR_VALIDATION_PYTHON=python3
 TILEXR_VALIDATION_JOBS=4

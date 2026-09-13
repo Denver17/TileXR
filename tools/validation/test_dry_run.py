@@ -18,27 +18,27 @@ class DryRunTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
         os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DRY_RUN_CHECKPOINT
-        self.hostfile.write_text("localhost\nnode-b\n", encoding="utf-8")
+        self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         self.manifest = {"build_id": "dry-build", "checkpoint": workflow.DRY_RUN_CHECKPOINT,
                          "mode": "host", "source": {"commit": "a" * 40}, "tests": []}
         workflow.write_json(self.config().install / "manifest.json", self.manifest)
 
     def test_mapping_preserves_host_and_physical_device_order_at_64p_and_128p(self):
-        devices = [7, 2, 5, 0, 6, 1, 4, 3]
+        devices = list(range(8))
         for count in (8, 16):
-            self.hostfile.write_text("\n".join(f"node-{index} devices=" + ",".join(map(str, devices))
+            self.hostfile.write_text("\n".join(f"192.0.2.{index + 1}"
                                                for index in range(count)), encoding="utf-8")
             mappings = workflow.rank_mapping(self.config().hosts())
             self.assertEqual([item["rank"] for item in mappings], list(range(count * 8)))
             for rank, item in enumerate(mappings):
-                self.assertEqual(item, {"host": f"node-{rank // 8}", "host_index": rank // 8,
+                self.assertEqual(item, {"host": f"192.0.2.{rank // 8 + 1}", "host_index": rank // 8,
                                         "local_rank": rank % 8, "device": devices[rank % 8],
                                         "rank": rank, "rank_size": count * 8})
 
     def test_rejects_unsupported_topology(self):
-        for hosts in ("localhost\n", "localhost devices=0,1\nnode-b\n",
-                      "\n".join(f"node-{i}" for i in range(17)),
-                      "localhost\nlocalhost\n", "localhost devices=0,1,2,3,4,5,6,6\nnode-b\n"):
+        for hosts in ("127.0.0.1\n", "127.0.0.1 devices=0,1\n192.0.2.2\n",
+                      "\n".join(f"192.0.2.{i + 1}" for i in range(17)),
+                      "127.0.0.1\n127.0.0.1\n", "127.0.0.1 devices=0,1,2,3,4,5,6,6\n192.0.2.2\n"):
             with self.subTest(hosts=hosts), self.assertRaises(ValueError):
                 self.hostfile.write_text(hosts, encoding="utf-8")
                 self.config().hosts()
@@ -75,7 +75,7 @@ class DryRunTests(TemporaryRoot):
     def test_real_rank_processes_cover_64p_and_128p_mapping(self):
         # 本机逐节点运行真实 rank 进程；这是编排回归，不是目标集群验收。
         for hosts in (8, 16):
-            self.hostfile.write_text("\n".join(f"node-{i}" for i in range(hosts)), encoding="utf-8")
+            self.hostfile.write_text("\n".join(f"192.0.2.{i + 1}" for i in range(hosts)), encoding="utf-8")
             config = self.config()
             mappings = workflow.rank_mapping(config.hosts())
             records = []
