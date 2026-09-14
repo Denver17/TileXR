@@ -410,6 +410,49 @@ class ChainConsumerTests(unittest.TestCase):
                 for rank in range(16):
                     (Path(self.trace.name) / str(rank)).unlink()
 
+    def check_dispatch_breakdown(self, evidence):
+        self.assertEqual(evidence["generation"], 5)
+        self.assertEqual(evidence["schema_version"], 6)
+        self.assertEqual(evidence["kernel_scope"], "dispatch")
+        self.assertEqual(len(evidence["records"]), 64)
+        self.assertEqual([record["core"] for record in evidence["records"]], list(range(64)))
+        rows = first_hops = relay_packets = 0
+        for core in evidence["records"]:
+            self.assertLessEqual(core["prefix_end"], core["recv_data_end"])
+            self.assertLessEqual(core["recv_data_end"], core["end"])
+            detail = core["detail"]
+            self.assertEqual(set(detail), {"points", "metrics", "counters"})
+            points, metrics, counters = detail["points"], detail["metrics"], detail["counters"]
+            self.assertEqual(len(points), 14)
+            self.assertEqual(len(metrics), 7)
+            self.assertEqual(len(counters), 10)
+            rows += counters["rows"]
+            first_hops += counters["first_hop_rows"]
+            relay_packets += counters["relay_packets"]
+            self.assertEqual(metrics["acquire_load"]["count"], counters["rows"])
+            self.assertEqual(metrics["atomic"]["count"], counters["first_hop_rows"])
+            self.assertEqual(metrics["probe"]["count"], counters["probe_batches"])
+            if core["core"] < 48:
+                self.assertEqual(counters["rows"], 0)
+                self.assertEqual(points["recv_begin"], 0)
+                self.assertEqual(bool(core["send_packets"]), core["core"] < evidence["bs"])
+                self.assertLessEqual(core["first_hop_count"], len(core["send_packets"]))
+            elif counters["rows"]:
+                self.assertGreater(counters["probe_batches"], counters["empty_probe_batches"])
+                self.assertGreaterEqual(counters["probe_slots"], counters["rows"])
+                self.assertGreaterEqual(counters["lanes"], 1)
+                self.assertLessEqual(counters["lanes"], 8)
+            else:
+                self.assertEqual(points["clear_end"], points["prepare_end"])
+            if core["core"] == 63:
+                self.assertEqual(metrics["round_peer_wait"]["count"], evidence["rank_size"])
+                self.assertGreaterEqual(counters["round_polls"], evidence["rank_size"])
+                self.assertLess(counters["round_slowest_peer"], evidence["rank_size"])
+            else:
+                self.assertEqual(metrics["round_peer_wait"]["count"], 0)
+                self.assertEqual(points["wait_end"], points["sync_end"])
+        return rows, first_hops, relay_packets
+
     def test_count_breakdown_reads_final_generation_and_rejects_bad_records(self):
         for fault in (None, "missing", "stale", "legacy", "core", "time", "recv-time", "last-segment", "reserved", "issue-header", "issue-count", "issue-time"):
             with self.subTest(fault=fault):
@@ -429,18 +472,64 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(process.returncode, 0, errors)
                         evidence = json.loads(next(line.split(" ", 1)[1] for line in output.splitlines()
                                                    if line.startswith("EP_SERVER_DEDUP_BREAKDOWN_PASS ")))
-                        self.assertEqual(evidence["generation"], 5)
-                        self.assertEqual(evidence["schema_version"], 5)
-                        self.assertEqual(evidence["kernel_scope"], "dispatch")
-                        for core in evidence["records"]:
-                            self.assertLessEqual(core["prefix_end"], core["recv_data_end"])
-                            self.assertLessEqual(core["recv_data_end"], core["end"])
-                        self.assertEqual(len(evidence["records"]), 64)
-                        for core in evidence["records"][:48]:
-                            self.assertEqual(bool(core["send_packets"]), core["core"] < evidence["bs"])
-                            self.assertLessEqual(core["first_hop_count"], len(core["send_packets"]))
+                        detail_rows, first_hops, relays = self.check_dispatch_breakdown(evidence)
+                        record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
+                        self.assertEqual(detail_rows, record["first_hop_received"] + record["direct_received"] + record["relay_received"])
+                        self.assertEqual(first_hops, record["first_hop_received"])
+                        self.assertEqual(relays, record["relay_packets"])
                         self.assertEqual(self.trace_lines(rank).count("sync"), 1)
+                        self.assertEqual(self.trace_lines(rank).count("detail-breakdown-read"), 1)
                     (Path(self.trace.name) / str(rank)).unlink()
+
+    def test_receive_and_finish_breakdown_rejects_corrupt_detail_contracts(self):
+        for fault in ("marker", "stale", "core", "rank", "version", "size", "reserved", "point-reserved",
+                      "counter-reserved", "sender-point", "recv-parent", "recv-order", "finish-parent",
+                      "finish-order", "noncoordinator", "empty", "rows", "first-hop", "relays", "lanes",
+                      "blocks", "probes", "polls", "peer", "metric-count", "metric-interval", "metric-total",
+                      "metric-unused", "round-count", "round-interval", "atomic-subset"):
+            with self.subTest(fault=fault):
+                env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                           TILEXR_VALIDATION_WARMUP="2")
+                processes = [self.start(rank, environment=dict(env, **(
+                    {"TEST_PROFILE_FAULT": "detail-" + fault} if rank == 1 else {}))) for rank in range(16)]
+                for rank, process in enumerate(processes):
+                    output, errors = process.communicate(timeout=15)
+                    if rank == 1:
+                        self.assertNotEqual(process.returncode, 0, fault)
+                        self.assertIn("stage=breakdown-read", errors)
+                        self.assertIn("invalid dispatch detail core=", errors)
+                        self.assertNotIn("EP_SERVER_DEDUP_BREAKDOWN_PASS", output)
+                        self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
+                    else:
+                        self.assertEqual(process.returncode, 0, errors)
+                        evidence, = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")
+                        self.check_dispatch_breakdown(evidence)
+                    (Path(self.trace.name) / str(rank)).unlink()
+
+    def test_detail_breakdown_accepts_zero_duration_samples_and_quantized_multiblock_packets(self):
+        for zero_duration in (False, True):
+            with self.subTest(zero_duration=zero_duration):
+                env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                           TILEXR_VALIDATION_WARMUP="2", TILEXR_VALIDATION_BS="3", TILEXR_VALIDATION_H="7168",
+                           TILEXR_VALIDATION_TOPK="6", TILEXR_VALIDATION_QUANT_MODE="4")
+                if zero_duration:
+                    env["TEST_PROFILE_FAULT"] = "zero-duration"
+                processes = [self.start(rank, environment=env) for rank in range(16)]
+                for process in processes:
+                    output, errors = process.communicate(timeout=20)
+                    self.assertEqual(process.returncode, 0, errors)
+                    evidence, = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")
+                    self.check_dispatch_breakdown(evidence)
+                    for core in evidence["records"][48:]:
+                        if core["detail"]["counters"]["rows"]:
+                            self.assertGreater(core["detail"]["counters"]["blocks"], 1)
+                        for metric in core["detail"]["metrics"].values():
+                            if metric["count"]:
+                                self.assertGreater(metric["max_begin"], 0)
+                                if zero_duration:
+                                    self.assertEqual(metric["total_ticks"], 0)
+                                    self.assertEqual(metric["max_begin"], metric["max_end"])
+                for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_launch_and_async_errors_do_not_release_unconfirmed_round(self):
         for stage in ("launch", "sync"):

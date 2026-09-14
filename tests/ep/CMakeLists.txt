@@ -307,13 +307,16 @@ foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_serve
 endforeach()
 target_compile_definitions(test_tilexr_ep_server_dedup_source_send_profile PRIVATE TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
 
-add_executable(test_tilexr_ep_server_dedup_receive_packet unit/test_tilexr_ep_server_dedup_receive_packet.cpp)
-target_include_directories(test_tilexr_ep_server_dedup_receive_packet PRIVATE
-    unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
-set_target_properties(test_tilexr_ep_server_dedup_receive_packet PROPERTIES CXX_STANDARD 17)
-add_test(NAME test_tilexr_ep_server_dedup_receive_packet COMMAND test_tilexr_ep_server_dedup_receive_packet)
-set_tests_properties(test_tilexr_ep_server_dedup_receive_packet PROPERTIES TIMEOUT 30)
-install(TARGETS test_tilexr_ep_server_dedup_receive_packet RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+foreach(test_target test_tilexr_ep_server_dedup_receive_packet test_tilexr_ep_server_dedup_receive_profile)
+    add_executable(${test_target} unit/test_tilexr_ep_server_dedup_receive_packet.cpp)
+    target_include_directories(${test_target} PRIVATE
+        unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
+    set_target_properties(${test_target} PROPERTIES CXX_STANDARD 17)
+    add_test(NAME ${test_target} COMMAND ${test_target})
+    set_tests_properties(${test_target} PROPERTIES TIMEOUT 30)
+    install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endforeach()
+target_compile_definitions(test_tilexr_ep_server_dedup_receive_profile PRIVATE TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
 
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
 

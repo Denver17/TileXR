@@ -186,6 +186,142 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(len([event for event in events if event.get("cat") == "mte3_issue"]), 7)
         self.assertEqual([event["tid"] for event in events if event["name"] == "thread_name"], list(range(64)))
 
+    def receive_detail_fixture(self):
+        config, ranks = self.dispatch_fixture()
+        for rank in ranks:
+            rank.update(relay_packets=4, relay_received=4, relay_bytes=4*15872, data_bytes=11*15872)
+            rank["same_server_data_bytes"] += 2*15872
+            rank["breakdown"]["schema_version"] = 6
+            first_hop = 0
+            for core in rank["breakdown"]["records"]:
+                cid = core["core"]
+                core["end"] = 220
+                core["recv_data_end"] = 190 if cid >= 48 else 160
+                points = dict.fromkeys(measure.DETAIL_POINTS, 0)
+                points.update(zip(measure.DETAIL_POINTS[8:],
+                                  [190 if cid >= 48 else 160, 192 if cid >= 48 else 162, 200,
+                                   202 if cid == 63 else 200, 205 if cid == 63 else 200, 219 if cid == 63 else 200]))
+                metrics = {name: dict(total_ticks=0, max_begin=0, max_end=0, count=0) for name in measure.DETAIL_METRICS}
+                counters = dict.fromkeys(measure.DETAIL_COUNTERS, 0)
+                if cid >= 48:
+                    rows = 11 * (cid - 47) // 16 - 11 * (cid - 48) // 16
+                    points.update(zip(measure.DETAIL_POINTS[:8], [160, 161, 162, 164, 180, 182, 183, 185]
+                                      if rows else [160, 161, 162, 164, 164, 164, 164, 164]))
+                    if rows:
+                        counters.update(rows=1, probe_batches=2, probe_slots=2, empty_probe_batches=1, lanes=8, blocks=31)
+                        metrics.update(probe=dict(total_ticks=4, max_begin=164, max_end=166, count=2),
+                                       acquire_load=dict(total_ticks=2, max_begin=166, max_end=168, count=1),
+                                       metadata=dict(total_ticks=4, max_begin=168, max_end=172, count=1),
+                                       output_issue=dict(total_ticks=1, max_begin=172, max_end=173, count=1))
+                        if first_hop < 3:
+                            counters.update(first_hop_rows=1, relay_packets=(1, 1, 2)[first_hop])
+                            metrics.update(atomic=dict(total_ticks=1, max_begin=170, max_end=171, count=1),
+                                           relay_issue=dict(total_ticks=2, max_begin=173, max_end=175, count=1))
+                            first_hop += 1
+                if cid == 63:
+                    counters.update(round_polls=18, round_slowest_peer=4)
+                    metrics["round_peer_wait"] = dict(total_ticks=12, max_begin=211, max_end=215, count=16)
+                core["detail"] = dict(points=points, metrics=metrics, counters=counters)
+        return config, ranks
+
+    def test_dispatch_v6_uses_real_receive_finish_intervals_and_separate_operation_sums(self):
+        config, ranks = self.receive_detail_fixture()
+        summary = measure.summarize_measurements(ranks, config, "d" * 64)
+        breakdown = summary["breakdown"]
+        self.assertEqual(breakdown["schema_version"], 6)
+        self.assertEqual(breakdown["stages"]["recv_loop"]["median"], 16)
+        self.assertEqual(breakdown["stages"]["recv_drain_issue"]["median"], 2)
+        self.assertEqual(breakdown["stages"]["finish_peer_wait"]["median"], 14)
+        self.assertEqual(breakdown["operations"]["probe"]["core_total_ticks"]["median"], 4)
+        self.assertEqual(breakdown["operations"]["probe"]["all_core_total_ticks"]["median"], 44)
+        self.assertEqual(breakdown["operations"]["probe"]["max_interval_ticks"]["median"], 2)
+        self.assertEqual(breakdown["operations"]["probe"]["count"]["median"], 22)
+        self.assertEqual(breakdown["rank_operations"][0]["round_slowest_peer"], 4)
+        self.assertIn("atomic 包含于 metadata", measure.render_measurements(summary))
+        traces = measure.export_breakdown_traces(ranks, config, self.root / "v6", "v6-run", "d" * 64)
+        data = json.loads(Path(traces["ranks"]["0"]).read_text())
+        events = data["traceEvents"]
+        actual = [event for event in events if event.get("cat") == "operation_max_interval" and event["tid"] == 49]
+        probe = next(event for event in actual if event["args"]["metric"] == "probe")
+        self.assertEqual(probe["dur"], .002)
+        self.assertEqual(probe["args"]["total_ticks"], 4)
+        self.assertEqual((probe["args"]["start_ticks"], probe["args"]["end_ticks"]), (164, 166))
+        self.assertEqual(next(event for event in actual if event["args"]["metric"] == "atomic")["args"]["start_ticks"], 170)
+        # Core 63 also receives; select its completion metric explicitly.
+        wait = next(event for event in events if event.get("cat") == "operation_max_interval" and event["tid"] == 63
+                    and event["args"]["metric"] == "round_peer_wait")
+        self.assertEqual(wait["args"]["peer"], 4)
+        self.assertEqual(wait["dur"], .004)
+        self.assertIn("not DMA completion", data["otherData"]["detail_timing"])
+
+    def test_dispatch_v6_rejects_missing_wrong_role_interval_or_counter_evidence(self):
+        config, ranks = self.receive_detail_fixture()
+        for fault in ("missing", "extra", "missing-point", "float", "overflow", "backwards", "parent", "empty",
+                      "sender", "completion-owner", "rows", "blocks", "lanes", "slots", "empty-batches", "metric-count",
+                      "metric-interval", "metric-total", "metric-unused", "atomic-total", "first-hop", "relay", "peer", "polls"):
+            rank = copy.deepcopy(ranks[0])
+            cores = rank["breakdown"]["records"]
+            detail = cores[49]["detail"]
+            if fault == "missing": cores[49].pop("detail")
+            if fault == "extra": detail["points"]["invented"] = 0
+            if fault == "missing-point": detail["points"].pop("loop_end")
+            if fault == "float": detail["counters"]["rows"] = 1.0
+            if fault == "overflow": detail["counters"]["rows"] = 1 << 64
+            if fault == "backwards": detail["points"]["tasks_end"] = 180
+            if fault == "parent": detail["points"]["recv_begin"] = 159
+            if fault == "empty": cores[48]["detail"]["points"]["clear_end"] += 1
+            if fault == "sender": cores[0]["detail"]["points"]["recv_begin"] = 1
+            if fault == "completion-owner": detail["points"]["wait_end"] = 201
+            if fault == "rows": detail["counters"]["rows"] = 2
+            if fault == "blocks": detail["counters"]["blocks"] = 32
+            if fault == "lanes": detail["counters"]["lanes"] = 0
+            if fault == "slots": detail["counters"]["probe_slots"] = 33
+            if fault == "empty-batches": detail["counters"]["empty_probe_batches"] = 2
+            if fault == "metric-count": detail["metrics"]["probe"]["count"] = 1
+            if fault == "metric-interval": detail["metrics"]["metadata"]["max_end"] = 181
+            if fault == "metric-total": detail["metrics"]["probe"]["total_ticks"] = 5
+            if fault == "metric-unused": cores[48]["detail"]["metrics"]["probe"]["max_begin"] = 164
+            if fault == "atomic-total": detail["metrics"]["atomic"].update(total_ticks=5, max_begin=168, max_end=173)
+            if fault == "first-hop": rank["first_hop_received"] += 1
+            if fault == "relay": rank["relay_packets"] += 1
+            if fault == "peer": cores[63]["detail"]["counters"]["round_slowest_peer"] = 16
+            if fault == "polls": cores[63]["detail"]["counters"]["round_polls"] = 15
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                measure.validate_rank_measurements(rank, config)
+
+    def test_dispatch_v6_preserves_zero_duration_samples_and_empty_receivers(self):
+        config, ranks = self.receive_detail_fixture()
+        node_config = dict(config)
+        node_config.pop("rank_size")
+        measure.validate_rank_measurements(dict(ranks[0], rank_size=16), node_config)
+        metric = ranks[0]["breakdown"]["records"][49]["detail"]["metrics"]["acquire_load"]
+        metric.update(total_ticks=0, max_end=metric["max_begin"])
+        measure.validate_rank_measurements(ranks[0], config)
+        events = measure._receive_detail_events(ranks[0]["breakdown"]["records"][49], 0, 100, 1)
+        self.assertEqual(next(event for event in events if event.get("args", {}).get("metric") == "acquire_load")["dur"], 0)
+        events = measure._receive_detail_events(ranks[0]["breakdown"]["records"][48], 0, 100, 1)
+        self.assertFalse(any(event.get("cat") == "operation_max_interval" for event in events))
+        self.assertEqual(next(event for event in events if event["name"] == "recv_loop")["dur"], 0)
+
+    def test_trace_tracks_have_numeric_sort_metadata_and_padded_names_for_retained_traces(self):
+        config, ranks = self.dispatch_fixture()
+        traces = measure.export_breakdown_traces(ranks, config, self.root / "ordered", "ordered-run", "d" * 64)
+        data = json.loads(Path(traces["all_ranks"]).read_text())
+        events = data["traceEvents"]
+        self.assertEqual([event["args"]["sort_index"] for event in events if event.get("name") == "process_sort_index"], list(range(16)))
+        self.assertEqual([event["args"]["sort_index"] for event in events if event.get("name") == "thread_sort_index" and event["pid"] == 0], list(range(64)))
+        self.assertEqual([event["args"]["name"] for event in events if event.get("name") == "thread_name" and event["pid"] == 0],
+                         [f"AIV core {core:02d}" for core in range(64)])
+        original = dict(data, traceEvents=list(reversed([event for event in events
+                        if event.get("name") not in ("process_sort_index", "thread_sort_index")])))
+        saved = copy.deepcopy(original)
+        repaired = measure.sort_trace_tracks(original)
+        self.assertEqual(original, saved)
+        self.assertEqual(repaired["otherData"], original["otherData"])
+        self.assertEqual(measure.sort_trace_tracks(repaired), repaired)
+        self.assertCountEqual([json.dumps(event, sort_keys=True) for event in repaired["traceEvents"] if event["ph"] != "M"],
+                              [json.dumps(event, sort_keys=True) for event in original["traceEvents"] if event["ph"] != "M"])
+
     def test_dispatch_rejects_old_profile_missing_receive_or_incomplete_relay_traffic(self):
         config, ranks = self.dispatch_fixture()
         for fault in ("v4", "scope", "missing-receive", "early-receive", "late-receive", "detail", "relay-bytes", "relay-count", "total", "classification"):

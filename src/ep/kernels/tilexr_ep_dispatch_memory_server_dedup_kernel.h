@@ -19,6 +19,7 @@ public:
     {
         profile_.Mark(0);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
+        profile_.Detail().Init(args_, bs, topK);
         core_ = GetBlockIdx(); magic_ = magic; pipe_ = pipe;
         counterOffset_ = TileXREpServerDedupCountLayout(experts).counterOffset;
         counts_.Init(commArgs, expertIds, expertTokenNumsOut, sendCountsOut, bs, topK, experts, expertTokenNumsType, magic, pipe);
@@ -46,11 +47,14 @@ public:
             // CompleteCumsum may still be writing expert counts from its UB.
             // Retire that stage before receiver resets the pipe and reloads GM.
             PipeBarrier<PIPE_ALL>();
-            receiver_.Process(); profile_.Mark(7);
+            receiver_.Process(profile_.Detail()); profile_.Mark(7);
         }
+        profile_.Detail().Mark(EpDedupDetailPoint::FinishBegin);
         counts_.Finish();
+        profile_.Detail().Mark(EpDedupDetailPoint::LocalEnd);
         // All 64 cores participate exactly once, after their GM writes complete.
         SyncAll();
+        profile_.Detail().Mark(EpDedupDetailPoint::SyncEnd);
         if (core_ == kEpServerDedupCoreNum - 1U) {
             pipe_->Reset();
             TBuf<> counter;
@@ -64,8 +68,9 @@ public:
             DataCopyPad(output, zero, {1U, 4U, 0U, 0U, 0U});
             const TEventID after = pipe_->FetchEventID(HardEvent::MTE3_S);
             SetFlag<HardEvent::MTE3_S>(after); WaitFlag<HardEvent::MTE3_S>(after);
-            CompleteServerDedupRound(args_, magic_, pipe_);
-        }
+            profile_.Detail().Mark(EpDedupDetailPoint::CounterEnd);
+            CompleteServerDedupRound(args_, magic_, pipe_, &profile_.Detail());
+        } else profile_.Detail().CopyPoints(11U, 13U, EpDedupDetailPoint::SyncEnd);
         profile_.Mark(8);
         for (uint32_t point = 9U; point < kEpServerDedupProfilePoints; ++point) profile_.Skip(point, 8U);
         profile_.Flush(args_, magic_);

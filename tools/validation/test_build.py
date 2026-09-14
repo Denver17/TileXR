@@ -284,17 +284,19 @@ class BuildTests(unittest.TestCase):
             config = self.config("production")
             manifest, _ = self.build_fixture(config)
             self.assertTrue(manifest["server_dedup_profiling"])
-            self.assertEqual(manifest["server_dedup_profile_version"], 5)
+            self.assertEqual(manifest["server_dedup_profile_version"], 6)
             configure = next(args for args, _, _ in self.commands if "-S" in args and str(self.root) in args)
             self.assertIn("-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON", configure)
             with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="functional"):
                 self.assertEqual(workflow.verify_build(self.config("production", "run"), check_run_mode=False), manifest)
-            manifest.pop("server_dedup_profile_version")
-            workflow.write_json(config.install / "manifest.json", manifest)
-            with self.assertRaisesRegex(ValueError, "breakdown v5"):
-                workflow.verify_build(config)
-            with self.assertRaisesRegex(ValueError, "breakdown v5"):
-                workflow.verify_build(config, check_run_mode=False)
+            for old_version in (None, 5):
+                with self.subTest(old_version=old_version):
+                    manifest["server_dedup_profile_version"] = old_version
+                    workflow.write_json(config.install / "manifest.json", manifest)
+                    with self.assertRaisesRegex(ValueError, "breakdown v6"):
+                        workflow.verify_build(config)
+                    with self.assertRaisesRegex(ValueError, "breakdown v6"):
+                        workflow.verify_build(config, check_run_mode=False)
             with mock.patch.dict(os.environ, TILEXR_VALIDATION_RUN_MODE="performance"):
                 with self.assertRaisesRegex(ValueError, "设备打点开关"):
                     workflow.verify_build(self.config("production", "run"))

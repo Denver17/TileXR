@@ -9,6 +9,43 @@ namespace {
 using namespace TileXREp;
 using ServerDedupTest::Check;
 
+void CheckReceiveProfile(ServerDedupDetailProfile &profile, uint32_t rows, uint32_t firstHops, uint32_t relays)
+{
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    const uint64_t bytes = kEpServerDedupDetailBytes + TileXREpServerDedupSendProfileLayout(0U, 96U, 6U).bytes +
+        4ULL * 1024U * 1024U;
+    std::vector<uint8_t> storage(bytes + 64U, 0xcd);
+    auto *base = reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(storage.data()) + 63U) & ~uintptr_t(63U));
+    TileXR::CommArgs args {};
+    args.rankSize = 16U; args.peerMemBytes = bytes; args.peerMems[0] = base;
+    const auto syncBefore = AscendC::TestSyncOperations();
+    profile.Init(&args, 96U, 6U);
+    profile.Flush(&args, 7U);
+    Check(AscendC::TestSyncOperations() == syncBefore, "fine profile persistence adds no synchronization");
+    const auto &record = reinterpret_cast<EpServerDedupDetailRecord *>(base)[AscendC::testCore];
+    Check(record.counters[0] == rows && record.counters[4] == firstHops && record.counters[5] == relays,
+        "diagnostic workload counts match real receive/relay writes");
+    for (uint32_t i = 1; i < 8U; ++i)
+        Check(record.points[i] >= record.points[i - 1U], "receive phase boundaries are ordered");
+    const uint64_t expected[] = {record.counters[1], rows, rows, firstHops, rows, firstHops, 0U};
+    uint64_t accounted = 0U;
+    for (uint32_t i = 0; i < 7U; ++i) {
+        const auto &m = record.metrics[i];
+        Check(m.count == expected[i], "metric sample count matches actual operations");
+        if (m.count != 0U) {
+            Check(m.maxBegin >= record.points[3] && m.maxEnd <= record.points[4] && m.maxEnd >= m.maxBegin &&
+                m.totalTicks >= m.maxEnd - m.maxBegin, "slowest operation interval lies in the real processing interval");
+        } else Check(m.totalTicks == 0U && m.maxBegin == 0U && m.maxEnd == 0U, "unused metrics contain no stale interval");
+        if (i != uint32_t(EpDedupDetailMetric::Atomic)) accounted += m.totalTicks;
+    }
+    Check(accounted <= record.points[4] - record.points[3], "exclusive sampled totals fit the processing interval");
+    if (rows == 0U) Check(record.counters[6] == 0U && record.counters[7] == 0U && record.points[3] == record.points[7],
+        "empty receive records no data/probe/lane work");
+#else
+    (void)profile; (void)rows; (void)firstHops; (void)relays;
+#endif
+}
+
 struct Packet {
     EpServerDedupDataLayout layout;
     uint32_t k, entries;
@@ -164,8 +201,10 @@ void CheckReceiver(int32_t role)
         Check(std::memcmp(firstCopy.data(), bytes, size) == 0, "all destinations receive an identical common packet");
         ++sends;
     };
-    receiver.Process();
+    ServerDedupDetailProfile profile;
+    receiver.Process(profile);
     AscendC::GmWriteObserver() = {};
+    CheckReceiveProfile(profile, 1U, role > 0 ? 1U : 0U, role > 0 ? fixture.entries : 0U);
     Check(sends == (role > 0 ? fixture.entries : 0U), "DIRECT and terminal rows do not start relay groups");
     Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "receiver writes the exact hidden row");
     if (Quantized) Check(std::memcmp(scales.data() + 32U, fixture.payload.data() + data.quantCount, data.scaleBytes) == 0,
@@ -304,9 +343,11 @@ void CheckBatchReceiver(uint32_t h)
             inLane = true;
         }
     };
-    receiver.Process();
+    ServerDedupDetailProfile profile;
+    receiver.Process(profile);
     AscendC::GmReadObserver() = {}; AscendC::GmWriteObserver() = {};
     AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
+    CheckReceiveProfile(profile, owned, 8U, 24U);
     Check(processed.size() == owned && processed.front() == 23U && processed[7U] == 16U,
         "scan advances past an unready full batch and consumes a ready tail in reverse order");
     const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
@@ -351,7 +392,9 @@ void CheckBatchReceiver(uint32_t h)
     // The same object and TPipe must also handle an empty next receive set.
     std::fill(prefix, prefix + experts, 0U);
     const auto prior = hidden;
-    receiver.Process();
+    ServerDedupDetailProfile emptyProfile;
+    receiver.Process(emptyProfile);
+    CheckReceiveProfile(emptyProfile, 0U, 0U, 0U);
     Check(hidden == prior && pipe.bytes == experts * 4U, "empty receive set has no data/probe/lane allocation or output writes");
 }
 

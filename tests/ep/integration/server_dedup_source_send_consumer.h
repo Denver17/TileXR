@@ -21,6 +21,94 @@ void SaveSourceSendInputs(const Config &c, const std::vector<uint16_t> &x,
     write("-weights.bin", weights.data(), weights.size() * sizeof(float));
 }
 
+void AppendDispatchDetail(std::ostringstream &out, const Config &c,
+    const TileXREp::EpServerDedupDetailRecord &detail, uint32_t core, uint64_t generation,
+    const uint64_t *time, const TileXREp::EpServerDedupDataLayout &layout,
+    const std::vector<ServerDedupReference::DispatchRow> &rows)
+{
+    using namespace TileXREp;
+    const auto require = [&](bool valid, const std::string &field) {
+        Require(valid, "invalid dispatch detail core=" + std::to_string(core) + " field=" + field);
+    };
+    require(detail.marker == kEpServerDedupProfileMarker && detail.version == kEpServerDedupProfileVersion &&
+        detail.recordBytes == sizeof(detail) && detail.rank == uint32_t(c.rank) && detail.core == core &&
+        detail.generation == generation && detail.reserved == 0U, "identity");
+    const auto *p = detail.points;
+    const auto *n = detail.counters;
+    for (uint32_t i = 14; i < 16; ++i) require(p[i] == 0U, "reserved point");
+    for (uint32_t i = 10; i < 16; ++i) require(n[i] == 0U, "reserved counter");
+    const bool receiver = core >= kEpServerDedupSendCoreNum;
+    uint64_t expectedRows = 0U, firstHops = 0U, relays = 0U;
+    if (receiver) {
+        const uint64_t index = core - kEpServerDedupSendCoreNum;
+        const uint64_t begin = rows.size() * index / kEpServerDedupRecvCoreNum;
+        const uint64_t end = rows.size() * (index + 1U) / kEpServerDedupRecvCoreNum;
+        expectedRows = end - begin;
+        for (uint64_t row = begin; row < end; ++row) if (rows[row].FirstHop()) {
+            ++firstHops;
+            relays += rows[row].packet.members.size() - 1U;
+        }
+        require(p[0] >= time[6] && p[7] <= time[7], "receive parent");
+        for (uint32_t i = 1; i < 8; ++i) require(p[i] >= p[i - 1U], "receive order");
+    } else {
+        for (uint32_t i = 0; i < 8; ++i) require(p[i] == 0U, "sender receive point");
+    }
+    require(n[0] == expectedRows && n[4] == firstHops && n[5] == relays, "receive counts");
+    if (expectedRows != 0U) {
+        require(n[6] >= 1U && n[6] <= 8U && n[7] == layout.blockCount, "receive capacity");
+        require(n[1] >= (expectedRows + 15U) / 16U && n[2] >= expectedRows && n[2] >= n[1] &&
+            n[2] / 16U + uint64_t(n[2] % 16U != 0U) <= n[1] && n[3] < n[1], "probe counts");
+    } else {
+        for (uint32_t i = 0; i < 8; ++i) require(n[i] == 0U, "empty receive counter");
+        if (receiver) for (uint32_t i = 4; i < 8; ++i) require(p[i] == p[3], "empty receive point");
+    }
+    require(p[8] >= time[7] && p[13] <= time[8], "finish parent");
+    for (uint32_t i = 9; i < 14; ++i) require(p[i] >= p[i - 1U], "finish order");
+    const bool coordinator = core == kEpServerDedupCoreNum - 1U;
+    if (coordinator) require(n[8] >= uint64_t(c.rankSize) && n[9] < uint64_t(c.rankSize), "round counters");
+    else {
+        require(n[8] == 0U && n[9] == 0U, "noncoordinator counter");
+        for (uint32_t i = 11; i < 14; ++i) require(p[i] == p[10], "noncoordinator point");
+    }
+    const char *pointNames[] = {"recv_begin", "prefix_end", "tasks_end", "prepare_end", "loop_end", "drain_end",
+        "clear_issue_end", "clear_end", "finish_begin", "local_end", "sync_end", "counter_end", "publish_end", "wait_end"};
+    const char *metricNames[] = {"probe", "acquire_load", "metadata", "atomic", "output_issue", "relay_issue", "round_peer_wait"};
+    const char *counterNames[] = {"rows", "probe_batches", "probe_slots", "empty_probe_batches", "first_hop_rows",
+        "relay_packets", "lanes", "blocks", "round_polls", "round_slowest_peer"};
+    const uint64_t expectedCounts[] = {n[1], expectedRows, expectedRows, firstHops, expectedRows, firstHops,
+        coordinator ? uint64_t(c.rankSize) : 0U};
+    out << ",\"detail\":{\"points\":{";
+    for (uint32_t i = 0; i < 14; ++i) {
+        if (i != 0U) out << ',';
+        out << '\"' << pointNames[i] << "\":" << p[i];
+    }
+    out << "},\"metrics\":{";
+    for (uint32_t i = 0; i < 7; ++i) {
+        const auto &m = detail.metrics[i];
+        require(m.count == expectedCounts[i], std::string(metricNames[i]) + " count");
+        if (m.count == 0U) require(m.totalTicks == 0U && m.maxBegin == 0U && m.maxEnd == 0U,
+            std::string(metricNames[i]) + " unused");
+        else {
+            const uint64_t begin = i == 6U ? p[12] : p[3];
+            const uint64_t end = i == 6U ? p[13] : p[4];
+            require(m.maxBegin >= begin && m.maxEnd >= m.maxBegin && m.maxEnd <= end &&
+                m.totalTicks <= end - begin && m.maxEnd - m.maxBegin <= m.totalTicks &&
+                m.totalTicks / m.count + uint64_t(m.totalTicks % m.count != 0U) <= m.maxEnd - m.maxBegin,
+                std::string(metricNames[i]) + " interval");
+        }
+        if (i != 0U) out << ',';
+        out << '\"' << metricNames[i] << "\":{\"total_ticks\":" << m.totalTicks << ",\"max_begin\":" << m.maxBegin
+            << ",\"max_end\":" << m.maxEnd << ",\"count\":" << m.count << '}';
+    }
+    require(detail.metrics[3].totalTicks <= detail.metrics[2].totalTicks, "atomic subset");
+    out << "},\"counters\":{";
+    for (uint32_t i = 0; i < 10; ++i) {
+        if (i != 0U) out << ',';
+        out << '\"' << counterNames[i] << "\":" << n[i];
+    }
+    out << "}}";
+}
+
 std::string ReadDispatchProfile(const Config &c, const TileXR::CommArgs &args)
 {
     using namespace TileXREp;
@@ -29,11 +117,16 @@ std::string ReadDispatchProfile(const Config &c, const TileXR::CommArgs &args)
         "read dispatch breakdown");
     const auto detailLayout = TileXREpServerDedupSendProfileLayout(args.peerMemBytes, uint32_t(c.bs), uint32_t(c.topK));
     const auto dataLayout = TileXREpServerDedupDataLayout(c.bs, c.h, c.topK, c.experts, c.quantMode == 4);
-    Require(detailLayout.offset >= dataLayout.requiredBytes, "send profile overlaps data or communicator flags");
+    const uint64_t recvOffset = TileXREpServerDedupDetailOffset(detailLayout.offset);
+    Require(recvOffset >= dataLayout.requiredBytes, "dispatch profile overlaps data or communicator flags");
+    std::array<EpServerDedupDetailRecord, kEpServerDedupCoreNum> recvDetail {};
+    Check(aclrtMemcpy(recvDetail.data(), sizeof(recvDetail), args.peerMems[c.rank] + recvOffset,
+        sizeof(recvDetail), ACL_MEMCPY_DEVICE_TO_HOST), "read receive and finish breakdown");
     std::vector<uint8_t> detail(detailLayout.bytes);
     Check(aclrtMemcpy(detail.data(), detail.size(), args.peerMems[c.rank] + detailLayout.offset,
         detail.size(), ACL_MEMCPY_DEVICE_TO_HOST), "read send issue breakdown");
     const uint64_t generation = uint64_t(c.warmup) + c.loops;
+    const auto outputRows = ServerDedupReference::DispatchRows(SourceSendShape(c), uint32_t(c.rank));
     const char *points[] = {"start", "init_end", "send_cnt_end", "send_data_end", "recv_cnt_end", "cumsum_end", "prefix_end", "recv_data_end", "end"};
     std::ostringstream out;
     out << ",\"schema_version\":" << kEpServerDedupProfileVersion << ",\"kernel_scope\":\"dispatch\",\"generation\":" << generation
@@ -57,6 +150,7 @@ std::string ReadDispatchProfile(const Config &c, const TileXR::CommArgs &args)
             Require(i == 0 || time[i] >= time[i - 1], "unordered dispatch breakdown timestamps");
             out << ",\"" << points[i] << "\":" << time[i];
         }
+        AppendDispatchDetail(out, c, recvDetail[core], core, generation, time, dataLayout, outputRows);
         if (core < kEpServerDedupSendCoreNum) {
             EpServerDedupSendProfileHeader header {};
             const auto *base = detail.data() + core * detailLayout.coreStride;

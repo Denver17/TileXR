@@ -78,8 +78,8 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    if (next.data.requiredBytes > TileXREpServerDedupSendProfileLayout(
-        commArgs.peerMemBytes, uint32_t(p.bs), uint32_t(p.topK)).offset) {
+    if (next.data.requiredBytes > TileXREpServerDedupDetailOffset(TileXREpServerDedupSendProfileLayout(
+        commArgs.peerMemBytes, uint32_t(p.bs), uint32_t(p.topK)).offset)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 #endif

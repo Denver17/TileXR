@@ -125,7 +125,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::EpServerDedupSendProfileHeader header {};
             const auto *base = windows[source].data() + detail.offset + core * detail.coreStride;
             std::memcpy(&header, base, sizeof(header));
-            Check(header.marker == TileXREp::kEpServerDedupProfileMarker && header.version == 5 &&
+            Check(header.marker == TileXREp::kEpServerDedupProfileMarker && header.version == 6 &&
                 header.recordBytes == sizeof(TileXREp::EpServerDedupSendProfilePacket) && header.rank == source &&
                 header.core == core && header.generation == 7U + round, "issue header identifies core/rank/generation, including empty cores");
             uint32_t observed = 0, firstHops = 0;

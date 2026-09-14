@@ -203,7 +203,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 2 -l 3 2
 ```
 
-构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=5`，并标记 184B ABI、`r07-single` 布局及 `dispatch` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。
+构建参数设置 `TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=ON`；manifest 为 `server_dedup_profiling=true`、`server_dedup_profile_version=6`，并标记 184B ABI、`r07-single` 布局及 `dispatch` 范围。`bash build_all.sh` 等同 `breakdown=0`，不受遗留 RUN_MODE 影响。同步只校验安装包，运行还校验模式与包的匹配；不手工编辑 manifest。v6 增加 recv/finish 细分记录，需要重新编译和同步，不能使用旧 v5 安装包运行新版 reader。
 
 成功结果和 trace 路径：
 
@@ -221,7 +221,7 @@ run/case-<时间>-<PID>/<run_id>/traces/index.json
 
 阶段为 `init`、`send_cnt`、`send_data`、`recv_cnt`、`cumsum`、`prefix_consume`、`recv_data`、`finish` 和 `dispatch_total`。源端核未执行的计数接收阶段为零时长，计数接收核的 send_data 为零；finish 包含末尾全核 SyncAll、core63 counter 清零及跨 rank 完成等待。时间戳从 Init 前到上述收尾后，排除对象构造和最终 trace 写出。breakdown 仅保留最后一次测量的粗粒度和逐包记录，generation=warmup+loops；不生成每轮 trace。各卡独立归零，不能推断跨卡绝对时序。
 
-v5 沿用 v4 的发送细打点，在每个发送核的 `send_data` 下划分三个连续区间，`stages_us` 同时汇总这三项：
+v6 沿用 v4/v5 的发送细打点，在每个发送核的 `send_data` 下划分三个连续区间，`stages_us` 同时汇总这三项：
 
 | trace 名称 | 起止时间点 |
 | --- | --- |
@@ -233,13 +233,61 @@ v5 沿用 v4 的发送细打点，在每个发送核的 `send_data` 下划分三
 
 `nodes[].reported_result.ranks[].breakdown.records[]` 的发送核增加 `first_hop_count` 和 `send_packets: [{issue, token, k}, ...]`。数组按实际发送顺序排列，前 `first_hop_count` 项为待中转包，其余为 DIRECT；同一输入 Token 可产生多个物理包，`token/k` 标识该包的原始路由头。trace 中每包都有 `MTE3 issue` 瞬时点，`send_issue_interval` 段表示 **本包下发 → 下一包下发**，跨 first-hop/DIRECT 切换的间隔归前一个包。它包含下一包准备、已有等待与下发开销，不表示本包 DMA 搬运完成耗时。最后一包没有下一下发点，只保留瞬时点，并将其后至 `send_data_end` 单列为 `send_drain_and_outputs`；该收尾包含已有 lane 排空、mask/weight 输出及粗边界同步，不冒充 Token 间隔。各段核最大值不可直接相加。
 
-R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v5 粗粒度记录每核三个 64B 行，共 12288B，仍落在原预留区内；存储前9个有效时间点，最后3个为 end 的副本。逐包记录暂存在独立 UB，最终 `end` 取时后才写到通信域 payload 尾部，必须避开 `peerMemBytes` 中最后 4MiB 的 communicator flags。每核最多 `ceil(BS/48)*TopK` 个 16B 记录，加 32B 头后按 64B 对齐；48 核总区按 512B 对齐。固定 BS96/TopK6 时占用 12288B GM，每发送核增加 192B UB，计入 lane 容量计算，仍保留 8 个 lane。Host 拒绝数据区与诊断区重叠，现有 cnt/数据偏移和 4GiB 通信域大小不变。reader 校验版本、核/rank、generation、包数和时间范围，汇总再核对 first-hop/DIRECT 包数，禁止静默截断。
+R07 单份布局从 offset=0 预留 12800B profile，cnt 从 12800B 开始；v6 粗粒度记录沿用每核三个 64B 行，共 12288B，仍落在原预留区内；存储前9个有效时间点，最后3个为 end 的副本。逐包记录暂存在独立 UB，最终 `end` 取时后才写到通信域 payload 尾部，必须避开 `peerMemBytes` 中最后 4MiB 的 communicator flags。每核最多 `ceil(BS/48)*TopK` 个 16B 记录，加 32B 头后按 64B 对齐；48 核总区按 512B 对齐。固定 BS96/TopK6 时占用 12288B GM，每发送核增加 192B UB，计入 lane 容量计算，仍保留 8 个 lane。v6 在该逐包区之前增加每核 512B、合计 32KiB 的 recv/finish 诊断区；只在最终 `end` 之后以 Scalar GM stores 写出并逐 64B 行 DCCI，不在接收热循环写 GM。新增固定诊断状态不经 TPipe 分配，不改 lane 容量策略；编译器局部存储/寄存器溢出和读时钟开销需要真实编译及设备测量。Host 拒绝数据区与两个诊断区重叠，现有 cnt/数据偏移和 4GiB 通信域大小不变。reader 校验版本、核/rank、generation、包数和时间范围，汇总再核对 first-hop/DIRECT 包数，禁止静默截断。
 
-已有 v3/v4/v5 成功 summary 可离线导出，无需再次启动设备；v3 只能显示原有粗粒度阶段，无法补出逐包时间点：
+### recv_data 与 finish 细分（v6）
+
+接收核 48～63 的 `recv_data` 下增加以下真实区间。新增采样只调用 `GetSystemCycle` 和维护固定状态，未新增 PipeBarrier、SetFlag/WaitFlag 或 SyncAll。
+
+| trace 名称 | 实际范围 |
+| --- | --- |
+| `recv_prefix` | pipe Reset、prefix buffer 分配和 GM prefix 读取完成 |
+| `recv_tasks` | 从 prefix 建立本核 task 与 pending 表 |
+| `recv_prepare` | Flag 探测缓冲、lane 分配及初始事件准备 |
+| `recv_loop` | 扫描待收包、读取、输出及转发的完整循环 |
+| `recv_drain_issue` | 循环结束后下发各 lane 的 MTE3→MTE2 等待指令 |
+| `recv_clear_issue` | 下发本核所消费槽位的 Flag 清理 |
+| `recv_write_completion` | 原有最终 PIPE_ALL 等待，覆盖尚未完成的数据及 Flag 写入 |
+
+`recv_loop` 点击参数包含六类操作的累计 ticks、执行次数、最长一次的真实起止点：`probe`（批量 Flag 读取/归约及就绪判断）、`acquire_load`（lane 依赖与整包 MTE2 读取完成）、`metadata`（尾表、assist/group、转发头和 S→MTE3 准备）、`atomic`（第一跳分配 t，包含于 metadata）、`output_issue`（hidden/scales/assist/group 下发）、`relay_issue`（一个第一跳包的全部转发下发）。同时记录 rows、probe_batches、probe_slots、empty_probe_batches、first_hop_rows、relay_packets、lanes、blocks。频繁空探测提示等待数据，`acquire_load` 占比高提示 lane 回收/包读取路径，metadata/atomic 高提示 Scalar 处理或计数争用；这些是后续定位线索，不能单凭累计耗时认定 DMA 带宽瓶颈。
+
+| finish 子阶段 | 实际范围 |
+| --- | --- |
+| `finish_local` | 原有 counts.Finish：PIPE_ALL 与溢出模式恢复 |
+| `finish_sync` | 原有 64 核 SyncAll |
+| `finish_counter` | 仅 core63：重置 pipe、counter 写零并等待写入完成 |
+| `finish_publish` | 仅 core63：准备并向所有 rank 下发本轮完成代次，等待下发完成 |
+| `finish_peer_wait` | 仅 core63：逐 peer 读取本地 inbox，等待四个副本都达到本轮 magic |
+
+`round_peer_wait` 记录每个 peer 等待的累计值和最慢实际区间，`round_slowest_peer` 标明该 peer；`round_polls` 统计所有 inbox 加载，包括第一次即成功的加载。非 core63 的后三阶段为零，空接收核的 loop/drain/clear 阶段及接收计数为零。
+
+JSON 原始字段位于每核 `detail.points/metrics/counters`。`measurements.breakdown.operations` 按操作给出每 rank 的核累计最大值、全核累计之和、最长真实区间，再汇总跨 rank median/min/max；原始 rank 结果在 `rank_operations`。trace 用真实阶段和 `... max interval` 显示时间线，累计值只放参数和汇总，不将跨多次循环的总和拼成连续阶段。atomic 已计入 metadata，不重复相加。`WaitFlag<MTE3_MTE2>` 只阻塞目标 MTE2，不能用其前后的 Scalar 取时表示独立等待；`acquire_load` 结束于已有 MTE2_S，`recv_drain_issue` 也不宣称数据排空已经完成。output/relay 的 issue 不代表 DMA 完成。
+
+### 2026-09-14 slowesttrace 分析与后续判断
+
+输入为用户提供的 [slowesttrace.json](https://github.com/SilentEmotion/hallo-world/blob/master/slowesttrace.json)，schema5、选中 rank3，64P/E384、BS96/H7168/TopK6、BF16→MXFP8 E4M3、balance_shift/seed2026、100 轮测量＋50 轮预热，记录最后 generation150。run_id=`6944e3210ddb46af89f4c7dec5aa20ad`，kernel SHA256=`43071633e430aac4bb4109da4902560635618ab4299d8306b4ebf439054a1666`。此处仅统计该 rank 的核，单位 μs（A5 1000 ticks/μs），不代表所有 rank 或 100 轮分布，也不以此单卡记录计算跨卡带宽。
+
+| 区间/核集合 | min | median | max |
+| --- | ---: | ---: | ---: |
+| send_data，core0～47 | 30.507 | 37.982 | 42.615 |
+| recv_data，core48～63 | 44.380 | 53.704 | 58.164 |
+| finish，core48～62 | 0.171 | 4.357 | 13.991 |
+
+core60 的 recv_data 从 24.997 到 83.161，是接收阶段最慢核；core63 从 24.839 到 78.535，接收结束后 finish 耗时 29.539，到 108.074 才结束。其余核在约 83.33 结束，因此 core63 形成约 24.74 的额外拖尾。core63 的 finish 在接收核中最长；源端核更早进入同步等待，例如 core18 的 finish 为 50.601，不能说 core63 的 finish 时长大于全部 64 核。旧 v5 没有内部记录，无法把拖尾直接归因于 counter、通知或某个 peer。
+
+先根据新 trace 判断：若 `finish_sync` 长，应检查其他核接收与转发结束时间；若 `finish_publish` 长，可评估将各 peer 通知分配给多个核；若 `finish_peer_wait` 长，结合最慢 peer 与该 peer 的本地接收结束情况判断。单纯更换完成 owner 只会移动拖尾；并行通知必须保证所有数据/Flag 完成、counter 清零后才能公布本轮完成，额外协调也有成本。counter 只写 4B，但仍包含 pipe/buffer 和同步开销，是否值得卸载应由细分实测决定。本次保留原有 48/16 分工和 core63 完成协议。
+
+### Chrome 核顺序与旧 trace
+
+导出显式写入数值 `process_sort_index=rank`、`thread_sort_index=core`，名称为 `AIV core 00`～`63`。旧导出只有事件数组顺序，Chrome 可以按名称或自身顺序排轨；仅排序 JSON 不能约束可视化行顺序。保留原始 ticks 和 rank 归零方式，各 NPU 时钟仍不互相对齐。
+
+已有 v3/v4/v5/v6 成功 summary 可离线导出并获得数值核排序，无需再次启动设备；旧版本不能补出未采集的 recv/finish 细分：
 
 ```bash
 python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summary.json
 ```
+
+只有旧 trace 时，可调用 `tools.validation.measurements.sort_trace_tracks(trace)` 保存返回的新 JSON；该函数只修正 metadata 和事件排列，保持原始测量事件内容，重复处理结果一致。
 
 ## 失败定位与本地检查
 
@@ -262,6 +310,7 @@ cmake --build build/server-dedup-host --target \
   test_tilexr_ep_server_dedup_host_validation test_tilexr_ep_server_dedup_public_abi \
   test_tilexr_ep_kernel_launch test_tilexr_ep_server_dedup_counts \
   test_tilexr_ep_server_dedup_profile test_tilexr_ep_server_dedup_receive_packet \
+  test_tilexr_ep_server_dedup_receive_profile \
   test_tilexr_ep_server_dedup_source_send \
   test_tilexr_ep_server_dedup_source_send_profile test_tilexr_ep_server_dedup_host_profile_validation -j8
 ctest --test-dir build/server-dedup-host --output-on-failure \
@@ -272,6 +321,8 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用；在 GM 搬运替身记录实际发送，核对第一跳优先、DIRECT 从本 server 开始循环且同 server 内保持 Token/k 顺序、每个槽位恰好一包及跨阶段 lane 序号连续。64P/E384 乱序路由覆盖源 server0/3/7、本卡及同 server 跨卡、空目标 server、每核多 Token、第一跳与 DIRECT 混合及三轮复用，profiling OFF/ON 均执行。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 逐包打点的本地回归还核对每条记录与实际发送对应、空核头、容量/同步标志区边界、Host 容量拒绝、损坏记录拒绝、三个子阶段及最后一包的 trace 语义。纯 CPU 替身只验证记录和导出契约，真实 CANN 9.1 编译、A5 可见性及诊断开销仍需服务器运行确认。维护时不要在热路径逐包写 GM/DCCI，也不要为获取完成时间新增同步；相邻下发点才能保持这里约定的测量含义。
+
+2026-09-14 v6 本地验证：9 项聚焦 CTest 通过（接收和发送各含 profiling OFF/ON、计数、profile、Host 容量和独立 GM 地址空间）；19 项 C++14 consumer 集成测试、33 项测量/导出测试通过；15 项构建脚本测试中 14 项通过、1 项因 MSYS 模拟 symlink 跳过；2 项 breakdown 多节点编排测试通过，覆盖 v6 manifest、同步后运行、全部 rank 记录、核排序及缺失/旧代次拒绝。consumer 覆盖 43 种记录损坏、零时长样本、H7168 量化多块包。主审和独立 AscendC 审查未发现确定性缺陷，检查了事件顺序、lane 生命周期、GM 地址空间和诊断区隔离。本地没有 CANN/A5；这批证据不证明 v6 真实编译、异步执行、可见性或打点性能，用户先前完整 Dispatch 的功能通过记录仍按其原始边界保存。
 
 维护经验：通信域由双份计数布局迁移到单份数据布局时，必须同时更新 Host 容量、设备地址、profile reader、manifest 和当前检查点，禁止复用旧计数通过标记。旧 source-send 检查点结束时数据 Flag 为1；完整 Dispatch 结束时所有消费槽 Flag 必须为0，因此必须一起切换 kernel、consumer、manifest、marker 和打点版本并重新 build/sync，不能沿用旧成功包。量化输入尾部必须按 Memory 显式补零，并在复用输入 UB 前完成初始化写入；非量化传输填充无需清零。
 

@@ -253,6 +253,8 @@ int main()
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     const uint64_t detailBytes = TileXREpServerDedupSendProfileLayout(0, p.bs, p.topK).bytes;
     g_commArgs.peerMemBytes += detailBytes;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_commArgs.peerMemBytes += kEpServerDedupDetailBytes;
     Check(Invoke(valid) == TILEXR_SUCCESS, "exact data plus detailed trace and communicator flags accepted");
     --g_commArgs.peerMemBytes;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);

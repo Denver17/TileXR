@@ -7,7 +7,7 @@
 
 namespace TileXREp {
 constexpr uint32_t kEpServerDedupProfileMarker = 0x53445046U;
-constexpr uint16_t kEpServerDedupProfileVersion = 5U;
+constexpr uint16_t kEpServerDedupProfileVersion = 6U;
 constexpr uint32_t kEpServerDedupProfilePoints = 12U;
 constexpr uint32_t kEpServerDedupProfileSegments = 3U;
 
@@ -56,6 +56,44 @@ struct EpServerDedupSendProfileLayout {
 static_assert(sizeof(EpServerDedupSendProfileHeader) == 32U, "send profile header ABI");
 static_assert(sizeof(EpServerDedupSendProfilePacket) == 16U, "send issue record ABI");
 static_assert(offsetof(EpServerDedupSendProfilePacket, token) == 8U, "send issue metadata ABI");
+
+enum class EpDedupDetailPoint : uint32_t {
+    RecvBegin, PrefixEnd, TasksEnd, PrepareEnd, LoopEnd, DrainEnd, ClearIssueEnd, ClearEnd,
+    FinishBegin, LocalEnd, SyncEnd, CounterEnd, PublishEnd, WaitEnd
+};
+enum class EpDedupDetailMetric : uint32_t {
+    Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait
+};
+enum class EpDedupDetailCounter : uint32_t {
+    Rows, ProbeBatches, ProbeSlots, EmptyProbeBatches, FirstHopRows, RelayPackets,
+    Lanes, Blocks, RoundPolls, RoundSlowestPeer
+};
+struct EpServerDedupDetailMetric {
+    uint64_t totalTicks, maxBegin, maxEnd, count;
+};
+// Fixed diagnostic state: sums plus the slowest real interval for each operation.
+// Atomic is a subset of Metadata; totals must not be laid out as a fake timeline.
+struct alignas(64) EpServerDedupDetailRecord {
+    uint32_t marker;
+    uint16_t version, recordBytes;
+    uint32_t rank, core;
+    uint64_t generation, reserved;
+    uint64_t points[16];
+    EpServerDedupDetailMetric metrics[7];
+    uint64_t counters[16];
+};
+constexpr uint64_t kEpServerDedupDetailBytes = kEpServerDedupCoreNum * sizeof(EpServerDedupDetailRecord);
+static_assert(sizeof(EpServerDedupDetailRecord) == 512U, "detail record ABI and cache-line isolation");
+
+#if TILEXR_ASCENDC_AICORE_COMPILE
+FORCE_INLINE_AICORE
+#else
+inline
+#endif
+uint64_t TileXREpServerDedupDetailOffset(uint64_t sendOffset)
+{
+    return sendOffset >= kEpServerDedupDetailBytes ? sendOffset - kEpServerDedupDetailBytes : 0U;
+}
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
 FORCE_INLINE_AICORE

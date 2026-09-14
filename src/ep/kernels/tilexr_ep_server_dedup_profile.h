@@ -3,11 +3,13 @@
 
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_profile.h"
+#include "tilexr_ep_server_dedup_detail_profile.h"
 
 namespace TileXREp {
 using namespace AscendC;
 class ServerDedupProfile {
 public:
+    __aicore__ inline ServerDedupDetailProfile &Detail() { return detail_; }
     __aicore__ inline void Mark(uint32_t point)
     {
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
@@ -47,11 +49,13 @@ public:
             AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                 AscendC::DcciDst::CACHELINE_OUT>(output);
         }
+        detail_.Flush(args, generation);
 #else
         (void)args; (void)generation;
 #endif
     }
 private:
+    ServerDedupDetailProfile detail_;
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
     uint64_t time_[kEpServerDedupProfilePoints] {};
 #endif

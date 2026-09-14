@@ -691,7 +691,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
         self.manifest.update(checkpoint=checkpoint, mode="production", server_dedup_profiling=run_mode == "breakdown")
         if run_mode == "breakdown":
-            self.manifest["server_dedup_profile_version"] = 5
+            self.manifest["server_dedup_profile_version"] = 6
         self.manifest["server_dedup_contract"] = dict(workflow.DISPATCH_ABI)
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.parent.mkdir()
@@ -744,12 +744,37 @@ if behavior == 'stale-round':
 if run_mode != 'functional':
     record['timing_us'] = dict(submit=4, sync=3, barrier=2, batch_total=10)
 if run_mode == 'breakdown':
-    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=5, kernel_scope='dispatch',
+    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=6, kernel_scope='dispatch',
                    records=[dict(core=core, start=100, init_end=110, send_cnt_end=120, send_data_end=125, recv_cnt_end=130,
                                  cumsum_end=140, prefix_end=150, recv_data_end=155, end=160) for core in range(64)])
     for core in profile['records'][:48]:
         core.update(first_hop_count=1, send_packets=[dict(issue=121, token=core['core']*2, k=0)] +
                     [dict(issue=123, token=core['core']*2+1, k=k) for k in range(6)])
+    for core in profile['records']:
+        receiver = core['core'] >= 48
+        owner = core['core'] == 63
+        points = dict(zip(('recv_begin', 'prefix_end', 'tasks_end', 'prepare_end',
+                           'loop_end', 'drain_end', 'clear_issue_end', 'clear_end'),
+                          (150, 150, 150, 150, 155, 155, 155, 155) if receiver else (0,) * 8))
+        points.update(finish_begin=155, local_end=156, sync_end=157,
+                      counter_end=158 if owner else 157, publish_end=159 if owner else 157,
+                      wait_end=160 if owner else 157)
+        metrics = {name: dict(total_ticks=0, max_begin=0, max_end=0, count=0)
+                   for name in ('probe', 'acquire_load', 'metadata', 'atomic',
+                                'output_issue', 'relay_issue', 'round_peer_wait')}
+        # Equal-tick samples are legitimate; counts still reflect actual work.
+        if receiver:
+            for name, count in (('probe', 3), ('acquire_load', 36), ('metadata', 36),
+                                ('atomic', 3), ('output_issue', 36), ('relay_issue', 3)):
+                metrics[name].update(max_begin=151, max_end=151, count=count)
+        if owner:
+            metrics['round_peer_wait'].update(max_begin=159, max_end=159, count=rank_size)
+        counters = dict(rows=36 if receiver else 0, probe_batches=3 if receiver else 0,
+                        probe_slots=36 if receiver else 0, empty_probe_batches=0,
+                        first_hop_rows=3 if receiver else 0, relay_packets=15 if receiver else 0,
+                        lanes=8 if receiver else 0, blocks=31 if receiver else 0,
+                        round_polls=rank_size if owner else 0, round_slowest_peer=0)
+        core['detail'] = dict(points=points, metrics=metrics, counters=counters)
     if behavior == 'stale-breakdown':
         profile['generation'] -= 1
     if behavior != 'missing-breakdown':
@@ -965,9 +990,16 @@ with output.open('w', newline='') as f:
         self.assert_success(self.invoke("run", environment={"TILEXR_DIRECT_RUN": "1"}))
         summary = self.summary()
         self.assertEqual(summary["measurements"]["run_mode"], "breakdown")
+        self.assertEqual(summary["measurements"]["breakdown"]["schema_version"], 6)
+        self.assertIn("recv_loop", summary["measurements"]["breakdown"]["stages_us"])
+        self.assertIn("round_peer_wait", summary["measurements"]["breakdown"]["operations"])
         self.assertEqual(len(summary["traces"]["ranks"]), 16)
         trace = workflow.read_json(Path(summary["traces"]["all_ranks"]))
         self.assertEqual({event["pid"] for event in trace["traceEvents"] if event["ph"] == "X"}, set(range(16)))
+        for rank in range(16):
+            ordered = [event["args"]["sort_index"] for event in trace["traceEvents"]
+                       if event["name"] == "thread_sort_index" and event["pid"] == rank]
+            self.assertEqual(ordered, list(range(64)))
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["breakdown"]["generation"], 5)

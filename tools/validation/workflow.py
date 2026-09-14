@@ -492,8 +492,8 @@ def verify_build(config, *, check_run_mode=True):
                                            profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
-        if profiling and manifest.get("server_dedup_profile_version") != 5:
-            raise ValueError("需要完整 Dispatch breakdown v5 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
+        if profiling and manifest.get("server_dedup_profile_version") != 6:
+            raise ValueError("需要完整 Dispatch breakdown v6 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -603,7 +603,7 @@ def build(config):
         manifest["server_dedup_contract"] = dict(DISPATCH_ABI)
         manifest["server_dedup_profiling"] = config.profiling
         if manifest["server_dedup_profiling"]:
-            manifest["server_dedup_profile_version"] = 5
+            manifest["server_dedup_profile_version"] = 6
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
