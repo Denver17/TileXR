@@ -10,8 +10,8 @@ struct ProfileCapture {
     uint32_t recordsPerCore;
     std::vector<uint64_t> timestamps;
     std::vector<uint32_t> events, counts, dropped;
-    explicit ProfileCapture(TileXR::CommArgs &args, uint32_t launches = 1U) :
-        recordsPerCore(recordsPerLaunch * launches),
+    explicit ProfileCapture(TileXR::CommArgs &args) :
+        recordsPerCore(recordsPerLaunch),
         timestamps(64ULL * recordsPerCore + 2U, 0U),
         events(64ULL * recordsPerCore + 2U, 0U), counts(64U * 8U, 0U), dropped(64U * 8U, 0U)
     {
@@ -25,12 +25,13 @@ struct ProfileCapture {
         args.tilexrProfilingCoreCapacity = 64U;
         args.tilexrProfilingRecordsPerCore = recordsPerCore;
     }
-    std::vector<uint32_t> Events(uint32_t core, uint32_t launch = 0U) const
+    std::vector<uint32_t> Events(uint32_t core) const
     {
         std::vector<uint32_t> result;
         uint64_t previous = 0U;
-        const uint64_t base = uint64_t(core) * recordsPerCore + uint64_t(launch) * recordsPerLaunch + 1U;
-        for (uint32_t i = 0U; i < recordsPerLaunch; ++i) {
+        const uint64_t base = uint64_t(core) * recordsPerCore + 1U;
+        Check(counts[core * 8U] <= recordsPerCore, "published valid count stays in its core partition");
+        for (uint32_t i = 0U; i < counts[core * 8U]; ++i) {
             if (events[base + i] == 0U) continue;
             Check(timestamps[base + i] > previous, "real timestamp samples retain execution order");
             previous = timestamps[base + i];

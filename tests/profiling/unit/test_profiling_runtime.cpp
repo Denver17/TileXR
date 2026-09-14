@@ -157,12 +157,91 @@ void TestLaunchReservations()
         "all concurrent reservations must fit the expected capture");
 }
 
+void TestLatestReservations()
+{
+    TileXR::TileXRProfilingRuntimeConfig config;
+    TileXR::TileXRProfilingLaunchState launches;
+    const uint32_t disabled = std::numeric_limits<uint32_t>::max();
+    uint32_t slot = 0U;
+    Check(launches.ReserveLatest(config, 65536U, &slot) && slot == disabled &&
+        !launches.LatestLaunch(), "disabled latest capture must not select a reservation mode");
+    config.enabled = true;
+    config.recordsPerCore = 65536U;
+    Check(!launches.ReserveLatest(config, 8U, nullptr), "null latest output must fail");
+    Check(!launches.ReserveLatest(config, 0U, &slot) && slot == disabled,
+        "zero latest width must fail safely");
+    Check(!launches.ReserveLatest(config, 7U, &slot), "unaligned latest width must fail");
+    for (uint32_t launch = 0U; launch < 10000U; ++launch) {
+        Check(launches.ReserveLatest(config, 65536U, &slot) && slot == 0U &&
+            launches.LatestLaunch() && !launches.Incomplete(),
+            "latest capture must keep constant storage beyond the old launch limit");
+    }
+    Check(!launches.Reserve(config, 65536U, &slot) && slot == disabled &&
+        launches.Incomplete(), "reserved writer must not mix with latest capture");
+    launches.Reset();
+    Check(!launches.LatestLaunch() && !launches.Incomplete(), "reset must clear capture mode");
+    Check(launches.Reserve(config, 65536U, &slot) && slot == 0U,
+        "reset must allow ordinary reservations again");
+    Check(!launches.ReserveLatest(config, 65536U, &slot) && slot == disabled &&
+        !launches.LatestLaunch() && launches.Incomplete(),
+        "latest writer must not overwrite an ordinary reserved capture");
+    launches.Reset();
+    Check(launches.ReserveLatest(config, 8U, &slot) && slot == 0U,
+        "fresh latest capture must accept a smaller fixed budget");
+    Check(!launches.ReserveLatest(config, 16U, &slot) && slot == disabled &&
+        launches.Incomplete(), "latest capture must reject changed launch budgets");
+    launches.Reset();
+    Check(launches.ReserveLatest(config, 0xfffffff8U, &slot) && slot == disabled &&
+        launches.LatestLaunch() && launches.Incomplete(),
+        "oversized latest budget must disable capture without integer overflow");
+}
+
+void TestLatestExport()
+{
+    const std::string path = "tilexr-profiling-latest-test.records.bin";
+    (void)std::remove(path.c_str());
+    TileXR::TileXRProfilingRuntimeConfig config;
+    config.enabled = config.latestLaunch = true;
+    config.recordsPath = path;
+    config.recordsPerCore = 24U;
+    config.coreCapacity = 2U;
+    // Both cores retain nonzero old data. Core zero's final launch is shorter;
+    // core one's final launch is empty. Only the first two events remain valid.
+    std::vector<uint64_t> timestamps(48U, 100U);
+    std::vector<uint32_t> eventIds(48U, 99U);
+    timestamps[0] = 300U;
+    timestamps[1] = 200U;
+    eventIds[0] = 2U;
+    eventIds[1] = 1U;
+    std::fill(eventIds.begin() + 2U, eventIds.begin() + 8U, 0U);
+    std::string error;
+    Check(TileXR::WriteTileXRProfilingRecords(config, 1, {8U, 0U}, {0U, 0U},
+        timestamps, eventIds, &error), "latest capture must export a shorter valid range");
+    std::ifstream input(path.c_str(), std::ios::binary);
+    const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    Check(bytes.size() == 104U && ReadU32(bytes, 20U) == 1U &&
+        ReadU32(bytes, 48U) == TileXR::TileXRProfilingStreamId(1U, 0U) &&
+        ReadU32(bytes, 52U) == 2U && ReadU32(bytes, 56U) == 0U &&
+        ReadU64(bytes, 72U) == 200U && ReadU32(bytes, 80U) == 1U &&
+        ReadU64(bytes, 88U) == 300U && ReadU32(bytes, 96U) == 2U,
+        "latest export must exclude stale tails and empty cores, preserving sorted valid events");
+    input.close();
+    (void)std::remove(path.c_str());
+    Check(!TileXR::WriteTileXRProfilingRecords(config, 1, {32U, 0U}, {0U, 0U},
+        timestamps, eventIds, &error), "latest exporter must reject count beyond GM capacity");
+    Check(!TileXR::WriteTileXRProfilingRecords(config, 1, {7U, 0U}, {0U, 0U},
+        timestamps, eventIds, &error), "latest exporter must reject unaligned publication");
+}
+
 } // namespace
 
 int main()
 {
     TestRuntimeConfig();
     TestLaunchReservations();
+    TestLatestReservations();
+    TestLatestExport();
     const std::string path = "tilexr-profiling-runtime-test.records.bin";
     (void)std::remove(path.c_str());
     TileXR::TileXRProfilingRuntimeConfig config {};

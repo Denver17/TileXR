@@ -144,10 +144,9 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
     if (profileConfig.enabled) {
         // Fixture events are small; export them through the real runtime writer
         // using a compact equivalent buffer, rather than reserving device GM.
-        const uint64_t loops = std::strtoull(std::getenv("TILEXR_VALIDATION_LOOPS"), nullptr, 10);
-        const uint64_t warmup = std::strtoull(std::getenv("TILEXR_VALIDATION_WARMUP"), nullptr, 10);
-        if (profileConfig.recordsPerCore != (loops + warmup) * 65536U) return 95;
-        profileStride = uint32_t((loops + warmup) * 16U);
+        if (profileConfig.recordsPerCore != 65536U) return 95;
+        profileConfig.latestLaunch = true;
+        profileStride = 16U;
         profileTimes.resize(uint64_t(profileStride) * 64U);
         profileEvents.resize(profileTimes.size());
         profileOccupied.resize(64U);
@@ -228,24 +227,26 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     const int result = Call("launch");
     if (result == 0) {
         if (profileConfig.enabled) {
-            const uint32_t launch = uint32_t(calls["launch"] - 1U);
-            const uint64_t origin = uint64_t(launch + 1U) * 100000U;
+            const uint64_t launch = calls["launch"] - 1U;
+            const uint64_t origin = (launch + 1U) * 100000U;
             const char *fault = std::getenv("TEST_PROFILE_FAULT");
-            const uint32_t expected = profileStride / 16U;
-            if (!(fault && std::strcmp(fault, "stale") == 0 && launch + 1U == expected)) {
-                for (uint32_t core = 0; core < 64U; ++core) {
-                    const size_t base = uint64_t(core) * profileStride + launch * 16U;
-                    const uint32_t ids[] = {0x53000001U, 0x53000002U, 0x53000204U,
-                        0x53000206U, 0x53000207U, 0x53000205U, 0x53000300U, 0x53000009U};
-                    for (uint32_t i = 0; i < 8U; ++i) {
-                        profileTimes[base + i] = origin + core + i * 100U;
-                        profileEvents[base + i] = ids[i];
-                    }
-                    profileOccupied[core] = (launch + 1U) * 16U;
-                    if (fault && std::strcmp(fault, "overflow") == 0 && core == 63U) {
-                        profileDropped[core] = 2U;
-                        profileEvents[base + 7U] = 0U;
-                    }
+            for (uint32_t core = 0; core < 64U; ++core) {
+                const size_t base = uint64_t(core) * profileStride;
+                const uint32_t ids[] = {0x53000001U, 0x53000002U, 0x53000204U,
+                    0x53000206U, 0x53000207U, 0x53000205U, 0x53000300U, 0x53000009U};
+                // The initial capture is deliberately longer. Its stale tail
+                // remains in GM; the real standard exporter must ignore it.
+                const uint32_t count = launch == 0U ? 16U : 8U;
+                for (uint32_t i = 0; i < count; ++i) {
+                    profileTimes[base + i] = origin + core + i * 100U;
+                    profileEvents[base + i] = i + 1U == count ? ids[7U] : ids[std::min(i, 6U)];
+                }
+                profileOccupied[core] = count;
+                profileDropped[core] = 0U;
+                if (fault && core == 63U && (std::strcmp(fault, "overflow") == 0 ||
+                        (std::strcmp(fault, "previous-overflow") == 0 && launch == 0U))) {
+                    profileDropped[core] = 2U;
+                    profileEvents[base + count - 1U] = 0U;
                 }
             }
         }

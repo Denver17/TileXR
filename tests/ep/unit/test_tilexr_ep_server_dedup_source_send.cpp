@@ -92,7 +92,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         const uint32_t destination = packet.members.front().expert / localExperts;
         if (!windows.count(destination)) windows[destination].assign(data.dispatchOffset + data.dispatchBytes + 32U, 0xa5);
     }
-    ServerDedupTest::ProfileCapture capture(args, rounds);
+    ServerDedupTest::ProfileCapture capture(args);
     for (auto &window : windows) args.peerMems[window.first] = window.second.data();
     std::vector<uint32_t> masks(bs + 2U, 0xdeadbeefU);
     std::vector<float> output(bs * k + 2U, -777.0f);
@@ -113,12 +113,12 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
                 reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe);
             TileXREp::ServerDedupProfile profile;
-            profile.Init(reinterpret_cast<GM_ADDR>(&args), round);
+            profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
             sender.Process(profile);
             const auto syncBefore = AscendC::TestSyncOperations();
             profile.Publish();
             Check(AscendC::TestSyncOperations() == syncBefore, "standard publication adds no synchronization");
-            const auto events = capture.Events(core, round);
+            const auto events = capture.Events(core);
 #if defined(TILEXR_ENABLE_PROFILING)
             const auto observed = std::count_if(writes.begin(), writes.end(),
                 [core](const Write &write) { return write.core == core; });

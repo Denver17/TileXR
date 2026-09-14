@@ -263,6 +263,13 @@ int TileXRComm::ReserveProfilingLaunch(
         launchSlot) ? TILEXR_SUCCESS : TILEXR_ERROR_PARA_CHECK_FAIL;
 }
 
+int TileXRComm::ReserveLatestProfilingLaunch(
+    uint32_t recordsPerLaunch, uint32_t *launchSlot)
+{
+    return profilingLaunchState_.ReserveLatest(profilingConfig_, recordsPerLaunch,
+        launchSlot) ? TILEXR_SUCCESS : TILEXR_ERROR_PARA_CHECK_FAIL;
+}
+
 int TileXRComm::FinalizeProfiling()
 {
     if (!profilingConfig_.enabled || profilingFinalized_) {
@@ -317,6 +324,7 @@ int TileXRComm::FinalizeProfiling()
 
     std::string error;
     profilingConfig_.incomplete = profilingLaunchState_.Incomplete();
+    profilingConfig_.latestLaunch = profilingLaunchState_.LatestLaunch();
     if (!WriteTileXRProfilingRecords(profilingConfig_, rank_, occupiedCounts,
             droppedCounts, timestamps, eventIds, &error)) {
         TILEXR_LOG(ERROR) << "TileXR profiling records export failed: " << error;

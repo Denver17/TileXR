@@ -12,7 +12,7 @@ class ServerDedupProfile {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, uint32_t launchSlot)
     {
-        writer_.Initialize(commArgs, AscendC::GetBlockIdx(), launchSlot,
+        writer_.InitializeLatest(commArgs, AscendC::GetBlockIdx(), launchSlot,
             kEpServerDedupProfilingRecordsPerLaunch);
     }
     __aicore__ inline void Mark(uint32_t point)

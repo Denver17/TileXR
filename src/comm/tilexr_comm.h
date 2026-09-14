@@ -85,6 +85,7 @@ public:
     std::string PrintDFX();
     int FinalizeProfiling();
     int ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
+    int ReserveLatestProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
     int GetInternalResource(void **resource) const;
     int AttachInternalResource(void *resource,
         TileXRInternalResourceDestroyFn destroy);

@@ -371,9 +371,21 @@ elif kind == "rsync":
         dest = pathlib.Path(dest)
         if scenario == "stale-result":
             src = src.parent / "old-run"
-        shutil.copytree(src, dest, dirs_exist_ok=True)
+        excludes = [arg.split("=", 1)[1] for arg in args if arg.startswith("--exclude=")]
+        shutil.copytree(src, dest, dirs_exist_ok=True, ignore=shutil.ignore_patterns(*excludes))
         if scenario == "corrupt-result":
             (dest / "result.json").write_text("{invalid JSON}")
+        if scenario == "missing-profile-report":
+            (dest / "profile-rank-8/report.html").unlink()
+        if scenario == "corrupt-profile-report":
+            artifact = dest / "profile-rank-8/perfetto_trace.json"
+            artifact.write_bytes(b"!" + artifact.read_bytes()[1:])
+        if scenario == "stale-profile-result":
+            import json
+            result_path = dest / "result.json"
+            result = json.loads(result_path.read_text())
+            result['run_id'] = 'older-run'
+            result_path.write_text(json.dumps(result))
     else:
         if scenario == "transfer-fail":
             print("injected transfer failure", file=sys.stderr)
@@ -758,12 +770,14 @@ if run_mode == 'breakdown':
     from test_profiling_fixture import write_capture
     path = os.environ['TILEXR_PROFILING_RECORDS_PATH']
     capture_id = os.environ['TILEXR_PROFILING_CAPTURE_ID']
-    assert int(os.environ['TILEXR_PROFILING_RECORDS_PER_CORE']) == (loops + warmup) * 65536
+    assert int(os.environ['TILEXR_PROFILING_RECORDS_PER_CORE']) == 65536
+    Path(path + '.tmp').write_bytes(b'incomplete raw capture sentinel')
     if behavior != 'missing-breakdown':
         write_capture(path, rank=rank, launches=warmup+loops, warmup=warmup,
-                      fault={'stale-breakdown': 'stale', 'overflow-breakdown': 'overflow'}.get(behavior, ''), capture_id=capture_id)
+                      fault={'accumulating-breakdown': 'accumulating', 'overflow-breakdown': 'overflow'}.get(behavior, ''), capture_id=capture_id)
     print('EP_SERVER_DEDUP_BREAKDOWN_PASS ' + json.dumps(dict(record,
-          schema='tilexr_profiling_records.v1', records_path=path, capture_id=capture_id, launches=warmup+loops)))
+          schema='tilexr_profiling_records.v1', records_path=path, capture_id=capture_id, launches=warmup+loops,
+          capture_mode='latest_launch', captured_launches=1, captured_launch=warmup+loops-1)))
 if behavior == 'wrong-loops':
     record['loops'] = loops - 1
 prefix = 'EP_SERVER_DEDUP_DISPATCH_PASS '
@@ -960,7 +974,7 @@ with output.open('w', newline='') as f:
         self.assertEqual(result["errors"][0]["type"], "RESULT_FAILED")
         self.assertEqual(result["errors"][0]["rank"], 8)
 
-    def test_dispatch_breakdown_collects_all_rank_records(self):
+    def test_dispatch_breakdown_collects_finished_reports_without_remote_raw(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
                           TILEXR_VALIDATION_WARMUP="2")
@@ -979,24 +993,41 @@ with output.open('w', newline='') as f:
         self.assertIn("metadata", summary["measurements"]["breakdown"]["stages_us"])
         self.assertIn("atomic", summary["measurements"]["breakdown"]["stages_us"])
         self.assertEqual(len(summary["traces"]["ranks"]), 16)
-        trace = workflow.read_json(Path(summary["traces"]["all_ranks"]))
-        self.assertEqual({event["args"]["rank"] for event in trace["traceEvents"] if event["ph"] == "X"}, set(range(16)))
-        for pid in {event["pid"] for event in trace["traceEvents"] if event["ph"] == "X"}:
+        self.assertNotIn("all_ranks", summary["traces"])
+        self.assertEqual(summary["traces"]["status"], "complete")
+        self.assertTrue(Path(summary["traces"]["index"]).is_file())
+        for rank, path in summary["traces"]["ranks"].items():
+            trace = workflow.read_json(Path(path))
+            self.assertEqual({event["args"]["rank"] for event in trace["traceEvents"] if event["ph"] == "X"}, {int(rank)})
+            intervals = [event for event in trace["traceEvents"] if event["ph"] == "X" and event["name"] == "kernel_total"]
+            self.assertEqual(len(intervals), 64)
             ordered = [event["args"]["sort_index"] for event in trace["traceEvents"]
-                       if event["name"] == "thread_sort_index" and event["pid"] == pid]
+                       if event["name"] == "thread_sort_index"]
             self.assertEqual(ordered, list(range(64)))
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["breakdown"]["launches"], 5)
+                self.assertEqual(rank["breakdown"]["captured_launch"], 4)
+                self.assertEqual(rank["breakdown"]["sample_us"], [8])
+                self.assertEqual(rank["breakdown"]["measured_launches"], 1)
                 for artifact in rank["breakdown"]["artifacts"].values():
                     self.assertTrue(Path(artifact).is_file(), artifact)
                     if rank["rank"] >= 8:
                         self.assertIn("nodes/1", Path(artifact).as_posix())
+                if rank["rank"] >= 8:
+                    evidence = rank["breakdown"]
+                    self.assertFalse(evidence["records_collected"])
+                    self.assertIsNone(evidence["local_records_path"])
+                    self.assertEqual(evidence["source_host"], "192.0.2.2")
+                    self.assertTrue(Path(evidence["source_records_path"]).is_file())
+                    copied = Path(evidence["summary_path"]).parent.parent
+                    self.assertFalse(list(copied.glob("*.records.v1*")))
 
-    def test_dispatch_breakdown_missing_or_stale_record_fails(self):
+    def test_dispatch_breakdown_missing_or_accumulating_record_fails(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
-        os.environ["TILEXR_VALIDATION_RUN_MODE"] = "breakdown"
-        for behavior in ("missing-breakdown", "stale-breakdown"):
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                          TILEXR_VALIDATION_WARMUP="2")
+        for behavior in ("missing-breakdown", "accumulating-breakdown"):
             with self.subTest(behavior=behavior):
                 command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
                                       environment={"CHAIN_TEST_BEHAVIOR": behavior})
@@ -1036,9 +1067,34 @@ with output.open('w', newline='') as f:
         for artifact in evidence["communication"]["breakdown"]["artifacts"].values():
             self.assertIn("nodes/1", Path(artifact).as_posix())
             self.assertTrue(Path(artifact).is_file(), artifact)
-        self.assertIn("nodes/1", Path(failure["records_path"]).as_posix())
+        self.assertNotIn("nodes/1", Path(failure["records_path"]).as_posix())
         self.assertTrue(Path(failure["records_path"]).is_file())
         self.assertTrue((Path(failure["report_dir"]) / "report.html").is_file())
+        self.assertEqual(summary["traces"]["status"], "incomplete")
+        self.assertTrue(summary["traces"]["reports"]["8"]["artifacts_verified"])
+        self.assertNotIn("8", summary["traces"]["rank_us"])
+        self.assertNotIn("measurements", summary)
+        self.assertFalse(list(Path(failure["report_dir"]).parent.glob("*.records.v1*")))
+
+    def test_collected_missing_corrupt_or_stale_reports_fail_without_losing_good_reports(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
+                          TILEXR_VALIDATION_WARMUP="0")
+        self.prepare_sync()
+        for scenario in ("missing-profile-report", "corrupt-profile-report", "stale-profile-result"):
+            with self.subTest(scenario=scenario):
+                previous = set(self.config_instance.logs.glob("*/summary.json"))
+                command = self.invoke("run", environment={"FAKE_SCENARIO": scenario})
+                self.assertNotEqual(command.returncode, 0, command.stdout + command.stderr)
+                created = set(self.config_instance.logs.glob("*/summary.json")) - previous
+                self.assertEqual(len(created), 1)
+                summary = workflow.read_json(created.pop())
+                index = summary["traces"]
+                self.assertEqual(index["status"], "incomplete")
+                self.assertTrue(Path(index["report"]).is_file())
+                self.assertNotIn("8", index["rank_us"])
+                self.assertTrue(index["reports"]["0"]["artifacts_verified"])
+                self.assertNotIn("measurements", summary)
 
     def test_measurement_aggregation_failure_preserves_summary_and_exit_code(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")

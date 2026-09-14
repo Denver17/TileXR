@@ -201,6 +201,19 @@ int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
     return c->ReserveProfilingLaunch(recordsPerLaunch, launchSlot);
 }
 
+int TileXRProfilingReserveLatestLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot)
+{
+    if (launchSlot != nullptr) {
+        *launchSlot = static_cast<uint32_t>(-1);
+    }
+    if (comm == nullptr || launchSlot == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto *c = static_cast<TileXRComm *>(comm);
+    return c->ReserveLatestProfilingLaunch(recordsPerLaunch, launchSlot);
+}
+
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
 {
     if (comm == nullptr || localPtr == nullptr || handle == nullptr || bytes == 0) {

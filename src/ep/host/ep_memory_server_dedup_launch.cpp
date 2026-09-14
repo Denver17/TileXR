@@ -34,9 +34,9 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     }
     uint32_t profilingLaunchSlot = UINT32_MAX;
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    // Profiling reservation is separate from communication magic. Exhaustion
-    // disables capture for this launch and is reported by the common runtime.
-    TileXRProfilingReserveLaunch(p.comm, kEpServerDedupProfilingRecordsPerLaunch,
+    // Sequential launches reuse one standard capture slot, independent of
+    // communication magic. An unavailable capture never prevents submission.
+    TileXRProfilingReserveLatestLaunch(p.comm, kEpServerDedupProfilingRecordsPerLaunch,
         &profilingLaunchSlot);
 #endif
     EpServerDedupKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.x),

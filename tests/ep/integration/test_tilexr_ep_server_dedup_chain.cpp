@@ -179,13 +179,7 @@ std::string ConfigureProfiling(const Config &c)
         Check(unsetenv("TILEXR_PROFILING_RECORDS_PATH"), "disable kernel capture");
         return {};
     }
-    const uint64_t calls = uint64_t(c.warmup) + c.loops;
-    constexpr uint64_t perLaunch = 65536U;
-    Require(calls <= TileXR::TILEXR_PROFILING_MAX_RECORDS_PER_CORE / perLaunch,
-        "profiling capture capacity exceeds standard records-per-core limit");
-    const uint64_t capacity = calls * perLaunch;
-    Require(capacity <= SIZE_MAX / (64U * (sizeof(uint64_t) + sizeof(uint32_t))),
-        "profiling capture byte size overflow");
+    constexpr uint32_t capacity = 65536U;
     // The coordinator supplies one UUID and a unique output path per rank.
     const char *capture = std::getenv("TILEXR_PROFILING_CAPTURE_ID");
     const char *path = std::getenv("TILEXR_PROFILING_RECORDS_PATH");
@@ -564,7 +558,9 @@ int Run(const Config &c)
         if (!profilePath.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS",
             ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(profilePath) +
             ",\"capture_id\":" + Json(std::getenv("TILEXR_PROFILING_CAPTURE_ID")) +
-            ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops));
+            ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops) +
+            ",\"capture_mode\":\"latest_launch\",\"captured_launches\":1,\"captured_launch\":" +
+            std::to_string(uint64_t(c.warmup) + c.loops - 1U));
         Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
     }
     return success ? 0 : 1;

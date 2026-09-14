@@ -143,6 +143,33 @@ never stop communication or overwrite previous launches. A disabled launch
 slot (`UINT32_MAX`) makes recording a no-op. Standard runtime reservation
 retains capture-level evidence when no launch slot is available.
 
+### Retain Only The Latest Launch
+
+For a long sequential batch where only the final launch is needed, reserve with
+`TileXRProfilingReserveLatestLaunch(comm, recordsPerLaunch, &launchSlot)` and
+initialize with `profiler.InitializeLatest(commArgsGM, logicalCore, launchSlot,
+recordsPerLaunch)`. Keep the usual marker calls and `Publish()`. Configure
+`TILEXR_PROFILING_RECORDS_PER_CORE` for one launch, without multiplying by the
+batch length. The reservation returns slot zero on every enabled launch; a
+disabled or insufficient-capacity capture returns `UINT32_MAX`.
+
+The initializer resets only that core's occupied and dropped counts. It adds no
+writer state or local arrays. The latest-mode exporter scans only the published
+valid range, so shorter and empty launches cannot expose a preceding launch's
+tail. A preceding launch's device overflow is also replaced. Reports describe
+the final launch, not batch-wide samples or completeness of discarded launches.
+
+Use a fixed logical core set and record budget, order launches on the same
+stream (or with equivalent dependencies), and keep the communicator capture
+exclusive to latest writers. The runtime rejects mixing its latest and reserved
+reservation APIs or changing the latest budget. Legacy independently assigned
+slots and `ProfilingRecorder` are not visible to that allocator and must not
+share the capture. Ordinary reserved and legacy capture semantics are unchanged.
+
+Do not approximate latest mode by using ordinary `Initialize` with slot zero:
+its published count preserves the earlier high-water mark and dropped counts,
+and ordinary export may inspect stale slots beyond a shorter last launch.
+
 ## CommArgs And Runtime Lifecycle
 
 `CommArgs` carries the common GM state to every TileXR Kernel:

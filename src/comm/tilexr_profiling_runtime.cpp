@@ -200,7 +200,8 @@ bool BuildExportStreams(const TileXRProfilingRuntimeConfig &config, int rank,
             std::numeric_limits<uint32_t>::max() : droppedCounts[core];
         stream.records.reserve(occupied);
         const uint64_t base = static_cast<uint64_t>(core) * config.recordsPerCore;
-        for (uint32_t slot = 0U; slot < config.recordsPerCore; ++slot) {
+        const uint32_t validSlots = config.latestLaunch ? occupied : config.recordsPerCore;
+        for (uint32_t slot = 0U; slot < validSlots; ++slot) {
             const uint32_t eventId = eventIds[base + slot];
             if (eventId == 0U) {
                 continue;
@@ -225,6 +226,20 @@ bool TileXRProfilingLaunchState::Reserve(
     const TileXRProfilingRuntimeConfig &config, uint32_t recordsPerLaunch,
     uint32_t *launchSlot)
 {
+    return ReserveImpl(config, recordsPerLaunch, launchSlot, Mode::Reserved);
+}
+
+bool TileXRProfilingLaunchState::ReserveLatest(
+    const TileXRProfilingRuntimeConfig &config, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot)
+{
+    return ReserveImpl(config, recordsPerLaunch, launchSlot, Mode::Latest);
+}
+
+bool TileXRProfilingLaunchState::ReserveImpl(
+    const TileXRProfilingRuntimeConfig &config, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot, Mode mode)
+{
     if (launchSlot == nullptr) {
         return false;
     }
@@ -235,6 +250,24 @@ bool TileXRProfilingLaunchState::Reserve(
     }
     std::lock_guard<std::mutex> lock(mutex_);
     if (!config.enabled) {
+        return true;
+    }
+    if (mode_ != Mode::Unset && mode_ != mode) {
+        incomplete_ = true;
+        return false;
+    }
+    mode_ = mode;
+    if (mode == Mode::Latest) {
+        if (latestWidth_ != 0U && latestWidth_ != recordsPerLaunch) {
+            incomplete_ = true;
+            return false;
+        }
+        latestWidth_ = recordsPerLaunch;
+        if (recordsPerLaunch > config.recordsPerCore) {
+            incomplete_ = true;
+            return true;
+        }
+        *launchSlot = 0U;
         return true;
     }
     // Different operators may request different slot widths. Align the next
@@ -257,10 +290,18 @@ bool TileXRProfilingLaunchState::Incomplete() const
     return incomplete_;
 }
 
+bool TileXRProfilingLaunchState::LatestLaunch() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return mode_ == Mode::Latest;
+}
+
 void TileXRProfilingLaunchState::Reset()
 {
     std::lock_guard<std::mutex> lock(mutex_);
+    mode_ = Mode::Unset;
     nextRecord_ = 0U;
+    latestWidth_ = 0U;
     incomplete_ = false;
 }
 

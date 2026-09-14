@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/validation"))
 import measurements
 from test_profiling_fixture import CAPTURE_ID
+from profiling.records import load_record_files
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -422,7 +423,7 @@ class ChainConsumerTests(unittest.TestCase):
 
     def test_breakdown_uses_standard_export_after_communication_cleanup(self):
         config = dict(run_mode="breakdown", loops=3, warmup=2, block_dim="auto")
-        for fault in ("", "missing", "stale", "capture", "overflow"):
+        for fault in ("", "missing", "capture", "overflow", "previous-overflow"):
             env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
                        TILEXR_VALIDATION_WARMUP="2", TEST_PROFILE_FAULT=fault)
             processes = [self.start(rank, environment=env) for rank in range(16)]
@@ -434,6 +435,9 @@ class ChainConsumerTests(unittest.TestCase):
                     marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
                     self.assertEqual(marker["schema"], measurements.RECORDS_SCHEMA)
                     self.assertEqual(marker["launches"], 5)
+                    self.assertEqual(marker["captured_launches"], 1)
+                    self.assertEqual(marker["capture_mode"], "latest_launch")
+                    self.assertEqual(marker["captured_launch"], 4)
                     calls = self.trace_lines(rank)
                     self.assertEqual(calls.count("sync"), 1)
                     self.assertEqual(calls.count("profiling-export"), 1)
@@ -447,20 +451,33 @@ class ChainConsumerTests(unittest.TestCase):
                                 measurements.breakdown_record(path, config, rank, CAPTURE_ID, report)
                         else:
                             record = measurements.breakdown_record(path, config, rank, CAPTURE_ID, report)
-                            self.assertEqual(record["status"], "incomplete" if fault else "complete")
-                            if not fault:
-                                self.assertEqual(record["sample_us"], [0.7] * 3)
-                                self.assertEqual(record["stages_us"]["atomic"]["sample_count"], 3 * 64)
+                            self.assertEqual(record["status"], "incomplete" if fault == "overflow" else "complete")
+                            if fault != "overflow":
+                                self.assertEqual(record["sample_us"], [0.7])
+                                self.assertEqual(record["stages_us"]["atomic"]["sample_count"], 64)
+                                raw = load_record_files([path])[0]
+                                self.assertEqual(len(raw.streams), 64)
+                                for stream in raw.streams:
+                                    self.assertEqual(len(stream.records), 8)
+                                    self.assertEqual(stream.records[0].timestamp, 500000 + (stream.id & 0xffff))
+                                    self.assertEqual(stream.dropped_count, 0)
             shutil.rmtree(self.trace.name)
             Path(self.trace.name).mkdir()
 
-    def test_profile_capacity_overflow_is_rejected_before_communicator_creation(self):
-        process = self.start(0, environment=dict(TILEXR_VALIDATION_RUN_MODE="breakdown",
-            TILEXR_VALIDATION_LOOPS="1024", TILEXR_VALIDATION_WARMUP="0"))
-        output, errors = process.communicate(timeout=5)
-        self.assertNotEqual(process.returncode, 0, output + errors)
-        self.assertIn("profiling capture capacity", errors)
-        self.assertNotIn("comm-init", self.trace_lines(0))
+    def test_profile_capacity_is_fixed_for_arbitrary_batch_lengths(self):
+        for loops, warmup in ((1024, 0), (4294967295, 4294967295)):
+            with self.subTest(loops=loops, warmup=warmup):
+                process = self.start(0, environment=dict(TILEXR_VALIDATION_RUN_MODE="breakdown",
+                    TILEXR_VALIDATION_LOOPS=str(loops), TILEXR_VALIDATION_WARMUP=str(warmup),
+                    TILEXR_PROFILING_RECORDS_PER_CORE="8", TEST_FAIL_STAGE="comm-init"))
+                output, errors = process.communicate(timeout=5)
+                self.assertNotEqual(process.returncode, 0, output + errors)
+                self.assertIn("stage=communicator", errors)
+                self.assertIn("ret=91", errors)
+                # The stub verifies 65536 before the injected failure. An old
+                # batch-scaled budget either rejects early or returns ret=95.
+                self.assertIn("comm-init", self.trace_lines(0))
+                for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_breakdown_progress_is_flushed_before_blocking_api(self):
         for api, stage in (("launch", "launch"), ("sync", "stream-sync"),

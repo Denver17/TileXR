@@ -972,7 +972,10 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                     if (breakdown.get("schema") != measurements.RECORDS_SCHEMA or
                             breakdown.get("records_path") != str(records_path) or
                             breakdown.get("capture_id") != env["TILEXR_PROFILING_CAPTURE_ID"] or
-                            breakdown.get("launches") != config.chain["warmup"] + config.chain["loops"]):
+                            breakdown.get("launches") != config.chain["warmup"] + config.chain["loops"] or
+                            breakdown.get("capture_mode") != "latest_launch" or
+                            breakdown.get("captured_launches") != 1 or
+                            breakdown.get("captured_launch") != config.chain["warmup"] + config.chain["loops"] - 1):
                         raise Failure("RESULT_FAILED", "breakdown capture identity mismatch", rank=rank)
                     try:
                         # Device processes run concurrently; decode one large capture at a time.
@@ -1192,6 +1195,55 @@ def launch_outcome(log, execution_error, run_id, manifest, expected_ranks=None, 
     return None, execution
 
 
+def rebase_node_breakdown_reports(result, node_log, host, *, local_records=False):
+    """Keep failed-capture source evidence while relocating only collected reports."""
+    if not isinstance(result, dict):
+        return
+    for record in result.get("ranks", []):
+        if (isinstance(record, dict) and type(record.get("rank")) is int
+                and isinstance(record.get("breakdown"), dict)):
+            record["breakdown"] = measurements.relocate_breakdown_report(
+                record["breakdown"], node_log, record["rank"], host, local_records=local_records)
+    for item in [*result.get("errors", []), *result.get("profiling_failures", [])]:
+        if (not isinstance(item, dict) or item.get("communication_completed") is not True
+                or type(item.get("rank")) is not int):
+            continue
+        item["source_host"] = host
+        item["source_records_path"] = item.get("source_records_path", item.get("records_path"))
+        item["records_collected"] = local_records
+        item["report_dir"] = str(Path(node_log) / f"profile-rank-{item['rank']}")
+        communication = item.get("communication")
+        if isinstance(communication, dict) and isinstance(communication.get("breakdown"), dict):
+            communication["breakdown"] = measurements.relocate_breakdown_report(
+                communication["breakdown"], node_log, item["rank"], host, local_records=local_records)
+
+
+def node_profile_records(nodes, run_id, manifest, mappings, chain_config):
+    """Only current-run, current-build rank records may enter the report index."""
+    records = []
+    expected = {mapping["rank"]: mapping for mapping in mappings}
+    for node in nodes:
+        result = node.get("reported_result")
+        if (not isinstance(result, dict) or result.get("run_id") != run_id
+                or any(result.get(key) != manifest[key] for key in ("build_id", "checkpoint", "mode"))):
+            continue
+        rows = list(result.get("ranks", []))
+        rows.extend(item["communication"] for item in result.get("profiling_failures", [])
+                    if isinstance(item, dict) and isinstance(item.get("communication"), dict))
+        for row in rows:
+            if not isinstance(row, dict) or type(row.get("rank")) is not int:
+                continue
+            mapping = expected.get(row["rank"])
+            if mapping is None or mapping["host"] != node["host"]:
+                continue
+            try:
+                validate_rank_records([row], [mapping], run_id, manifest, chain_config, check_measurements=False)
+            except (Failure, ValueError, TypeError, KeyError):
+                continue
+            records.append(row)
+    return records
+
+
 def run(config):
     deadline = time.monotonic() + config.timeout
     execution_deadline = min(deadline - 20, time.monotonic() + 120)
@@ -1299,33 +1351,17 @@ def run(config):
         try:
             if index:
                 node_log.mkdir(parents=True, exist_ok=True)
-                execute(["rsync", "-a", "--protect-args", "--timeout=5", "-e", shlex.join(["ssh", *SSH_OPTIONS]),
+                excludes = (["--exclude=*.records.v1", "--exclude=*.records.v1.tmp"]
+                            if config.chain and config.chain["run_mode"] == "breakdown" else [])
+                execute(["rsync", "-a", "--protect-args", "--timeout=5", *excludes, "-e", shlex.join(["ssh", *SSH_OPTIONS]),
                          config.target(host["host"]) + ":" + str(log) + "/", str(node_log) + "/"],
                         log / f"collect-{index}.log", timeout=max(1, deadline - time.monotonic()),
                         start_failure="LOG_COLLECT_FAILED", exit_failure="LOG_COLLECT_FAILED")
             result = read_json(node_log / "result.json")
             failures.extend(result_errors(result, run_id, manifest, expected_ranks(index), config.chain))
             if config.chain and config.chain["run_mode"] == "breakdown":
-                # Remote artifacts now live beneath this node's collected log directory.
-                evidence = [*failures, *result.get("errors", []), *result.get("profiling_failures", [])]
-                for item in evidence:
-                    if (isinstance(item, dict) and item.get("communication_completed") is True
-                            and type(item.get("rank")) is int):
-                        item["records_path"] = str(node_log / f"rank-{item['rank']}.records.v1")
-                        item["report_dir"] = str(node_log / f"profile-rank-{item['rank']}")
-                        capture = item.get("communication", {}).get("breakdown")
-                        if isinstance(capture, dict):
-                            capture["records_path"] = item["records_path"]
-                            capture["artifacts"] = {name: str(Path(item["report_dir"]) / name)
-                                                    for name in ("perfetto_trace.json", "analysis.md", "report.html")}
-                for record in result.get("ranks", []):
-                    if (not isinstance(record, dict) or type(record.get("rank")) is not int
-                            or not isinstance(record.get("breakdown"), dict)):
-                        continue
-                    record["breakdown"]["records_path"] = str(node_log / f"rank-{record['rank']}.records.v1")
-                    record["breakdown"]["artifacts"] = {
-                        name: str(node_log / f"profile-rank-{record['rank']}" / name)
-                        for name in ("perfetto_trace.json", "analysis.md", "report.html")}
+                rebase_node_breakdown_reports(result, node_log, host["host"], local_records=index == 0)
+                rebase_node_breakdown_reports({"errors": failures}, node_log, host["host"], local_records=index == 0)
         except FileNotFoundError as error:
             # 拉起/异常退出已说明为何没有完成记录，避免追加一个伪解析失败。
             if not failures:
@@ -1397,15 +1433,26 @@ def run(config):
                     if config.chain["run_mode"] != "functional":
                         report["measurements"] = aggregate
                     report["relay_links_validated"] = True
-                    if config.chain["run_mode"] == "breakdown":
-                        report["traces"] = measurements.export_breakdown_traces(records,
-                            dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha,
-                            config.install / "share/tilexr/profiling/server_dedup.mapping.json")
                 except (ValueError, TypeError, KeyError, OSError) as error:
                     failure = Failure("RESULT_FAILED", f"Dispatch 结果或测量汇总失败：{error}").record()
                     errors.append(failure)
                     primary_error = failure
                     report.update(status="FAIL", primary_error=failure)
+            if config.checkpoint == DISPATCH_CHECKPOINT and config.chain["run_mode"] == "breakdown":
+                try:
+                    kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
+                    report["traces"] = measurements.collect_breakdown_reports(
+                        node_profile_records(nodes, run_id, manifest, mappings, config.chain),
+                        dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha)
+                    for item in report["traces"]["errors"]:
+                        errors.append(Failure("LOG_COLLECT_FAILED", "profiling report: " + item["message"],
+                                              **({"rank": item["rank"]} if "rank" in item else {})).record())
+                except (ValueError, TypeError, KeyError, OSError) as error:
+                    errors.append(Failure("LOG_COLLECT_FAILED", f"profiling report index failed: {error}").record())
+                if errors:
+                    report.pop("measurements", None)
+                    primary_error = primary_error or errors[0]
+                    report.update(status="FAIL", primary_error=primary_error)
         rank_summary = f"ranks={completed}/{len(mappings)} "
     write_json(log / "summary.json", report)
     print("\n================================", flush=True)
@@ -1413,7 +1460,7 @@ def run(config):
     if "measurements" in report:
         print(measurements.render_measurements(report["measurements"]), flush=True)
     if "traces" in report:
-        print("Trace JSON: " + report["traces"]["all_ranks"], flush=True)
+        print("最后一轮打点报告索引: " + report["traces"]["report"], flush=True)
         for role, path in report["traces"]["selected"].items():
             print(f"{role}: {path}", flush=True)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "

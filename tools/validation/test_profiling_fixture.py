@@ -1,16 +1,17 @@
 """Small records.v1 fixtures for validation tests; never imported by production."""
 import struct
 from pathlib import Path
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
-CAPTURE_ID = "d63acd67-e125-46c6-bd57-69ca989951dd"
+CAPTURE_ID = str(uuid5(NAMESPACE_URL, "tilexr-validation:run-test"))
 
 
 def write_capture(path, rank=0, launches=5, warmup=2, duration=8000, fault="", capture_id=CAPTURE_ID):
     blocks = []
     for core in range(64):
         records = []
-        for launch in range(launches - (fault == "stale")):
+        selected = range(launches) if fault == "accumulating" else (launches - 1,)
+        for launch in selected:
             begin = 100000000000000000 + launch * 1000000 + core
             span = duration * 10 if launch < warmup else duration
             events = [(0, 0x53000001), (span // 8, 0x53000002),

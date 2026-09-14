@@ -71,6 +71,19 @@ int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
     uint32_t *launchSlot);
 
+// Reuse slot zero for every ordered launch, retaining each core's final launch
+// only. Pair exclusively with DirectProfilingWriter::InitializeLatest. Keep the
+// launch budget and logical core set fixed for the communicator capture; do not
+// mix with ReserveLaunch, legacy slots, or append ProfilingRecorder. The two
+// reservation APIs reject mixing; legacy writers cannot be detected by Host.
+// Budget is a nonzero multiple of 8. UINT32_MAX means disabled/insufficient GM
+// capacity, with success so communication can proceed. Invalid/mixed requests
+// return a parameter error and UINT32_MAX. Capacity/mode failures mark capture
+// incomplete. Reserve at least this budget in TILEXR_PROFILING_RECORDS_PER_CORE;
+// total allocation and record processing need not scale with launch count.
+int TileXRProfilingReserveLatestLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot);
+
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
 
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);

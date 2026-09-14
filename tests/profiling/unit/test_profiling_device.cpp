@@ -123,7 +123,42 @@ int main()
     writer.Publish();
     Check(buffers.dropped[1U] == std::numeric_limits<uint32_t>::max(),
         "dropped count must saturate without wrapping");
+
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
+    for (uint32_t index = 0U; index < 27U; ++index) {
+        writer.RecordAt(7U, 700U + index);
+    }
+    writer.Publish();
+    writer.Publish();
+    Check(buffers.counts[9U] == 24U && buffers.dropped[9U] == 3U,
+        "latest overflow must describe this launch only and Publish must be idempotent");
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
+    Check(buffers.counts[9U] == 0U && buffers.dropped[9U] == 0U,
+        "latest launch must reset its own count and loss without scanning GM");
+    writer.RecordAt(8U, 800U);
+    writer.Publish();
+    Check(buffers.counts[9U] == 8U && buffers.dropped[9U] == 0U &&
+        buffers.events[25U] == 8U && buffers.events[26U] == 0U &&
+        buffers.events[33U] == 7U,
+        "shorter latest launch must replace valid range while leaving stale tail unexported");
+    Check(buffers.counts[1U] == 8U &&
+        buffers.dropped[1U] == std::numeric_limits<uint32_t>::max(),
+        "latest launch must not reset a neighboring core");
+    for (uint32_t slot : {1U, std::numeric_limits<uint32_t>::max()}) {
+        writer.InitializeLatest(buffers.Address(), 1U, slot, 24U);
+        writer.RecordAt(9U, 900U);
+        writer.Publish();
+        Check(buffers.counts[9U] == 8U && buffers.events[25U] == 8U,
+            "invalid latest slot must not reset or overwrite the preceding capture");
+    }
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
+    writer.Publish();
+    Check(buffers.counts[9U] == 0U && buffers.dropped[9U] == 0U,
+        "empty latest launch must hide all previous records");
 #else
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
+    writer.RecordAt(8U, 800U);
+    writer.Publish();
     Check(AscendC::CycleReads() == 0U && buffers.counts[9U] == 0U &&
         buffers.events[25U] == 0U && buffers.stamps[25U] == 0U,
         "OFF build must not sample cycles or touch GM");

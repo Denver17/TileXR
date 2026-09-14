@@ -214,35 +214,45 @@ bash run.sh -n 2 -e 96 -m 2 -l 3 2
 
 原粗粒度 `Mark()` 自带的 profiling-only `PIPE_ALL` 已移除；通信代码原有 SetFlag/WaitFlag、PIPE_ALL、SyncAll 和完成协议保留。时间戳表示 Scalar 到达点位的时间，只有已有完成 fence 才赋予相应完成语义：`acquire_load` 的终点在已有 MTE2_S 之后，packet/output/relay 的 issue 不代表 DMA 完成，drain issue 也不表示流水已经排空。新旧 breakdown 数值不能直接作为无扰动性能 A/B；直接 GM 写和读时钟仍可能影响调度，普通性能基线关闭设备打点。
 
-每次 launch 为每核预留 65,536 条，共 64 核，即每 rank 每轮 48MiB GM 有效载荷预算，另有约 4KiB 的计数区。consumer 在 communicator 初始化前为 `warmup+loops` 配置总容量，例如 100+50 轮为每 rank 7,200MiB。标准上限为每核 67,108,856 条，当前固定槽宽最多容纳 1,023 轮；入口在整数检查后拒绝超过总预算的配置。导出文件只包含实际命中记录，但当前 exporter 的 Host 暂存仍随配置容量增长，通用报告的 Host 内存随实际事件数增长；GM 容量不代表 Host 内存无限。
+整批执行固定为每核预留 65,536 条，共 64 核，即每 rank 48MiB GM 有效载荷预算，另有约 4KiB 的计数区。每次 launch 覆盖本 core 的上一轮记录，consumer 在 communicator 初始化前将容量固定为 65,536，不再乘 `warmup+loops`，也不再受原 1,023 轮槽位上限限制。例如 50 次预热加 100 次测量，打点 GM 和当前 Host 原始回读均由每 rank 7,200MiB 降为 48MiB；8 卡服务器共 384MiB，64 卡共 3GiB。这是缓冲区容量，导出文件只含最后一轮实际命中记录，报告内存仍随该轮事件数增长。
 
-Host 通过 `TileXRProfilingReserveLaunch` 分配互不重叠的槽位，独立于通信 magic；同一 capture 的 launch 必须按序执行。单核槽满后仅丢弃后续打点并报告 incomplete，整轮槽耗尽也只禁用该轮采集并留下丢失标记，不改变通信返回路径。此 capture 应专用于采用预约槽位的 EP kernel，不能与独立分配槽位的旧 collectives recorder 或 append-style `ProfilingRecorder` 混用同一 communicator 记录区。
+Host 使用标准库 `TileXRProfilingReserveLatestLaunch` 复用 slot 0，独立于通信 magic；kernel 使用 `DirectProfilingWriter::InitializeLatest` 在入口重置本 core 的有效条数和丢点计数，然后沿用标准 Record/Publish。只重置计数，不清空整块 GM；latest exporter 只扫描发布的有效范围，所以较短或空的最后一轮不会混入旧尾部，上一轮 overflow 也不会污染本轮丢点数。最后一轮槽满仍报告 incomplete，通信继续执行；先前轮次的详细记录和丢点信息已被覆盖，不对其完整性作结论。
+
+同一 capture 必须保持固定核集合、固定槽宽，并按 stream 顺序执行，不能并发覆盖。两个 Host reservation API 会拒绝混用 latest 和普通 reserved 模式；旧 collectives 的独立槽位和 append-style `ProfilingRecorder` 不受该 allocator 管理，调用方仍须保证 communicator 专用。普通 reserved/legacy 导出保持原语义，只有显式 latest capture 才将有效条数作为扫描上限。
 
 R07 原始起始 12,800B 预留区保留为布局 padding，cnt/数据偏移和 4GiB 通信域不变；新打点既不占用该区，也不占用通信域 payload 尾部。删除自定义 flush 路径，从结构上去掉此次 DCCI tensor extent 错误所在的算子记录逻辑；这不等于已经证明原 A5 卡死在新产物上消失。
 
-整批 stream 同步及输出校验完成后，communicator 销毁时导出每 rank 的 `rank-N.records.v1`。各 rank 共用 capture UUID，文件路径独立；远端文件随本次运行日志归集。通用报告按每核 critical begin 的出现序号划分 launch，禁止跨轮配对，再剔除 warmup。完整性诊断覆盖全部轮次：被排除的预热轮丢失也保留警告，缺少整轮的具体位置不能仅靠时间戳还原。采集不完整应与通信输出正确分开记录，不把截断 trace 当作完整性能证据。
+整批 stream 同步及输出校验完成后，communicator 销毁时导出每 rank 的 `rank-N.records.v1`。各 rank 共用 capture UUID，文件路径独立，只保留最后一次提交的打点（`captured_launch=warmup+loops-1`，从 0 开始）。各服务器为本卡解析一次并生成标准 Perfetto、HTML 和统计；主节点默认只收集已生成的报告及小摘要，不收远端原始 records，不重新解析或生成每卡/全局大 trace。原始文件留在所属服务器，摘要保留来源，供显式离线重处理。节点内报告锁仍限制 Python 解析并发，不限制各卡 C++ 回读并发。
+
+通用报告检查每核唯一完整的 kernel 起止和本轮配对，不能再按预热次数剔除唯一 capture。采集不完整与通信输出正确分开记录，失败节点中其他已完成卡的报告仍保留；不能把截断 trace 当作完整性能证据。
 
 成功结果的主要路径如下（rank 文件可能位于本节点目录或归集的 `nodes/<节点序号>/`）：
 
 ```text
 run/case-<时间>-<PID>/<run_id>/summary.json
-run/case-<时间>-<PID>/<run_id>/traces/all-ranks/perfetto_trace.json
-run/case-<时间>-<PID>/<run_id>/traces/all-ranks/report.html
-run/case-<时间>-<PID>/<run_id>/traces/rank-N/perfetto_trace.json
+run/case-<时间>-<PID>/<run_id>/traces/index.html
 run/case-<时间>-<PID>/<run_id>/traces/index.json
 ```
 
-`index.json` 引用全部 rank 的 trace，并按测量轮 kernel 时长中位数选 fastest/p50/slowest rank。trace 按 launch/rank/core 展示，每卡时间归零不构成跨 NPU 时钟同步。summary 的 `measurements.breakdown.kernel_us` 先取每轮核最大值，再取每 rank 测量轮中位数，最后汇总跨 rank median/min/max；操作统计使用实际配对区间，不再沿用旧 v6 的核内 sum/max 字段。
+`index.html`/`index.json` 链接各节点已生成的每卡报告，按最后一轮 kernel 时长选择 fastest/p50/slowest rank。每卡时间归零不构成跨 NPU 时钟同步。`measurements.breakdown.kernel_us` 取每 rank 最后一轮的核最大值，再汇总跨 rank median/min/max；保留各 rank 值，不先合并服务器中位数。操作统计使用该轮实际配对区间；多次操作的中位数不能称为多轮执行中位数。performance 仍使用关闭设备打点的 msprof 多轮样本，统计口径独立。
 
-在保留 records 和 mapping 的情况下，可离线重新生成报告；输出目录须为空或尚不存在：
+需要全局 trace 时，显式取回各服务器的 `rank-N.records.v1` 到同一本地目录，再用 `--records-dir` 离线重新生成；输出目录须为空或尚不存在。默认执行不会承担这部分开销：
 
 ```bash
-python3 tools/validation/measurements.py /path/to/run/summary.json --output-dir /path/to/new-report
+python3 tools/validation/measurements.py /path/to/run/summary.json --records-dir /path/to/copied-records --output-dir /path/to/new-report
 ```
 
-维护要点：保持事件位置与记录机制分离；新增点位只扩展数字 ID 和 mapping，不重新引入 UB 暂存或算子专属 cache flush。跨 Host/kernel/reader 改动需同时校验 launch ABI、分配预算、重复轮次、截断状态和安装产物身份，不能仅用 functional 成功证明 profiling 路径安全。
+维护要点：保持事件位置与记录机制分离；新增点位只扩展数字 ID 和 mapping，不重新引入 UB 暂存或算子专属 cache flush。复用槽位必须同时处理有效范围和丢点状态，不能只把 slot 改成 0。跨 Host/kernel/reader 改动需同时校验 launch ABI、固定分配预算、长轮后短轮/空轮、截断状态及安装产物身份。多机 profiling 应在数据所在节点完成解析，再收集成品，避免每卡本地解析后主节点又解析两遍。
 
-### 标准打点迁移的验证边界（2026-09-14）
+原报错中的 SSH 退出、收集超时和“结果汇总超过总期限”不能证明主节点最终报告生成是首因：该期限检查在最终报告分支前，已有错误时该分支被跳过。此次修复控制 capture、节点报告和归集的数据量，不修改执行期限；是否消除原 A5 超时仍需用户环境运行证据。
+
+### 单轮覆盖与分布式报告的验证边界（2026-09-14）
+
+标准 runtime 和设备 ON/OFF 三个 C++14 程序以 `-Wall -Wextra -Werror` 编译执行通过，覆盖一万次固定槽预约、模式混用拒绝、长轮溢出后短轮/空轮、旧尾过滤及相邻 core 保护。EP 聚焦 CTest 7/7、consumer 替身 19 项、独立地址空间检查 1 项及通用 Python 报告 81 项通过。上述均为 Host/替身证据。
+
+本次最新生产源码以 `36ec5dd` 加工作区修改在 blue 的真实 CANN 9.1/A5 工具链完成 OFF/ON kernel、`tilexr-ep` 及 `tile-comm` 编译。532 个生产/构建文件与快照一致，源码清单、日志和资源诊断保存在 `build/profiling-latest-verification/`。静态 kernel 栈 OFF=2,504B、ON=2,576B，差额 72B；VF 最大栈均为 0B，最大 VReg/PReg 均为 10/4，未取得完整 Scalar spill 证据。本次没有运行 NPU，不宣称原卡死或多机处理时限已经实机验证修复。
+
+### 前一版标准打点迁移的验证边界（2026-09-14）
 
 本地 EP Host/设备替身聚焦检查 14/14 通过，覆盖打点开关、GM guard、重复 launch、发送/接收字节正确性及内部 launch ABI。接收 ON 测试随后更新为标准宏对应的 PASS marker，重编并运行通过。通用 Python 报告 81 项通过，包含重复/嵌套区间、截断、预热选择、容量上限及已解析模型复用。真实 C++14 consumer 配合 ACL 替身的 19 项集成检查通过；这些测试不执行 NPU。
 

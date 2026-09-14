@@ -22,6 +22,9 @@ struct TileXRProfilingRuntimeConfig {
     uint32_t coreCapacity = 0U;
     // A launch that had no GM reservation cannot report device dropped counts.
     bool incomplete = false;
+    // Explicit opt-in: legacy capture may contain records beyond its counters.
+    // Latest writers publish the only valid range and may leave old GM tails.
+    bool latestLaunch = false;
 };
 
 // One allocator per communicator. Reservation is Host-only and never waits for
@@ -30,12 +33,20 @@ class TileXRProfilingLaunchState {
 public:
     bool Reserve(const TileXRProfilingRuntimeConfig &config,
         uint32_t recordsPerLaunch, uint32_t *launchSlot);
+    bool ReserveLatest(const TileXRProfilingRuntimeConfig &config,
+        uint32_t recordsPerLaunch, uint32_t *launchSlot);
     bool Incomplete() const;
+    bool LatestLaunch() const;
     void Reset();
 
 private:
+    enum class Mode { Unset, Reserved, Latest };
+    bool ReserveImpl(const TileXRProfilingRuntimeConfig &config,
+        uint32_t recordsPerLaunch, uint32_t *launchSlot, Mode mode);
     mutable std::mutex mutex_;
+    Mode mode_ = Mode::Unset;
     uint32_t nextRecord_ = 0U;
+    uint32_t latestWidth_ = 0U;
     bool incomplete_ = false;
 };
 

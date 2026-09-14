@@ -289,7 +289,7 @@ void TestServerDedupRuntimeLaunch()
         auto roundArgs = expected;
         roundArgs[22] = kNextMagic + round;
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
-        roundArgs[23] = static_cast<uint64_t>(round);
+        roundArgs[23] = 0U;
 #endif
         Check(gLaunches.size() == static_cast<std::size_t>(round + 1) &&
             gLaunches.back().args == roundArgs && gLaunches.back().stream == p.stream,
@@ -318,11 +318,11 @@ void TestServerDedupRuntimeLaunch()
         gLaunches.back().args[22] == static_cast<uint64_t>(kNextMagic + 1),
         "a later invocation cannot reuse a failed submission's magic");
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
-    Check(gProfilingCalls == 2U && gLaunches.back().args[23] == 1U,
-        "failed submissions never reuse a profiling slot");
+    Check(gProfilingCalls == 2U && gLaunches.back().args[23] == 0U,
+        "latest capture reuses its single slot independently of submission magic");
     gProfilingExhausted = true;
     Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches.back().args[23] == UINT32_MAX,
-        "exhausted profiling does not prevent communication launch");
+        "unavailable latest capture does not prevent communication launch");
 #endif
 }
 
@@ -488,10 +488,10 @@ bool LoadKernelBinary(const void *, const char *fileName, KernelBinaryView *bina
 
 extern "C" {
 
-int TileXRProfilingReserveLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
+int TileXRProfilingReserveLatestLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
 {
     Check(recordsPerLaunch == 65536U, "Host and Kernel use the same per-launch capture budget");
-    *slot = gProfilingExhausted ? UINT32_MAX : gProfilingCalls;
+    *slot = gProfilingExhausted ? UINT32_MAX : 0U;
     ++gProfilingCalls;
     return TileXR::TILEXR_SUCCESS;
 }

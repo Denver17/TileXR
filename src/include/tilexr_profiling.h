@@ -124,6 +124,21 @@ private:
 
 class DirectProfilingWriter {
 public:
+    // Pair with TileXRProfilingReserveLatestLaunch. Every launch must use the
+    // same logical cores and execute in order, with no other capture writers.
+    // Reset metadata only: the exporter ignores the stale tail beyond count.
+    __attribute__((always_inline)) inline __aicore__ void InitializeLatest(
+        GM_ADDR commArgsGM, uint32_t logicalCore,
+        uint32_t launchSlot, uint32_t recordsPerLaunch)
+    {
+        Initialize(commArgsGM, logicalCore,
+            launchSlot == 0U ? 0U : static_cast<uint32_t>(-1), recordsPerLaunch);
+        if (enabled_) {
+            recordCount_[0] = 0U;
+            droppedCount_[0] = 0U;
+        }
+    }
+
     __attribute__((always_inline)) inline __aicore__ void Initialize(
         GM_ADDR commArgsGM, uint32_t logicalCore,
         uint32_t launchSlot, uint32_t recordsPerLaunch)
@@ -272,6 +287,11 @@ public:
 class DirectProfilingWriter {
 public:
 #if TILEXR_PROFILING_AICORE
+    __attribute__((always_inline)) inline __aicore__ void InitializeLatest(
+        GM_ADDR, uint32_t, uint32_t, uint32_t)
+    {
+    }
+
     __attribute__((always_inline)) inline __aicore__ void Initialize(
         GM_ADDR, uint32_t, uint32_t, uint32_t)
     {
