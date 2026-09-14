@@ -82,8 +82,10 @@ rejects ordinary namespace-scope arrays referenced from AICore functions with
 `global variable ... is not allowed in aicore function`; do not move this state
 to a C++ global. Source syntax still cannot prove register allocation. Every
 production Kernel must inspect generated code and compiler diagnostics for
-scalar-stack or UB spills. Reduce the marker count or split the capture if the
-target compiler spills; do not silently change markers to per-event GM stores.
+scalar-stack or UB spills. For fixed small marker sets, reduce marker count if
+the target compiler spills. For repeated sites or limited local resources,
+explicitly choose the standard direct writer described below and measure its
+per-event GM overhead.
 
 When `TILEXR_ENABLE_PROFILING` is absent, recorder methods are no-ops and the
 device arrays and flush implementation are not emitted.
@@ -103,11 +105,43 @@ uses no profiling `DataCopy`, UB scratch, or `S_MTE3`/`MTE3_S` synchronization.
 This keeps profiling from adding MTE pipeline dependencies to the operator.
 Each append is still padded to eight slots; event-ID zero marks padding and the
 Host exporter removes it from `capture.records.bin`. A single Kernel invocation
-may record at most 256 markers.
+using `ProfilingRecorder<N>` may record at most 256 markers.
 
-Direct scalar GM stores are limited to this post-interval profiling capture.
-They must not be generalized to UDMA SQEs, queue heads, or doorbells, whose
+Profiling scalar GM stores must not be generalized to UDMA SQEs, queue heads, or doorbells, whose
 cache-coherency and publication rules remain transport-specific.
+
+### Direct GM Writer For Repeated Markers
+
+Use `DirectProfilingWriter` when retaining every repetition is necessary or
+Kernel-local timestamp arrays are undesirable. The Host reserves a launch
+slot with `TileXRProfilingReserveLaunch(comm, recordsPerLaunch, &launchSlot)`
+and passes that slot through the internal Kernel ABI. Budget each launch in
+multiples of eight records; use the same budget for one capture. Communication
+magic is not a profiling launch identity.
+
+```cpp
+TileXR::DirectProfilingWriter profiler;
+profiler.Initialize(commArgsGM, logicalCore, launchSlot, recordsPerLaunch);
+profiler.Record(kEventTotalBegin);
+// Every repeated marker appends a fresh record.
+profiler.Record(kEventTotalEnd);
+profiler.Publish();
+```
+
+`Record(eventId)` reads the system cycle and writes an 8-byte timestamp and a
+4-byte numeric event ID directly to the standard per-core GM arrays. It uses
+no profiling UB allocation, timestamp array, or MTE operation. The writer
+retains pointers and counters of fixed size; only generated AICore code can
+establish register/spill usage. Each mark still adds scalar instructions and
+GM/cache traffic. It does not fence asynchronous work: an issue-site marker
+means Scalar arrival, and a completion marker must follow an existing business
+completion fence. Keep that distinction in the operator's stage descriptions.
+
+`Publish()` pads to eight slots and publishes the occupied count. Capacity
+exhaustion drops subsequent markers and marks the capture incomplete; it must
+never stop communication or overwrite previous launches. A disabled launch
+slot (`UINT32_MAX`) makes recording a no-op. Standard runtime reservation
+retains capture-level evidence when no launch slot is available.
 
 ## CommArgs And Runtime Lifecycle
 
@@ -152,7 +186,7 @@ communication domain initializes:
 |---|---|---|
 | `TILEXR_PROFILING_RECORDS_PATH` | Enables profiling | Output path for records.v1; supports `{rank}`, `{device}`, and `{comm_domain}` |
 | `TILEXR_PROFILING_CAPTURE_ID` | Required when enabled | Canonical UUID embedded in every records file for this capture |
-| `TILEXR_PROFILING_RECORDS_PER_CORE` | Optional | Aligned per-core GM capacity; default 4096, maximum 65536 |
+| `TILEXR_PROFILING_RECORDS_PER_CORE` | Optional | Aligned per-core GM capacity for the whole capture; default 4096, maximum 67,108,856 |
 
 The output parent directory must already exist, and an existing records path is
 never overwritten. Multi-rank runs should use a unique path such as:
@@ -211,8 +245,12 @@ stream_id = (rank << 16) | core
 
 The tool accepts every stream present in the records and derives rank/core from
 this encoding. The capture UUID comes from records; all record files supplied
-to one report must share it. The tool uses one synthetic launch, a per-core
-clock domain, cycle timestamps, and `AscendC::GetSystemCycle`.
+to one report must share it. Each critical begin starts a new launch in that
+core's record order. IDs are zero-based begin ordinals, with a per-core clock
+domain, cycle timestamps, and `AscendC::GetSystemCycle`. Multiple cores/ranks
+must record the same ordered launches. Unequal begin counts make the report
+incomplete; timestamps cannot determine where a wholly missing launch belonged.
+Records before the first begin remain a diagnostic fragment with launch ID -1.
 
 Event IDs are `uint32` values and must be unique across every operator recorded
 into one communication-domain capture. Sequential repetitions may reuse one
@@ -237,9 +275,18 @@ positions never enter the Kernel capture.
 ## Capacity And Concurrency
 
 Each core appends into a disjoint GM range. The per-core occupied counter is
-updated only during the deferred flush. When a flush cannot fit, the retained
-records are preserved, the dropped count is increased, and the generated run
-is reported as incomplete.
+updated during deferred `Flush()` or direct-writer `Publish()`. Direct writers
+reserve disjoint fixed-size launch slots on the Host; total capacity must
+cover warmup and measured launches. For example, 65,536 records/core/launch
+across 64 cores needs approximately 48 MiB GM per launch, plus shared counters.
+The exported record has 16 bytes rather than the 12-byte GM payload.
+
+When capacity cannot fit additional data, retained records remain valid and
+the report is incomplete. A truncated begin/end pair contributes no fabricated
+duration and is never paired across the next critical begin or the next parent
+invocation. Valid earlier intervals remain available. The binary reader accepts
+files up to 64 GiB and reads in 64 KiB chunks; normalized records and rendered
+artifacts still require Host memory proportional to actual recorded events.
 
 The v1 append path deliberately has no device atomic. Kernel launches that can
 execute concurrently on the same communicator and the same core ID must not
@@ -247,9 +294,13 @@ share one profiling capture. Order profiled launches on one stream, or use
 separate communicators/captures. Without that rule, two flushes could reserve
 the same per-core range.
 
-Different operators recorded into the same communicator must share one JSON
-catalog with non-conflicting event IDs. When separate operator reports are
-desired, use separate communicator lifetimes and records paths.
+The Host reservation allocator does not share its cursor with deferred
+`ProfilingRecorder` appends or older operator-owned direct-writer slot counters.
+Do not mix those allocation schemes within one communicator capture, even on
+an ordered stream: each can otherwise write slots already owned by another.
+Use a dedicated communicator/capture for the new reservation path. Operators
+that all use this Host reservation API can share a capture with a common JSON
+catalog and non-conflicting event IDs.
 
 ## Report Command
 
@@ -261,6 +312,25 @@ python3 -m tools.profiling \
   --records capture.records.bin \
   --output-dir report
 ```
+
+For two warmup launches followed by ten measured launches, add
+`--skip-launches 2 --launch-count 10 --expected-launch-count 12`.
+The Python `generate_reports()` and `load_profile_run()` APIs accept equivalent
+keyword arguments `skip_launches`, `launch_count`, and `expected_launch_count`.
+When the caller also needs normalized data for validation or summaries, load
+once with `load_profile_run()` and pass the result to the public
+`generate_reports_for_run(run, output_dir, attributes=None)` API. This avoids
+parsing a large capture again while the first normalized run is still retained.
+Selection preserves the original launch IDs. All capture diagnostics remain
+visible, including warmup loss; selection cannot turn an incomplete capture
+into a complete report. The expected count detects missing whole launches even
+when every core lacks them, but cannot identify missing middle-launch positions
+without additional producer identity. Reports retain only observed intervals;
+they do not fill missing branches or truncated intervals with zero durations.
+
+Stage durations and shares are inclusive. Do not add a parent's duration to
+its nested children's durations. Wait/synchronization pressure uses the union
+of covered intervals on the critical lane to avoid double counting.
 
 The public artifacts remain:
 
@@ -275,9 +345,11 @@ report/report.html
 1. Assign capture-wide unique, nonzero event IDs.
 2. Add only operator, cycle conversion, stage hierarchy, and event IDs to JSON.
 3. Include `tilexr_profiling.h` and compile the profiled Kernel with the enable macro.
-4. Use compile-time marker slots and prove the maximum marker count is at most 256.
-5. Record the critical end before calling the common flush helper.
-6. Pass the communicator's existing device `CommArgs` pointer to the Kernel.
+4. Use a fixed recorder of at most 256 slots, or a direct writer with a bounded
+   per-launch budget and the common Host launch reservation API.
+5. Record the critical end before the common `Flush()` or `Publish()` call.
+6. Pass the communicator's device `CommArgs` and any direct-writer launch slot
+   through the internal Kernel ABI.
 7. Set a new records path and one shared capture UUID before communicator initialization.
 8. Order profiled launches on one stream for each communicator capture.
 9. Destroy the communicator before invoking `tools/profiling`.

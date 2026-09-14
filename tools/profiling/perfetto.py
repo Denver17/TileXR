@@ -290,5 +290,6 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
             "overflowed_stream_count": run.overflowed_stream_count,
             "excluded_stream_count": run.excluded_stream_count,
             "dropped_record_count": run.dropped_record_count,
+            "attributes": run.attributes,
         },
     }

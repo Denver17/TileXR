@@ -9,7 +9,7 @@ option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
 option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
 option(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    "Enable per-AIV source-send breakdown in the Server Dedup kernel" OFF)
+    "Enable standard GM event capture in the Server Dedup kernel" OFF)
 option(TILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST
     "Build the isolated A5 4 GiB peer-window boundary test" OFF)
 
@@ -149,7 +149,7 @@ set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP
 tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"
     "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
-    DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>
+    DEFINITIONS $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_counts.h"
@@ -159,7 +159,7 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_receive_packet.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_round.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_profile.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_detail_profile.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_profiling.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_data_layout.h"
@@ -252,3 +252,9 @@ if(TILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST)
         FILES "${_boundary_binary}" TARGETS tilexr_ep_memory_boundary_test_kernel)
     install(TARGETS tilexr-ep-memory-boundary-test LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
+
+install(FILES profiling/server_dedup.mapping.json
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/profiling)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/tools/profiling
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/tools
+    FILES_MATCHING PATTERN "*.py" PATTERN "__pycache__" EXCLUDE)

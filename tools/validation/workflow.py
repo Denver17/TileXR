@@ -34,7 +34,7 @@ CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
-DISPATCH_ABI = {"launch_bytes": 184, "layout": "r07-single", "kernel_scope": "dispatch"}
+DISPATCH_ABI = {"launch_bytes": 192, "layout": "r07-single", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 4 * 1024 ** 3
@@ -358,6 +358,8 @@ def chain_configuration(checkpoint):
         warmup = int(os.environ.get("TILEXR_VALIDATION_WARMUP", "0"))
         if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
             raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
+        if run_mode == "breakdown":
+            measurements.capture_capacity(loops, warmup)
         if block_dim not in ("auto", "64"):
             raise ValueError("Dispatch 固定 48/16 核组，block_dim 必须为 auto/64")
 
@@ -486,14 +488,14 @@ def verify_build(config, *, check_run_mode=True):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if config.checkpoint == DISPATCH_CHECKPOINT:
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
-            raise ValueError("需要完整 Dispatch 184B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
+            raise ValueError("需要完整 Dispatch 192B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and config.chain is not None and
                                            profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
                              "普通模式请执行 bash build_all.sh；成功后执行 bash sync.sh")
-        if profiling and manifest.get("server_dedup_profile_version") != 6:
-            raise ValueError("需要完整 Dispatch breakdown v6 产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
+        if profiling and manifest.get("server_dedup_profile_schema") != measurements.RECORDS_SCHEMA:
+            raise ValueError("需要标准 Dispatch records.v1 打点产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     if artifact_files(config.install) != manifest["artifacts"]:
@@ -603,7 +605,7 @@ def build(config):
         manifest["server_dedup_contract"] = dict(DISPATCH_ABI)
         manifest["server_dedup_profiling"] = config.profiling
         if manifest["server_dedup_profiling"]:
-            manifest["server_dedup_profile_version"] = 6
+            manifest["server_dedup_profile_schema"] = measurements.RECORDS_SCHEMA
     write_json(stage / "manifest.json", manifest)
     config.install.parent.mkdir(parents=True, exist_ok=True)
     if config.install.is_symlink() or config.install.parent.is_symlink():
@@ -816,7 +818,7 @@ def validate_dispatch_links(records, config):
         raise ValueError("完整 Dispatch 物理包总数与原始 route 总数不一致")
 
 
-def validate_rank_records(records, expected, run_id, manifest, chain_config=None):
+def validate_rank_records(records, expected, run_id, manifest, chain_config=None, *, check_measurements=True):
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
         raise Failure("LOG_PARSE_FAILED", "rank 记录格式错误")
     actual = [record.get("rank") for record in records]
@@ -864,10 +866,10 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                 if any(type(record.get(key)) is not int or record[key] != chain_config["warmup"]
                        for key in ("warmup_submitted", "warmup_completed")):
                     raise Failure("RESULT_FAILED", "rank 未完成指定预热批次", rank=mapping["rank"])
-                if chain_config["run_mode"] != "functional":
+                if check_measurements and chain_config["run_mode"] != "functional":
                     try:
                         if (chain_config["run_mode"] == "breakdown" and
-                                record.get("breakdown", {}).get("schema_version") != manifest.get("server_dedup_profile_version")):
+                                record.get("breakdown", {}).get("schema") != manifest.get("server_dedup_profile_schema")):
                             raise ValueError("breakdown 设备记录版本与安装产物不一致")
                         measurements.validate_rank_measurements(record, chain_config)
                     except (ValueError, TypeError, KeyError) as error:
@@ -904,6 +906,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
     def launch(mapping):
         rank = mapping["rank"]
         log = config.logs / run_id / f"rank-{rank}.log"
+        record, communication_completed = None, False
         try:
             if cancelled.is_set():
                 return None
@@ -930,6 +933,13 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if config.chain["block_dim"] != "auto":
                     env[block_dim] = config.chain["block_dim"]
                 env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+                env.pop("TILEXR_PROFILING_RECORDS_PATH", None)
+                if config.chain["run_mode"] == "breakdown":
+                    records_path = log.parent / f"rank-{rank}.records.v1"
+                    env.update(TILEXR_PROFILING_CAPTURE_ID=str(uuid.uuid5(uuid.NAMESPACE_URL, "tilexr-validation:" + run_id)),
+                               TILEXR_PROFILING_RECORDS_PATH=str(records_path),
+                               TILEXR_PROFILING_RECORDS_PER_CORE=str(measurements.capture_capacity(
+                                   config.chain["loops"], config.chain["warmup"])))
                 if config.chain["run_mode"] == "performance":
                     profile_dir = log.parent / f"msprof-rank-{rank}"
                     argv = [config.chain["msprof"], "--application=" + shlex.join([str(arg) for arg in argv]),
@@ -943,6 +953,10 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if not isinstance(record, dict):
                     raise Failure("LOG_PARSE_FAILED", "轮次记录不是 JSON 对象")
                 record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
+                if config.chain["run_mode"] == "breakdown":
+                    validate_rank_records([record], [mapping], run_id, manifest, config.chain,
+                                          check_measurements=False)
+                    communication_completed = True
                 if config.chain["run_mode"] == "performance":
                     try:
                         record["performance"] = measurements.performance_record(profile_dir,
@@ -955,21 +969,41 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                     if (not isinstance(breakdown, dict) or any(breakdown.get(key) != value for key, value in wanted.items())
                             or breakdown.get("pid") != record.get("pid")):
                         raise Failure("RESULT_FAILED", "breakdown 的 rank/运行身份不一致", rank=rank)
-                    record["breakdown"] = breakdown
+                    if (breakdown.get("schema") != measurements.RECORDS_SCHEMA or
+                            breakdown.get("records_path") != str(records_path) or
+                            breakdown.get("capture_id") != env["TILEXR_PROFILING_CAPTURE_ID"] or
+                            breakdown.get("launches") != config.chain["warmup"] + config.chain["loops"]):
+                        raise Failure("RESULT_FAILED", "breakdown capture identity mismatch", rank=rank)
+                    try:
+                        # Device processes run concurrently; decode one large capture at a time.
+                        with profiling_lock:
+                            record["breakdown"] = measurements.breakdown_record(records_path, config.chain, rank,
+                                env["TILEXR_PROFILING_CAPTURE_ID"], log.parent / f"profile-rank-{rank}",
+                                config.install / "share/tilexr/profiling/server_dedup.mapping.json")
+                    except (ValueError, OSError) as error:
+                        raise Failure("RESULT_FAILED", f"standard profiling capture failed: {error}; communication completed",
+                                      rank=rank) from error
             else:
                 record = parse_rank_marker(output, DRY_RUN_MARKER)
             validate_rank_records([record], [mapping], run_id, manifest, config.chain)
             return record
         except Exception as error:
-            failures = failure_records(error, "LAUNCH_FAILED", rank=rank, log=str(log))
+            capture = (dict(communication_completed=True,
+                            profile_status=record.get("breakdown", {}).get("status", "unavailable"),
+                            records_path=str(records_path), report_dir=str(log.parent / f"profile-rank-{rank}"))
+                       if communication_completed else {})
+            failures = failure_records(error, "LAUNCH_FAILED", rank=rank, log=str(log), **capture)
             # 保留第一个观察到的失败；其他 rank 的取消/清理错误作为后续证据。
             with error_lock:
+                if communication_completed:
+                    result.setdefault("profiling_failures", []).append(dict(rank=rank, communication=record, **capture))
                 result["errors"].extend(failures)
                 cancelled.set()
             return None
 
     result["ranks"] = []
     error_lock = threading.Lock()
+    profiling_lock = threading.Lock()
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(launch, mapping) for mapping in mappings]
         for future in concurrent.futures.as_completed(futures):
@@ -1271,6 +1305,27 @@ def run(config):
                         start_failure="LOG_COLLECT_FAILED", exit_failure="LOG_COLLECT_FAILED")
             result = read_json(node_log / "result.json")
             failures.extend(result_errors(result, run_id, manifest, expected_ranks(index), config.chain))
+            if config.chain and config.chain["run_mode"] == "breakdown":
+                # Remote artifacts now live beneath this node's collected log directory.
+                evidence = [*failures, *result.get("errors", []), *result.get("profiling_failures", [])]
+                for item in evidence:
+                    if (isinstance(item, dict) and item.get("communication_completed") is True
+                            and type(item.get("rank")) is int):
+                        item["records_path"] = str(node_log / f"rank-{item['rank']}.records.v1")
+                        item["report_dir"] = str(node_log / f"profile-rank-{item['rank']}")
+                        capture = item.get("communication", {}).get("breakdown")
+                        if isinstance(capture, dict):
+                            capture["records_path"] = item["records_path"]
+                            capture["artifacts"] = {name: str(Path(item["report_dir"]) / name)
+                                                    for name in ("perfetto_trace.json", "analysis.md", "report.html")}
+                for record in result.get("ranks", []):
+                    if (not isinstance(record, dict) or type(record.get("rank")) is not int
+                            or not isinstance(record.get("breakdown"), dict)):
+                        continue
+                    record["breakdown"]["records_path"] = str(node_log / f"rank-{record['rank']}.records.v1")
+                    record["breakdown"]["artifacts"] = {
+                        name: str(node_log / f"profile-rank-{record['rank']}" / name)
+                        for name in ("perfetto_trace.json", "analysis.md", "report.html")}
         except FileNotFoundError as error:
             # 拉起/异常退出已说明为何没有完成记录，避免追加一个伪解析失败。
             if not failures:
@@ -1344,7 +1399,8 @@ def run(config):
                     report["relay_links_validated"] = True
                     if config.chain["run_mode"] == "breakdown":
                         report["traces"] = measurements.export_breakdown_traces(records,
-                            dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha)
+                            dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha,
+                            config.install / "share/tilexr/profiling/server_dedup.mapping.json")
                 except (ValueError, TypeError, KeyError, OSError) as error:
                     failure = Failure("RESULT_FAILED", f"Dispatch 结果或测量汇总失败：{error}").record()
                     errors.append(failure)

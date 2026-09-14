@@ -17,7 +17,9 @@ class ServerDedupAddressSpaceTests(unittest.TestCase):
         for profiling in (0, 1):
             with self.subTest(profiling=profiling):
                 command = [compiler, "-std=c++17", "-fsyntax-only", "-DTILEXR_TEST_GM_ADDRESS_SPACE=1",
-                           f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={profiling}"]
+                           "-D__CCE__=1", "-D__CCE_IS_AICORE__=1"]
+                if profiling:
+                    command.append("-DTILEXR_ENABLE_PROFILING=1")
                 command.extend("-I" + str(ROOT / path) for path in includes)
                 command.append(str(ROOT / "src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"))
                 # Keep checking the staged receiver even while the current

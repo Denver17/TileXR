@@ -1,6 +1,7 @@
 """Pair numeric event records and build the normalized profiling model."""
 
 import math
+from bisect import bisect_right
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -50,6 +51,37 @@ def _pair_stream(
     samples = []
     diagnostics: List[Diagnostic] = []
 
+    def abandon_interval(key: Tuple[int, Optional[int]], begin: RawRecord) -> None:
+        instance_label = "" if key[1] is None else f" instance {key[1]}"
+        diagnostics.append(
+            _diagnostic(
+                "unmatched_begin",
+                f"stage {key[0]}{instance_label} began without a matching end event",
+                stream.source,
+                stream_id=stream.id,
+                stage_id=key[0],
+                instance_id=key[1],
+                event_id=begin.event_id,
+                record_index=begin.source_index,
+                raw_timestamp=begin.timestamp,
+            )
+        )
+
+    def abandon_children(stage_id: int) -> None:
+        for key in list(open_intervals):
+            if key[0] in descendants[stage_id]:
+                abandon_interval(key, open_intervals.pop(key))
+        invalid_intervals.difference_update(
+            key for key in tuple(invalid_intervals) if key[0] in descendants[stage_id]
+        )
+
+    descendants = {stage.id: set() for stage in mapping.stages}
+    for stage in mapping.stages:
+        parent = stage.parent_stage_id
+        while parent is not None:
+            descendants[parent].add(stage.id)
+            parent = stages[parent].parent_stage_id
+
     for record in stream.records:
         event = events.get(record.event_id)
         if event is None:
@@ -83,6 +115,10 @@ def _pair_stream(
             continue
 
         if event.edge == "begin":
+            # A new parent invocation cannot complete a child from an earlier
+            # invocation, even when both use the same numeric event IDs.
+            if not any(key[0] == stage.id and key != interval_key for key in open_intervals):
+                abandon_children(stage.id)
             if interval_key in invalid_intervals:
                 continue
             if interval_key in open_intervals:
@@ -109,6 +145,7 @@ def _pair_stream(
             continue
 
         if interval_key in invalid_intervals:
+            invalid_intervals.remove(interval_key)
             continue
         begin = open_intervals.pop(interval_key, None)
         if begin is None:
@@ -153,27 +190,17 @@ def _pair_stream(
             )
         )
 
-    for (stage_id, instance_id), begin in sorted(
+        if not any(key[0] == stage.id for key in open_intervals):
+            abandon_children(stage.id)
+
+    for key, begin in sorted(
         open_intervals.items(),
         key=lambda item: (
             item[0][0],
             item[0][1] if item[0][1] is not None else -1,
         ),
     ):
-        instance_label = "" if instance_id is None else f" instance {instance_id}"
-        diagnostics.append(
-            _diagnostic(
-                "unmatched_begin",
-                f"stage {stage_id}{instance_label} began without a matching end event",
-                stream.source,
-                stream_id=stream.id,
-                stage_id=stage_id,
-                instance_id=instance_id,
-                event_id=begin.event_id,
-                record_index=begin.source_index,
-                raw_timestamp=begin.timestamp,
-            )
-        )
+        abandon_interval(key, begin)
 
     samples.sort(
         key=lambda sample: (
@@ -186,13 +213,24 @@ def _pair_stream(
     samples_by_stage: Dict[int, List[StageSample]] = {}
     for sample in samples:
         samples_by_stage.setdefault(sample.stage_id, []).append(sample)
+    # Prefix maxima allow overlapping named instances while avoiding a scan of
+    # every parent for every repeated child (quadratic for long captures).
+    parent_bounds = {}
+    for stage_id, stage_samples in samples_by_stage.items():
+        starts = []
+        ends = []
+        for sample in sorted(stage_samples, key=lambda item: item.source_index):
+            starts.append(sample.source_index)
+            end = sample.end_source_index if sample.end_source_index is not None else sample.source_index
+            ends.append(max(ends[-1] if ends else -1, end))
+        parent_bounds[stage_id] = (starts, ends)
     for sample in samples:
         if sample.parent_stage_id is None:
             continue
-        if not any(
-            parent.raw_start <= sample.raw_start and parent.raw_end >= sample.raw_end
-            for parent in samples_by_stage.get(sample.parent_stage_id, [])
-        ):
+        starts, ends = parent_bounds.get(sample.parent_stage_id, ([], []))
+        index = bisect_right(starts, sample.source_index) - 1
+        sample_end = sample.end_source_index if sample.end_source_index is not None else sample.source_index
+        if index < 0 or ends[index] < sample_end:
             diagnostics.append(
                 _diagnostic(
                     "child_outside_parent",
@@ -231,6 +269,10 @@ def _pair_stream(
         stage_metrics=definition.stage_metrics,
         attributes=definition.attributes,
     )
+    diagnostics = [
+        replace(item, details={**item.details, "launch_id": definition.launch_id})
+        for item in diagnostics
+    ]
     return lane, tuple(diagnostics), usable
 
 
@@ -265,11 +307,61 @@ def _normalize_timeline(
     return tuple(normalized_launches)
 
 
+def _split_stream(stream: RecordStream, mapping: ProfilingMapping) -> Dict[int, RecordStream]:
+    """Split only on declared critical begins; raw timestamps are not launch IDs."""
+    critical_ids = {stage.id for stage in mapping.stages if stage.critical}
+    starts = {
+        event.id for event in mapping.events
+        if event.stage_id in critical_ids and event.edge == "begin"
+    }
+    chunks = {}
+    begin_indices = [
+        index for index, record in enumerate(stream.records) if record.event_id in starts
+    ]
+    if not begin_indices:
+        # Keep a stream with no begin available for diagnosis, including empty
+        # streams. It cannot supply a usable launch interval.
+        return {-1: stream}
+    if begin_indices[0]:
+        chunks[-1] = replace(stream, records=stream.records[:begin_indices[0]])
+    ends = begin_indices[1:] + [len(stream.records)]
+    for launch_id, (begin, end) in enumerate(zip(begin_indices, ends)):
+        chunks[launch_id] = replace(stream, records=stream.records[begin:end])
+    return chunks
+
+
+def _validate_launch_count(value: Optional[int], name: str, allow_zero: bool) -> None:
+    if value is not None and (
+        isinstance(value, bool) or not isinstance(value, int) or value < (0 if allow_zero else 1)
+    ):
+        qualifier = "non-negative" if allow_zero else "positive"
+        raise ProfilingInputError(f"{name} must be a {qualifier} integer")
+
+
 def load_profile_run(
     mapping_input: MappingInput,
     record_paths: Sequence[Path],
+    *,
+    skip_launches: int = 0,
+    launch_count: Optional[int] = None,
+    expected_launch_count: Optional[int] = None,
 ) -> ProfileRun:
-    """Validate a marker mapping and record files, then normalize one run."""
+    """Normalize launches in capture order, optionally selecting measured launches.
+
+    Launch IDs are the ordinal of critical begins in each stream, not inferred
+    from unsynchronized timestamps. Completeness diagnostics cover the entire
+    capture even when warmup or later launches are excluded from timing reports.
+    """
+    if skip_launches is None:
+        raise ProfilingInputError("skip_launches must be a non-negative integer")
+    _validate_launch_count(skip_launches, "skip_launches", True)
+    _validate_launch_count(launch_count, "launch_count", False)
+    _validate_launch_count(expected_launch_count, "expected_launch_count", False)
+    if expected_launch_count is not None and (
+        skip_launches >= expected_launch_count or
+        (launch_count is not None and skip_launches + launch_count > expected_launch_count)
+    ):
+        raise ProfilingInputError("launch selection exceeds expected_launch_count")
     mapping = load_mapping(mapping_input)
     record_files = load_record_files(record_paths)
     capture_id = record_files[0].capture_id
@@ -295,24 +387,16 @@ def load_profile_run(
                 record_files[0].source,
             )
         )
-    lanes: List[Lane] = []
-    usable_stream_count = 0
+    lanes_by_launch: Dict[int, List[Lane]] = {}
+    usable_streams = set()
+    launch_counts = {}
+    usable_lane_count = 0
     dropped_record_count = 0
     dropped_stream_count = 0
     overflowed_stream_count = 0
 
     for stream_id in sorted(streams_by_id):
         stream = streams_by_id[stream_id]
-        definition = StreamDefinition(
-            id=stream.id,
-            launch_id=0,
-            rank=stream.id >> 16,
-            host=None,
-            device=None,
-            core=stream.id & 0xFFFF,
-            attributes={},
-            stage_metrics=(),
-        )
         if not stream.complete:
             diagnostics.append(
                 _diagnostic(
@@ -344,29 +428,68 @@ def load_profile_run(
                 )
             )
         dropped_record_count += stream.dropped_count
-        lane, pairing_diagnostics, usable = _pair_stream(stream, definition, mapping)
-        diagnostics.extend(pairing_diagnostics)
-        lanes.append(lane)
-        if usable:
-            usable_stream_count += 1
+        chunks = _split_stream(stream, mapping)
+        launch_counts[stream_id] = sum(launch_id >= 0 for launch_id in chunks)
+        for launch_id, chunk in chunks.items():
+            definition = StreamDefinition(
+                id=stream.id,
+                launch_id=launch_id,
+                rank=stream.id >> 16,
+                host=None,
+                device=None,
+                core=stream.id & 0xFFFF,
+                attributes={"launch_identity": "critical_begin_ordinal"},
+                stage_metrics=(),
+            )
+            lane, pairing_diagnostics, usable = _pair_stream(chunk, definition, mapping)
+            diagnostics.extend(pairing_diagnostics)
+            lanes_by_launch.setdefault(launch_id, []).append(lane)
+            selected = launch_id >= skip_launches and (
+                launch_count is None or launch_id < skip_launches + launch_count
+            )
+            if usable and selected:
+                usable_streams.add(stream_id)
+                usable_lane_count += 1
 
-    launches = (
-        Launch(
-            id=0,
-            lanes=tuple(
-                sorted(
-                    lanes,
-                    key=lambda lane: (
-                        lane.rank,
-                        lane.host or "",
-                        lane.device or "",
-                        lane.core,
-                        lane.stream_id,
-                    ),
+    observed_launch_count = max(launch_counts.values(), default=0)
+    target_launch_count = expected_launch_count or observed_launch_count
+    missing_lane_count = 0
+    for stream_id, count in launch_counts.items():
+        if count != target_launch_count:
+            missing_lane_count += max(0, target_launch_count - count)
+            diagnostics.append(
+                _diagnostic(
+                    "launch_count_mismatch",
+                    f"stream {stream_id} has {count} launch begin(s); expected {target_launch_count}; "
+                    "a wholly missing launch cannot be located from timestamps",
+                    streams_by_id[stream_id].source,
+                    stream_id=stream_id,
+                    observed_launch_count=count,
+                    expected_launch_count=target_launch_count,
                 )
-            ),
-            attributes={},
-        ),
+            )
+    stop = skip_launches + launch_count if launch_count is not None else observed_launch_count
+    if skip_launches >= observed_launch_count or (
+        launch_count is not None and stop > observed_launch_count
+    ):
+        diagnostics.append(
+            _diagnostic(
+                "launch_selection_incomplete",
+                "the requested launch selection is not fully present in the capture",
+                None,
+                skip_launches=skip_launches,
+                launch_count=launch_count,
+                observed_launch_count=observed_launch_count,
+            )
+        )
+    launches = tuple(
+        Launch(
+            id=launch_id,
+            lanes=tuple(sorted(lanes, key=lambda lane: (lane.rank, lane.core, lane.stream_id))),
+            attributes={"identity": "critical_begin_ordinal"} if launch_id >= 0 else {"fragment": True},
+        )
+        for launch_id, lanes in sorted(lanes_by_launch.items())
+        if skip_launches <= launch_id < stop or (launch_id == -1 and skip_launches == 0)
     )
     launches = _normalize_timeline(launches, mapping)
 
@@ -388,14 +511,23 @@ def load_profile_run(
         status=status,
         launches=launches,
         diagnostics=tuple(diagnostics),
-        attributes={},
+        attributes={
+            "observed_launch_count": observed_launch_count,
+            "expected_launch_count": expected_launch_count,
+            "skip_launches": skip_launches,
+            "launch_count": launch_count,
+            "selected_launch_ids": [launch.id for launch in launches if launch.id >= 0],
+            "launch_identity": "critical_begin_ordinal",
+            "missing_launch_lane_count": missing_lane_count,
+            "usable_launch_lane_count": usable_lane_count,
+        },
         sources=(mapping.source,) + tuple(record_file.source for record_file in record_files),
         expected_stream_count=len(streams_by_id),
         present_stream_count=len(streams_by_id),
-        usable_stream_count=usable_stream_count,
+        usable_stream_count=len(usable_streams),
         missing_stream_count=0,
         dropped_stream_count=dropped_stream_count,
         overflowed_stream_count=overflowed_stream_count,
-        excluded_stream_count=len(streams_by_id) - usable_stream_count,
+        excluded_stream_count=len(streams_by_id) - len(usable_streams),
         dropped_record_count=dropped_record_count,
     )

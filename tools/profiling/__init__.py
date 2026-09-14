@@ -1,7 +1,7 @@
 """Producer-neutral profiling analysis and report generation."""
 
 from .model import MAPPING_SCHEMA, RECORDS_SCHEMA, ProfilingInputError
-from .cli import GeneratedReports, generate_reports
+from .cli import GeneratedReports, generate_reports, generate_reports_for_run
 
 
 __all__ = [
@@ -10,4 +10,5 @@ __all__ = [
     "ProfilingInputError",
     "RECORDS_SCHEMA",
     "generate_reports",
+    "generate_reports_for_run",
 ]

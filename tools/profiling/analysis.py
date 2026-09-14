@@ -146,10 +146,11 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
                 if launch_id == critical_lane.launch_id and lane.stream_id == critical_lane.stream_id
             )
 
-        lanes_with_samples: Dict[int, Tuple[Lane, int, float]] = {}
-        for _, lane, sample in entries:
-            previous = lanes_with_samples.get(lane.stream_id, (lane, 0, 0.0))
-            lanes_with_samples[lane.stream_id] = (
+        lanes_with_samples: Dict[Tuple[int, int], Tuple[Lane, int, float]] = {}
+        for launch_id, lane, sample in entries:
+            identity = (launch_id, lane.stream_id)
+            previous = lanes_with_samples.get(identity, (lane, 0, 0.0))
+            lanes_with_samples[identity] = (
                 lane,
                 previous[1] + 1,
                 previous[2] + sample.duration_us,
@@ -201,9 +202,14 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
             bandwidth_gbps=bandwidth,
         )
 
-    core_latencies = [sample.duration_us for _, _, sample in lane_entries]
-    rank_imbalance = _ratio(list(invocation_durations.values()))
-    core_imbalance = _ratio(core_latencies)
+    rank_latencies: Dict[int, List[float]] = {}
+    core_latencies: Dict[int, List[float]] = {}
+    for (launch_id, _), duration in invocation_durations.items():
+        rank_latencies.setdefault(launch_id, []).append(duration)
+    for launch_id, _, sample in lane_entries:
+        core_latencies.setdefault(launch_id, []).append(sample.duration_us)
+    rank_imbalance = max((_ratio(values) for values in rank_latencies.values()), default=1.0)
+    core_imbalance = max((_ratio(values) for values in core_latencies.values()), default=1.0)
 
     findings: List[Finding] = []
     non_total = [
@@ -224,10 +230,22 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
             )
         )
 
-    wait_sync_share = sum(
-        summary.share_of_critical
-        for summary in stage_summaries.values()
-        if summary.category in {"wait", "sync"}
+    # Nested waits (or overlapping named instances) cover the same cycles.
+    # Count their union on the critical lane instead of adding inclusive times.
+    wait_sync_intervals = sorted(
+        (sample.raw_start, sample.raw_end)
+        for sample in (critical_lane_model.samples if critical_lane_model else ())
+        if sample.kind == "interval" and sample.category in {"wait", "sync"}
+    )
+    covered_cycles = 0
+    covered_end = None
+    for begin, end in wait_sync_intervals:
+        covered_cycles += max(0, end - max(begin, covered_end if covered_end is not None else begin))
+        covered_end = max(covered_end if covered_end is not None else end, end)
+    wait_sync_share = (
+        covered_cycles / run.cycles_per_us / critical_lane.duration_us
+        if critical_lane is not None and critical_lane.duration_us > 0.0 and run.cycles_per_us
+        else 0.0
     )
     if wait_sync_share >= 0.20:
         findings.append(

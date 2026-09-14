@@ -277,7 +277,7 @@ class ProfilingPairingTests(unittest.TestCase):
         self.assertIn("unmatched_begin", codes)
         self.assertIn("invalid_critical_interval_count", codes)
 
-    def test_overlapping_critical_begin_does_not_fabricate_latency(self):
+    def test_new_critical_begin_retains_truncation_and_starts_a_new_launch(self):
         records = [(1000, 1), (1500, 1), (3000, 6)]
         with tempfile.TemporaryDirectory() as tmp:
             mapping_path, records_path = write_capture(
@@ -286,8 +286,11 @@ class ProfilingPairingTests(unittest.TestCase):
             run = load_profile_run(mapping_path, [records_path])
 
         self.assertEqual(run.status, "incomplete")
-        self.assertEqual(run.usable_stream_count, 0)
+        self.assertEqual(run.usable_stream_count, 1)
+        self.assertEqual([launch.id for launch in run.launches], [0, 1])
         self.assertFalse(any(sample.critical for sample in run.launches[0].lanes[0].samples))
+        total = next(sample for sample in run.launches[1].lanes[0].samples if sample.critical)
+        self.assertEqual((total.raw_start, total.raw_end), (1500, 3000))
 
     def test_rejects_non_finite_timestamp_conversion(self):
         mapping = mapping_document(cycles_per_us=5e-324)

@@ -3,62 +3,38 @@
 
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_profile.h"
-#include "tilexr_ep_server_dedup_detail_profile.h"
+#include "tilexr_profiling.h"
 
 namespace TileXREp {
-using namespace AscendC;
+// Only event-ID translation lives here; the standard writer owns all state.
+// Markers are passive Scalar observations, with no additional pipe barriers.
 class ServerDedupProfile {
 public:
-    __aicore__ inline ServerDedupDetailProfile &Detail() { return detail_; }
+    __aicore__ inline void Init(GM_ADDR commArgs, uint32_t launchSlot)
+    {
+        writer_.Initialize(commArgs, AscendC::GetBlockIdx(), launchSlot,
+            kEpServerDedupProfilingRecordsPerLaunch);
+    }
     __aicore__ inline void Mark(uint32_t point)
     {
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-        AscendC::PipeBarrier<PIPE_ALL>();
-        time_[point] = static_cast<uint64_t>(AscendC::GetSystemCycle());
-#else
-        (void)point;
-#endif
+        writer_.Record(kEpServerDedupMainEventBase + point);
     }
-    __aicore__ inline void Skip(uint32_t point, uint32_t previous)
+    __aicore__ inline void Mark(EpDedupDetailPoint point)
     {
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-        time_[point] = time_[previous];
-#else
-        (void)point; (void)previous;
-#endif
+        writer_.Record(kEpServerDedupDetailEventBase + uint32_t(point));
     }
-    __aicore__ inline void Flush(const __gm__ TileXR::CommArgs *args, uint64_t generation)
+    __aicore__ inline void Begin(EpDedupDetailMetric operation)
     {
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-        const uint32_t core = AscendC::GetBlockIdx();
-        for (uint32_t segment = 0; segment < kEpServerDedupProfileSegments; ++segment) {
-            __gm__ EpServerDedupProfileRecord *record =
-                reinterpret_cast<__gm__ EpServerDedupProfileRecord *>(args->peerMems[args->rank]) +
-                    core * kEpServerDedupProfileSegments + segment;
-            record->marker = kEpServerDedupProfileMarker;
-            record->version = kEpServerDedupProfileVersion;
-            record->recordBytes = sizeof(*record);
-            record->rank = args->rank;
-            record->core = core;
-            record->blockDim = kEpServerDedupCoreNum;
-            record->segment = segment;
-            record->generation = generation;
-            for (uint32_t i = 0; i < 4U; ++i) record->time[i] = time_[segment * 4U + i];
-            AscendC::GlobalTensor<uint8_t> output;
-            output.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(record), sizeof(*record));
-            AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
-                AscendC::DcciDst::CACHELINE_OUT>(output);
-        }
-        detail_.Flush(args, generation);
-#else
-        (void)args; (void)generation;
-#endif
+        writer_.Record(kEpServerDedupOperationEventBase + 2U * uint32_t(operation));
     }
+    __aicore__ inline void End(EpDedupDetailMetric operation)
+    {
+        writer_.Record(kEpServerDedupOperationEventBase + 2U * uint32_t(operation) + 1U);
+    }
+    __aicore__ inline void PacketIssue() { writer_.Record(kEpServerDedupPacketIssueEvent); }
+    __aicore__ inline void Publish() { writer_.Publish(); }
 private:
-    ServerDedupDetailProfile detail_;
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    uint64_t time_[kEpServerDedupProfilePoints] {};
-#endif
+    TileXR::DirectProfilingWriter writer_;
 };
 } // namespace TileXREp
 #endif

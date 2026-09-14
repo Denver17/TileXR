@@ -24,7 +24,9 @@ constexpr uint32_t TILEXR_PROFILING_GM_ALIGNMENT_RECORDS = 8U;
 constexpr uint32_t TILEXR_PROFILING_COUNT_STRIDE = 8U;
 constexpr uint32_t TILEXR_PROFILING_MAX_CORE_COUNT = 64U;
 constexpr uint32_t TILEXR_PROFILING_DEFAULT_RECORDS_PER_CORE = 4096U;
-constexpr uint32_t TILEXR_PROFILING_MAX_RECORDS_PER_CORE = 65536U;
+// The whole capture may contain multiple large launches. Bound the worst-case
+// 64-core records.v1 export (including headers) below 64 GiB.
+constexpr uint32_t TILEXR_PROFILING_MAX_RECORDS_PER_CORE = 0x03fffff8U;
 
 constexpr uint32_t TileXRProfilingStreamId(uint32_t rank, uint32_t core)
 {
@@ -126,6 +128,9 @@ public:
         GM_ADDR commArgsGM, uint32_t logicalCore,
         uint32_t launchSlot, uint32_t recordsPerLaunch)
     {
+        enabled_ = false;
+        cursor_ = 0U;
+        dropped_ = 0U;
         if (commArgsGM == nullptr) {
             return;
         }
@@ -168,6 +173,13 @@ public:
         enabled_ = true;
     }
 
+    __attribute__((always_inline)) inline __aicore__ void Record(uint32_t eventId)
+    {
+        if (enabled_ && eventId != 0U) {
+            RecordAt(eventId, static_cast<uint64_t>(AscendC::GetSystemCycle()));
+        }
+    }
+
     __attribute__((always_inline)) inline __aicore__ void RecordAt(
         uint32_t eventId, uint64_t timestamp)
     {
@@ -202,9 +214,17 @@ public:
             cursor_ = aligned;
         }
         if (dropped_ != 0U) {
-            droppedCount_[0] = dropped_;
+            // Launches sharing a core stream must execute in order. Preserve
+            // overflow from earlier launches, including after repeated Publish.
+            const uint32_t previous = droppedCount_[0];
+            const uint32_t maximum = static_cast<uint32_t>(-1);
+            droppedCount_[0] = previous > maximum - dropped_ ?
+                maximum : previous + dropped_;
+            dropped_ = 0U;
         }
-        recordCount_[0] = launchBase_ + cursor_;
+        if (recordCount_[0] < launchBase_ + cursor_) {
+            recordCount_[0] = launchBase_ + cursor_;
+        }
     }
 
 private:
@@ -258,6 +278,10 @@ public:
     }
 
     __attribute__((always_inline)) inline __aicore__ void RecordAt(uint32_t, uint64_t)
+    {
+    }
+
+    __attribute__((always_inline)) inline __aicore__ void Record(uint32_t)
     {
     }
 

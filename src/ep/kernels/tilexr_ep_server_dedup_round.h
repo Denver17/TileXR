@@ -3,7 +3,7 @@
 
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_count_layout.h"
-#include "tilexr_ep_server_dedup_detail_profile.h"
+#include "tilexr_ep_server_dedup_profile.h"
 
 namespace TileXREp {
 
@@ -11,7 +11,7 @@ namespace TileXREp {
 // Each producer owns one 32B epoch record on every peer. No shared flag reset:
 // >= accepts a peer already in a later call without missing this completion.
 __aicore__ inline void CompleteServerDedupRound(const __gm__ TileXR::CommArgs *args,
-    int64_t magic, AscendC::TPipe *pipe, ServerDedupDetailProfile *profile = nullptr)
+    int64_t magic, AscendC::TPipe *pipe, ServerDedupProfile *profile = nullptr)
 {
     using namespace AscendC;
     pipe->Reset();
@@ -36,10 +36,9 @@ __aicore__ inline void CompleteServerDedupRound(const __gm__ TileXR::CommArgs *a
     GlobalTensor<int64_t> inbox;
     inbox.SetGlobalBuffer(reinterpret_cast<__gm__ int64_t *>(args->peerMems[args->rank] + offset));
     for (int peer = 0; peer < args->rankSize; ++peer) {
-        const uint64_t peerBegin = profile != nullptr ? profile->Now() : 0U;
+        if (profile != nullptr) profile->Begin(EpDedupDetailMetric::RoundPeerWait);
         bool ready = false;
         while (!ready) {
-            if (profile != nullptr) profile->Count(EpDedupDetailCounter::RoundPolls);
             DataCopy(recv, inbox[uint64_t(peer) * 4U], 4U);
             const TEventID loaded = pipe->FetchEventID(HardEvent::MTE2_S);
             SetFlag<HardEvent::MTE2_S>(loaded); WaitFlag<HardEvent::MTE2_S>(loaded);
@@ -47,8 +46,7 @@ __aicore__ inline void CompleteServerDedupRound(const __gm__ TileXR::CommArgs *a
             for (uint32_t word = 0; word < 4U; ++word)
                 ready = ready && recv.GetValue(word) >= magic;
         }
-        if (profile != nullptr && profile->Sample(EpDedupDetailMetric::RoundPeerWait, peerBegin))
-            profile->Set(EpDedupDetailCounter::RoundSlowestPeer, uint32_t(peer));
+        if (profile != nullptr) profile->End(EpDedupDetailMetric::RoundPeerWait);
     }
     if (profile != nullptr) profile->Mark(EpDedupDetailPoint::WaitEnd);
 }

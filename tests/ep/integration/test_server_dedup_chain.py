@@ -9,6 +9,11 @@ import subprocess
 import tempfile
 import time
 import unittest
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/validation"))
+import measurements
+from test_profiling_fixture import CAPTURE_ID
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -63,9 +68,10 @@ class ChainConsumerTests(unittest.TestCase):
         result = subprocess.run([
             compiler, "-std=c++14", "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
             "-I", str(include.parent), "-I", str(ROOT / "src/include"),
-            "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
+            "-I", str(ROOT / "src/comm"), "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
             str(SOURCE / "test_tilexr_ep_server_dedup_chain.cpp"),
             str(SOURCE / "server_dedup_chain_stub.cpp"),
+            str(ROOT / "src/comm/tilexr_profiling_runtime.cpp"),
             str(ROOT / "src/ep/host/ep_memory_server_dedup_layout.cpp"),
             str(ROOT / "src/ep/host/ep_memory_layout.cpp"),
             str(ROOT / "src/ep/host/ep_layout.cpp"),
@@ -106,6 +112,9 @@ class ChainConsumerTests(unittest.TestCase):
     def start(self, rank, *, environment=None, run="run-identity", stderr=subprocess.PIPE):
         env = dict(self.environment, TEST_RANK=str(rank))
         env.update(environment or {})
+        if env.get("TILEXR_VALIDATION_RUN_MODE") == "breakdown":
+            env.setdefault("TILEXR_PROFILING_CAPTURE_ID", CAPTURE_ID)
+            env.setdefault("TILEXR_PROFILING_RECORDS_PATH", str(Path(self.trace.name) / f"rank-{rank}.records.v1"))
         process = subprocess.Popen([str(self.executable), run, "build-identity", "unknown", f"node-{rank // 8}",
             str(rank // 8), str(rank % 8), str(rank % 8), str(rank), "16"],
             env=env, stdout=subprocess.PIPE, stderr=stderr, text=True)
@@ -411,126 +420,47 @@ class ChainConsumerTests(unittest.TestCase):
                 for rank in range(16):
                     (Path(self.trace.name) / str(rank)).unlink()
 
-    def check_dispatch_breakdown(self, evidence):
-        self.assertEqual(evidence["generation"], 5)
-        self.assertEqual(evidence["schema_version"], 6)
-        self.assertEqual(evidence["kernel_scope"], "dispatch")
-        self.assertEqual(len(evidence["records"]), 64)
-        self.assertEqual([record["core"] for record in evidence["records"]], list(range(64)))
-        rows = first_hops = relay_packets = 0
-        for core in evidence["records"]:
-            self.assertLessEqual(core["prefix_end"], core["recv_data_end"])
-            self.assertLessEqual(core["recv_data_end"], core["end"])
-            detail = core["detail"]
-            self.assertEqual(set(detail), {"points", "metrics", "counters"})
-            points, metrics, counters = detail["points"], detail["metrics"], detail["counters"]
-            self.assertEqual(len(points), 14)
-            self.assertEqual(len(metrics), 7)
-            self.assertEqual(len(counters), 10)
-            rows += counters["rows"]
-            first_hops += counters["first_hop_rows"]
-            relay_packets += counters["relay_packets"]
-            self.assertEqual(metrics["acquire_load"]["count"], counters["rows"])
-            self.assertEqual(metrics["atomic"]["count"], counters["first_hop_rows"])
-            self.assertEqual(metrics["probe"]["count"], counters["probe_batches"])
-            if core["core"] < 48:
-                self.assertEqual(counters["rows"], 0)
-                self.assertEqual(points["recv_begin"], 0)
-                self.assertEqual(bool(core["send_packets"]), core["core"] < evidence["bs"])
-                self.assertLessEqual(core["first_hop_count"], len(core["send_packets"]))
-            elif counters["rows"]:
-                self.assertGreater(counters["probe_batches"], counters["empty_probe_batches"])
-                self.assertGreaterEqual(counters["probe_slots"], counters["rows"])
-                self.assertGreaterEqual(counters["lanes"], 1)
-                self.assertLessEqual(counters["lanes"], 8)
-            else:
-                self.assertEqual(points["clear_end"], points["prepare_end"])
-            if core["core"] == 63:
-                self.assertEqual(metrics["round_peer_wait"]["count"], evidence["rank_size"])
-                self.assertGreaterEqual(counters["round_polls"], evidence["rank_size"])
-                self.assertLess(counters["round_slowest_peer"], evidence["rank_size"])
-            else:
-                self.assertEqual(metrics["round_peer_wait"]["count"], 0)
-                self.assertEqual(points["wait_end"], points["sync_end"])
-        return rows, first_hops, relay_packets
+    def test_breakdown_uses_standard_export_after_communication_cleanup(self):
+        config = dict(run_mode="breakdown", loops=3, warmup=2, block_dim="auto")
+        for fault in ("", "missing", "stale", "capture", "overflow"):
+            env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                       TILEXR_VALIDATION_WARMUP="2", TEST_PROFILE_FAULT=fault)
+            processes = [self.start(rank, environment=env) for rank in range(16)]
+            for rank, process in enumerate(processes):
+                output, errors = process.communicate(timeout=30)
+                with self.subTest(rank=rank, fault=fault):
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")), 1)
+                    marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
+                    self.assertEqual(marker["schema"], measurements.RECORDS_SCHEMA)
+                    self.assertEqual(marker["launches"], 5)
+                    calls = self.trace_lines(rank)
+                    self.assertEqual(calls.count("sync"), 1)
+                    self.assertEqual(calls.count("profiling-export"), 1)
+                    self.assertGreater(calls.index("profiling-export"), calls.index("free"))
+                    self.assertLess(calls.index("profiling-export"), calls.index("finalize"))
+                    if rank == 0:
+                        path = Path(marker["records_path"])
+                        report = Path(self.trace.name) / f"report-{fault or 'valid'}"
+                        if fault in ("missing", "capture"):
+                            with self.assertRaises(ValueError):
+                                measurements.breakdown_record(path, config, rank, CAPTURE_ID, report)
+                        else:
+                            record = measurements.breakdown_record(path, config, rank, CAPTURE_ID, report)
+                            self.assertEqual(record["status"], "incomplete" if fault else "complete")
+                            if not fault:
+                                self.assertEqual(record["sample_us"], [0.7] * 3)
+                                self.assertEqual(record["stages_us"]["atomic"]["sample_count"], 3 * 64)
+            shutil.rmtree(self.trace.name)
+            Path(self.trace.name).mkdir()
 
-    def test_count_breakdown_reads_final_generation_and_rejects_bad_records(self):
-        for fault in (None, "missing", "stale", "legacy", "core", "time", "recv-time", "last-segment", "reserved", "issue-header", "issue-count", "issue-time"):
-            with self.subTest(fault=fault):
-                env = dict(TILEXR_VALIDATION_CHECKPOINT="ep-sdedup-p2-dispatch",
-                           TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
-                           TILEXR_VALIDATION_WARMUP="2")
-                processes = [self.start(rank, environment=dict(env, **(
-                    {"TEST_PROFILE_FAULT": fault} if rank == 1 and fault else {}))) for rank in range(16)]
-                for rank, process in enumerate(processes):
-                    output, errors = process.communicate(timeout=15)
-                    if rank == 1 and fault:
-                        self.assertNotEqual(process.returncode, 0)
-                        self.assertIn("stage=breakdown-read", errors)
-                        self.assertNotIn("EP_SERVER_DEDUP_BREAKDOWN_PASS", output)
-                        self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
-                    else:
-                        self.assertEqual(process.returncode, 0, errors)
-                        evidence = json.loads(next(line.split(" ", 1)[1] for line in output.splitlines()
-                                                   if line.startswith("EP_SERVER_DEDUP_BREAKDOWN_PASS ")))
-                        detail_rows, first_hops, relays = self.check_dispatch_breakdown(evidence)
-                        record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
-                        self.assertEqual(detail_rows, record["first_hop_received"] + record["direct_received"] + record["relay_received"])
-                        self.assertEqual(first_hops, record["first_hop_received"])
-                        self.assertEqual(relays, record["relay_packets"])
-                        self.assertEqual(self.trace_lines(rank).count("sync"), 1)
-                        self.assertEqual(self.trace_lines(rank).count("detail-breakdown-read"), 1)
-                    (Path(self.trace.name) / str(rank)).unlink()
-
-    def test_receive_and_finish_breakdown_rejects_corrupt_detail_contracts(self):
-        for fault in ("marker", "stale", "core", "rank", "version", "size", "reserved", "point-reserved",
-                      "counter-reserved", "sender-point", "recv-parent", "recv-order", "finish-parent",
-                      "finish-order", "noncoordinator", "empty", "rows", "first-hop", "relays", "lanes",
-                      "blocks", "probes", "polls", "peer", "metric-count", "metric-interval", "metric-total",
-                      "metric-unused", "round-count", "round-interval", "atomic-subset"):
-            with self.subTest(fault=fault):
-                env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
-                           TILEXR_VALIDATION_WARMUP="2")
-                processes = [self.start(rank, environment=dict(env, **(
-                    {"TEST_PROFILE_FAULT": "detail-" + fault} if rank == 1 else {}))) for rank in range(16)]
-                for rank, process in enumerate(processes):
-                    output, errors = process.communicate(timeout=15)
-                    if rank == 1:
-                        self.assertNotEqual(process.returncode, 0, fault)
-                        self.assertIn("stage=breakdown-read", errors)
-                        self.assertIn("invalid dispatch detail core=", errors)
-                        self.assertNotIn("EP_SERVER_DEDUP_BREAKDOWN_PASS", output)
-                        self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
-                    else:
-                        self.assertEqual(process.returncode, 0, errors)
-                        evidence, = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")
-                        self.check_dispatch_breakdown(evidence)
-                    (Path(self.trace.name) / str(rank)).unlink()
-
-    def test_detail_breakdown_accepts_zero_duration_samples_and_quantized_multiblock_packets(self):
-        for zero_duration in (False, True):
-            with self.subTest(zero_duration=zero_duration):
-                env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
-                           TILEXR_VALIDATION_WARMUP="2", TILEXR_VALIDATION_BS="3", TILEXR_VALIDATION_H="7168",
-                           TILEXR_VALIDATION_TOPK="6", TILEXR_VALIDATION_QUANT_MODE="4")
-                if zero_duration:
-                    env["TEST_PROFILE_FAULT"] = "zero-duration"
-                processes = [self.start(rank, environment=env) for rank in range(16)]
-                for process in processes:
-                    output, errors = process.communicate(timeout=20)
-                    self.assertEqual(process.returncode, 0, errors)
-                    evidence, = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")
-                    self.check_dispatch_breakdown(evidence)
-                    for core in evidence["records"][48:]:
-                        if core["detail"]["counters"]["rows"]:
-                            self.assertGreater(core["detail"]["counters"]["blocks"], 1)
-                        for metric in core["detail"]["metrics"].values():
-                            if metric["count"]:
-                                self.assertGreater(metric["max_begin"], 0)
-                                if zero_duration:
-                                    self.assertEqual(metric["total_ticks"], 0)
-                                    self.assertEqual(metric["max_begin"], metric["max_end"])
-                for path in Path(self.trace.name).iterdir(): path.unlink()
+    def test_profile_capacity_overflow_is_rejected_before_communicator_creation(self):
+        process = self.start(0, environment=dict(TILEXR_VALIDATION_RUN_MODE="breakdown",
+            TILEXR_VALIDATION_LOOPS="1024", TILEXR_VALIDATION_WARMUP="0"))
+        output, errors = process.communicate(timeout=5)
+        self.assertNotEqual(process.returncode, 0, output + errors)
+        self.assertIn("profiling capture capacity", errors)
+        self.assertNotIn("comm-init", self.trace_lines(0))
 
     def test_breakdown_progress_is_flushed_before_blocking_api(self):
         for api, stage in (("launch", "launch"), ("sync", "stream-sync"),
@@ -567,7 +497,7 @@ class ChainConsumerTests(unittest.TestCase):
                            if line.startswith("EP_SERVER_DEDUP_PROGRESS ")]
                 self.assertEqual([entry["stage"] for entry in entries], [
                     "acl-init", "device", "communicator", "allocation", "chain-barrier", "launch", "launch",
-                    "stream-sync", "batch-barrier", "round-read", "count-read", "dispatch-read", "breakdown-read",
+                    "stream-sync", "batch-barrier", "round-read", "count-read", "dispatch-read",
                     "cleanup-buffers", "cleanup-communicator", "cleanup-stream", "cleanup-device", "cleanup-acl"])
                 launches = [entry for entry in entries if entry["stage"] == "launch"]
                 self.assertEqual([entry["batch"] for entry in launches], ["warmup", "measurement"])

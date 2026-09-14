@@ -106,6 +106,8 @@ def render_analysis_markdown(run: ProfileRun, analysis: AnalysisResult) -> str:
         [
             "## Stage Breakdown",
             "",
+            "Stage times and shares are inclusive; parent and child times must not be added.",
+            "",
             "| ID | Parent | Stage | Category | Samples | Instances | Total (us) | Median (us) | Min (us) | Max (us) | Critical lane (us) | Critical share | Bytes | Byte semantics | Bandwidth (GB/s) |",
             "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|",
         ]
@@ -305,7 +307,7 @@ a {{ color:var(--accent); }}
 <section><h2>Run Metadata</h2><table><thead><tr><th>Attribute</th><th>Value</th></tr></thead><tbody>{_metadata_rows(run)}</tbody></table></section>
 <section><h2>Bottlenecks</h2><table><thead><tr><th>Severity</th><th>Finding</th><th>Evidence</th><th>Recommendation</th></tr></thead><tbody>{_finding_rows(analysis.findings)}</tbody></table></section>
 <section><h2>Rank / Core Comparison</h2><table><thead><tr><th>Launch</th><th>Stream</th><th>Rank</th><th>Host</th><th>Device</th><th>Core</th><th>Usable</th><th>Critical latency (us)</th></tr></thead><tbody>{''.join(lane_rows) or '<tr><td colspan="8">No stream data is available.</td></tr>'}</tbody></table></section>
-<section><h2>Stage Breakdown</h2><table><thead><tr><th>ID</th><th>Parent</th><th>Stage</th><th>Category</th><th>Samples</th><th>Instances</th><th>Total (us)</th><th>Median (us)</th><th>Min (us)</th><th>Max (us)</th><th>Critical lane (us)</th><th>Critical share</th><th>Bytes</th><th>Byte semantics</th><th>GB/s</th></tr></thead><tbody>{_stage_rows(analysis.stages.values())}</tbody></table></section>
+<section><h2>Stage Breakdown</h2><p>Stage times and shares are inclusive; parent and child times must not be added.</p><table><thead><tr><th>ID</th><th>Parent</th><th>Stage</th><th>Category</th><th>Samples</th><th>Instances</th><th>Total (us)</th><th>Median (us)</th><th>Min (us)</th><th>Max (us)</th><th>Critical lane (us)</th><th>Critical share</th><th>Bytes</th><th>Byte semantics</th><th>GB/s</th></tr></thead><tbody>{_stage_rows(analysis.stages.values())}</tbody></table></section>
 <section><h2>Diagnostics</h2><table><thead><tr><th>Severity</th><th>Code</th><th>Message</th><th>Source</th><th>Details</th></tr></thead><tbody>{_diagnostic_rows(run.diagnostics)}</tbody></table></section>
 </main>
 </body>

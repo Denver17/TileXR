@@ -84,6 +84,7 @@ public:
     SDMAInitStatus GetSDMAInitStatus() const;
     std::string PrintDFX();
     int FinalizeProfiling();
+    int ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
     int GetInternalResource(void **resource) const;
     int AttachInternalResource(void *resource,
         TileXRInternalResourceDestroyFn destroy);
@@ -164,6 +165,7 @@ private:
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     std::unique_ptr<TileXRSDMATransport> sdmaTransport_;
     TileXRProfilingRuntimeConfig profilingConfig_ {};
+    TileXRProfilingLaunchState profilingLaunchState_;
     GM_ADDR profilingTimestampsDev_ = nullptr;
     GM_ADDR profilingEventIdsDev_ = nullptr;
     GM_ADDR profilingRecordCountsDev_ = nullptr;

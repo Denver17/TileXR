@@ -7,6 +7,7 @@ from tools.profiling.analysis import analyze_run
 from tools.profiling.pairing import load_profile_run
 
 from _fixtures import (
+    mapping_document,
     overlapping_child_capture,
     record_block,
     stream_id,
@@ -88,6 +89,19 @@ class ProfilingAnalysisTests(unittest.TestCase):
         self.assertEqual(child.parent_stage_id, 0)
         self.assertEqual(child.instance_count, 2)
         self.assertEqual(child.sample_count, 2)
+
+    def test_nested_waits_are_not_double_counted_in_pressure_finding(self):
+        mapping = mapping_document()
+        mapping["stages"][2]["parent"] = "peer_wait"
+        mapping["stages"][2]["category"] = "sync"
+        result = analyze_run(self.load(mapping, [record_block(0, records=[
+            (0, 1), (10, 2), (20, 4), (60, 5), (80, 3), (100, 6),
+        ])]))
+
+        finding = next(item for item in result.findings if item.code == "wait_sync_pressure")
+        self.assertIn("70.0%", finding.evidence)
+        self.assertEqual(result.stages[1].sample_count, 1)
+        self.assertEqual(result.stages[2].sample_count, 1)
 
     def test_emits_only_producer_neutral_findings(self):
         result = analyze_run(self.load())

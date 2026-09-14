@@ -3,46 +3,35 @@
 #include <set>
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
+#include "server_dedup_profile_capture.h"
 
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
 using namespace TileXREp;
 using ServerDedupTest::Check;
 
-void CheckReceiveProfile(ServerDedupDetailProfile &profile, uint32_t rows, uint32_t firstHops, uint32_t relays)
+void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::ProfileCapture &capture,
+    uint32_t rows, uint32_t firstHops)
 {
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    const uint64_t bytes = kEpServerDedupDetailBytes + TileXREpServerDedupSendProfileLayout(0U, 96U, 6U).bytes +
-        4ULL * 1024U * 1024U;
-    std::vector<uint8_t> storage(bytes + 64U, 0xcd);
-    auto *base = reinterpret_cast<uint8_t *>((reinterpret_cast<uintptr_t>(storage.data()) + 63U) & ~uintptr_t(63U));
-    TileXR::CommArgs args {};
-    args.rankSize = 16U; args.peerMemBytes = bytes; args.peerMems[0] = base;
     const auto syncBefore = AscendC::TestSyncOperations();
-    profile.Init(&args, 96U, 6U);
-    profile.Flush(&args, 7U);
-    Check(AscendC::TestSyncOperations() == syncBefore, "fine profile persistence adds no synchronization");
-    const auto &record = reinterpret_cast<EpServerDedupDetailRecord *>(base)[AscendC::testCore];
-    Check(record.counters[0] == rows && record.counters[4] == firstHops && record.counters[5] == relays,
-        "diagnostic workload counts match real receive/relay writes");
-    for (uint32_t i = 1; i < 8U; ++i)
-        Check(record.points[i] >= record.points[i - 1U], "receive phase boundaries are ordered");
-    const uint64_t expected[] = {record.counters[1], rows, rows, firstHops, rows, firstHops, 0U};
-    uint64_t accounted = 0U;
-    for (uint32_t i = 0; i < 7U; ++i) {
-        const auto &m = record.metrics[i];
-        Check(m.count == expected[i], "metric sample count matches actual operations");
-        if (m.count != 0U) {
-            Check(m.maxBegin >= record.points[3] && m.maxEnd <= record.points[4] && m.maxEnd >= m.maxBegin &&
-                m.totalTicks >= m.maxEnd - m.maxBegin, "slowest operation interval lies in the real processing interval");
-        } else Check(m.totalTicks == 0U && m.maxBegin == 0U && m.maxEnd == 0U, "unused metrics contain no stale interval");
-        if (i != uint32_t(EpDedupDetailMetric::Atomic)) accounted += m.totalTicks;
+    profile.Publish();
+    Check(AscendC::TestSyncOperations() == syncBefore, "profile publication adds no synchronization");
+    const auto events = capture.Events(AscendC::testCore);
+#if defined(TILEXR_ENABLE_PROFILING)
+    Check(!events.empty() && events.front() == kEpServerDedupDetailEventBase, "receive begin is retained");
+    const uint32_t expected[] = {0U, rows, rows, firstHops, rows, firstHops, 0U};
+    for (uint32_t op = 0; op < 7U; ++op) {
+        const auto begin = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op);
+        const auto end = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op + 1U);
+        Check(begin == end, "each observed receive operation retains both timestamps");
+        if (op == 0U) Check(rows == 0U ? begin == 0 : begin > 0, "probe samples reflect actual work");
+        else Check(begin == expected[op], "every repeated operation is recorded without collapsing samples");
     }
-    Check(accounted <= record.points[4] - record.points[3], "exclusive sampled totals fit the processing interval");
-    if (rows == 0U) Check(record.counters[6] == 0U && record.counters[7] == 0U && record.points[3] == record.points[7],
-        "empty receive records no data/probe/lane work");
+    if (rows == 0U) Check(events.size() == 4U, "empty receive contains only real prefix/task/prepare observations");
+    else Check(events.back() == kEpServerDedupDetailEventBase + 7U, "clear completion remains the final receive point");
 #else
-    (void)profile; (void)rows; (void)firstHops; (void)relays;
+    (void)rows; (void)firstHops;
+    Check(events.empty(), "OFF builds emit no profiling data");
 #endif
 }
 
@@ -201,10 +190,12 @@ void CheckReceiver(int32_t role)
         Check(std::memcmp(firstCopy.data(), bytes, size) == 0, "all destinations receive an identical common packet");
         ++sends;
     };
-    ServerDedupDetailProfile profile;
+    ServerDedupTest::ProfileCapture capture(args);
+    ServerDedupProfile profile;
+    profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
     receiver.Process(profile);
     AscendC::GmWriteObserver() = {};
-    CheckReceiveProfile(profile, 1U, role > 0 ? 1U : 0U, role > 0 ? fixture.entries : 0U);
+    CheckReceiveProfile(profile, capture, 1U, role > 0 ? 1U : 0U);
     Check(sends == (role > 0 ? fixture.entries : 0U), "DIRECT and terminal rows do not start relay groups");
     Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "receiver writes the exact hidden row");
     if (Quantized) Check(std::memcmp(scales.data() + 32U, fixture.payload.data() + data.quantCount, data.scaleBytes) == 0,
@@ -343,11 +334,13 @@ void CheckBatchReceiver(uint32_t h)
             inLane = true;
         }
     };
-    ServerDedupDetailProfile profile;
+    ServerDedupTest::ProfileCapture capture(args);
+    ServerDedupProfile profile;
+    profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
     receiver.Process(profile);
     AscendC::GmReadObserver() = {}; AscendC::GmWriteObserver() = {};
     AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
-    CheckReceiveProfile(profile, owned, 8U, 24U);
+    CheckReceiveProfile(profile, capture, owned, 8U);
     Check(processed.size() == owned && processed.front() == 23U && processed[7U] == 16U,
         "scan advances past an unready full batch and consumes a ready tail in reverse order");
     const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
@@ -392,9 +385,11 @@ void CheckBatchReceiver(uint32_t h)
     // The same object and TPipe must also handle an empty next receive set.
     std::fill(prefix, prefix + experts, 0U);
     const auto prior = hidden;
-    ServerDedupDetailProfile emptyProfile;
+    ServerDedupTest::ProfileCapture emptyCapture(args);
+    ServerDedupProfile emptyProfile;
+    emptyProfile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
     receiver.Process(emptyProfile);
-    CheckReceiveProfile(emptyProfile, 0U, 0U, 0U);
+    CheckReceiveProfile(emptyProfile, emptyCapture, 0U, 0U);
     Check(hidden == prior && pipe.bytes == experts * 4U, "empty receive set has no data/probe/lane allocation or output writes");
 }
 
@@ -422,7 +417,7 @@ int main()
         std::cerr << error.what() << '\n';
         return 1;
     }
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+#if defined(TILEXR_ENABLE_PROFILING)
     return ServerDedupTest::Finish("receive_profile");
 #else
     return ServerDedupTest::Finish("receive_packet");

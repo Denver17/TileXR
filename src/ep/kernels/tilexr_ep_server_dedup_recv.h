@@ -5,7 +5,7 @@
 #include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_receive_tasks.h"
 #include "tilexr_ep_server_dedup_receive_packet.h"
-#include "tilexr_ep_server_dedup_detail_profile.h"
+#include "tilexr_ep_server_dedup_profile.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -30,9 +30,8 @@ public:
         group_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(group));
     }
 
-    __aicore__ inline void Process(ServerDedupDetailProfile &profile)
+    __aicore__ inline void Process(ServerDedupProfile &profile)
     {
-        profile_ = &profile;
         profile.Mark(EpDedupDetailPoint::RecvBegin);
         // Caller has completed count-stage writes before this Reset. The GM
         // prefix belongs to this receive core; old count UB is no longer used.
@@ -52,7 +51,6 @@ public:
         profile.Mark(EpDedupDetailPoint::TasksEnd);
         if (tasks_.Count() == 0U) {
             profile.Mark(EpDedupDetailPoint::PrepareEnd);
-            profile.CopyPoints(4U, 7U, EpDedupDetailPoint::PrepareEnd);
             return;
         }
 
@@ -68,9 +66,6 @@ public:
         lanes_ = available < 8U ? available : 8U; // Safe inputs guarantee at least one lane.
         pipe_->InitBuffer(lanesBuf_, lanes_ * laneStride_);
         for (uint32_t lane = 0; lane < lanes_; ++lane) SetFlag<HardEvent::MTE3_MTE2>(lane);
-        profile.Set(EpDedupDetailCounter::Rows, tasks_.Count());
-        profile.Set(EpDedupDetailCounter::Lanes, lanes_);
-        profile.Set(EpDedupDetailCounter::Blocks, blocks);
         profile.Mark(EpDedupDetailPoint::PrepareEnd);
 
         auto snapshot = probeIdxBuf_.Get<uint32_t>();
@@ -79,18 +74,15 @@ public:
             if (scan >= tasks_.PendingCount()) scan = 0U;
             const uint32_t remaining = tasks_.PendingCount() - scan;
             const uint32_t count = remaining < kProbeBatch ? remaining : kProbeBatch;
-            const uint64_t probeBegin = profile.Now();
+            profile.Begin(EpDedupDetailMetric::Probe);
             const uint32_t ready = Probe(scan, count);
-            profile.Sample(EpDedupDetailMetric::Probe, probeBegin);
-            profile.Count(EpDedupDetailCounter::ProbeBatches);
-            profile.Count(EpDedupDetailCounter::ProbeSlots, count);
-            if (ready == 0U) profile.Count(EpDedupDetailCounter::EmptyProbeBatches);
+            profile.End(EpDedupDetailMetric::Probe);
             // Higher-index removals cannot change the remaining lower-index
             // identities in this batch. Always consume the stable snapshot.
             for (uint32_t i = count; i > 0U; --i) {
                 const uint32_t index = i - 1U;
                 if ((ready & (uint32_t(1) << index)) == 0U) continue;
-                ReceiveOne(snapshot.GetValue(index), issued % lanes_);
+                ReceiveOne(snapshot.GetValue(index), issued % lanes_, profile);
                 tasks_.RemovePending(scan + index);
                 ++issued;
             }
@@ -138,9 +130,9 @@ private:
         return ready;
     }
 
-    __aicore__ inline void ReceiveOne(uint32_t j, uint32_t lane)
+    __aicore__ inline void ReceiveOne(uint32_t j, uint32_t lane, ServerDedupProfile &profile)
     {
-        const uint64_t acquireBegin = profile_->Now();
+        profile.Begin(EpDedupDetailMetric::AcquireLoad);
         WaitFlag<HardEvent::MTE3_MTE2>(lane);
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
         auto meta = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
@@ -150,8 +142,8 @@ private:
         DataCopy(wire, source, uint32_t(data_.tokenStride));
         SetFlag<HardEvent::MTE2_MTE3>(lane);
         ServerDedupReceiveSync<HardEvent::MTE2_S>();
-        profile_->Sample(EpDedupDetailMetric::AcquireLoad, acquireBegin);
-        const uint64_t metadataBegin = profile_->Now();
+        profile.End(EpDedupDetailMetric::AcquireLoad);
+        profile.Begin(EpDedupDetailMetric::Metadata);
         ServerDedupPacketTail tail(wire, uint32_t(data_.tailOffset));
         const int32_t forwardCount = int32_t(tail.Word(4U));
         const uint32_t row = tasks_.Begin() + j;
@@ -160,11 +152,9 @@ private:
         if (forwardCount > 0) {
             auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[args_->rank] +
                 TileXREpServerDedupCountLayout(experts_).counterOffset);
-            const uint64_t atomicBegin = profile_->Now();
+            profile.Begin(EpDedupDetailMetric::Atomic);
             t = AtomicAdd(counter, uint32_t(1));
-            profile_->Sample(EpDedupDetailMetric::Atomic, atomicBegin);
-            profile_->Count(EpDedupDetailCounter::FirstHopRows);
-            profile_->Count(EpDedupDetailCounter::RelayPackets, uint32_t(forwardCount));
+            profile.End(EpDedupDetailMetric::Atomic);
         }
         BuildServerDedupAssist(meta, tail, expert, uint32_t(args_->rank), t);
         if (forwardCount > 0) {
@@ -172,8 +162,8 @@ private:
             PrepareServerDedupForward(tail, uint32_t(args_->rank), t);
         }
         ServerDedupReceiveSync<HardEvent::S_MTE3>();
-        profile_->Sample(EpDedupDetailMetric::Metadata, metadataBegin);
-        const uint64_t outputBegin = profile_->Now();
+        profile.End(EpDedupDetailMetric::Metadata);
+        profile.Begin(EpDedupDetailMetric::OutputIssue);
         WaitFlag<HardEvent::MTE2_MTE3>(lane);
         WriteServerDedupPayloadRange(expandX_[uint64_t(row) * hiddenBytes_], wire, 0U, hiddenBytes_);
         if constexpr (Quantized)
@@ -182,9 +172,9 @@ private:
         DataCopyPad(assistEx_[uint64_t(row) * 8U], meta, {1U, 32U, 0U, 0U, 0U});
         if (forwardCount > 0)
             DataCopyPad(group_[uint64_t(t) * groupStride_ / 4U], group, {1U, groupStride_, 0U, 0U, 0U});
-        profile_->Sample(EpDedupDetailMetric::OutputIssue, outputBegin);
+        profile.End(EpDedupDetailMetric::OutputIssue);
         if (forwardCount > 0) {
-            const uint64_t relayBegin = profile_->Now();
+            profile.Begin(EpDedupDetailMetric::RelayIssue);
             for (uint32_t i = 0; i < uint32_t(forwardCount); ++i) {
                 const uint32_t expertId = tail.Word(8U + i * 4U);
                 const uint32_t destination = expertId / localExperts_;
@@ -194,7 +184,7 @@ private:
                     uint32_t(args_->rankSize), localExperts_, bs_));
                 DataCopy(output, wire, uint32_t(data_.tokenStride));
             }
-            profile_->Sample(EpDedupDetailMetric::RelayIssue, relayBegin);
+            profile.End(EpDedupDetailMetric::RelayIssue);
         }
         SetFlag<HardEvent::MTE3_MTE2>(lane);
     }
@@ -213,7 +203,6 @@ private:
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
-    ServerDedupDetailProfile *profile_ = nullptr;
     uint32_t bs_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U, receiver_ = 0U;
     uint32_t hiddenBytes_ = 0U, groupStride_ = 0U, laneStride_ = 0U, lanes_ = 0U;
     EpServerDedupDataLayout data_ {};

@@ -423,6 +423,10 @@ class WorkflowIntegrationTests(TemporaryRoot):
         profiler_target = self.root / "tools/ep/msprof_kernel_stats.py"
         profiler_target.parent.mkdir()
         shutil.copy2(profiler_source, profiler_target)
+        profiling_source = Path(workflow.__file__).resolve().parents[1] / "profiling"
+        profiling_target = self.root / "tools/profiling"
+        shutil.copytree(profiling_source, profiling_target, ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copy2(Path(workflow.__file__).with_name("test_profiling_fixture.py"), tool_root)
         self.script = tool_root / "workflow.py"
         (self.root / "set_env.sh").write_text(
             'export TILEXR_VALIDATION_ROOT="$PWD"\n'
@@ -445,6 +449,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
                   "files": [str(path.relative_to(self.root))
                             for path in (self.script, tool_root / "source.py", tool_root / "measurements.py",
                                          profiler_target, self.root / "set_env.sh", helper)]}
+        source["files"].extend(str(path.relative_to(self.root)) for path in profiling_target.rglob("*") if path.is_file())
+        source["files"].append("tools/validation/test_profiling_fixture.py")
         workflow.write_json(self.root / ".tilexr-source.json", source)
         self.config_instance = self.config()
         self.config_instance.install.mkdir(parents=True)
@@ -691,10 +697,13 @@ class WorkflowIntegrationTests(TemporaryRoot):
         entry.write_text(entry.read_text().replace("BUILD_MODE=host", "BUILD_MODE=production"), encoding="utf-8")
         self.manifest.update(checkpoint=checkpoint, mode="production", server_dedup_profiling=run_mode == "breakdown")
         if run_mode == "breakdown":
-            self.manifest["server_dedup_profile_version"] = 6
+            self.manifest["server_dedup_profile_schema"] = workflow.measurements.RECORDS_SCHEMA
         self.manifest["server_dedup_contract"] = dict(workflow.DISPATCH_ABI)
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.parent.mkdir()
+        mapping = self.config_instance.install / "share/tilexr/profiling/server_dedup.mapping.json"
+        mapping.parent.mkdir(parents=True)
+        shutil.copy2(workflow.measurements.profiling_mapping(), mapping)
         # 传输/编排夹具使用普通进程产出原生协议，不把它作为 CANN launch 证据。
         program.write_text("#!" + sys.executable + "\n" + r'''
 import json, os, sys
@@ -744,41 +753,17 @@ if behavior == 'stale-round':
 if run_mode != 'functional':
     record['timing_us'] = dict(submit=4, sync=3, barrier=2, batch_total=10)
 if run_mode == 'breakdown':
-    profile = dict(record, generation=warmup+loops, block_dim=64, schema_version=6, kernel_scope='dispatch',
-                   records=[dict(core=core, start=100, init_end=110, send_cnt_end=120, send_data_end=125, recv_cnt_end=130,
-                                 cumsum_end=140, prefix_end=150, recv_data_end=155, end=160) for core in range(64)])
-    for core in profile['records'][:48]:
-        core.update(first_hop_count=1, send_packets=[dict(issue=121, token=core['core']*2, k=0)] +
-                    [dict(issue=123, token=core['core']*2+1, k=k) for k in range(6)])
-    for core in profile['records']:
-        receiver = core['core'] >= 48
-        owner = core['core'] == 63
-        points = dict(zip(('recv_begin', 'prefix_end', 'tasks_end', 'prepare_end',
-                           'loop_end', 'drain_end', 'clear_issue_end', 'clear_end'),
-                          (150, 150, 150, 150, 155, 155, 155, 155) if receiver else (0,) * 8))
-        points.update(finish_begin=155, local_end=156, sync_end=157,
-                      counter_end=158 if owner else 157, publish_end=159 if owner else 157,
-                      wait_end=160 if owner else 157)
-        metrics = {name: dict(total_ticks=0, max_begin=0, max_end=0, count=0)
-                   for name in ('probe', 'acquire_load', 'metadata', 'atomic',
-                                'output_issue', 'relay_issue', 'round_peer_wait')}
-        # Equal-tick samples are legitimate; counts still reflect actual work.
-        if receiver:
-            for name, count in (('probe', 3), ('acquire_load', 36), ('metadata', 36),
-                                ('atomic', 3), ('output_issue', 36), ('relay_issue', 3)):
-                metrics[name].update(max_begin=151, max_end=151, count=count)
-        if owner:
-            metrics['round_peer_wait'].update(max_begin=159, max_end=159, count=rank_size)
-        counters = dict(rows=36 if receiver else 0, probe_batches=3 if receiver else 0,
-                        probe_slots=36 if receiver else 0, empty_probe_batches=0,
-                        first_hop_rows=3 if receiver else 0, relay_packets=15 if receiver else 0,
-                        lanes=8 if receiver else 0, blocks=31 if receiver else 0,
-                        round_polls=rank_size if owner else 0, round_slowest_peer=0)
-        core['detail'] = dict(points=points, metrics=metrics, counters=counters)
-    if behavior == 'stale-breakdown':
-        profile['generation'] -= 1
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools/validation'))
+    from test_profiling_fixture import write_capture
+    path = os.environ['TILEXR_PROFILING_RECORDS_PATH']
+    capture_id = os.environ['TILEXR_PROFILING_CAPTURE_ID']
+    assert int(os.environ['TILEXR_PROFILING_RECORDS_PER_CORE']) == (loops + warmup) * 65536
     if behavior != 'missing-breakdown':
-        print('EP_SERVER_DEDUP_BREAKDOWN_PASS ' + json.dumps(profile))
+        write_capture(path, rank=rank, launches=warmup+loops, warmup=warmup,
+                      fault={'stale-breakdown': 'stale', 'overflow-breakdown': 'overflow'}.get(behavior, ''), capture_id=capture_id)
+    print('EP_SERVER_DEDUP_BREAKDOWN_PASS ' + json.dumps(dict(record,
+          schema='tilexr_profiling_records.v1', records_path=path, capture_id=capture_id, launches=warmup+loops)))
 if behavior == 'wrong-loops':
     record['loops'] = loops - 1
 prefix = 'EP_SERVER_DEDUP_DISPATCH_PASS '
@@ -990,19 +975,23 @@ with output.open('w', newline='') as f:
         self.assert_success(self.invoke("run", environment={"TILEXR_DIRECT_RUN": "1"}))
         summary = self.summary()
         self.assertEqual(summary["measurements"]["run_mode"], "breakdown")
-        self.assertEqual(summary["measurements"]["breakdown"]["schema_version"], 6)
-        self.assertIn("recv_loop", summary["measurements"]["breakdown"]["stages_us"])
-        self.assertIn("round_peer_wait", summary["measurements"]["breakdown"]["operations"])
+        self.assertEqual(summary["measurements"]["breakdown"]["schema"], workflow.measurements.RECORDS_SCHEMA)
+        self.assertIn("metadata", summary["measurements"]["breakdown"]["stages_us"])
+        self.assertIn("atomic", summary["measurements"]["breakdown"]["stages_us"])
         self.assertEqual(len(summary["traces"]["ranks"]), 16)
         trace = workflow.read_json(Path(summary["traces"]["all_ranks"]))
-        self.assertEqual({event["pid"] for event in trace["traceEvents"] if event["ph"] == "X"}, set(range(16)))
-        for rank in range(16):
+        self.assertEqual({event["args"]["rank"] for event in trace["traceEvents"] if event["ph"] == "X"}, set(range(16)))
+        for pid in {event["pid"] for event in trace["traceEvents"] if event["ph"] == "X"}:
             ordered = [event["args"]["sort_index"] for event in trace["traceEvents"]
-                       if event["name"] == "thread_sort_index" and event["pid"] == rank]
+                       if event["name"] == "thread_sort_index" and event["pid"] == pid]
             self.assertEqual(ordered, list(range(64)))
         for node in summary["nodes"]:
             for rank in node["reported_result"]["ranks"]:
-                self.assertEqual(rank["breakdown"]["generation"], 5)
+                self.assertEqual(rank["breakdown"]["launches"], 5)
+                for artifact in rank["breakdown"]["artifacts"].values():
+                    self.assertTrue(Path(artifact).is_file(), artifact)
+                    if rank["rank"] >= 8:
+                        self.assertIn("nodes/1", Path(artifact).as_posix())
 
     def test_dispatch_breakdown_missing_or_stale_record_fails(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
@@ -1012,6 +1001,44 @@ with output.open('w', newline='') as f:
                 command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
                                       environment={"CHAIN_TEST_BEHAVIOR": behavior})
                 self.assertNotEqual(command.returncode, 0)
+
+    def test_capture_overflow_preserves_communication_and_report_evidence(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="1",
+                          TILEXR_VALIDATION_WARMUP="0")
+        command = self.invoke("node", "capture-overflow", self.manifest["build_id"], "20", "", "1",
+                              environment={"CHAIN_TEST_BEHAVIOR": "overflow-breakdown"})
+        self.assertNotEqual(command.returncode, 0, command.stdout + command.stderr)
+        result = workflow.read_json(self.config_instance.logs / "capture-overflow/result.json")
+        self.assertEqual(result["status"], "FAIL")
+        failure = next(item for item in result["errors"] if item.get("rank") == 8)
+        self.assertTrue(failure["communication_completed"])
+        self.assertEqual(failure["profile_status"], "incomplete")
+        self.assertTrue(Path(failure["records_path"]).is_file())
+        self.assertTrue((Path(failure["report_dir"]) / "report.html").is_file())
+        evidence = next(item for item in result["profiling_failures"] if item["rank"] == 8)
+        self.assertEqual(evidence["communication"]["cleanup"], "complete")
+        self.assertEqual(evidence["communication"]["completed"], 1)
+        self.assertTrue(evidence["communication"]["dispatch_outputs_validated"])
+        self.prepare_sync()
+        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "overflow-breakdown"})
+        self.assertNotEqual(command.returncode, 0, command.stdout + command.stderr)
+        summary = self.summary()
+        failure = next(item for item in summary["errors"] if item.get("rank") == 8
+                       and item.get("profile_status") == "incomplete")
+        remote = next(node for node in summary["nodes"] if node["host"] == "192.0.2.2")
+        evidence = next(item for item in remote["reported_result"]["profiling_failures"] if item["rank"] == 8)
+        self.assertTrue(remote["reported_result"]["ranks"], "mixed node must retain successful ranks")
+        for successful in remote["reported_result"]["ranks"]:
+            for artifact in successful["breakdown"]["artifacts"].values():
+                self.assertIn("nodes/1", Path(artifact).as_posix())
+                self.assertTrue(Path(artifact).is_file(), artifact)
+        for artifact in evidence["communication"]["breakdown"]["artifacts"].values():
+            self.assertIn("nodes/1", Path(artifact).as_posix())
+            self.assertTrue(Path(artifact).is_file(), artifact)
+        self.assertIn("nodes/1", Path(failure["records_path"]).as_posix())
+        self.assertTrue(Path(failure["records_path"]).is_file())
+        self.assertTrue((Path(failure["report_dir"]) / "report.html").is_file())
 
     def test_measurement_aggregation_failure_preserves_summary_and_exit_code(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")

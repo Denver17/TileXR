@@ -11,6 +11,7 @@ constexpr uint32_t kEpServerDedupRecvCoreNum = 16U;
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
+// Legacy padding retained for the R07 layout; standard profiling uses separate GM.
 constexpr uint64_t kEpServerDedupProfileReservedBytes = 12800U;
 constexpr uint64_t kEpServerDedupRoundBytes = uint64_t(TileXR::TILEXR_MAX_RANK_SIZE) * 32U;
 
@@ -21,7 +22,7 @@ constexpr uint64_t kEpServerDedupRoundBytes = uint64_t(TileXR::TILEXR_MAX_RANK_S
 #endif
 
 // R07-01: one state region. Matrix offsets are relative to cntOffset; counter
-// and stateBytes are relative to peerMems[rank]. Profiling capacity is always reserved.
+// and stateBytes are relative to peerMems[rank]. Legacy leading padding is retained.
 struct EpServerDedupCountLayout {
     uint64_t cntOffset;
     uint64_t cumsumOffset;

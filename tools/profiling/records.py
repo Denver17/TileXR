@@ -1,8 +1,9 @@
 """Bounded parser for tilexr_profiling_records.v1 binary files."""
 
 import struct
+from io import BytesIO
 from pathlib import Path
-from typing import Sequence, Tuple
+from typing import BinaryIO, Sequence, Tuple
 from uuid import UUID
 
 from .model import (
@@ -14,7 +15,9 @@ from .model import (
 )
 
 
-MAX_RECORD_FILE_BYTES = 256 * 1024 * 1024
+# Match the common runtime's checked capacity: 64 cores with up to
+# 67,108,856 records/core, including records.v1 stream and file headers.
+MAX_RECORD_FILE_BYTES = 64 * 1024 * 1024 * 1024
 MAX_RECORD_FILES = 4096
 
 FILE_HEADER = struct.Struct("<8sHHHHHBBI16sQ")
@@ -32,28 +35,13 @@ STREAM_OVERFLOW = 1 << 1
 KNOWN_STREAM_FLAGS = STREAM_COMPLETE | STREAM_OVERFLOW
 
 
-def _read_record_bytes(path: Path) -> bytes:
-    source = path.as_posix()
-    try:
-        size = path.stat().st_size
-        if size > MAX_RECORD_FILE_BYTES:
-            raise ProfilingInputError(
-                f"profiling records {source} exceeds maximum size of {MAX_RECORD_FILE_BYTES} bytes"
-            )
-        with path.open("rb") as stream:
-            data = stream.read(MAX_RECORD_FILE_BYTES + 1)
-    except OSError as exc:
-        raise ProfilingInputError(f"cannot read records {source}: {exc}") from exc
-    if len(data) > MAX_RECORD_FILE_BYTES:
+def _parse_record_stream(handle: BinaryIO, size: int, source: str) -> RecordFile:
+    if size > MAX_RECORD_FILE_BYTES:
         raise ProfilingInputError(
             f"profiling records {source} exceeds maximum size of {MAX_RECORD_FILE_BYTES} bytes"
         )
-    return data
-
-
-def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
-    """Parse one complete records.v1 byte sequence."""
-    if len(data) < FILE_HEADER_SIZE:
+    header = handle.read(FILE_HEADER_SIZE)
+    if len(header) < FILE_HEADER_SIZE:
         raise ProfilingInputError(f"records file {source} is truncated before the file header")
     (
         magic,
@@ -67,7 +55,7 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
         stream_count,
         capture_id_bytes,
         file_size,
-    ) = FILE_HEADER.unpack_from(data, 0)
+    ) = FILE_HEADER.unpack(header)
 
     if magic != RECORDS_MAGIC:
         raise ProfilingInputError(f"invalid records magic in {source}")
@@ -83,24 +71,23 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
         raise ProfilingInputError(f"unsupported records endianness {endianness} in {source}")
     if reserved != 0:
         raise ProfilingInputError(f"nonzero file-header reserved field in {source}")
-    if file_size != len(data):
+    if file_size != size:
         raise ProfilingInputError(
-            f"records file size mismatch in {source}: header={file_size}, actual={len(data)}"
+            f"records file size mismatch in {source}: header={file_size}, actual={size}"
         )
-    if stream_count > (len(data) - FILE_HEADER_SIZE) // STREAM_HEADER_SIZE:
+    if stream_count > (size - FILE_HEADER_SIZE) // STREAM_HEADER_SIZE:
         raise ProfilingInputError(f"stream count cannot fit in records file {source}")
 
     offset = FILE_HEADER_SIZE
     streams = []
     stream_ids = set()
     for block_index in range(stream_count):
-        if len(data) - offset < STREAM_HEADER_SIZE:
+        stream_header = handle.read(STREAM_HEADER_SIZE)
+        if len(stream_header) < STREAM_HEADER_SIZE:
             raise ProfilingInputError(
                 f"records file {source} is truncated before stream block {block_index}"
             )
-        stream_id, record_count, dropped_count, flags, block_size = STREAM_HEADER.unpack_from(
-            data, offset
-        )
+        stream_id, record_count, dropped_count, flags, block_size = STREAM_HEADER.unpack(stream_header)
         if stream_id in stream_ids:
             raise ProfilingInputError(f"duplicate stream ID {stream_id} in records file {source}")
         stream_ids.add(stream_id)
@@ -113,29 +100,34 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
                 f"header={block_size}, expected={expected_block_size}"
             )
         block_end = offset + block_size
-        if block_end > len(data):
+        if block_end > size:
             raise ProfilingInputError(f"stream {stream_id} is truncated in {source}")
 
         records = []
-        record_offset = offset + STREAM_HEADER_SIZE
         previous_timestamp = None
-        for record_index in range(record_count):
-            timestamp, event_id, record_reserved = RECORD.unpack_from(data, record_offset)
-            if event_id == 0:
-                raise ProfilingInputError(
-                    f"stream {stream_id} record {record_index} has reserved event ID 0 in {source}"
-                )
-            if record_reserved != 0:
-                raise ProfilingInputError(
-                    f"stream {stream_id} record {record_index} has nonzero reserved data in {source}"
-                )
-            if previous_timestamp is not None and timestamp < previous_timestamp:
-                raise ProfilingInputError(
-                    f"stream {stream_id} timestamps are not non-decreasing in {source}"
-                )
-            previous_timestamp = timestamp
-            records.append(RawRecord(timestamp, event_id, source, record_index))
-            record_offset += RECORD_SIZE
+        # Large captures must not be duplicated as one giant bytes object in
+        # addition to the normalized records. Bound transient IO to 64 KiB.
+        for chunk_start in range(0, record_count, 4096):
+            chunk_count = min(4096, record_count - chunk_start)
+            chunk = handle.read(chunk_count * RECORD_SIZE)
+            if len(chunk) != chunk_count * RECORD_SIZE:
+                raise ProfilingInputError(f"stream {stream_id} is truncated in {source}")
+            for chunk_index, (timestamp, event_id, record_reserved) in enumerate(RECORD.iter_unpack(chunk)):
+                record_index = chunk_start + chunk_index
+                if event_id == 0:
+                    raise ProfilingInputError(
+                        f"stream {stream_id} record {record_index} has reserved event ID 0 in {source}"
+                    )
+                if record_reserved != 0:
+                    raise ProfilingInputError(
+                        f"stream {stream_id} record {record_index} has nonzero reserved data in {source}"
+                    )
+                if previous_timestamp is not None and timestamp < previous_timestamp:
+                    raise ProfilingInputError(
+                        f"stream {stream_id} timestamps are not non-decreasing in {source}"
+                    )
+                previous_timestamp = timestamp
+                records.append(RawRecord(timestamp, event_id, source, record_index))
 
         streams.append(
             RecordStream(
@@ -149,9 +141,14 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
         )
         offset = block_end
 
-    if offset != len(data):
+    if offset != size or handle.read(1):
         raise ProfilingInputError(f"trailing bytes after stream blocks in {source}")
     return RecordFile(UUID(bytes=capture_id_bytes), tuple(streams), source)
+
+
+def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
+    """Parse one complete records.v1 byte sequence."""
+    return _parse_record_stream(BytesIO(data), len(data), source)
 
 
 def load_record_files(paths: Sequence[Path]) -> Tuple[RecordFile, ...]:
@@ -163,5 +160,11 @@ def load_record_files(paths: Sequence[Path]) -> Tuple[RecordFile, ...]:
     result = []
     for value in paths:
         path = Path(value)
-        result.append(parse_record_bytes(_read_record_bytes(path), path.as_posix()))
+        source = path.as_posix()
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as handle:
+                result.append(_parse_record_stream(handle, size, source))
+        except OSError as exc:
+            raise ProfilingInputError(f"cannot read records {source}: {exc}") from exc
     return tuple(result)

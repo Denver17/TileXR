@@ -8,6 +8,7 @@
 
 #include <array>
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -19,6 +20,23 @@ struct TileXRProfilingRuntimeConfig {
     std::array<uint8_t, 16U> captureId {};
     uint32_t recordsPerCore = 0U;
     uint32_t coreCapacity = 0U;
+    // A launch that had no GM reservation cannot report device dropped counts.
+    bool incomplete = false;
+};
+
+// One allocator per communicator. Reservation is Host-only and never waits for
+// device execution. Kernels sharing the capture must execute in order.
+class TileXRProfilingLaunchState {
+public:
+    bool Reserve(const TileXRProfilingRuntimeConfig &config,
+        uint32_t recordsPerLaunch, uint32_t *launchSlot);
+    bool Incomplete() const;
+    void Reset();
+
+private:
+    mutable std::mutex mutex_;
+    uint32_t nextRecord_ = 0U;
+    bool incomplete_ = false;
 };
 
 bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,

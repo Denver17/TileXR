@@ -2,6 +2,7 @@
 #include "acl/acl_rt.h"
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_count_layout.h"
+#include "ep_memory_server_dedup_profile.h"
 
 namespace TileXREp {
 
@@ -31,6 +32,13 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    uint32_t profilingLaunchSlot = UINT32_MAX;
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    // Profiling reservation is separate from communication magic. Exhaustion
+    // disables capture for this launch and is reported by the common runtime.
+    TileXRProfilingReserveLaunch(p.comm, kEpServerDedupProfilingRecordsPerLaunch,
+        &profilingLaunchSlot);
+#endif
     EpServerDedupKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.x),
         reinterpret_cast<GM_ADDR>(p.expertIds), static_cast<GM_ADDR>(p.expertScales),
         static_cast<GM_ADDR>(p.expandXOut), static_cast<GM_ADDR>(p.dynamicScalesOut), reinterpret_cast<GM_ADDR>(p.expertTokenNumsOut),
@@ -39,7 +47,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
         reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), p.bs, p.h, p.topK, p.moeExpertNum,
         static_cast<int64_t>(layout.globalBs), p.expertTokenNumsType, p.quantMode, static_cast<int64_t>(p.dtype),
         static_cast<int64_t>(p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype),
-        magic};
+        magic, static_cast<int64_t>(profilingLaunchSlot)};
     return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);
 }
 

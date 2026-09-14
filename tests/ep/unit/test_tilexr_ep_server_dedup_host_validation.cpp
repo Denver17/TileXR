@@ -249,19 +249,7 @@ int main()
     g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024 - 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024;
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    const uint64_t detailBytes = TileXREpServerDedupSendProfileLayout(0, p.bs, p.topK).bytes;
-    g_commArgs.peerMemBytes += detailBytes;
-    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    g_commArgs.peerMemBytes += kEpServerDedupDetailBytes;
-    Check(Invoke(valid) == TILEXR_SUCCESS, "exact data plus detailed trace and communicator flags accepted");
-    --g_commArgs.peerMemBytes;
-    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    ++g_commArgs.peerMemBytes;
-#else
-    Check(Invoke(valid) == TILEXR_SUCCESS, "exact data domain plus flag capacity accepted");
-#endif
+    Check(Invoke(valid) == TILEXR_SUCCESS, "profiling needs no space in the exact data plus flag domain");
     g_commArgs.peerMems[63] += 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMems[63] -= 1;

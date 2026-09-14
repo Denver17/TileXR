@@ -62,6 +62,15 @@ int TileXRGetCommArgsHost(TileXRCommPtr comm, TileXR::CommArgs *&commArgsPtr);
 
 int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 
+// Reserve disjoint per-core slots for an ordered profiling launch. The budget
+// must be a nonzero multiple of 8. UINT32_MAX means disabled/exhausted; this is
+// success, and the operator should still launch. Exhaustion marks export as
+// incomplete. All launches sharing a capture must be ordered by the caller.
+// Every direct writer in that communicator capture must use this allocator;
+// do not mix it with legacy collectives' own slots or append ProfilingRecorder.
+int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot);
+
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
 
 int TileXRUDMAUnregister(TileXRCommPtr comm, TileXRUDMAMemHandle handle);

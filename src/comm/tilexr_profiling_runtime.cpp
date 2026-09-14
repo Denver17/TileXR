@@ -108,8 +108,13 @@ bool ParseRecordsPerCore(const char *value, uint32_t *result)
     }
     errno = 0;
     char *end = nullptr;
-    const unsigned long parsed = std::strtoul(value, &end, 10);
-    if (errno != 0 || end == value || *end != '\0' || parsed == 0UL ||
+    for (const char *digit = value; *digit != '\0'; ++digit) {
+        if (*digit < '0' || *digit > '9') {
+            return false;
+        }
+    }
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0ULL ||
         parsed > TILEXR_PROFILING_MAX_RECORDS_PER_CORE ||
         parsed % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0UL) {
         return false;
@@ -189,7 +194,10 @@ bool BuildExportStreams(const TileXRProfilingRuntimeConfig &config, int rank,
         }
         ExportStream stream {};
         stream.id = TileXRProfilingStreamId(static_cast<uint32_t>(rank), core);
-        stream.droppedCount = droppedCounts[core];
+        // UINT32_MAX denotes saturated/unknown loss when an entire launch was
+        // skipped. Export even empty streams so exhaustion cannot look complete.
+        stream.droppedCount = config.incomplete ?
+            std::numeric_limits<uint32_t>::max() : droppedCounts[core];
         stream.records.reserve(occupied);
         const uint64_t base = static_cast<uint64_t>(core) * config.recordsPerCore;
         for (uint32_t slot = 0U; slot < config.recordsPerCore; ++slot) {
@@ -213,6 +221,49 @@ bool BuildExportStreams(const TileXRProfilingRuntimeConfig &config, int rank,
 
 } // namespace
 
+bool TileXRProfilingLaunchState::Reserve(
+    const TileXRProfilingRuntimeConfig &config, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot)
+{
+    if (launchSlot == nullptr) {
+        return false;
+    }
+    *launchSlot = std::numeric_limits<uint32_t>::max();
+    if (recordsPerLaunch == 0U || recordsPerLaunch %
+            TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!config.enabled) {
+        return true;
+    }
+    // Different operators may request different slot widths. Align the next
+    // reservation to its own width rather than reusing a global slot counter.
+    const uint64_t slot = (static_cast<uint64_t>(nextRecord_) +
+        recordsPerLaunch - 1U) / recordsPerLaunch;
+    const uint64_t end = (slot + 1U) * recordsPerLaunch;
+    if (end > config.recordsPerCore) {
+        incomplete_ = true;
+        return true;
+    }
+    *launchSlot = static_cast<uint32_t>(slot);
+    nextRecord_ = static_cast<uint32_t>(end);
+    return true;
+}
+
+bool TileXRProfilingLaunchState::Incomplete() const
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    return incomplete_;
+}
+
+void TileXRProfilingLaunchState::Reset()
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    nextRecord_ = 0U;
+    incomplete_ = false;
+}
+
 bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
     TileXRProfilingRuntimeConfig *config, std::string *error)
 {
@@ -232,7 +283,7 @@ bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
     }
     if (!ParseRecordsPerCore(std::getenv("TILEXR_PROFILING_RECORDS_PER_CORE"),
             &config->recordsPerCore)) {
-        SetError(error, "TILEXR_PROFILING_RECORDS_PER_CORE must be an aligned integer in [8, 65536]");
+        SetError(error, "TILEXR_PROFILING_RECORDS_PER_CORE must be an aligned integer in [8, 67108856]");
         return false;
     }
     config->recordsPath = ExpandRecordsPath(recordsPath, rank, device, commDomain);

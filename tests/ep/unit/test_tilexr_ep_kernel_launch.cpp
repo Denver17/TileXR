@@ -28,6 +28,8 @@ struct LaunchCapture {
 
 int gFailures = 0;
 int gMagicCalls = 0;
+uint32_t gProfilingCalls = 0U;
+bool gProfilingExhausted = false;
 constexpr int64_t kNextMagic = 0x1234;
 std::string gSocName = "Ascend950PR_9589";
 int gBinaryRegisterCalls = 0;
@@ -55,6 +57,8 @@ void Check(bool condition, const char *message)
 void ResetCapture()
 {
     gMagicCalls = 0;
+    gProfilingCalls = 0U;
+    gProfilingExhausted = false;
     gBinaryRegisterCalls = 0;
     gBinaryUnregisterCalls = 0;
     gBinaryRegisterResult = RT_ERROR_NONE;
@@ -264,11 +268,16 @@ void TestServerDedupRuntimeLaunch()
     ResetCapture();
     gVectorCores = 64;
     Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
-    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 23);
+    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 24);
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
+    constexpr uint64_t firstProfilingSlot = 0U;
+#else
+    constexpr uint64_t firstProfilingSlot = UINT32_MAX;
+#endif
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
         0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
-        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic};
-    Check(gLaunches[0].args == expected, "all 23 kernel arguments preserve order, widths and values (184B)");
+        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic, firstProfilingSlot};
+    Check(gLaunches[0].args == expected, "all 24 kernel arguments preserve order, widths and values (192B)");
     Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
@@ -278,7 +287,10 @@ void TestServerDedupRuntimeLaunch()
     for (int round = 0; round < rounds; ++round) {
         Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
         auto roundArgs = expected;
-        roundArgs.back() = kNextMagic + round;
+        roundArgs[22] = kNextMagic + round;
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
+        roundArgs[23] = static_cast<uint64_t>(round);
+#endif
         Check(gLaunches.size() == static_cast<std::size_t>(round + 1) &&
             gLaunches.back().args == roundArgs && gLaunches.back().stream == p.stream,
             "each round forwards its new magic and reuses all pointers and the stream");
@@ -303,8 +315,15 @@ void TestServerDedupRuntimeLaunch()
     Check(gMagicCalls == 1 && gLaunches.size() == 1, "failed submission consumes only its own magic");
     gLaunchResult = RT_ERROR_NONE;
     Check(launch() == TileXR::TILEXR_SUCCESS && gMagicCalls == 2 &&
-        gLaunches.back().args.back() == static_cast<uint64_t>(kNextMagic + 1),
+        gLaunches.back().args[22] == static_cast<uint64_t>(kNextMagic + 1),
         "a later invocation cannot reuse a failed submission's magic");
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
+    Check(gProfilingCalls == 2U && gLaunches.back().args[23] == 1U,
+        "failed submissions never reuse a profiling slot");
+    gProfilingExhausted = true;
+    Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches.back().args[23] == UINT32_MAX,
+        "exhausted profiling does not prevent communication launch");
+#endif
 }
 
 void TestOrdinaryDispatchRuntimeLaunch()
@@ -468,6 +487,14 @@ bool LoadKernelBinary(const void *, const char *fileName, KernelBinaryView *bina
 } // namespace TileXR
 
 extern "C" {
+
+int TileXRProfilingReserveLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
+{
+    Check(recordsPerLaunch == 65536U, "Host and Kernel use the same per-launch capture budget");
+    *slot = gProfilingExhausted ? UINT32_MAX : gProfilingCalls;
+    ++gProfilingCalls;
+    return TileXR::TILEXR_SUCCESS;
+}
 
 int TileXRCommNextMagic(TileXRCommPtr, int64_t *magic)
 {

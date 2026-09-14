@@ -283,6 +283,7 @@ add_executable(test_tilexr_ep_server_dedup_counts
 target_include_directories(test_tilexr_ep_server_dedup_counts PRIVATE
     unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS}
     ${TILEXR_ROOT}/src/ep/kernels)
+target_compile_definitions(test_tilexr_ep_server_dedup_counts PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
 add_test(NAME test_tilexr_ep_server_dedup_counts COMMAND test_tilexr_ep_server_dedup_counts)
 set_tests_properties(test_tilexr_ep_server_dedup_counts PROPERTIES TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_counts RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -290,7 +291,7 @@ install(TARGETS test_tilexr_ep_server_dedup_counts RUNTIME DESTINATION ${CMAKE_I
 add_executable(test_tilexr_ep_server_dedup_profile unit/test_tilexr_ep_server_dedup_profile.cpp)
 target_include_directories(test_tilexr_ep_server_dedup_profile PRIVATE
     unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
-target_compile_definitions(test_tilexr_ep_server_dedup_profile PRIVATE TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
+target_compile_definitions(test_tilexr_ep_server_dedup_profile PRIVATE __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
 add_test(NAME test_tilexr_ep_server_dedup_profile COMMAND test_tilexr_ep_server_dedup_profile)
 set_tests_properties(test_tilexr_ep_server_dedup_profile PROPERTIES TIMEOUT 30)
 install(TARGETS test_tilexr_ep_server_dedup_profile RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
@@ -300,23 +301,25 @@ foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_serve
         ${CMAKE_CURRENT_LIST_DIR}/../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp)
     target_include_directories(${test_target} PRIVATE
         unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
+    target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
     set_target_properties(${test_target} PROPERTIES CXX_STANDARD 17)
     add_test(NAME ${test_target} COMMAND ${test_target})
     set_tests_properties(${test_target} PROPERTIES TIMEOUT 120)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
-target_compile_definitions(test_tilexr_ep_server_dedup_source_send_profile PRIVATE TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
+target_compile_definitions(test_tilexr_ep_server_dedup_source_send_profile PRIVATE __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
 
 foreach(test_target test_tilexr_ep_server_dedup_receive_packet test_tilexr_ep_server_dedup_receive_profile)
     add_executable(${test_target} unit/test_tilexr_ep_server_dedup_receive_packet.cpp)
     target_include_directories(${test_target} PRIVATE
         unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
+    target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
     set_target_properties(${test_target} PROPERTIES CXX_STANDARD 17)
     add_test(NAME ${test_target} COMMAND ${test_target})
     set_tests_properties(${test_target} PROPERTIES TIMEOUT 30)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
-target_compile_definitions(test_tilexr_ep_server_dedup_receive_profile PRIVATE TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
+target_compile_definitions(test_tilexr_ep_server_dedup_receive_profile PRIVATE __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
 
 add_executable(test_tilexr_moonep_planner_public_abi unit/test_tilexr_moonep_planner_public_abi.cpp)
 
@@ -372,6 +375,15 @@ add_executable(test_tilexr_ep_kernel_launch
     ${TILEXR_ROOT}/src/ep/host/ep_dispatch_memory_host.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
 )
+
+add_executable(test_tilexr_ep_kernel_launch_profile
+    $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
+target_include_directories(test_tilexr_ep_kernel_launch_profile BEFORE PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS})
+target_compile_definitions(test_tilexr_ep_kernel_launch_profile PRIVATE
+    TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
+add_test(NAME test_tilexr_ep_kernel_launch_profile COMMAND test_tilexr_ep_kernel_launch_profile)
+install(TARGETS test_tilexr_ep_kernel_launch_profile RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 target_include_directories(test_tilexr_ep_layout PRIVATE
     ${TILEXR_EP_TEST_INCLUDE_DIRS}

@@ -23,6 +23,8 @@ class RuntimeConfigurationTests(unittest.TestCase):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text((repo / name).read_text(), encoding="utf-8")
+        shutil.copytree(repo / "tools/profiling", self.root / "tools/profiling",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         (self.root / "scripts").mkdir()
         (self.root / "scripts/common_env.sh").write_text("# environment fixture\n")
         self.local = self.root / "validation.local.sh"

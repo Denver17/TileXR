@@ -4,8 +4,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from tools.profiling import generate_reports
+from tools.profiling import generate_reports, generate_reports_for_run
+from tools.profiling.pairing import load_profile_run
 
 from _fixtures import mapping_document, record_block, stream_id, write_capture
 
@@ -127,6 +129,37 @@ class ProfilingPipelineTests(unittest.TestCase):
             )
             self.assertTrue(all(path.is_file() for path in result.artifacts))
             self.assertIn(r"api\-smoke", (output / "analysis.md").read_text(encoding="utf-8"))
+
+    def test_cli_selects_measured_launches_and_records_selection(self):
+        block = record_block(0, records=[(0, 1), (1000, 6), (2000, 1), (2010, 6)])
+        with tempfile.TemporaryDirectory() as tmp:
+            result, output, _, _ = self.invoke(
+                Path(tmp), blocks=[block], extra_args=("--skip-launches", "1",
+                    "--launch-count", "1", "--expected-launch-count", "2"),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            trace = json.loads((output / "perfetto_trace.json").read_text(encoding="utf-8"))
+
+        totals = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+        self.assertEqual(len(totals), 1)
+        self.assertEqual(totals[0]["args"]["launch_id"], 1)
+        self.assertEqual(totals[0]["dur"], 0.01)
+        self.assertEqual(trace["metadata"]["attributes"]["selected_launch_ids"], [1])
+
+    def test_reports_for_normalized_run_do_not_reparse_or_mutate_input(self):
+        block = record_block(0, records=[(0, 1), (1000, 6), (2000, 1), (2010, 6)])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mapping_path, records_path = write_capture(root, blocks=[block])
+            run = load_profile_run(mapping_path, [records_path], skip_launches=1, launch_count=1)
+            with patch("tools.profiling.cli.load_profile_run", side_effect=AssertionError("reparsed input")):
+                result = generate_reports_for_run(run, root / "report", attributes={"case": "selected"})
+            trace = json.loads((result.output_dir / "perfetto_trace.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(result.status, "complete")
+        self.assertEqual(trace["metadata"]["attributes"]["selected_launch_ids"], [1])
+        self.assertEqual(trace["metadata"]["attributes"]["case"], "selected")
+        self.assertNotIn("case", run.attributes)
 
     def test_cli_attributes_add_host_side_provenance(self):
         with tempfile.TemporaryDirectory() as tmp:

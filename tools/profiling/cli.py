@@ -15,7 +15,7 @@ from .analysis import analyze_run
 from .html_report import render_analysis_markdown, render_report_html
 from .io import atomic_write_json, atomic_write_text
 from .mapping import MappingInput
-from .model import ProfilingInputError
+from .model import ProfileRun, ProfilingInputError
 from .pairing import load_profile_run
 from .perfetto import render_perfetto
 
@@ -62,6 +62,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="KEY=VALUE",
         help="host-side provenance to add to run metadata; repeat as needed",
     )
+    parser.add_argument("--skip-launches", type=int, default=0,
+                        help="exclude this many initial launches (for example warmup)")
+    parser.add_argument("--launch-count", type=int,
+                        help="report this many launches after --skip-launches")
+    parser.add_argument("--expected-launch-count", type=int,
+                        help="expected total launches per core, including warmup")
     return parser
 
 
@@ -156,9 +162,27 @@ def generate_reports(
     records: Sequence[Path],
     output_dir: Path,
     attributes: Optional[Mapping[str, Any]] = None,
+    *,
+    skip_launches: int = 0,
+    launch_count: Optional[int] = None,
+    expected_launch_count: Optional[int] = None,
 ) -> GeneratedReports:
     """Generate and atomically publish reports from a mapping and record files."""
-    run = load_profile_run(mapping, records)
+    run = load_profile_run(
+        mapping, records,
+        skip_launches=skip_launches,
+        launch_count=launch_count,
+        expected_launch_count=expected_launch_count,
+    )
+    return generate_reports_for_run(run, output_dir, attributes)
+
+
+def generate_reports_for_run(
+    run: ProfileRun,
+    output_dir: Path,
+    attributes: Optional[Mapping[str, Any]] = None,
+) -> GeneratedReports:
+    """Publish reports from an already normalized run without rereading records."""
     if attributes:
         merged_attributes = dict(run.attributes)
         merged_attributes.update(_validate_attributes(attributes))
@@ -185,6 +209,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             args.records,
             args.output_dir,
             _parse_attributes(args.attribute),
+            skip_launches=args.skip_launches,
+            launch_count=args.launch_count,
+            expected_launch_count=args.expected_launch_count,
         )
     except (ProfilingInputError, OSError, UnicodeError, ValueError) as exc:
         print(f"profiling error: {exc}", file=sys.stderr)

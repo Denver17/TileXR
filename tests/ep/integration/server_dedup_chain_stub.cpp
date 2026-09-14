@@ -13,7 +13,7 @@
 #include "tilexr_ep.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
-#include "ep_memory_server_dedup_profile.h"
+#include "tilexr_profiling_runtime.h"
 #include "server_dedup_dispatch_reference.h"
 
 namespace {
@@ -27,12 +27,10 @@ std::map<uintptr_t, std::vector<uint8_t>> packets;
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
 alignas(32) std::array<uint8_t, 32> localPeer {};
-std::array<TileXREp::EpServerDedupProfileRecord, TileXREp::kEpServerDedupCoreNum * TileXREp::kEpServerDedupProfileSegments> countProfile {};
-std::vector<uint8_t> sendProfile;
-uint64_t sendProfileOffset = 0;
-std::array<TileXREp::EpServerDedupDetailRecord, TileXREp::kEpServerDedupCoreNum> dispatchDetail {};
-uint64_t dispatchDetailOffset = 0;
-bool profileReady = false;
+TileXR::TileXRProfilingRuntimeConfig profileConfig;
+std::vector<uint64_t> profileTimes;
+std::vector<uint32_t> profileEvents, profileOccupied, profileDropped;
+uint32_t profileStride = 0;
 int Call(const char *name)
 {
     const uint64_t count = ++calls[name];
@@ -107,18 +105,6 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
         if (std::getenv("TEST_ROUND_FAULT") != nullptr) --epochs[3];
         return Call("round-read");
     }
-    if (profileReady && source == args.peerMems[rankId] && bytes == sizeof(countProfile)) {
-        std::memcpy(destination, countProfile.data(), bytes);
-        return Call("breakdown-read");
-    }
-    if (profileReady && source == args.peerMems[rankId] + sendProfileOffset && bytes == sendProfile.size()) {
-        std::memcpy(destination, sendProfile.data(), bytes);
-        return Call("send-breakdown-read");
-    }
-    if (profileReady && source == args.peerMems[rankId] + dispatchDetailOffset && bytes == sizeof(dispatchDetail)) {
-        std::memcpy(destination, dispatchDetail.data(), bytes);
-        return Call("detail-breakdown-read");
-    }
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
         return Call("boundary-host-read");
@@ -153,6 +139,20 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
     if (std::getenv("TEST_MISSING_PEER") != nullptr) { args.peerMems[3] = nullptr; }
     if (std::getenv("TEST_SMALL_PEER") != nullptr) { args.peerMemBytes = 64; }
     *comm = &args;
+    std::string error;
+    if (!TileXR::LoadTileXRProfilingRuntimeConfig(rank, deviceId, domain, &profileConfig, &error)) return 94;
+    if (profileConfig.enabled) {
+        // Fixture events are small; export them through the real runtime writer
+        // using a compact equivalent buffer, rather than reserving device GM.
+        const uint64_t loops = std::strtoull(std::getenv("TILEXR_VALIDATION_LOOPS"), nullptr, 10);
+        const uint64_t warmup = std::strtoull(std::getenv("TILEXR_VALIDATION_WARMUP"), nullptr, 10);
+        if (profileConfig.recordsPerCore != (loops + warmup) * 65536U) return 95;
+        profileStride = uint32_t((loops + warmup) * 16U);
+        profileTimes.resize(uint64_t(profileStride) * 64U);
+        profileEvents.resize(profileTimes.size());
+        profileOccupied.resize(64U);
+        profileDropped.resize(profileOccupied.size());
+    }
     return Call("comm-init");
 }
 int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, int rank, TileXRCommPtr *comm)
@@ -175,7 +175,22 @@ int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, in
 }
 int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&host) { host = &args; return Call("host-args"); }
 int TileXRGetCommArgsDev(TileXRCommPtr, GM_ADDR &device) { device = reinterpret_cast<GM_ADDR>(&args); return Call("device-args"); }
-int TileXRCommDestroy(TileXRCommPtr) { return Call("comm-destroy"); }
+int TileXRCommDestroy(TileXRCommPtr)
+{
+    if (profileConfig.enabled) {
+        const char *fault = std::getenv("TEST_PROFILE_FAULT");
+        if (!fault || std::strcmp(fault, "missing") != 0) {
+            std::string error;
+            profileConfig.recordsPerCore = profileStride;
+            if (fault && std::strcmp(fault, "capture") == 0) ++profileConfig.captureId[0];
+            if (!TileXR::WriteTileXRProfilingRecords(profileConfig, rankId, profileOccupied,
+                    profileDropped, profileTimes, profileEvents, &error)) return 94;
+        }
+        const int result = Call("profiling-export");
+        if (result != 0) return result;
+    }
+    return Call("comm-destroy");
+}
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bool *mask,
     int64_t maskType, void *weights, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t experts, int64_t world, int64_t rank, int64_t tpWorld, int64_t tpRank,
@@ -212,145 +227,26 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     }
     const int result = Call("launch");
     if (result == 0) {
-        const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
-        if (mode && std::strcmp(mode, "breakdown") == 0) {
-            using namespace TileXREp;
-            profileReady = true;
-            for (uint32_t core = 0; core < kEpServerDedupCoreNum * kEpServerDedupProfileSegments; ++core) {
-                auto &p = countProfile[core];
-                p = EpServerDedupProfileRecord {};
-                p.marker = kEpServerDedupProfileMarker; p.version = kEpServerDedupProfileVersion;
-                p.recordBytes = sizeof(p); p.rank = uint32_t(rank); p.core = core / kEpServerDedupProfileSegments; p.segment = core % kEpServerDedupProfileSegments;
-                p.blockDim = kEpServerDedupCoreNum; p.generation = calls["launch"];
-                for (uint32_t i = 0; i < 4U; ++i)
-                    p.time[i] = calls["launch"] * 100000 + core / kEpServerDedupProfileSegments + std::min(p.segment * 4U + i, 8U) * 1000;
-            }
+        if (profileConfig.enabled) {
+            const uint32_t launch = uint32_t(calls["launch"] - 1U);
+            const uint64_t origin = uint64_t(launch + 1U) * 100000U;
             const char *fault = std::getenv("TEST_PROFILE_FAULT");
-            const auto detailLayout = TileXREpServerDedupSendProfileLayout(args.peerMemBytes, uint32_t(bs), uint32_t(topK));
-            sendProfile.assign(detailLayout.bytes, 0);
-            sendProfileOffset = detailLayout.offset;
-            dispatchDetailOffset = TileXREpServerDedupDetailOffset(detailLayout.offset);
-            const ServerDedupReference::Shape profileShape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h),
-                uint32_t(topK), dtype == TileXR::TILEXR_DATA_TYPE_BFP16, quant == 4, outDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3};
-            const auto sent = ServerDedupReference::SourcePackets(ServerDedupReference::Ids(profileShape, rank),
-                ServerDedupReference::Weights(profileShape, rank), rank, world, experts, topK);
-            const auto profileRows = ServerDedupReference::DispatchRows(profileShape, uint32_t(rank));
-            const auto profileData = TileXREpServerDedupDataLayout(bs, h, topK, experts, quant == 4);
-            for (uint32_t core = 0; core < kEpServerDedupCoreNum; ++core) {
-                auto &d = dispatchDetail[core];
-                d = EpServerDedupDetailRecord {};
-                d.marker = kEpServerDedupProfileMarker; d.version = kEpServerDedupProfileVersion;
-                d.recordBytes = sizeof(d); d.rank = uint32_t(rank); d.core = core; d.generation = calls["launch"];
-                auto *p = d.points;
-                auto *n = d.counters;
-                if (core >= kEpServerDedupSendCoreNum) {
-                    const uint64_t index = core - kEpServerDedupSendCoreNum;
-                    const uint64_t begin = profileRows.size() * index / kEpServerDedupRecvCoreNum;
-                    const uint64_t end = profileRows.size() * (index + 1U) / kEpServerDedupRecvCoreNum;
-                    const uint64_t base = countProfile[core * kEpServerDedupProfileSegments + 1U].time[2];
-                    for (uint32_t i = 0; i < 4U; ++i) p[i] = base + 1U + i * 10U;
-                    for (uint32_t i = 4; i < 8U; ++i) p[i] = p[3];
-                    n[0] = end - begin;
-                    if (n[0]) {
-                        for (uint32_t i = 4; i < 8U; ++i) p[i] = p[3] + 500U + (i - 4U) * 10U;
-                        n[1] = (n[0] + 15U) / 16U + 1U;
-                        n[2] = n[0] + std::min(n[0], UINT64_C(16));
-                        n[3] = 1U; n[6] = 8U; n[7] = profileData.blockCount;
-                        for (uint64_t row = begin; row < end; ++row) if (profileRows[row].FirstHop()) {
-                            ++n[4];
-                            n[5] += profileRows[row].packet.members.size() - 1U;
-                        }
-                        const uint64_t counts[] = {n[1], n[0], n[0], n[4], n[0], n[4]};
-                        const uint64_t offsets[] = {0U, 20U, 40U, 40U, 60U, 80U};
-                        for (uint32_t i = 0; i < 6U; ++i) if (counts[i])
-                            d.metrics[i] = {counts[i], p[3] + offsets[i], p[3] + offsets[i] + 1U, counts[i]};
+            const uint32_t expected = profileStride / 16U;
+            if (!(fault && std::strcmp(fault, "stale") == 0 && launch + 1U == expected)) {
+                for (uint32_t core = 0; core < 64U; ++core) {
+                    const size_t base = uint64_t(core) * profileStride + launch * 16U;
+                    const uint32_t ids[] = {0x53000001U, 0x53000002U, 0x53000204U,
+                        0x53000206U, 0x53000207U, 0x53000205U, 0x53000300U, 0x53000009U};
+                    for (uint32_t i = 0; i < 8U; ++i) {
+                        profileTimes[base + i] = origin + core + i * 100U;
+                        profileEvents[base + i] = ids[i];
+                    }
+                    profileOccupied[core] = (launch + 1U) * 16U;
+                    if (fault && std::strcmp(fault, "overflow") == 0 && core == 63U) {
+                        profileDropped[core] = 2U;
+                        profileEvents[base + 7U] = 0U;
                     }
                 }
-                p[8] = countProfile[core * kEpServerDedupProfileSegments + 1U].time[3] + 1U;
-                p[9] = p[8] + 10U; p[10] = p[9] + 10U;
-                for (uint32_t i = 11; i < 14U; ++i) p[i] = p[10];
-                if (core == kEpServerDedupCoreNum - 1U) {
-                    p[11] = p[10] + 10U; p[12] = p[11] + 10U; p[13] = p[12] + 60U;
-                    n[8] = uint64_t(world) + 7U; n[9] = uint64_t(world) - 1U;
-                    d.metrics[6] = {uint64_t(world) * 2U, p[12] + 1U, p[12] + 3U, uint64_t(world)};
-                }
-            }
-            for (uint32_t core = 0; core < kEpServerDedupSendCoreNum; ++core) {
-                EpServerDedupSendProfileHeader header {kEpServerDedupProfileMarker, kEpServerDedupProfileVersion,
-                    sizeof(EpServerDedupSendProfilePacket), uint32_t(rank), core, calls["launch"], 0, 0};
-                const uint32_t count = bs / 48U + (core < bs % 48U);
-                const uint32_t start = core * (bs / 48U) + std::min(core, uint32_t(bs % 48U));
-                std::vector<EpServerDedupSendProfilePacket> issued;
-                for (bool firstHop : {true, false}) for (const auto &packet : sent) {
-                    if (packet.token < start || packet.token >= start + count || (packet.members.size() > 1U) != firstHop) continue;
-                    issued.push_back({countProfile[core * kEpServerDedupProfileSegments].time[2] + 1U, packet.token, packet.members[0].k});
-                    if (firstHop) ++header.firstHopCount;
-                }
-                header.packetCount = uint32_t(issued.size());
-                if (core == 0U && fault) {
-                    if (std::strcmp(fault, "issue-header") == 0) --header.generation;
-                    if (std::strcmp(fault, "issue-count") == 0) header.packetCount = detailLayout.capacity + 1U;
-                    if (std::strcmp(fault, "issue-time") == 0 && !issued.empty()) issued[0].issue = 1U;
-                }
-                auto *base = sendProfile.data() + core * detailLayout.coreStride;
-                std::memcpy(base, &header, sizeof(header));
-                if (!issued.empty()) std::memcpy(base + sizeof(header), issued.data(), issued.size() * sizeof(issued[0]));
-            }
-            if (fault) {
-                auto &p = countProfile[0];
-                if (std::strcmp(fault, "missing") == 0) p.marker = 0;
-                if (std::strcmp(fault, "stale") == 0) --p.generation;
-                if (std::strcmp(fault, "legacy") == 0) p.version = 1;
-                if (std::strcmp(fault, "core") == 0) p.core = 1;
-                if (std::strcmp(fault, "time") == 0) p.time[3] = p.time[2] - 1;
-                if (std::strcmp(fault, "recv-time") == 0) countProfile[1].time[3] = countProfile[1].time[2] - 1;
-                if (std::strcmp(fault, "last-segment") == 0) countProfile[2].marker = 0;
-                if (std::strcmp(fault, "reserved") == 0) ++countProfile[2].time[1];
-                auto &sender = dispatchDetail[0];
-                auto &empty = dispatchDetail[48];
-                auto &recv = dispatchDetail[63]; // The final partition is nonempty for the test shapes.
-                if (std::strcmp(fault, "detail-marker") == 0) sender.marker = 0;
-                if (std::strcmp(fault, "detail-stale") == 0) --sender.generation;
-                if (std::strcmp(fault, "detail-core") == 0) sender.core = 1;
-                if (std::strcmp(fault, "detail-rank") == 0) ++sender.rank;
-                if (std::strcmp(fault, "detail-version") == 0) --sender.version;
-                if (std::strcmp(fault, "detail-size") == 0) --sender.recordBytes;
-                if (std::strcmp(fault, "detail-reserved") == 0) sender.reserved = 1;
-                if (std::strcmp(fault, "detail-point-reserved") == 0) sender.points[15] = 1;
-                if (std::strcmp(fault, "detail-counter-reserved") == 0) sender.counters[15] = 1;
-                if (std::strcmp(fault, "detail-sender-point") == 0) sender.points[0] = 1;
-                if (std::strcmp(fault, "detail-recv-parent") == 0) recv.points[0] = 1;
-                if (std::strcmp(fault, "detail-recv-order") == 0) recv.points[2] = recv.points[1] - 1U;
-                if (std::strcmp(fault, "detail-finish-parent") == 0) sender.points[8] = 1;
-                if (std::strcmp(fault, "detail-finish-order") == 0) recv.points[12] = recv.points[11] - 1U;
-                if (std::strcmp(fault, "detail-noncoordinator") == 0) ++sender.points[11];
-                if (std::strcmp(fault, "detail-empty") == 0) ++empty.points[4];
-                if (std::strcmp(fault, "detail-rows") == 0) ++recv.counters[0];
-                if (std::strcmp(fault, "detail-first-hop") == 0) ++recv.counters[4];
-                if (std::strcmp(fault, "detail-relays") == 0) ++recv.counters[5];
-                if (std::strcmp(fault, "detail-lanes") == 0) recv.counters[6] = 9;
-                if (std::strcmp(fault, "detail-blocks") == 0) ++recv.counters[7];
-                if (std::strcmp(fault, "detail-probes") == 0) recv.counters[2] = 0;
-                if (std::strcmp(fault, "detail-polls") == 0) recv.counters[8] = uint64_t(world) - 1U;
-                if (std::strcmp(fault, "detail-peer") == 0) recv.counters[9] = uint64_t(world);
-                if (std::strcmp(fault, "detail-metric-count") == 0) ++recv.metrics[1].count;
-                if (std::strcmp(fault, "detail-metric-interval") == 0) recv.metrics[1].maxEnd = recv.points[4] + 1U;
-                if (std::strcmp(fault, "detail-metric-total") == 0) recv.metrics[1].totalTicks = 0U;
-                if (std::strcmp(fault, "detail-metric-unused") == 0) sender.metrics[0].maxBegin = 1U;
-                if (std::strcmp(fault, "detail-round-count") == 0) --recv.metrics[6].count;
-                if (std::strcmp(fault, "detail-round-interval") == 0) recv.metrics[6].maxBegin = recv.points[12] - 1U;
-                if (std::strcmp(fault, "detail-atomic-subset") == 0) {
-                    for (auto &d : dispatchDetail) if (d.metrics[3].count != 0U) {
-                        d.metrics[2].totalTicks = 0U;
-                        d.metrics[2].maxEnd = d.metrics[2].maxBegin;
-                        break;
-                    }
-                }
-                if (std::strcmp(fault, "zero-duration") == 0)
-                    for (auto &d : dispatchDetail) for (auto &metric : d.metrics) if (metric.count != 0U) {
-                        metric.totalTicks = 0U;
-                        metric.maxEnd = metric.maxBegin;
-                    }
             }
         }
         using namespace ServerDedupReference;

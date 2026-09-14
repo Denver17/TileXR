@@ -1,3 +1,6 @@
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -26,7 +29,7 @@
 #include "tilexr_ep.h"
 #include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
-#include "ep_memory_server_dedup_profile.h"
+#include "tilexr_profiling.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "server_dedup_dispatch_reference.h"
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
@@ -166,6 +169,31 @@ Config Parse(int argc, char **argv)
     Require(comm.sin_port != c.barrier.sin_port || comm.sin_addr.s_addr != c.barrier.sin_addr.s_addr,
         "communicator and Host barrier need distinct endpoints");
     return c;
+}
+
+// The standard runtime owns allocation and export. No profiling data uses the
+// communication window; capture configuration must precede communicator init.
+std::string ConfigureProfiling(const Config &c)
+{
+    if (c.runMode != "breakdown") {
+        Check(unsetenv("TILEXR_PROFILING_RECORDS_PATH"), "disable kernel capture");
+        return {};
+    }
+    const uint64_t calls = uint64_t(c.warmup) + c.loops;
+    constexpr uint64_t perLaunch = 65536U;
+    Require(calls <= TileXR::TILEXR_PROFILING_MAX_RECORDS_PER_CORE / perLaunch,
+        "profiling capture capacity exceeds standard records-per-core limit");
+    const uint64_t capacity = calls * perLaunch;
+    Require(capacity <= SIZE_MAX / (64U * (sizeof(uint64_t) + sizeof(uint32_t))),
+        "profiling capture byte size overflow");
+    // The coordinator supplies one UUID and a unique output path per rank.
+    const char *capture = std::getenv("TILEXR_PROFILING_CAPTURE_ID");
+    const char *path = std::getenv("TILEXR_PROFILING_RECORDS_PATH");
+    Require(capture && *capture && path && *path,
+        "breakdown requires TILEXR_PROFILING_CAPTURE_ID and TILEXR_PROFILING_RECORDS_PATH");
+    Check(setenv("TILEXR_PROFILING_RECORDS_PER_CORE", std::to_string(capacity).c_str(), 1),
+        "configure profiling capacity");
+    return path;
 }
 
 std::string Json(const std::string &text)
@@ -354,7 +382,8 @@ int Run(const Config &c)
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
-    std::string stage = "acl-init", batch = "initialization", breakdown, dispatch;
+    std::string stage = "acl-init", batch = "initialization", dispatch;
+    const std::string profilePath = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
         stage = name;
         // Flush before a potentially blocking call: an external timeout cannot
@@ -502,10 +531,6 @@ int Run(const Config &c)
         }
         enterStage("dispatch-read");
         dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost);
-        if (c.runMode == "breakdown") {
-            enterStage("breakdown-read");
-            breakdown = ReadDispatchProfile(c, *host);
-        }
         success = true;
     } catch (const std::exception &error) {
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
@@ -536,7 +561,10 @@ int Run(const Config &c)
         std::string details = ",\"submitted\":" + std::to_string(submitted) + ",\"completed\":" +
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
-        if (!breakdown.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS", breakdown);
+        if (!profilePath.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS",
+            ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(profilePath) +
+            ",\"capture_id\":" + Json(std::getenv("TILEXR_PROFILING_CAPTURE_ID")) +
+            ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops));
         Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
     }
     return success ? 0 : 1;

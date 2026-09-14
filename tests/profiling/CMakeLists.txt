@@ -20,11 +20,29 @@ add_executable(test_profiling_runtime
     ${TILEXR_PROFILING_ROOT}/src/comm/tilexr_profiling_runtime.cpp
 )
 target_compile_features(test_profiling_runtime PRIVATE cxx_std_14)
+find_package(Threads REQUIRED)
+target_link_libraries(test_profiling_runtime PRIVATE Threads::Threads)
 target_include_directories(test_profiling_runtime PRIVATE
     ${TILEXR_PROFILING_ROOT}/src/comm
     ${TILEXR_PROFILING_ROOT}/src/include
 )
 add_test(NAME test_profiling_runtime COMMAND test_profiling_runtime)
+
+foreach(profile_mode IN ITEMS on off)
+    add_executable(test_profiling_device_${profile_mode} unit/test_profiling_device.cpp)
+    target_compile_features(test_profiling_device_${profile_mode} PRIVATE cxx_std_14)
+    target_include_directories(test_profiling_device_${profile_mode} PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/unit/stubs
+        ${TILEXR_PROFILING_ROOT}/src/include)
+    target_compile_definitions(test_profiling_device_${profile_mode} PRIVATE
+        __CCE__=1 __CCE_IS_AICORE__=1)
+    if(profile_mode STREQUAL "on")
+        target_compile_definitions(test_profiling_device_${profile_mode} PRIVATE
+            TILEXR_ENABLE_PROFILING=1)
+    endif()
+    add_test(NAME test_profiling_device_${profile_mode}
+        COMMAND test_profiling_device_${profile_mode})
+endforeach()
 
 if(NOT TILEXR_BUILD_PROFILING_DEMO)
     return()

@@ -1,15 +1,47 @@
 import tempfile
 import unittest
+from io import BytesIO
 from pathlib import Path
+from unittest.mock import patch
 
 from tools.profiling.model import ProfilingInputError
 from tools.profiling.pairing import load_profile_run
-from tools.profiling.records import parse_record_bytes
+from tools.profiling.records import load_record_files, parse_record_bytes
 
 from _fixtures import CAPTURE_ID, mapping_document, record_block, records_bytes, write_capture
 
 
 class ProfilingRecordTests(unittest.TestCase):
+    def test_large_stream_uses_bounded_reads_and_preserves_record_indices(self):
+        records = [(index, 7) for index in range(9000)]
+        data = records_bytes([record_block(0, records=records)])
+
+        class BoundedReader(BytesIO):
+            def read(self, size=-1):
+                if size < 0 or size > 65536:
+                    raise AssertionError("unbounded records read")
+                return super().read(size)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "capture.records.bin"
+            path.write_bytes(data)
+            with patch.object(Path, "open", return_value=BoundedReader(data)):
+                parsed = load_record_files([path])[0]
+
+        self.assertEqual(len(parsed.streams[0].records), 9000)
+        self.assertEqual(parsed.streams[0].records[8192].source_index, 8192)
+
+    def test_timestamp_order_is_checked_across_input_chunks(self):
+        records = [(index, 7) for index in range(4096)] + [(0, 7)]
+        with self.assertRaisesRegex(ProfilingInputError, "not non-decreasing"):
+            parse_record_bytes(records_bytes([record_block(0, records=records)]))
+
+    def test_file_capacity_is_checked_before_record_allocation(self):
+        data = records_bytes([record_block(0, records=[(0, 1), (1, 6)])])
+        with patch("tools.profiling.records.MAX_RECORD_FILE_BYTES", len(data) - 1):
+            with self.assertRaisesRegex(ProfilingInputError, "exceeds maximum size"):
+                parse_record_bytes(data)
+
     def test_parses_exact_file_stream_and_record_layout(self):
         data = records_bytes([record_block(100, 0)])
         parsed = parse_record_bytes(data)

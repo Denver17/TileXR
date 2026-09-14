@@ -256,6 +256,13 @@ int TileXRComm::InitProfiling()
     return TILEXR_SUCCESS;
 }
 
+int TileXRComm::ReserveProfilingLaunch(
+    uint32_t recordsPerLaunch, uint32_t *launchSlot)
+{
+    return profilingLaunchState_.Reserve(profilingConfig_, recordsPerLaunch,
+        launchSlot) ? TILEXR_SUCCESS : TILEXR_ERROR_PARA_CHECK_FAIL;
+}
+
 int TileXRComm::FinalizeProfiling()
 {
     if (!profilingConfig_.enabled || profilingFinalized_) {
@@ -309,6 +316,7 @@ int TileXRComm::FinalizeProfiling()
     }
 
     std::string error;
+    profilingConfig_.incomplete = profilingLaunchState_.Incomplete();
     if (!WriteTileXRProfilingRecords(profilingConfig_, rank_, occupiedCounts,
             droppedCounts, timestamps, eventIds, &error)) {
         TILEXR_LOG(ERROR) << "TileXR profiling records export failed: " << error;
@@ -334,6 +342,8 @@ void TileXRComm::ResetProfilingState()
     commArgs_.tilexrProfilingCoreCapacity = 0U;
     commArgs_.extraFlag &= ~ExtraFlag::PROFILING;
     profilingConfig_ = TileXRProfilingRuntimeConfig {};
+    profilingLaunchState_.Reset();
+    profilingFinalized_ = false;
 }
 
 int TileXRComm::InitUDMA()
