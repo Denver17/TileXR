@@ -324,6 +324,8 @@ find . -type f -name 'rank-*.log' -exec sh -c 'for f do printf "\n%s\n" "$f"; gr
 
 2026-09-14：用户回传 16P/E384、BS96/H7168/TopK6、BF16/MXFP8 E4M3、breakdown 100+50 轮运行达到统一期限，rank 0 最后一条为 CHAIN_PASS。旧代码仅在异常或最终成功时输出后续状态，外部取消使具体阻塞边界丢失，因此补充调用前刷新的有界阶段日志。当前尚未确认设备根因；`3fa9d1b` 仅修正 Host 测试标记，设备 recv/finish 打点变化位于 `ba67a77`。本地以真实 C++14 consumer 配合 ACL 替身暂停 launch、stream-sync 和 communicator destroy，确认 API 尚未返回时日志已可读，解除暂停后全部 16 rank 完成；四项聚焦测试通过，还覆盖异步错误、清理失败和普通模式六种类型组合。这只验证 Host 定位能力，不表示卡死已修复或 CANN/A5 已通过。
 
+2026-09-14：A5 plog 进一步确认 breakdown 的 `aclrtSynchronizeStream` 返回 507035 源于 AIV error 271（`The address for scalar to access the internal buffer is out of bounds`），所有相关 core 在相同 kernel PC 报错。根因是 detail profile flush 对 `GlobalTensor<uint8_t>` 使用 `bytes[offset]` 的索引 DCCI 时未设置 tensor extent；该 bounds-sensitive overload 不能依赖无长度的 `SetGlobalBuffer`。修复为传入 `sizeof(EpServerDedupDetailRecord)` 后才可重新验证 breakdown；functional 不执行该 flush 路径，因此不能作为此修复证据。CANN/A5 编译和运行结果须以修复后的新 build/sync/run 为准。
+
 不带 CANN/NPU 的聚焦检查：
 
 ```bash

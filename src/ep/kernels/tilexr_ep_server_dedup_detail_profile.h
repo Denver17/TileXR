@@ -93,7 +93,10 @@ public:
             output->metrics[i].count = record_.metrics[i].count;
         }
         AscendC::GlobalTensor<uint8_t> bytes;
-        bytes.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(output));
+        // The indexed DCCI overload performs scalar internal-buffer bounds
+        // checking. Set the tensor extent before using bytes[offset]; without
+        // it, profiling-only execution can raise AIV error 271 at stream sync.
+        bytes.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(output), sizeof(*output));
         for (uint32_t offset = 0; offset < sizeof(EpServerDedupDetailRecord); offset += 64U)
             AscendC::DataCacheCleanAndInvalid<uint8_t, AscendC::CacheLine::SINGLE_CACHE_LINE,
                 AscendC::DcciDst::CACHELINE_OUT>(bytes[offset]);
