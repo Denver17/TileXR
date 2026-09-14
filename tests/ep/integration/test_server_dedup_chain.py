@@ -103,12 +103,12 @@ class ChainConsumerTests(unittest.TestCase):
                 process.kill()
             process.communicate(timeout=5)
 
-    def start(self, rank, *, environment=None, run="run-identity"):
+    def start(self, rank, *, environment=None, run="run-identity", stderr=subprocess.PIPE):
         env = dict(self.environment, TEST_RANK=str(rank))
         env.update(environment or {})
         process = subprocess.Popen([str(self.executable), run, "build-identity", "unknown", f"node-{rank // 8}",
             str(rank // 8), str(rank % 8), str(rank % 8), str(rank), "16"],
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            env=env, stdout=subprocess.PIPE, stderr=stderr, text=True)
         self.processes.append(process)
         return process
 
@@ -216,6 +216,7 @@ class ChainConsumerTests(unittest.TestCase):
                     for rank, process in enumerate(processes):
                         output, errors = process.communicate(timeout=15)
                         self.assertEqual(process.returncode, 0, output + errors)
+                        self.assertNotIn("EP_SERVER_DEDUP_PROGRESS", errors)
                         record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
                         records.append(record)
                         linked, = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")
@@ -529,6 +530,49 @@ class ChainConsumerTests(unittest.TestCase):
                                 if zero_duration:
                                     self.assertEqual(metric["total_ticks"], 0)
                                     self.assertEqual(metric["max_begin"], metric["max_end"])
+                for path in Path(self.trace.name).iterdir(): path.unlink()
+
+    def test_breakdown_progress_is_flushed_before_blocking_api(self):
+        for api, stage in (("launch", "launch"), ("sync", "stream-sync"),
+                           ("comm-destroy", "cleanup-communicator")):
+            with self.subTest(api=api):
+                resume = Path(self.trace.name) / "resume"
+                progress = Path(self.trace.name) / "progress.log"
+                env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                           TILEXR_VALIDATION_WARMUP="2")
+                with progress.open("w") as log:
+                    process = self.start(0, environment=dict(env, TEST_PAUSE_STAGE=api,
+                        TEST_RESUME_FILE=str(resume)), stderr=log)
+                    peers = [self.start(rank, environment=env) for rank in range(1, 16)]
+                    deadline = time.monotonic() + 8
+                    while api not in self.trace_lines(0) and time.monotonic() < deadline:
+                        self.assertIsNone(process.poll(), progress.read_text())
+                        time.sleep(0.02)
+                    self.assertIn(api, self.trace_lines(0))
+                    # The API is still blocked. Evidence must already be on
+                    # disk, without an exception, return, or process shutdown.
+                    self.assertIsNone(process.poll())
+                    lines = progress.read_text().splitlines()
+                    self.assertTrue(lines)
+                    self.assertIn(f"stage={stage} ", lines[-1])
+                    if api == "sync":
+                        self.assertIn("submitted=3 completed=0 warmup_submitted=2 warmup_completed=0", lines[-1])
+                    resume.touch()
+                    for current in [process] + peers:
+                        output, errors = current.communicate(timeout=15)
+                        self.assertEqual(current.returncode, 0, output + (errors or ""))
+                        self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")), 1)
+                entries = [dict(item.split("=", 1) for item in line.split()[1:])
+                           for line in progress.read_text().splitlines()
+                           if line.startswith("EP_SERVER_DEDUP_PROGRESS ")]
+                self.assertEqual([entry["stage"] for entry in entries], [
+                    "acl-init", "device", "communicator", "allocation", "chain-barrier", "launch", "launch",
+                    "stream-sync", "batch-barrier", "round-read", "count-read", "dispatch-read", "breakdown-read",
+                    "cleanup-buffers", "cleanup-communicator", "cleanup-stream", "cleanup-device", "cleanup-acl"])
+                launches = [entry for entry in entries if entry["stage"] == "launch"]
+                self.assertEqual([entry["batch"] for entry in launches], ["warmup", "measurement"])
+                self.assertEqual([entry["submission"] for entry in launches], ["1", "1"])
+                self.stop(); self.processes.clear()
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_launch_and_async_errors_do_not_release_unconfirmed_round(self):

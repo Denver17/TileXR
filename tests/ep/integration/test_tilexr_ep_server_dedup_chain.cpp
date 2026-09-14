@@ -355,16 +355,27 @@ int Run(const Config &c)
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
     std::string stage = "acl-init", batch = "initialization", breakdown, dispatch;
+    auto enterStage = [&](const char *name) {
+        stage = name;
+        // Flush before a potentially blocking call: an external timeout cannot
+        // report the in-memory stage through the exception handler.
+        if (c.runMode == "breakdown") {
+            std::cerr << "EP_SERVER_DEDUP_PROGRESS rank=" << c.rank << " stage=" << stage << " batch=" << batch
+                << " submission=" << submission << " submitted=" << submitted << " completed=" << completed
+                << " warmup_submitted=" << warmupSubmitted << " warmup_completed=" << warmupCompleted << std::endl;
+        }
+    };
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
     try {
+        enterStage("acl-init");
         Check(aclInit(nullptr), "aclInit"); initialized = true;
-        stage = "device";
+        enterStage("device");
         Check(aclrtSetDevice(c.device), "aclrtSetDevice"); deviceSet = true;
         const char *soc = aclrtGetSocName();
         Require(soc != nullptr && (std::strncmp(soc, "Ascend950", 9) == 0 ||
             std::strncmp(soc, "Ascend910_9", 11) == 0 || std::strncmp(soc, "A5", 2) == 0), "A5 required");
         Check(aclrtCreateStream(&stream), "aclrtCreateStream");
-        stage = "communicator";
+        enterStage("communicator");
         Check(TileXRCommInitRankMemoryDomainWithSize(0, kServerDedupDataMiB, c.rankSize, c.rank, &comm),
             "TileXRCommInitRankMemoryDomainWithSize");
         TileXR::CommArgs *host = nullptr;
@@ -381,7 +392,7 @@ int Run(const Config &c)
         for (int rank = 0; rank < c.rankSize; ++rank) {
             Require(host->peerMems[rank] == deviceArgs.peerMems[rank], "device peer mapping differs from Host");
         }
-        stage = "allocation";
+        enterStage("allocation");
         const uint64_t sizes[] = {layout.xBytes, layout.expertIdsBytes, layout.expandXBytes,
             layout.expertTokenNumsBytes, layout.sendCountsBytes, layout.assistExBytes,
             layout.sourceMaskBytes, layout.groupBytes, layout.weightBytes, layout.weightBytes, layout.dynamicScalesBytes};
@@ -416,7 +427,7 @@ int Run(const Config &c)
         Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0xff, layout.sendCountsBytes), "initialize send counts");
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
             "caller allocation validation");
-        stage = "chain-barrier";
+        enterStage("chain-barrier");
         safeCleanup = false;
         barrier.Run(0);
         Marker(c, "EP_SERVER_DEDUP_CHAIN_PASS", ",\"peer_count\":" + std::to_string(c.rankSize) +
@@ -431,6 +442,9 @@ int Run(const Config &c)
             batch = warming ? "warmup" : "measurement";
             submission = warming ? call + 1U : call - c.warmup + 1U;
             stage = "launch";
+            // One entry per warmup/measurement phase, independent of loop
+            // count. Counters in this message describe phase entry only.
+            if (submission == 1U) enterStage("launch");
             Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
                 nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[8], comm, c.bs, c.h, c.topK, c.experts,
                 c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
@@ -441,14 +455,14 @@ int Run(const Config &c)
             if (warming) ++warmupSubmitted;
             else ++submitted;
         }
-        stage = "stream-sync";
+        enterStage("stream-sync");
         Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
-        stage = "batch-barrier";
+        enterStage("batch-barrier");
         barrier.Run(2);
         completed = submitted;
         warmupCompleted = warmupSubmitted;
         safeCleanup = true;
-        stage = "round-read";
+        enterStage("round-read");
         std::vector<int64_t> epochs(uint64_t(c.rankSize) * 4U);
         Check(aclrtMemcpy(epochs.data(), epochs.size() * sizeof(int64_t),
             host->peerMems[c.rank] + TileXREp::TileXREpServerDedupRoundOffset(host->peerMemBytes),
@@ -457,7 +471,7 @@ int Run(const Config &c)
             Require(epochs[word] == int64_t(calls), "completion epoch mismatch peer=" +
                 std::to_string(word / 4U) + " expected=" + std::to_string(calls) +
                 " actual=" + std::to_string(epochs[word]));
-        stage = "count-read";
+        enterStage("count-read");
         std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
         std::vector<int64_t> actualExperts(c.experts / c.rankSize);
         Check(aclrtMemcpy(actualPrefix.data(), layout.sendCountsBytes, buffers[4],
@@ -486,10 +500,10 @@ int Run(const Config &c)
                 previousExpert = cumulative;
             }
         }
-        stage = "dispatch-read";
+        enterStage("dispatch-read");
         dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost);
         if (c.runMode == "breakdown") {
-            stage = "breakdown-read";
+            enterStage("breakdown-read");
             breakdown = ReadDispatchProfile(c, *host);
         }
         success = true;
@@ -512,11 +526,12 @@ int Run(const Config &c)
                 << " warmup_completed=" << warmupCompleted << " " << name << " ret=" << code << std::endl;
         }
     };
+    enterStage("cleanup-buffers");
     for (auto data : buffers) { if (data != nullptr) cleanup(aclrtFree(data), "aclrtFree"); }
-    if (comm != nullptr) { cleanup(TileXRCommDestroy(comm), "TileXRCommDestroy"); }
-    if (stream != nullptr) { cleanup(aclrtDestroyStream(stream), "aclrtDestroyStream"); }
-    if (deviceSet) { cleanup(aclrtResetDevice(c.device), "aclrtResetDevice"); }
-    if (initialized) { cleanup(aclFinalize(), "aclFinalize"); }
+    if (comm != nullptr) { enterStage("cleanup-communicator"); cleanup(TileXRCommDestroy(comm), "TileXRCommDestroy"); }
+    if (stream != nullptr) { enterStage("cleanup-stream"); cleanup(aclrtDestroyStream(stream), "aclrtDestroyStream"); }
+    if (deviceSet) { enterStage("cleanup-device"); cleanup(aclrtResetDevice(c.device), "aclrtResetDevice"); }
+    if (initialized) { enterStage("cleanup-acl"); cleanup(aclFinalize(), "aclFinalize"); }
     if (success) {
         std::string details = ",\"submitted\":" + std::to_string(submitted) + ",\"completed\":" +
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +

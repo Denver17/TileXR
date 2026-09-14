@@ -301,6 +301,29 @@ python3 tools/validation/measurements.py run/case-实际目录/实际run_id/summ
 
 `stage=count-read` 或 `stage=dispatch-read` 表示 stream 与 Host barrier 已完成，随后数值/包校验失败，不代表等待超时。错误保留首个不匹配字段、source/token/k/q 或 count 邻域。count 输出预填 -1，mask/权重输出预填哨兵；保留实际原始输入供复现。提交、同步或 barrier 失败而完成状态未知时，不释放可能仍在使用的设备资源，交由进程退出和调度器收尾。
 
+### 只有 CHAIN_PASS 后超时
+
+`EP_SERVER_DEDUP_CHAIN_PASS` 在第一次 Dispatch 提交前输出，只证明建链和启动前检查通过。`primary_error` 为 `EXIT_FAILED / 集群达到统一执行期限 / stage=execution` 时，表示控制端期限到达并取消集群任务，不能据此认定 kernel 已运行、recv_data 死锁或环境故障。统一执行预算为 `min(配置总期限 - 20 秒, 120 秒)`，从控制端 run 开始计入产物检查、启动及测试，不是单个 kernel 的等待时长。
+
+breakdown 模式在 Host 阶段入口刷新 `EP_SERVER_DEDUP_PROGRESS`，每 rank 正常最多 18 行，与轮数无关。warmup 和 measurement 各只在第一次提交前打印一次 `stage=launch`；该行的 submission/submitted 是**阶段入口快照**，不能解释为后续卡在第 1 轮。functional/performance 不打印进度；不增加设备同步或 Host 计时。
+
+| 最后一条 progress 的 stage | 下一条尚未出现时的排查范围 |
+| --- | --- |
+| `launch` | 当前 warmup/measurement 批次的 Host 提交路径，含运行时排队；不能确定具体阻塞轮次 |
+| `stream-sync` | 所有提交已返回，进入整批 stream 同步；需结合所有 rank 和设备日志检查异步执行/等待 |
+| `batch-barrier` | 本 rank stream 同步已成功，正在等待其他 rank 的 Host barrier |
+| `round-read` / `count-read` / `dispatch-read` | 整批 stream 和 Host barrier 已完成，正在读取/校验对应输出 |
+| `breakdown-read` | Dispatch 输出校验已通过，正在读取/校验/序列化设备打点 |
+| `cleanup-*` | 当前对应资源释放阶段；仅在最终 DISPATCH_PASS 中看到 cleanup=complete 才能确认收尾成功 |
+
+在本次运行的 `<run_id>` 结果目录执行以下只读命令，保留全部 rank 的最后阶段和已有错误：
+
+```bash
+find . -type f -name 'rank-*.log' -exec sh -c 'for f do printf "\n%s\n" "$f"; grep "EP_SERVER_DEDUP_FAIL " "$f"; grep "EP_SERVER_DEDUP_PROGRESS " "$f" | tail -n 3; done' sh {} +
+```
+
+2026-09-14：用户回传 16P/E384、BS96/H7168/TopK6、BF16/MXFP8 E4M3、breakdown 100+50 轮运行达到统一期限，rank 0 最后一条为 CHAIN_PASS。旧代码仅在异常或最终成功时输出后续状态，外部取消使具体阻塞边界丢失，因此补充调用前刷新的有界阶段日志。当前尚未确认设备根因；`3fa9d1b` 仅修正 Host 测试标记，设备 recv/finish 打点变化位于 `ba67a77`。本地以真实 C++14 consumer 配合 ACL 替身暂停 launch、stream-sync 和 communicator destroy，确认 API 尚未返回时日志已可读，解除暂停后全部 16 rank 完成；四项聚焦测试通过，还覆盖异步错误、清理失败和普通模式六种类型组合。这只验证 Host 定位能力，不表示卡死已修复或 CANN/A5 已通过。
+
 不带 CANN/NPU 的聚焦检查：
 
 ```bash

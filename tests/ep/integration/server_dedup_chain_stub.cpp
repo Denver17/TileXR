@@ -1,11 +1,13 @@
 // 仅由 test_server_dedup_chain.py 链接到真实 consumer；不进入生产安装包。
 #include <cstdlib>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <fstream>
 #include <map>
 #include <string>
+#include <thread>
 #include <tuple>
 #include "acl/acl.h"
 #include "tilexr_ep.h"
@@ -39,6 +41,15 @@ int Call(const char *name)
         const char *rank = std::getenv("TEST_RANK");
         std::ofstream log(std::string(directory) + "/" + (rank == nullptr ? "0" : rank), std::ios::app);
         log << name << '\n';
+    }
+    const char *pauseStage = std::getenv("TEST_PAUSE_STAGE");
+    const char *resumeFile = std::getenv("TEST_RESUME_FILE");
+    if (pauseStage != nullptr && resumeFile != nullptr && std::strcmp(pauseStage, name) == 0) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        while (!std::ifstream(resumeFile).good()) {
+            if (std::chrono::steady_clock::now() >= deadline) return 92;
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
     }
     const char *failure = std::getenv("TEST_FAIL_STAGE");
     const char *failCall = std::getenv("TEST_FAIL_CALL");
