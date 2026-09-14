@@ -330,6 +330,8 @@ python3 tests/ep/integration/test_server_dedup_chain.py
 
 新增 Host CTest 必须安装并输出与测试名对应的 marker（如 `EP_SERVER_DEDUP_ABI_HOST_PASS test=source_send`）。EP 自定义链接命令必须依赖 `$<TARGET_OBJECTS:...>`，保证对象重编后最终外部 kernel 重链；生产 Host 库继续相对加载、注册独立 AICore 二进制。CPU 编译/链接和故障注入只证明这些边界，不替代设备验证。
 
+2026-09-14 v6 Host 标记修复：同一源文件生成 `receive_packet` 和 `receive_profile` 两个程序时，后者仍打印 `test=receive_packet`，导致各节点在 Host 测试阶段报 `LOG_PARSE_FAILED`，工作流退出 16。该故障不是设备 trace 解码失败；此前 CTest 只检查退出码，模拟工作流又使用自带正确标记的夹具，未覆盖真实程序到 reader 的边界。现按 profiling 编译开关输出各自标记，与 source_send 测试保持一致。维护时应让实际编译出的变体经过工作流 marker 校验，不能仅用程序 exit=0 或自造 PASS 日志证明兼容。本地将两个真实接收程序接入现有 node 夹具：修复前复现同名测试的退出 16，修复后节点通过，两个接收 CTest 也通过；其他四项 Host 程序为编排夹具，该验证不涉及 CANN 或 NPU。
+
 ## 输出和验收范围
 
 以下保留历史检查点说明，原文中的“当前提交/当前阶段”指记录形成时的代码。当前完整 Dispatch 操作步骤及通过条件以上文为准；不运行下面的旧空 kernel 或 breakdown 验收。

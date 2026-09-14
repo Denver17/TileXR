@@ -422,5 +422,9 @@ int main()
         std::cerr << error.what() << '\n';
         return 1;
     }
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    return ServerDedupTest::Finish("receive_profile");
+#else
     return ServerDedupTest::Finish("receive_packet");
+#endif
 }
