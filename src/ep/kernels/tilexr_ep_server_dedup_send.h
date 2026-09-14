@@ -176,7 +176,11 @@ public:
         const uint32_t bytes = sizeof(*header) + packets_ * sizeof(*records);
         for (uint32_t offset = 0; offset < bytes; offset += 64U) {
             GlobalTensor<uint8_t> output;
-            output.SetGlobalBuffer(base + offset);
+            // DCCI performs an indexed/scalar access internally. Give the
+            // tensor an extent covering the cache line being flushed so the
+            // profiling-only path cannot trip the AIV internal-buffer bounds
+            // check on CANN 9.1.
+            output.SetGlobalBuffer(base + offset, 64U);
             DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(output);
         }
 #else
