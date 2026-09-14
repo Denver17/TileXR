@@ -2,7 +2,9 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
-当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理数据 Flag，再参与已有 SyncAll、counter 清零及跨 Rank 完成协议。Combine 尚未实现。本增量需通过下面的多卡 NPU 运行验收，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理数据 Flag，再参与已有 SyncAll、counter 清零及跨 Rank 完成协议。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+
+2026-09-14：用户确认完整 Dispatch 在 **16P、64P 的单轮和多轮功能测试均通过**。按最近交付的 [8bc2348](https://github.com/LingquLab/TileXR/commit/8bc2348471614c97b7d020aed65a70885aa3e263) 登记；本次回传未附原始 summary、kernel SHA 或编译版本，尚未独立核对产物来源。该结果覆盖已运行配置的完整 Dispatch 功能及多轮复用；专家数、BS/H/TopK、dtype/量化格式和具体轮次未回传，不沿用此前 source-send 的量化覆盖，也不据此登记完整安全矩阵、128P、breakdown v5、性能目标或 Combine 通过。
 
 固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 保持 **4 GiB 通信域**（4092 MiB 数据 + 4 MiB Flag），底层另有 1 MiB 地址偏移余量。总专家数 `0<E<=1024` 且能被 rank 数整除；完整 Dispatch/Combine 验收前不调整通信域大小。
 
@@ -18,7 +20,7 @@ functional/performance/breakdown 都支持 `loops>=1、warmup>=0`，默认 1/0�
 
 实现维护约束：CompleteCumsum 的计数写出可能仍引用 UB，必须 PIPE_ALL 后再 Reset，并用 `cntOffset+prefixOffset+receiver*prefixStride` 重载 GM 前缀。尾部是逻辑偏移，字段位置必须逐项映射为 `p/480*512+p%480`，不能假定跨 Flag 的 entries 连续。DataCopyPad 完整块源 stride 为 1 个 32B、GM 目标 stride 为 0 字节；group 的字节 stride 用于 uint32 Tensor 时除以 4。批次稳定索引快照不能随着 pending 删除重新读取身份，pending 删除也不表示 lane 已释放。
 
-本地接收测试覆盖量化/非量化字节布局、K1/6/32、24 项任务跨满批/尾批、整批未到达后继续推进、1/3/8 路复用、packet/meta/group 在途只读、空接收、同卡/跨卡转发及其他核槽位保护。Host 模型和地址空间检查不能证明真实 CANN API、异步设备流水或 NPU 性能；本次 CANN/A5 尚待用户环境执行，blue 编译调查按用户先前要求暂缓。
+本地接收测试覆盖量化/非量化字节布局、K1/6/32、24 项任务跨满批/尾批、整批未到达后继续推进、1/3/8 路复用、packet/meta/group 在途只读、空接收、同卡/跨卡转发及其他核槽位保护。Host 模型和地址空间检查不能证明真实 CANN API、异步设备流水或 NPU 性能；设备功能结果以上述用户回传记录为准，尚未取得实际编译版本及性能数据。blue 编译调查按用户先前要求暂缓。
 
 生产多卡执行需要 CANN 9.1、匹配 driver（25.1.rc1 或更新）及每卡至少 64 AIV 的 Ascend910A5/Ascend950。复用相同环境已保留的 HCCL Test 资格记录，不因本次构建重复运行；环境规则见 `AGENTS.md`。
 
