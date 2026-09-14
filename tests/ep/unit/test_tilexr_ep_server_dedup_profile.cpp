@@ -37,7 +37,7 @@ int main()
                     events[5U + 4U*i] == kEpServerDedupOperationEventBase + 5U,
                     "atomic intervals are nested inside the same metadata invocation");
             }
-            Check(capture.counts[core * 8U] == (launch == 2U ? 8U : 16U),
+            Check(capture.counts[core * TileXR::TILEXR_PROFILING_COUNT_STRIDE] == (launch == 2U ? 8U : 16U),
                 "latest publication replaces previous valid count, including shorter captures");
         }
     }
@@ -59,7 +59,7 @@ int main()
     shorter.Publish();
     Check(capture.Events(0U).size() == 2U && capture.counts[0U] == 8U && capture.dropped[0U] == 0U,
         "shorter launch after overflow exposes no stale tail or previous loss");
-    Check(capture.Events(1U).size() == 7U && capture.counts[8U] == 8U,
+    Check(capture.Events(1U).size() == 7U && capture.counts[TileXR::TILEXR_PROFILING_COUNT_STRIDE] == 8U,
         "latest reset never changes another core capture");
     for (uint32_t slot : {1U, UINT32_MAX}) {
         ServerDedupProfile unavailable;

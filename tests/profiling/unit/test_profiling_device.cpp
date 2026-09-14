@@ -16,13 +16,15 @@ void Check(bool ok, const char *message)
 }
 
 struct Buffers {
-    static constexpr uint32_t kCapacity = 24U;
+    static constexpr uint32_t kCapacity = 32U;
+    static constexpr uint32_t kCore1Data = kCapacity + 1U;
+    static constexpr uint32_t kCore1Count = TileXR::TILEXR_PROFILING_COUNT_STRIDE + 1U;
     static constexpr uint32_t kGuard = 0xabcd1234U;
     // Extra entries on each side expose any overflow into a neighboring region.
     std::array<uint64_t, kCapacity * 2U + 2U> stamps {};
     std::array<uint32_t, kCapacity * 2U + 2U> events {};
-    std::array<uint32_t, 18U> counts {};
-    std::array<uint32_t, 18U> dropped {};
+    std::array<uint32_t, 2U * TileXR::TILEXR_PROFILING_COUNT_STRIDE + 2U> counts {};
+    std::array<uint32_t, 2U * TileXR::TILEXR_PROFILING_COUNT_STRIDE + 2U> dropped {};
     TileXR::CommArgs args {};
 
     Buffers()
@@ -47,7 +49,7 @@ struct Buffers {
             counts.front() == kGuard && counts.back() == kGuard &&
             dropped.front() == kGuard && dropped.back() == kGuard,
             "profiling writes must stay inside GM arrays");
-        for (uint32_t index = 2U; index < 9U; ++index) {
+        for (uint32_t index = 2U; index < kCore1Count; ++index) {
             Check(counts[index] == 0U && dropped[index] == 0U,
                 "profiling counters must preserve per-core padding");
         }
@@ -67,10 +69,10 @@ int main()
     writer.RecordAt(2U, 200U);
     writer.Publish();
 #if defined(TILEXR_ENABLE_PROFILING)
-    Check(buffers.events[25U] == 1U && buffers.stamps[25U] == 1U &&
-        buffers.events[26U] == 2U && buffers.stamps[26U] == 200U,
+    Check(buffers.events[Buffers::kCore1Data] == 1U && buffers.stamps[Buffers::kCore1Data] == 1U &&
+        buffers.events[Buffers::kCore1Data + 1U] == 2U && buffers.stamps[Buffers::kCore1Data + 1U] == 200U,
         "direct marker must store timestamp/event pair in requested core");
-    Check(buffers.counts[9U] == 8U && buffers.events[27U] == 0U,
+    Check(buffers.counts[Buffers::kCore1Count] == 8U && buffers.events[Buffers::kCore1Data + 2U] == 0U,
         "Publish must align valid records and pad with zero events");
     writer.Initialize(buffers.Address(), 1U, 1U, 8U);
     for (uint32_t index = 0U; index < 10U; ++index) {
@@ -78,15 +80,15 @@ int main()
     }
     writer.Publish();
     writer.Publish();
-    Check(buffers.events[25U] == 1U && buffers.events[33U] == 3U &&
-        buffers.events[41U] == 0U && buffers.dropped[9U] == 2U,
+    Check(buffers.events[Buffers::kCore1Data] == 1U && buffers.events[Buffers::kCore1Data + 8U] == 3U &&
+        buffers.events[Buffers::kCore1Data + 16U] == 0U && buffers.dropped[Buffers::kCore1Count] == 2U,
         "launch overflow must preserve earlier/later slots and Publish is idempotent");
     writer.Initialize(buffers.Address(), 1U, 2U, 8U);
     for (uint32_t index = 0U; index < 9U; ++index) {
         writer.RecordAt(4U, 400U + index);
     }
     writer.Publish();
-    Check(buffers.dropped[9U] == 3U && buffers.counts[9U] == 24U,
+    Check(buffers.dropped[Buffers::kCore1Count] == 3U && buffers.counts[Buffers::kCore1Count] == 24U,
         "later launches must accumulate rather than erase prior dropped counts");
     // A failed reinitialization must disable the previous live writer.
     const uint64_t before = AscendC::CycleReads();
@@ -98,7 +100,7 @@ int main()
     };
     reject(nullptr, 0U, 0U, 8U);
     reject(buffers.Address(), 2U, 0U, 8U);
-    reject(buffers.Address(), 0U, 3U, 8U);
+    reject(buffers.Address(), 0U, 4U, 8U);
     reject(buffers.Address(), 0U, std::numeric_limits<uint32_t>::max(), 8U);
     reject(buffers.Address(), 0U, 0U, 0U);
     reject(buffers.Address(), 0U, 0U, 7U);
@@ -107,7 +109,7 @@ int main()
     buffers.args.extraFlag = TileXR::ExtraFlag::PROFILING;
     buffers.args.tilexrProfilingRecordsPerCore = 23U;
     reject(buffers.Address(), 0U, 0U, 8U);
-    buffers.args.tilexrProfilingRecordsPerCore = 24U;
+    buffers.args.tilexrProfilingRecordsPerCore = Buffers::kCapacity;
     buffers.args.tilexrProfilingEventIdsGM = nullptr;
     reject(buffers.Address(), 0U, 0U, 8U);
     buffers.args.tilexrProfilingEventIdsGM = reinterpret_cast<GM_ADDR>(buffers.events.data() + 1U);
@@ -124,43 +126,43 @@ int main()
     Check(buffers.dropped[1U] == std::numeric_limits<uint32_t>::max(),
         "dropped count must saturate without wrapping");
 
-    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
-    for (uint32_t index = 0U; index < 27U; ++index) {
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, Buffers::kCapacity);
+    for (uint32_t index = 0U; index < Buffers::kCapacity + 3U; ++index) {
         writer.RecordAt(7U, 700U + index);
     }
     writer.Publish();
     writer.Publish();
-    Check(buffers.counts[9U] == 24U && buffers.dropped[9U] == 3U,
+    Check(buffers.counts[Buffers::kCore1Count] == Buffers::kCapacity && buffers.dropped[Buffers::kCore1Count] == 3U,
         "latest overflow must describe this launch only and Publish must be idempotent");
-    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
-    Check(buffers.counts[9U] == 0U && buffers.dropped[9U] == 0U,
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, Buffers::kCapacity);
+    Check(buffers.counts[Buffers::kCore1Count] == 0U && buffers.dropped[Buffers::kCore1Count] == 0U,
         "latest launch must reset its own count and loss without scanning GM");
     writer.RecordAt(8U, 800U);
     writer.Publish();
-    Check(buffers.counts[9U] == 8U && buffers.dropped[9U] == 0U &&
-        buffers.events[25U] == 8U && buffers.events[26U] == 0U &&
-        buffers.events[33U] == 7U,
+    Check(buffers.counts[Buffers::kCore1Count] == 8U && buffers.dropped[Buffers::kCore1Count] == 0U &&
+        buffers.events[Buffers::kCore1Data] == 8U && buffers.events[Buffers::kCore1Data + 1U] == 0U &&
+        buffers.events[Buffers::kCore1Data + 8U] == 7U,
         "shorter latest launch must replace valid range while leaving stale tail unexported");
     Check(buffers.counts[1U] == 8U &&
         buffers.dropped[1U] == std::numeric_limits<uint32_t>::max(),
         "latest launch must not reset a neighboring core");
     for (uint32_t slot : {1U, std::numeric_limits<uint32_t>::max()}) {
-        writer.InitializeLatest(buffers.Address(), 1U, slot, 24U);
+        writer.InitializeLatest(buffers.Address(), 1U, slot, Buffers::kCapacity);
         writer.RecordAt(9U, 900U);
         writer.Publish();
-        Check(buffers.counts[9U] == 8U && buffers.events[25U] == 8U,
+        Check(buffers.counts[Buffers::kCore1Count] == 8U && buffers.events[Buffers::kCore1Data] == 8U,
             "invalid latest slot must not reset or overwrite the preceding capture");
     }
-    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, Buffers::kCapacity);
     writer.Publish();
-    Check(buffers.counts[9U] == 0U && buffers.dropped[9U] == 0U,
+    Check(buffers.counts[Buffers::kCore1Count] == 0U && buffers.dropped[Buffers::kCore1Count] == 0U,
         "empty latest launch must hide all previous records");
 #else
-    writer.InitializeLatest(buffers.Address(), 1U, 0U, 24U);
+    writer.InitializeLatest(buffers.Address(), 1U, 0U, Buffers::kCapacity);
     writer.RecordAt(8U, 800U);
     writer.Publish();
-    Check(AscendC::CycleReads() == 0U && buffers.counts[9U] == 0U &&
-        buffers.events[25U] == 0U && buffers.stamps[25U] == 0U,
+    Check(AscendC::CycleReads() == 0U && buffers.counts[Buffers::kCore1Count] == 0U &&
+        buffers.events[Buffers::kCore1Data] == 0U && buffers.stamps[Buffers::kCore1Data] == 0U,
         "OFF build must not sample cycles or touch GM");
     static_assert(sizeof(TileXR::DirectProfilingWriter) == 1U,
         "OFF writer must have no per-core state");

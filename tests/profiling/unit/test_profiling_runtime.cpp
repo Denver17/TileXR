@@ -82,7 +82,7 @@ void TestRuntimeConfig()
     const uint64_t maxExport = 48U + 64U * (24U +
         static_cast<uint64_t>(config.recordsPerCore) * 16U);
     Check(maxExport <= (64ULL << 30U), "maximum records.v1 export must fit parser limit");
-    for (const char *invalid : {"0", "7", "67108864", "4294967296",
+    for (const char *invalid : {"0", "7", "8", "24", "67108864", "4294967296",
             "18446744073709551616", "-8", "+8", " 8", "8x"}) {
         SetEnv("TILEXR_PROFILING_RECORDS_PER_CORE", invalid);
         Check(!TileXR::LoadTileXRProfilingRuntimeConfig(0, 0, 0, &config, &error),

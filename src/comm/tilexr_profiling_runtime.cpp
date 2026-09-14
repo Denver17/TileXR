@@ -116,7 +116,7 @@ bool ParseRecordsPerCore(const char *value, uint32_t *result)
     const unsigned long long parsed = std::strtoull(value, &end, 10);
     if (errno != 0 || end == value || *end != '\0' || parsed == 0ULL ||
         parsed > TILEXR_PROFILING_MAX_RECORDS_PER_CORE ||
-        parsed % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0UL) {
+        parsed % TILEXR_PROFILING_CORE_ALIGNMENT_RECORDS != 0UL) {
         return false;
     }
     *result = static_cast<uint32_t>(parsed);
@@ -324,7 +324,7 @@ bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
     }
     if (!ParseRecordsPerCore(std::getenv("TILEXR_PROFILING_RECORDS_PER_CORE"),
             &config->recordsPerCore)) {
-        SetError(error, "TILEXR_PROFILING_RECORDS_PER_CORE must be an aligned integer in [8, 67108856]");
+        SetError(error, "TILEXR_PROFILING_RECORDS_PER_CORE must be a multiple of 16 in [16, 67108848]");
         return false;
     }
     config->recordsPath = ExpandRecordsPath(recordsPath, rank, device, commDomain);

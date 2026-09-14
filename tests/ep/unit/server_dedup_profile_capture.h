@@ -13,7 +13,7 @@ struct ProfileCapture {
     explicit ProfileCapture(TileXR::CommArgs &args) :
         recordsPerCore(recordsPerLaunch),
         timestamps(64ULL * recordsPerCore + 2U, 0U),
-        events(64ULL * recordsPerCore + 2U, 0U), counts(64U * 8U, 0U), dropped(64U * 8U, 0U)
+        events(64ULL * recordsPerCore + 2U, 0U), counts(64U * TileXR::TILEXR_PROFILING_COUNT_STRIDE, 0U), dropped(64U * TileXR::TILEXR_PROFILING_COUNT_STRIDE, 0U)
     {
         timestamps.front() = timestamps.back() = UINT64_MAX;
         events.front() = events.back() = UINT32_MAX;
@@ -30,8 +30,8 @@ struct ProfileCapture {
         std::vector<uint32_t> result;
         uint64_t previous = 0U;
         const uint64_t base = uint64_t(core) * recordsPerCore + 1U;
-        Check(counts[core * 8U] <= recordsPerCore, "published valid count stays in its core partition");
-        for (uint32_t i = 0U; i < counts[core * 8U]; ++i) {
+        Check(counts[core * TileXR::TILEXR_PROFILING_COUNT_STRIDE] <= recordsPerCore, "published valid count stays in its core partition");
+        for (uint32_t i = 0U; i < counts[core * TileXR::TILEXR_PROFILING_COUNT_STRIDE]; ++i) {
             if (events[base + i] == 0U) continue;
             Check(timestamps[base + i] > previous, "real timestamp samples retain execution order");
             previous = timestamps[base + i];

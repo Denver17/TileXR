@@ -122,6 +122,32 @@ The profiling flush uses no `DataCopy`, UB scratch, or profiling-specific
 capture storage after the measured interval and does not change the required
 cache and publication protocol for UDMA SQEs, queue heads, or doorbells.
 
+Scalar GM capture storage still requires explicit cache publication. On CANN
+9.1 / A5, a DataCache line is 64 bytes. Each core's count and dropped count
+therefore use a 64-byte stride, and configured records per core must be a
+multiple of 16 so adjacent event-ID regions also occupy separate cache lines.
+Launch slots and occupied counts remain aligned to 8 records. Rebuild the Host
+library and device kernels together when changing this in-memory layout;
+`records.v1` and the launch argument layout are unchanged.
+
+The shared `DirectProfilingWriter::Publish()` and `ProfilingRecorder::Flush()`
+clean and invalidate only cache lines intersecting the written payload, then
+publish and flush counters with the standard `DataCacheCleanAndInvalid` API.
+An 8-record launch offset can place event IDs halfway through a cache line:
+advance to the next actual line boundary, including the final partial line.
+Use an explicit tensor extent at each address instead of indexing a tensor
+with the default zero extent. An empty latest launch must still flush both
+reset counters. Marker locations, UB usage and per-marker cache operations do
+not change.
+
+The triggering 64-core capture completed 150 launches but exported 63 streams,
+missing end markers and stale records with zero reported drops. A 32-byte
+counter stride lets neighboring cores overwrite each other's counts during
+cache writeback, producing empty streams, truncated records or exposed stale
+tails. Do not treat this as parser overload or relax capture integrity checks.
+Compilation and code review verify the patch's build and publication contract;
+device cache visibility remains subject to A5 runtime validation.
+
 The common runtime allocates capture storage before launch and serializes it to
 `tilexr_profiling_records.v1` when the communication domain is destroyed.
 

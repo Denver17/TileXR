@@ -21,12 +21,18 @@ namespace TileXR {
 
 constexpr uint32_t TILEXR_PROFILING_LOCAL_RECORD_CAPACITY = 256U;
 constexpr uint32_t TILEXR_PROFILING_GM_ALIGNMENT_RECORDS = 8U;
-constexpr uint32_t TILEXR_PROFILING_COUNT_STRIDE = 8U;
+// CANN 9.1 / 910B and A5 scalar DataCache lines are 64 bytes. Different
+// logical cores must never write any part of the same cache line.
+constexpr uint32_t TILEXR_PROFILING_CACHE_LINE_BYTES = 64U;
+constexpr uint32_t TILEXR_PROFILING_CORE_ALIGNMENT_RECORDS =
+    TILEXR_PROFILING_CACHE_LINE_BYTES / sizeof(uint32_t);
+constexpr uint32_t TILEXR_PROFILING_COUNT_STRIDE =
+    TILEXR_PROFILING_CACHE_LINE_BYTES / sizeof(uint32_t);
 constexpr uint32_t TILEXR_PROFILING_MAX_CORE_COUNT = 64U;
 constexpr uint32_t TILEXR_PROFILING_DEFAULT_RECORDS_PER_CORE = 4096U;
 // The whole capture may contain multiple large launches. Bound the worst-case
 // 64-core records.v1 export (including headers) below 64 GiB.
-constexpr uint32_t TILEXR_PROFILING_MAX_RECORDS_PER_CORE = 0x03fffff8U;
+constexpr uint32_t TILEXR_PROFILING_MAX_RECORDS_PER_CORE = 0x03fffff0U;
 
 constexpr uint32_t TileXRProfilingStreamId(uint32_t rank, uint32_t core)
 {
@@ -34,6 +40,30 @@ constexpr uint32_t TileXRProfilingStreamId(uint32_t rank, uint32_t core)
 }
 
 #if TILEXR_PROFILING_AICORE && defined(TILEXR_ENABLE_PROFILING)
+
+// Flush only the lines intersecting this writer's range. A reserved launch
+// may start halfway through an event-ID cache line (8 records = 32 bytes).
+// Construct each tensor at its actual address with an explicit extent; do
+// not index a tensor whose default extent is zero.
+template <typename T>
+__attribute__((always_inline)) inline __aicore__ void TileXRProfilingFlushGm(
+    __gm__ T *data, uint32_t count)
+{
+    __asm__ __volatile__("" ::: "memory");
+    __gm__ uint8_t *bytes = reinterpret_cast<__gm__ uint8_t *>(data);
+    const uint64_t length = static_cast<uint64_t>(count) * sizeof(T);
+    for (uint64_t offset = 0U; offset < length;) {
+        __gm__ uint8_t *address = bytes + offset;
+        AscendC::GlobalTensor<uint8_t> line;
+        line.SetGlobalBuffer(address, 1U);
+        AscendC::DataCacheCleanAndInvalid<uint8_t,
+            AscendC::CacheLine::SINGLE_CACHE_LINE,
+            AscendC::DcciDst::CACHELINE_OUT>(line);
+        offset += TILEXR_PROFILING_CACHE_LINE_BYTES -
+            reinterpret_cast<uint64_t>(address) % TILEXR_PROFILING_CACHE_LINE_BYTES;
+    }
+    __asm__ __volatile__("" ::: "memory");
+}
 
 template <uint32_t RecordCapacity>
 class ProfilingRecorder {
@@ -78,7 +108,7 @@ public:
         const uint32_t coreCapacity = args->tilexrProfilingCoreCapacity;
         const uint32_t recordsPerCore = args->tilexrProfilingRecordsPerCore;
         if (core >= coreCapacity || recordsPerCore < occupiedSlots ||
-            recordsPerCore % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U) {
+            recordsPerCore % TILEXR_PROFILING_CORE_ALIGNMENT_RECORDS != 0U) {
             return;
         }
 
@@ -97,6 +127,7 @@ public:
             const uint32_t nextDropped = oldDropped > maxValue - RecordCapacity ?
                 maxValue : oldDropped + RecordCapacity;
             droppedCountOut[0] = nextDropped;
+            TileXRProfilingFlushGm(droppedCountOut, 1U);
             return;
         }
 
@@ -114,7 +145,10 @@ public:
             timestampsOut[slot] = 0U;
             eventIdsOut[slot] = 0U;
         }
+        TileXRProfilingFlushGm(timestampsOut, occupiedSlots);
+        TileXRProfilingFlushGm(eventIdsOut, occupiedSlots);
         recordCountOut[0] = occupiedBefore + occupiedSlots;
+        TileXRProfilingFlushGm(recordCountOut, 1U);
     }
 
 private:
@@ -158,7 +192,7 @@ public:
             logicalCore >= args->tilexrProfilingCoreCapacity ||
             args->tilexrProfilingRecordsPerCore == 0U ||
             args->tilexrProfilingRecordsPerCore %
-                TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U ||
+                TILEXR_PROFILING_CORE_ALIGNMENT_RECORDS != 0U ||
             recordsPerLaunch == 0U ||
             recordsPerLaunch % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U) {
             return;
@@ -228,6 +262,10 @@ public:
             }
             cursor_ = aligned;
         }
+        // Complete payload publication before publishing its occupied range.
+        // No UB scratch or per-marker cache operations are needed.
+        TileXRProfilingFlushGm(timestamps_, cursor_);
+        TileXRProfilingFlushGm(eventIds_, cursor_);
         if (dropped_ != 0U) {
             // Launches sharing a core stream must execute in order. Preserve
             // overflow from earlier launches, including after repeated Publish.
@@ -240,6 +278,9 @@ public:
         if (recordCount_[0] < launchBase_ + cursor_) {
             recordCount_[0] = launchBase_ + cursor_;
         }
+        // Flush even when zero: InitializeLatest may have reset both counters.
+        TileXRProfilingFlushGm(droppedCount_, 1U);
+        TileXRProfilingFlushGm(recordCount_, 1U);
     }
 
 private:
