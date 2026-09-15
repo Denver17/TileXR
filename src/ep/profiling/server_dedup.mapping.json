@@ -186,6 +186,34 @@
       "end": 1392509453
     },
     {
+      "name": "load_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509454,
+      "end": 1392509455
+    },
+    {
+      "name": "load_wait",
+      "category": "wait",
+      "parent": "kernel_total",
+      "begin": 1392509456,
+      "end": 1392509457
+    },
+    {
+      "name": "Probe_load_flag",
+      "category": "issue",
+      "parent": "probe",
+      "begin": 1392509458,
+      "end": 1392509459
+    },
+    {
+      "name": "Probe_cal_sum",
+      "category": "compute",
+      "parent": "probe",
+      "begin": 1392509460,
+      "end": 1392509461
+    },
+    {
       "name": "packet_issue",
       "category": "issue",
       "parent": "kernel_total",

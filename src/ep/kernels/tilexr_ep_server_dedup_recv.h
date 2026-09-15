@@ -71,22 +71,30 @@ public:
         profile.Mark(EpDedupDetailPoint::PrepareEnd);
 
         auto snapshot = probeIdxBuf_.Get<uint32_t>();
-        uint32_t scan = 0U, issued = 0U;
+        const uint32_t depth = lanes_ < 2U ? lanes_ : 2U;
+        uint32_t scan = 0U, issued = 0U, consumed = 0U;
         while (tasks_.PendingCount() != 0U) {
             if (scan >= tasks_.PendingCount()) scan = 0U;
             const uint32_t remaining = tasks_.PendingCount() - scan;
             const uint32_t count = remaining < kProbeBatch ? remaining : kProbeBatch;
             profile.Begin(EpDedupDetailMetric::Probe);
-            const uint32_t ready = Probe(scan, count);
+            const uint32_t ready = Probe(scan, count, profile);
             profile.End(EpDedupDetailMetric::Probe);
-            // Higher-index removals cannot change the remaining lower-index
-            // identities in this batch. Always consume the stable snapshot.
+            // Load and consume the immutable snapshot in the same descending
+            // order. Higher-index removals cannot change lower pending entries.
+            uint32_t nextLoad = count;
             for (uint32_t i = count; i > 0U; --i) {
                 const uint32_t index = i - 1U;
                 if ((ready & (uint32_t(1) << index)) == 0U) continue;
-                ReceiveOne(snapshot.GetValue(index), issued % lanes_, profile);
+                while (issued - consumed < depth && nextLoad != 0U) {
+                    --nextLoad;
+                    if ((ready & (uint32_t(1) << nextLoad)) == 0U) continue;
+                    IssueLoad(snapshot.GetValue(nextLoad), issued % lanes_, profile);
+                    ++issued;
+                }
+                ConsumeLoaded(snapshot.GetValue(index), consumed % lanes_, profile);
                 tasks_.RemovePending(scan + index);
-                ++issued;
+                ++consumed;
             }
             if (ready == 0U) scan += count;
         }
@@ -108,19 +116,22 @@ private:
         return args_->peerMems[args_->rank] + data_.dispatchOffset + uint64_t(tasks_.Position(j)) * data_.tokenStride;
     }
 
-    __aicore__ inline uint32_t Probe(uint32_t start, uint32_t count)
+    __aicore__ inline uint32_t Probe(uint32_t start, uint32_t count, ServerDedupProfile &profile)
     {
         auto indices = probeIdxBuf_.Get<uint32_t>();
         auto flags = flagsBuf_.Get<float>();
         auto sums = sumBuf_.Get<float>();
         auto work = workBuf_.Get<float>();
         const uint32_t blocks = uint32_t(data_.blockCount);
+        profile.Begin(EpDedupDetailMetric::ProbeLoadFlag);
         for (uint32_t i = 0; i < count; ++i) {
             const uint32_t j = tasks_.PendingIndex(start + i);
             indices.SetValue(i, j);
             ReadServerDedupFlags(Slot(j), blocks, flags[i * blocks * 8U]);
         }
         ServerDedupReceiveSync<HardEvent::MTE2_V>();
+        profile.End(EpDedupDetailMetric::ProbeLoadFlag);
+        profile.Begin(EpDedupDetailMetric::ProbeCalSum);
         for (uint32_t i = 0; i < count; ++i) {
             ReduceSum(sums[i * 8U], flags[i * blocks * 8U], work, 8U, uint8_t(blocks), 1U);
             PipeBarrier<PIPE_V>(); // Reuse only the shared reduction scratch.
@@ -129,23 +140,33 @@ private:
         uint32_t ready = 0U;
         for (uint32_t i = 0; i < count; ++i)
             if (sums.GetValue(i * 8U) == float(blocks * 8U)) ready |= uint32_t(1) << i;
+        profile.End(EpDedupDetailMetric::ProbeCalSum);
         return ready;
     }
 
-    __aicore__ inline void ReceiveOne(uint32_t j, uint32_t lane, ServerDedupProfile &profile)
+    __aicore__ inline void IssueLoad(uint32_t j, uint32_t lane, ServerDedupProfile &profile)
     {
-        profile.Begin(EpDedupDetailMetric::AcquireLoad);
+        profile.Begin(EpDedupDetailMetric::LoadIssue);
         WaitFlag<HardEvent::MTE3_MTE2>(lane);
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
-        auto meta = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
-        auto group = wire[uint32_t(data_.tokenStride) + 32U].template ReinterpretCast<uint32_t>();
         GlobalTensor<uint8_t> source;
         source.SetGlobalBuffer(Slot(j));
         DataCopy(wire, source, uint32_t(data_.tokenStride));
         SetFlag<HardEvent::MTE2_MTE3>(lane);
-        ServerDedupReceiveSync<HardEvent::MTE2_S>();
-        profile.End(EpDedupDetailMetric::AcquireLoad);
+        // Publish immediately after this load, before queuing later loads.
+        SetFlag<HardEvent::MTE2_S>(lane);
+        profile.End(EpDedupDetailMetric::LoadIssue);
+    }
+
+    __aicore__ inline void ConsumeLoaded(uint32_t j, uint32_t lane, ServerDedupProfile &profile)
+    {
+        profile.Begin(EpDedupDetailMetric::LoadWait);
+        WaitFlag<HardEvent::MTE2_S>(lane);
+        profile.End(EpDedupDetailMetric::LoadWait);
         profile.Begin(EpDedupDetailMetric::Metadata);
+        auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
+        auto meta = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
+        auto group = wire[uint32_t(data_.tokenStride) + 32U].template ReinterpretCast<uint32_t>();
         ServerDedupPacketTail tail(wire, uint32_t(data_.tailOffset));
         const int32_t forwardCount = int32_t(tail.Word(4U));
         const uint32_t row = tasks_.Begin() + j;

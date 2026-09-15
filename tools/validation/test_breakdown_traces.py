@@ -128,6 +128,40 @@ class TraceTests(unittest.TestCase):
         receiver = {e["name"] for e in events if e["args"]["core"] == 48}
         self.assertTrue({"probe", "acquire_load", "metadata", "atomic", "output_issue", "relay_issue"} <= receiver)
 
+    def test_prefetch_and_split_probe_are_positive_intervals(self):
+        # Two loads are issued before either is consumed. Probe children use
+        # new event IDs; the legacy acquire_load fixture above stays supported.
+        recv = [(0, 0x53000001), (100, 0x53000200),
+            (110, 0x53000212), (130, 0x53000213),
+            (140, 0x53000214), (190, 0x53000215), (200, 0x53000201),
+            (210, 0x5300020E), (220, 0x5300020F),
+            (230, 0x5300020E), (240, 0x5300020F),
+            (250, 0x53000210), (260, 0x53000211),
+            (270, 0x53000204), (280, 0x53000205),
+            (290, 0x53000208), (300, 0x53000209),
+            (310, 0x53000210), (320, 0x53000211),
+            (330, 0x53000204), (340, 0x53000205),
+            (350, 0x53000208), (360, 0x53000209), (400, 0x53000009)]
+        rows = {core: [(0, 0x53000001), (400, 0x53000009)] if core < 48 else recv for core in range(64)}
+        path = write_capture(self.root / "prefetch.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "prefetch")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["diagnostic_count"], 0)
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        events = [e for e in trace["traceEvents"] if e["ph"] != "M"]
+        self.assertTrue(all(e["ph"] == "X" and e["dur"] > 0 for e in events))
+        lane = [e for e in events if e["args"]["core"] == 48]
+        for name, durations in {"probe": [0.1], "Probe_load_flag": [0.02], "Probe_cal_sum": [0.05],
+                                "load_issue": [0.01, 0.01], "load_wait": [0.01, 0.01]}.items():
+            self.assertEqual([e["dur"] for e in lane if e["name"] == name], durations)
+            self.assertEqual(result["stages_us"][name]["sample_count"], len(durations) * 16)
+        parent = next(e for e in lane if e["name"] == "probe")
+        for child in (e for e in lane if e["name"] in ("Probe_load_flag", "Probe_cal_sum")):
+            self.assertEqual(child["args"]["parent_stage_id"], parent["args"]["stage_id"])
+            self.assertLess(parent["args"]["raw_start"], child["args"]["raw_start"])
+            self.assertLess(child["args"]["raw_end"], parent["args"]["raw_end"])
+        self.assertNotIn("acquire_load", result["stages_us"])
+
     def test_pingpong_finish_returns_after_counter_reset_without_handshake(self):
         rows = {core: [(0, 0x53000001), (100, 0x53000108),
                       (200, 0x53000109), (300, 0x5300010A)] for core in range(64)}

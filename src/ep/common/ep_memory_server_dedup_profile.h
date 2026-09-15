@@ -16,7 +16,9 @@ enum class EpDedupDetailPoint : uint32_t {
     FinishBegin, LocalEnd, SyncEnd, CounterEnd, PublishEnd, WaitEnd
 };
 enum class EpDedupDetailMetric : uint32_t {
-    Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait
+    Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait,
+    // Append only: older captures retain their existing event identities.
+    LoadIssue, LoadWait, ProbeLoadFlag, ProbeCalSum
 };
 } // namespace TileXREp
 #endif

@@ -20,14 +20,32 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
     const auto events = capture.Events(AscendC::testCore);
 #if defined(TILEXR_ENABLE_PROFILING)
     Check(!events.empty() && events.front() == kEpServerDedupDetailEventBase, "receive begin is retained");
-    const uint32_t expected[] = {0U, rows, rows, firstHops, rows, firstHops, 0U};
-    for (uint32_t op = 0; op < 7U; ++op) {
+    const auto probes = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase);
+    Check(rows == 0U ? probes == 0 : probes > 0, "probe samples reflect actual work");
+    const uint32_t expected[] = {uint32_t(probes), 0U, rows, firstHops, rows, firstHops, 0U,
+        rows, rows, uint32_t(probes), uint32_t(probes)};
+    for (uint32_t op = 0; op < sizeof(expected) / sizeof(expected[0]); ++op) {
         const auto begin = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op);
         const auto end = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op + 1U);
         Check(begin == end, "each observed receive operation retains both timestamps");
-        if (op == 0U) Check(rows == 0U ? begin == 0 : begin > 0, "probe samples reflect actual work");
-        else Check(begin == expected[op], "every repeated operation is recorded without collapsing samples");
+        Check(begin == expected[op], "every repeated operation is recorded without collapsing samples");
     }
+    std::vector<uint32_t> active;
+    for (const auto event : events) {
+        if (event < kEpServerDedupOperationEventBase) continue;
+        const uint32_t offset = event - kEpServerDedupOperationEventBase;
+        const uint32_t op = offset / 2U;
+        if (offset % 2U == 0U) {
+            if (op == uint32_t(EpDedupDetailMetric::ProbeLoadFlag) || op == uint32_t(EpDedupDetailMetric::ProbeCalSum))
+                Check(!active.empty() && active.back() == uint32_t(EpDedupDetailMetric::Probe),
+                    "flag loading and sum/ready comparison remain nested within Probe");
+            active.push_back(op);
+        } else {
+            Check(!active.empty() && active.back() == op, "receive intervals close in nested order");
+            active.pop_back();
+        }
+    }
+    Check(active.empty(), "no receive interval remains open");
     if (rows == 0U) Check(events.size() == 4U, "empty receive contains only real prefix/task/prepare observations");
     else Check(events.back() == kEpServerDedupDetailEventBase + 7U, "clear completion remains the final receive point");
 #else
@@ -255,7 +273,7 @@ void CheckReceiver(int32_t role, int64_t magic)
 // each issued MTE3 source snapshot until the corresponding lane wait, so an
 // early Scalar overwrite of packet/meta/group storage is observable.
 template<bool Quantized>
-void CheckBatchReceiver(uint32_t h)
+void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
 {
     constexpr uint32_t bs = 64U, k = 6U, experts = 96U, world = 16U, rank = 8U, owned = 24U;
     const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
@@ -290,6 +308,10 @@ void CheckBatchReceiver(uint32_t h)
     args.rank = rank; args.rankSize = world; args.peerMems[rank] = local.data();
     const uint32_t hiddenBytes = Quantized ? h : 2U * h;
     const uint32_t groupStride = uint32_t(TileXREpDedupAlign(4U + 8U * (k - 1U), 32U));
+    const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
+    const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + 32U + groupStride));
+    Check(lanes == expectedLanes, "fixture exercises the intended physical lane count");
+    const uint32_t depth = std::min(2U, lanes);
     std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(owned * 8U + 16U, 0xcdcdcdcdU);
     std::vector<uint32_t> groups((8U * bs * groupStride + 64U) / 4U, 0xcdcdcdcdU);
@@ -300,18 +322,33 @@ void CheckBatchReceiver(uint32_t h)
         reinterpret_cast<uint8_t *>(assist.data() + 8U), reinterpret_cast<uint8_t *>(groups.data() + 8U),
         bs, h, k, experts, &pipe);
     bool released = false, inLane = false;
-    uint32_t flagReads = 0U, peak = 0U, currentLane = 0U;
-    std::vector<uint32_t> processed;
+    uint32_t flagReads = 0U, peak = 0U, currentLane = 0U, loadLane = 0U, peakLoads = 0U;
+    std::vector<uint32_t> loaded, processed;
     struct Read { const uint8_t *pointer; std::vector<uint8_t> bytes; };
     std::array<std::vector<Read>, 8> reads;
     std::array<bool, 8> queued {};
+    std::array<bool, 8> loadPending {};
+    std::array<uint32_t, 8> laneTask {};
     AscendC::EventObserver() = [&](AscendC::HardEvent event, uint32_t lane, bool set) {
+        if (event == AscendC::HardEvent::MTE2_S && loadPending[lane]) {
+            if (set) {
+                const uint32_t pending = uint32_t(loaded.size() - processed.size());
+                Check(pending <= depth, "at most two unconsumed loads, or one for a single lane");
+                peakLoads = std::max(peakLoads, pending);
+            } else {
+                if (processed.empty()) Check(loaded.size() == depth, "prefetch fills before the first consumer wait");
+                Check(lane == processed.size() % lanes && laneTask[lane] == loaded[processed.size()],
+                    "loads are consumed FIFO using the same lane and stable task identity");
+                processed.push_back(laneTask[lane]);
+                loadPending[lane] = false; currentLane = lane; inLane = true;
+            }
+        }
         if (event != AscendC::HardEvent::MTE3_MTE2) return;
         if (!set) {
             for (const auto &read : reads[lane])
                 Check(std::memcmp(read.pointer, read.bytes.data(), read.bytes.size()) == 0,
                     "lane packet/meta/group remain unchanged until the completion wait");
-            reads[lane].clear(); queued[lane] = false; currentLane = lane;
+            reads[lane].clear(); queued[lane] = false; loadLane = lane;
         } else if (!reads[lane].empty()) {
             queued[lane] = true;
             peak = std::max(peak, uint32_t(std::count(queued.begin(), queued.end(), true)));
@@ -344,9 +381,9 @@ void CheckBatchReceiver(uint32_t h)
             }
         } else if (size == data.tokenStride) {
             Check(released && q < owned, "ready packet belongs to this receive owner");
-            Check(std::find(processed.begin(), processed.end(), q) == processed.end(), "swap removal never consumes a stable row twice");
-            processed.push_back(q);
-            inLane = true;
+            Check(std::find(loaded.begin(), loaded.end(), q) == loaded.end(), "swap removal never loads a stable row twice");
+            Check(!loadPending[loadLane], "prefetch never reuses an unconsumed lane");
+            loaded.push_back(q); laneTask[loadLane] = q; loadPending[loadLane] = true;
         }
     };
     ServerDedupTest::ProfileCapture capture(args);
@@ -358,8 +395,10 @@ void CheckBatchReceiver(uint32_t h)
     CheckReceiveProfile(profile, capture, owned, 8U);
     Check(processed.size() == owned && processed.front() == 23U && processed[7U] == 16U,
         "scan advances past an unready full batch and consumes a ready tail in reverse order");
-    const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
-    const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + 32U + groupStride));
+    Check(loaded == processed && peakLoads == depth, "every prefetched packet is consumed with the requested depth");
+    for (const auto &events : {AscendC::Events<AscendC::HardEvent::MTE2_S>(),
+            AscendC::Events<AscendC::HardEvent::MTE2_MTE3>(), AscendC::Events<AscendC::HardEvent::MTE3_MTE2>()})
+        Check(std::none_of(events.begin(), events.end(), [](bool v) { return v; }), "all per-lane events are consumed after drain");
     Check(peak == lanes, "ready batches larger than the lane pool retain concurrent ownership");
     Check(pipe.bytes == fixed + lanes * (data.tokenStride + 32U + groupStride), "UB contains one packet/meta/group per lane and an independent 16-slot probe pool");
     std::set<uint32_t> groupIds;
@@ -414,10 +453,11 @@ int main()
 {
     try {
         CheckPacket(1U, 1U, false);
-        CheckBatchReceiver<false>(7168U);
-        CheckBatchReceiver<true>(7168U);
-        CheckBatchReceiver<false>(20000U);
-        CheckBatchReceiver<false>(42000U);
+        CheckBatchReceiver<false>(7168U, 8U);
+        CheckBatchReceiver<true>(7168U, 8U);
+        CheckBatchReceiver<false>(20000U, 3U);
+        CheckBatchReceiver<false>(26000U, 2U);
+        CheckBatchReceiver<false>(42000U, 1U);
         for (bool quantized : {false, true}) {
             for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
             CheckPacket(225U, 32U, quantized);
