@@ -12,6 +12,10 @@
 
 接收以完整前缀确定连续输出行，在 16 核按 floor 分区；tokenPos/pendingIdx 均只存 UB。每批独立探测最多 16 个 Token 的全部块、全部 8 个 Flag word，记录稳定索引，按原 pending 位置逆序消费就绪项并末项覆盖删除。整批未就绪时继续扫描；有删除则重查批起点的换入项。
 
+`recv_tasks` 表构造从每核的首个有效记录开始：对非递减的 inclusive prefix 二分查找首项 `prefix[record] > begin`，随后遍历到本核 `end`。从第 0 项重复扫描会让后部核即使拥有相同任务数也产生准备拖尾。必须使用严格大于跳过零计数平台，并取原始 `prefix[record-1]`（record=0 时为 0）计算 `q=row-previous`；不能以 begin 代替记录起点，否则跨核切分同一 source/expert 时会重用错误槽位。空分区直接返回；UB 双表、pending 稳定下标和核末清理所有权保持原契约。
+
+2026-09-15 此优化的本地 counts、receive_packet、receive_profile 三项 Host 替身回归通过，新增前导零、相等前缀、区间内部起点、全零/不足 16 行及 1024 总专家的槽位对照。已尝试通过配置的 blue SSH 连接进行 A5 编译，但连接返回 255 且无远端输出，未进入 CANN 编译；日志保存在本地 `build/recv-tasks-verification/`。本地测试不证明 A5 性能收益；用户复测时保持相同配置，对比 48～63 核的 recv_tasks 及完整 kernel 耗时。
+
 每路只分配一份 T 字节带 Flag 包、32B metaUB 和对齐 group 行，数据池按扣除前缀、双表及 `544*blockCount+576` 字节监听区后的剩余 190KiB 预算选择 1～8 路。`MTE3_MTE2` 保护复用，`MTE2_MTE3` 发布搬入，`MTE2_S/S_MTE3` 保护 Scalar 元数据访问。hidden/scale 用 DataCopyPad 跳过 Flag 直接写 GM，同一 Token 的转发连续读取这一份包；完成事件在最后一笔写出后记录，下一次复用 lane 才等待。核末回收 lane 后统一清理本核稳定 tokenPos 的所有 Flag。
 
 第一跳先生成保留正 forwardCount 的独立 assistEx/group，再把公共包改为终端角色；终端按 expert 匹配原 k/weight。权重按位复制，group 按 `t*K+originalK` 保存返回槽位，t 由并发取号产生，不预设其顺序。完整元数据关联由所有 rank 结果汇总后验收。

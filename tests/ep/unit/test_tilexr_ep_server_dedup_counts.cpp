@@ -83,6 +83,61 @@ void CheckReceiveTasks(Rank &rank, const std::vector<int32_t> &counts,
     Check(nextRow == addresses.size(), "all expected receive slots have an owner");
 }
 
+void CheckReceiveTaskBoundaries()
+{
+    constexpr uint32_t bs = 96U;
+    std::mt19937 rng(2026U);
+    for (uint32_t experts : {96U, 384U, 1008U, 1024U}) {
+        const uint32_t world = experts == 1008U ? 24U : experts == 1024U ? 128U : 16U;
+        for (uint32_t pattern = 0; pattern < 6U; ++pattern) {
+            std::vector<int32_t> counts(experts, 0);
+            if (pattern == 1U) counts.back() = 7; // Empty cores and a long leading plateau.
+            if (pattern == 2U) counts.front() = counts.back() = 16; // Exact boundary across zeros.
+            if (pattern == 3U) { counts[experts / 2U] = 17; counts.back() = 20; } // Split q ranges.
+            if (pattern == 4U) std::fill(counts.begin(), counts.end(), 1); // Cross-record partitions.
+            if (pattern == 5U)
+                for (auto &count : counts) count = rng() % 3U == 0U ? int32_t(rng() % (bs + 1U)) : 0;
+
+            AscendC::TPipe prefixPipe;
+            AscendC::TBuf<> prefixBuf;
+            prefixPipe.InitBuffer(prefixBuf, experts * sizeof(int32_t));
+            auto prefix = prefixBuf.Get<int32_t>();
+            int32_t cumulative = 0;
+            for (uint32_t i = 0; i < experts; ++i) {
+                cumulative += counts[i];
+                prefix.SetValue(i, cumulative);
+            }
+            for (uint32_t rank : {0U, world - 1U}) {
+                const uint32_t localExperts = experts / world;
+                const auto data = TileXREp::TileXREpServerDedupDataLayout(bs, 7168U, 6U, experts, false);
+                std::vector<uint64_t> addresses;
+                // Enumerate every sender slot independently of the receiver's search/partition.
+                for (uint32_t expert = 0; expert < localExperts; ++expert)
+                    for (uint32_t source = 0; source < world; ++source) {
+                        const uint32_t record = expert * world + source;
+                        for (uint32_t q = 0; q < uint32_t(counts[record]); ++q)
+                            addresses.push_back(TileXREp::TileXREpServerDedupDispatchOffset(
+                                data, source, rank, expert, q, world, localExperts, bs));
+                    }
+                for (uint32_t receiver = 0; receiver < 16U; ++receiver) {
+                    AscendC::TPipe pipe;
+                    TileXREp::ServerDedupReceiveTasks tasks;
+                    tasks.Build(prefix, rank, world, experts, bs, receiver, &pipe);
+                    const uint32_t begin = uint32_t(receiver * addresses.size() / 16U);
+                    const uint32_t end = uint32_t((receiver + 1U) * addresses.size() / 16U);
+                    Check(tasks.Begin() == begin && tasks.Count() == end - begin &&
+                        tasks.PendingCount() == end - begin, "sparse prefix retains exact floor ownership");
+                    for (uint32_t j = 0; j < end - begin; ++j) {
+                        Check(data.dispatchOffset + uint64_t(tasks.Position(j)) * data.tokenStride == addresses[begin + j],
+                            "prefix search preserves original q across zero counts and split records");
+                        Check(tasks.PendingIndex(j) == j, "prefix search retains stable pending indices");
+                    }
+                }
+            }
+        }
+    }
+}
+
 void CheckCompletionEpochs()
 {
     constexpr uint32_t world = 16;
@@ -245,6 +300,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 int main()
 {
     try {
+        CheckReceiveTaskBoundaries();
         CheckCompletionEpochs();
         Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
         Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.

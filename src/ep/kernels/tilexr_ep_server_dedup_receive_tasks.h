@@ -29,8 +29,17 @@ public:
         pendingIdx_ = pendingIdxBuf_.Get<uint32_t>();
 
         const uint32_t localExperts = experts / ranks;
-        uint32_t previous = 0U;
-        for (uint32_t record = 0; record < experts && previous < end; ++record) {
+        // Upper bound skips records ending at begin_, including zero-count runs.
+        // A nonempty partition has begin_ < total, so the result is < experts.
+        uint32_t record = 0U, limit = experts;
+        while (record < limit) {
+            const uint32_t middle = record + (limit - record) / 2U;
+            if (uint32_t(prefix.GetValue(middle)) <= begin_) record = middle + 1U;
+            else limit = middle;
+        }
+        // Keep the original record start: begin_ may split its q range.
+        uint32_t previous = record == 0U ? 0U : uint32_t(prefix.GetValue(record - 1U));
+        for (; record < experts && previous < end; ++record) {
             const uint32_t cumulative = uint32_t(prefix.GetValue(record));
             const uint32_t first = previous > begin_ ? previous : begin_;
             const uint32_t last = cumulative < end ? cumulative : end;
