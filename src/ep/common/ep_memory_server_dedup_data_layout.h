@@ -44,7 +44,7 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     layout.packedPayloadBytes = layout.blockCount * 480U;
     layout.tokenStride = layout.blockCount * 512U;
     layout.returnStride = (uint64_t(h) * 2U + 479U) / 480U * 512U;
-    layout.sourceOffset = TileXREpServerDedupCountLayout(experts).stateBytes;
+    layout.sourceOffset = kEpServerDedupControlBytes;
     layout.sourceBytes = uint64_t(bs) * topK * layout.returnStride;
     layout.dispatchOffset = TileXREpDedupAlign(layout.sourceOffset + layout.sourceBytes, 512U);
     layout.dispatchBytes = uint64_t(experts) * bs * layout.tokenStride;

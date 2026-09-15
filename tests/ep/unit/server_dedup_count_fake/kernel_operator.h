@@ -28,6 +28,15 @@ using bfloat16_t = uint16_t;
 namespace AscendC {
 extern uint32_t testCore;
 extern uint64_t testCopies;
+// Map sparse synthetic GM addresses to bounded Host storage. Real pointer inputs
+// stay unchanged; this lets tests cover >4 GiB offsets without huge allocations.
+inline std::function<void *(uintptr_t)> &GmAddressResolver() {
+    static std::function<void *(uintptr_t)> resolver;
+    return resolver;
+}
+inline void *ResolveGm(uintptr_t address) {
+    return GmAddressResolver() ? GmAddressResolver()(address) : reinterpret_cast<void *>(address);
+}
 inline std::function<void(const void *, const void *, uint32_t)> &GmWriteObserver() {
     static std::function<void(const void *, const void *, uint32_t)> observer;
     return observer;
@@ -70,8 +79,9 @@ template<int, int> int64_t GetCtrlSpr() { return 0; }
 template<int, int> void SetCtrlSpr(int64_t) {}
 inline void SyncAll() {}
 template<class T> inline T AtomicAdd(__gm__ T *address, T value) {
-    T old = *address;
-    *address += value;
+    T *mapped = static_cast<T *>(ResolveGm(reinterpret_cast<uintptr_t>(address)));
+    T old = *mapped;
+    *mapped += value;
     return old;
 }
 enum class RoundMode { CAST_TRUNC, CAST_RINT };
@@ -98,7 +108,7 @@ template<class T> struct GlobalTensor {
     T *pointer = nullptr;
     void SetGlobalBuffer(__gm__ T *p, std::size_t = 0) {
         // Enforce the device API's GM argument before mapping to CPU backing.
-        pointer = reinterpret_cast<T *>(reinterpret_cast<uintptr_t>(p));
+        pointer = static_cast<T *>(ResolveGm(reinterpret_cast<uintptr_t>(p)));
     }
     GlobalTensor operator[](std::size_t i) const { return {pointer + i}; }
 };

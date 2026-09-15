@@ -2,11 +2,11 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
-当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理数据 Flag，再参与已有 SyncAll、counter 清零及跨 Rank 完成协议。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理当前窗口的数据 Flag，再参与本卡 SyncAll 和当前窗口 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
 2026-09-14：用户确认完整 Dispatch 在 **16P、64P 的单轮和多轮功能测试均通过**。按最近交付的 [8bc2348](https://github.com/LingquLab/TileXR/commit/8bc2348471614c97b7d020aed65a70885aa3e263) 登记；本次回传未附原始 summary、kernel SHA 或编译版本，尚未独立核对产物来源。该结果覆盖已运行配置的完整 Dispatch 功能及多轮复用；专家数、BS/H/TopK、dtype/量化格式和具体轮次未回传，不沿用此前 source-send 的量化覆盖，也不据此登记完整安全矩阵、128P、breakdown v5、性能目标或 Combine 通过。
 
-固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 保持 **4 GiB 通信域**（4092 MiB 数据 + 4 MiB Flag），底层另有 1 MiB 地址偏移余量。总专家数 `0<E<=1024` 且能被 rank 数整除；完整 Dispatch/Combine 验收前不调整通信域大小。
+固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 申请 **8 GiB 通信域**（8188 MiB 数据 + 4 MiB runtime Flag），底层另有 1 MiB 地址偏移余量。两个固定 4 GiB 窗口由 `magic % 2` 选择；每窗前 2 MiB 是 cnt/cumsum/prefix/counter，后续 4090 MiB 可用于 Token 区，最后 4 MiB 保留。第一窗尾部空置，第二窗尾部归 runtime；任何 shape 均不得改变窗跨度或越过单窗上限。总专家数 `0<E<=1024` 且能被 rank 数整除。
 
 每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
 
@@ -20,9 +20,9 @@
 
 第一跳先生成保留正 forwardCount 的独立 assistEx/group，再把公共包改为终端角色；终端按 expert 匹配原 k/weight。权重按位复制，group 按 `t*K+originalK` 保存返回槽位，t 由并发取号产生，不预设其顺序。完整元数据关联由所有 rank 结果汇总后验收。
 
-functional/performance/breakdown 都支持 `loops>=1、warmup>=0`，默认 1/0。调用复用同一 communicator/stream/输入输出，连续提交 warmup+loops 轮，整批末尾只同步一次并执行 Host barrier。每轮完成协议现在覆盖接收、转发及 Flag 清理；最终读取完成代次和最后一轮输出，不声称保存了每轮输出快照。
+functional/performance/breakdown 都支持 `loops>=1、warmup>=0`，默认 1/0。调用复用同一 communicator/stream/输入输出，连续提交 warmup+loops 轮，整批末尾只同步一次并执行 Host barrier。各轮接收、转发及 Flag 清理在本卡 kernel 退出前完成；最终按最后一次实际 magic 选择窗口读取输出/Flag/counter，不再读取完成代次，不保存每轮输出快照。
 
-实现维护约束：CompleteCumsum 的计数写出可能仍引用 UB，必须 PIPE_ALL 后再 Reset，并用 `cntOffset+prefixOffset+receiver*prefixStride` 重载 GM 前缀。尾部是逻辑偏移，字段位置必须逐项映射为 `p/480*512+p%480`，不能假定跨 Flag 的 entries 连续。DataCopyPad 完整块源 stride 为 1 个 32B、GM 目标 stride 为 0 字节；group 的字节 stride 用于 uint32 Tensor 时除以 4。批次稳定索引快照不能随着 pending 删除重新读取身份，pending 删除也不表示 lane 已释放。
+实现维护约束：CompleteCumsum 的计数写出可能仍引用 UB，必须 PIPE_ALL 后再 Reset，并用 `windowOffset+cntOffset+prefixOffset+receiver*prefixStride` 重载 GM 前缀。尾部是逻辑偏移，字段位置必须逐项映射为 `p/480*512+p%480`，不能假定跨 Flag 的 entries 连续。DataCopyPad 完整块源 stride 为 1 个 32B、GM 目标 stride 为 0 字节；group 的字节 stride 用于 uint32 Tensor 时除以 4。批次稳定索引快照不能随着 pending 删除重新读取身份，pending 删除也不表示 lane 已释放。
 
 本地接收测试覆盖量化/非量化字节布局、K1/6/32、24 项任务跨满批/尾批、整批未到达后继续推进、1/3/8 路复用、packet/meta/group 在途只读、空接收、同卡/跨卡转发及其他核槽位保护。Host 模型和地址空间检查不能证明真实 CANN API、异步设备流水或 NPU 性能；设备功能结果以上述用户回传记录为准，尚未取得实际编译版本及性能数据。标准打点迁移的 blue 编译与本地验证证据见下文。
 
@@ -609,3 +609,11 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 关键结果分隔线统一为 32 个 `=`。PASS 或 kernel 性能前先输出两行实际 case 配置：算子/模式/测量与预热轮次，以及 BS/H/TopK/专家数/dtype/卡数/量化模式。信息取自本次 summary，终端与 summary.log 一致；当前明确标注 Dispatch server-dedup 空 kernel，不代表已实现 Combine 或去重数据面。
 
 批次结论只在至少执行一个 case 且全部返回成功时显示 `Batch PASS cases=N`。构建、同步或任一 case 非零退出立即停止并保留非零退出码；空清单不能显示 PASS。核心还检查 summary.status/errors，不能仅凭外层进程 exit=0 把失败结果标成通过。Shell 的 set -e 不能替代显式结果判断。
+
+### 2026-09-15：Dispatch 双窗复用约束
+
+单份通信区的轮末握手已移除，不能只修改 Token 地址而漏掉 cnt/cumsum/prefix、relay 或 counter；否则下一轮写入仍可能与上一轮清理冲突。现在统一使用 `peerMems[rank]+(magic%2)*4 GiB`，保留本地 MTE 完成、全核 SyncAll 和当前窗口 counter 清零，不新增 UB。
+
+连续 Dispatch 要求同 comm 单 stream、各 Rank 一致的调用/shape 次序，且每轮发布全部 count（包含零计数）。快 Rank 完成 N+1 需要收到每个 Rank 的 N+1 count，其同 stream 顺序证明这些 Rank 的 N 已结束，故 N+2 可复用 N 的窗口。后续 Dispatch/Combine 交替会让相邻 Dispatch 使用相同 parity，必须核对实际 Combine 通信、零流量及 relay 清理的依赖；当前未实现 Combine，不据此宣称其生命周期已验证。普通 GM 的 group/assistEx/sourceMask 等输出仍须保存到消费者完成。
+
+本次 8 个相关 Host 目标编译和对应回归、5 项 integration 替身、2 项新旧 trace 分段检查通过，覆盖双窗地址、inactive 窗口保护及最终窗口读取；独立并发/地址 review 无未解决发现。blue SSH 编译前探测返回 `banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入 CANN 9.1/A5 OFF/ON 编译；记录位于本地 `build/server-dedup-pingpong-verification/`。未运行 NPU，历史 4 GiB 或单窗结果不代表本次 8 GiB 双窗实机通过。

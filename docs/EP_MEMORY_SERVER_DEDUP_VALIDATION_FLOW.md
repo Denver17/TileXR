@@ -18,7 +18,7 @@
 
 专家数约束按最新主设计同步：总专家数不超过 1024 且能被 R 整除，不设独立单卡上限，允许 L=1。
 当前 cnt/cumsum 增量已适配 Host/layout/调度器限制；可执行步骤与数值判据见[当前提交验收](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收)。
-从本次计数测试直至完整 Dispatch/Combine Server Dedup 功能、性能验证完成，固定每 rank 4 GiB 通信域（4092 MiB 数据区 + 4 MiB Flag 区）；后续仅调整域内布局和算子逻辑。
+Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runtime Flag）；以 `magic % 2` 选择两个固定 4 GiB 窗口，后续 Combine 共用该域但尚未实现。每窗前 2 MiB 留给控制信息，Token 区不得越过 4092 MiB 相对偏移；第一窗尾部留空以保持两窗容量一致。
 开发阶段 1～4 统一先用 16P、每卡 6 专家（总计 96）、BS=96、TopK=6、balance_shift 主场景验证流程及性能；边界条件检查留到完整流程的最终验收，不在各增量默认扫描。
 下文保留阶段规划，空 kernel 辅助打点及完整数据路径的布局/ABI 不代表当前计数实现；既有通过记录不作为新范围已经验证的证据。
 
@@ -125,17 +125,18 @@ prefixOffset = A32(sumOffset+sumBytes); prefixStride = A32(N*4)
 readyOffset = A32(prefixOffset+C*prefixStride); readyBytes = C*C*32
 counterOffset = align1024(readyOffset+readyBytes)   # 1024B，仅首 4B 使用
 stateBytes = A512(counterOffset+1024)
-sourceOffset = stateBytes; sourceBytes = BS*K*U_s
+sourceOffset = 2*1024*1024; sourceBytes = BS*K*U_s
 dispatchOffset = A512(sourceOffset+sourceBytes); dispatchBytes = N*BS*T
 relayOffset = A512(dispatchOffset+dispatchBytes); relayBytes = 8*BS*K*U_m
 requiredBytes = relayOffset+relayBytes
+B_d = peerMems[d] + uint64(magic%2)*4*1024*1024*1024
 cntAddr(d,s,e) = B_d+cntOffset+(uint64(e)*R+s)*32
 dispatchAddr(d,s,e,q) = B_d+dispatchOffset+(((uint64(s)+d)%R*L+e)*BS+q)*T
 ```
 
 当前预留返回跨度 `U_s=U_m=ceil(2H/480)*512`，不能替换成含 Dispatch 尾部的 T；保留返回区域不等于实现 Combine。
 完整前缀和 ready 仅有 16 个消费者，按接收组内索引发布/读取/清理，不向发送核复制前缀；cnt/sum/ready 沿用 Memory 清理，prefix 本身不要求清零。
-不自行将单份布局乘 2 或新增窗口乒乓。已通过的 4 GiB 申请、映射和本卡边界读写只证明通信域能力；每个 case 仍须满足 `requiredBytes` 不超过实际数据域可用字节数，不把 Flag 区计为 payload 容量。
+窗口内布局使用两份固定跨度副本；count、prefix、counter、Token 和 relay 均跟随相同窗口。Host 检查 `stateBytes<=2 MiB`、`requiredBytes<=4 GiB-4 MiB` 和总分配至少 8 GiB。历史 4 GiB 独立 memory-boundary 检查保持原样，它不证明新的 8 GiB 双窗已在设备通过。
 
 #### 2.2 cnt 发送、接收与最终 cumsum 表
 

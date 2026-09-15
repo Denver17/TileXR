@@ -17,7 +17,6 @@ public:
         uint32_t topK, uint32_t experts, uint32_t expertTokenNumsType,
         int64_t magic, TPipe *pipe)
     {
-        (void)magic;
         tpipe_ = pipe;
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         epRankId_ = args_->rank;
@@ -31,7 +30,7 @@ public:
         expertTokenNumsType_ = expertTokenNumsType;
         useAllCoreCount_ = bs < kEpServerDedupSendCoreNum;
         layout_ = TileXREpServerDedupCountLayout(experts);
-        stateOffset_ = layout_.cntOffset;
+        stateOffset_ = TileXREpServerDedupWindowOffset(magic) + layout_.cntOffset;
         GM_ADDR localState = args_->peerMems[epRankId_] + stateOffset_;
         windowInstatusFp32Tensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));
         selfRankWinInGMTensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));

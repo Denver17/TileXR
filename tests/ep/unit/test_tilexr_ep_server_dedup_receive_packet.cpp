@@ -3,6 +3,7 @@
 #include <set>
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
+#include "server_dedup_test_memory.h"
 #include "server_dedup_profile_capture.h"
 
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
@@ -143,7 +144,7 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
 }
 
 template<bool Quantized>
-void CheckReceiver(int32_t role)
+void CheckReceiver(int32_t role, int64_t magic)
 {
     constexpr uint32_t h = 209U, k = 6U, rank = 8U, world = 16U, experts = 96U, bs = 2U;
     Packet fixture(h, k, Quantized, role);
@@ -165,7 +166,18 @@ void CheckReceiver(int32_t role)
     std::memcpy(local.data() + counts.counterOffset, &initialCounter, 4U);
     TileXR::CommArgs args {};
     args.rank = rank; args.rankSize = world;
-    args.peerMems[rank] = local.data(); args.peerMems[9U] = peer.data();
+    // Keep the opposite bank poisoned; prefix, counter, relay and flag cleanup
+    // must all follow the same magic-selected address above the 4 GiB boundary.
+    const uint32_t bank = uint32_t(magic) % 2U;
+    std::vector<uint8_t> otherLocal(local.size(), 0xa5), otherPeer(peer.size(), 0xa5);
+    ServerDedupTest::SparsePeerMemory memory;
+    memory.Add(rank, bank, local.data(), local.size());
+    memory.Add(9U, bank, peer.data(), peer.size());
+    memory.Add(rank, 1U - bank, otherLocal.data(), otherLocal.size());
+    memory.Add(9U, 1U - bank, otherPeer.data(), otherPeer.size());
+    args.peerMems[rank] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(rank));
+    args.peerMems[9U] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(9U));
+    args.peerMemBytes = kEpServerDedupPeerBytes;
     const uint32_t hiddenBytes = Quantized ? h : h * 2U;
     std::vector<uint8_t> hidden(hiddenBytes + 64U, 0xcd), scales(data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(24U, 0xcdcdcdcdU);
@@ -176,7 +188,7 @@ void CheckReceiver(int32_t role)
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
     receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,
         reinterpret_cast<uint8_t *>(assist.data() + 8U), reinterpret_cast<uint8_t *>(groups.data() + 8U),
-        bs, h, k, experts, &pipe);
+        bs, h, k, experts, &pipe, magic);
     uint32_t sends = 0;
     uint64_t sendSync = 0;
     std::vector<uint8_t> firstCopy;
@@ -220,7 +232,7 @@ void CheckReceiver(int32_t role)
             const auto address = TileXREpServerDedupDispatchOffset(data, 2U, expert / 6U, expert % 6U, q, world, 6U, bs);
             auto expected = fixture;
             expected.SetWord(4U, UINT32_MAX); expected.SetWord(6U, rank); expected.SetWord(7U, initialCounter); expected.Pack();
-            Check(std::memcmp(args.peerMems[expert / 6U] + address, expected.wire.data(), data.tokenStride) == 0,
+            Check(std::memcmp((expert / 6U == rank ? local.data() : peer.data()) + address, expected.wire.data(), data.tokenStride) == 0,
                 "local and peer relay slots retain their complete common packet and ready flags");
         }
     } else Check(std::all_of(groups.begin(), groups.end(), [](uint32_t v) { return v == 0xcdcdcdcdU; }),
@@ -235,6 +247,9 @@ void CheckReceiver(int32_t role)
         Check(std::all_of(words->begin(), words->begin() + 8U, [](uint32_t v) { return v == 0xcdcdcdcdU; }) &&
             std::all_of(words->end() - 8U, words->end(), [](uint32_t v) { return v == 0xcdcdcdcdU; }),
             "assist and group writes preserve both output guards");
+    Check(std::all_of(otherLocal.begin(), otherLocal.end(), [](uint8_t v) { return v == 0xa5; }) &&
+        std::all_of(otherPeer.begin(), otherPeer.end(), [](uint8_t v) { return v == 0xa5; }),
+        "receiver leaves the other bank's prefix, counter, payload and flags untouched");
 }
 // CPU hooks model buffer ownership, not asynchronous device execution. Keep
 // each issued MTE3 source snapshot until the corresponding lane wait, so an
@@ -407,9 +422,9 @@ int main()
             for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
             CheckPacket(225U, 32U, quantized);
         }
-        for (int32_t role : {0, 1, -1}) {
-            CheckReceiver<false>(role);
-            CheckReceiver<true>(role);
+        for (int64_t magic : {1, 2, 3}) for (int32_t role : {0, 1, -1}) {
+            CheckReceiver<false>(role, magic);
+            CheckReceiver<true>(role, magic);
         }
     } catch (const std::exception &error) {
         AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};

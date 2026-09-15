@@ -5,6 +5,7 @@
 #include "tilexr_ep_server_dedup_send.h"
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
+#include "server_dedup_test_memory.h"
 #include "server_dedup_profile_capture.h"
 #include "../integration/server_dedup_source_send_reference.h"
 
@@ -87,17 +88,29 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         }
         writes.push_back({AscendC::testCore, header[1], header[2], header[4], destination, reinterpret_cast<uintptr_t>(payload)});
     };
-    std::map<uint32_t, std::vector<uint8_t>> windows;
+    std::map<uint32_t, std::array<std::vector<uint8_t>, 2>> windows;
+    ServerDedupTest::SparsePeerMemory memory;
     for (const auto &packet : packets) {
         const uint32_t destination = packet.members.front().expert / localExperts;
-        if (!windows.count(destination)) windows[destination].assign(data.dispatchOffset + data.dispatchBytes + 32U, 0xa5);
+        if (!windows.count(destination)) {
+            auto &banks = windows[destination];
+            for (uint32_t bank = 0; bank < 2U; ++bank) {
+                banks[bank].assign(data.dispatchOffset + data.dispatchBytes + 32U, 0xa5);
+                memory.Add(destination, bank, banks[bank].data(), banks[bank].size());
+            }
+        }
     }
     ServerDedupTest::ProfileCapture capture(args);
-    for (auto &window : windows) args.peerMems[window.first] = window.second.data();
+    for (const auto &window : windows)
+        args.peerMems[window.first] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(window.first));
+    args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
     std::vector<uint32_t> masks(bs + 2U, 0xdeadbeefU);
     std::vector<float> output(bs * k + 2U, -777.0f);
     const auto observeWrite = AscendC::GmWriteObserver();
     for (uint32_t round = 0; round < rounds; ++round) {
+        const uint32_t bank = (round + 1U) % 2U;
+        std::map<uint32_t, std::vector<uint8_t>> inactive;
+        for (const auto &window : windows) inactive[window.first] = window.second[1U - bank];
         writes.clear();
         AscendC::GmWriteObserver() = observeWrite;
         if (round != 0) for (auto &value : hidden) value = uint16_t(value + 0x100U);
@@ -111,7 +124,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::ServerDedupSender<uint16_t, false, false> sender;
             sender.Init(&args, reinterpret_cast<uint8_t *>(hidden.data()), reinterpret_cast<uint8_t *>(ids.data()),
                 reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
-                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe);
+                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
             sender.Process(profile);
@@ -167,7 +180,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             const uint32_t destination = first.expert / localExperts;
             const uint64_t offset = data.dispatchOffset +
                 (((uint64_t(source) + destination) % ranks * localExperts + first.expert % localExperts) * bs + first.q) * data.tokenStride;
-            const uint8_t *wire = windows[destination].data() + offset;
+            const uint8_t *wire = windows[destination][bank].data() + offset;
             Check(std::count_if(writes.begin(), writes.end(), [&](const Write &write) {
                 return write.destination == wire && write.token == packet.token && write.k == first.k;
             }) == 1, "each original q slot is sent exactly once");
@@ -202,9 +215,10 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         Check(masks.front() == 0xdeadbeefU && masks.back() == 0xdeadbeefU && output.front() == -777.0f && output.back() == -777.0f,
             "non-aligned per-core writes preserve adjacent outputs");
         for (const auto &window : windows) {
-            Check(std::all_of(window.second.begin(), window.second.begin() + data.dispatchOffset,
+            Check(window.second[1U - bank] == inactive.at(window.first), "sender preserves the previous round bank");
+            Check(std::all_of(window.second[bank].begin(), window.second[bank].begin() + data.dispatchOffset,
                 [](uint8_t value) { return value == 0xa5; }), "source packets do not touch state or source return regions");
-            Check(std::all_of(window.second.end() - 32, window.second.end(), [](uint8_t value) { return value == 0xa5; }), "dispatch end canary");
+            Check(std::all_of(window.second[bank].end() - 32, window.second[bank].end(), [](uint8_t value) { return value == 0xa5; }), "dispatch end canary");
         }
 
     }

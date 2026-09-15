@@ -16,8 +16,7 @@ kernel 或性能已经实现并验证。后续确认更新本文对应章节，�
 
 当前代码增量仅实现 cnt 发送/接收、cumsum、完整前缀的发布/消费/清理及 expertTokenNumsOut。
 数据发送、数据接收/转发和 assistEx/sourceMask/group/expertScalesOut 生成仍未实现；当前入口的非计数输出不能用于后续 expert/Combine。
-验证环境从本次 cnt/cumsum 增量起，直到完整 Dispatch/Combine Server Dedup 功能、性能验收完成，固定每 rank 总通信域为 4 GiB
-（4092 MiB 数据区加 4 MiB Flag 区，`peerMemBytes=4294967296`）。后续只调整算子在域内的布局/逻辑并检查数据区容量，不按模块进度改变通信域大小。
+2026-09-15 更新：每 rank 总通信域为 8 GiB（8188 MiB 数据 + 4 MiB runtime Flag，`peerMemBytes=8589934592`）。两个固定 4 GiB 窗口按 `magic % 2` 选择；每窗前 2 MiB 为控制信息，Token 区上限为窗内 4092 MiB。两窗尾部均保留 4 MiB，实际 runtime Flag 只占整个域的最后 4 MiB。当前仅实现 Dispatch，Combine 后续共用此域。
 开发阶段 1～4 的当前主流程测试固定为 16P、每卡 6 专家、BS=96、TopK=6、balance_shift；优先验证流程和性能，边界条件在最终验收统一覆盖。这是测试基线，不缩窄算子的设计支持范围。
 
 ## 算子函数与模块划分
@@ -1134,13 +1133,13 @@ Memory 与 Server Dedup 算法不混用。执行 Server Dedup 时，通信空间
 
 第二块之后追加第三块；不为 Dispatch 的 Token 尾部另划通信区域，尾部已经包含在第二块各槽位的 Payload 中。
 R07-01 的具体 offset、对齐、所需字节数及子区位置按下表收口；不将第二块的两个子区重叠复用。
-通信域扩大到 4GB 上限由通信框架独立实现，不属于本方案范围；不再以旧容量上限或扩容实现阻塞本轮 Dispatch 设计。
+通信域通过现有可指定大小的 MemoryDomain 接口申请为 8 GiB；Host 校验两份窗口及单窗容量，不修改框架的 runtime Flag 所有权。
 这属于 Server Dedup 自身的布局实现，不涉及两个算法共存；cnt/cumsum 的记录格式和流程继续复用 Memory。
 assistEx/sourceMask/group 和 expertScalesOut 是调用方持有的普通 GM 输出；输入 expertScales 只读，均不计为通信大区。
 
 ### R07-01 单份通信数据域布局
 
-以本次使用的 Rank 通信数据域基址 B_rank 为起点，所有 offset、乘积及地址运算使用 uint64。
+以下是单个窗口内的布局，B_rank = peerMems[rank] + uint64(magic % 2) * 4 GiB；所有 offset、乘积及地址运算使用 uint64。两个窗口使用相同布局，控制信息及 counter 也必须翻转。
 沿用 Memory 的记录内容和访问顺序，重算偏移；不调用带旧固定窗口大小的地址常量来计算本版区域。
 记 N=R*L、C=16、A32(x)=align32(x)、A512(x)=align512(x)。T 是 Dispatch 去重包跨度。
 当前 FP16/BF16 非量化返回沿用 Memory Combine DataAsFlag：`U=ceil(H*2/480)*512`，不附 Dispatch 转发尾部。
@@ -1156,7 +1155,7 @@ assistEx/sourceMask/group 和 expertScalesOut 是调用方持有的普通 GM 输
 | cumsum 就绪 Flag | readyOffset=A32(prefixOffset+C*prefixStride) | C*C*32；`[consumer,producer,32B]`，每个 producer 发布一列，每个 consumer 检测并清理自己一行 |
 | 唯一 counter | counterOffset=align1024(readyOffset+C*C*32) | 1024B，仅首 uint32 使用；其余 1020B 不访问、不清零 |
 | 状态区结束 | stateBytes=A512(counterOffset+1024) | 对齐空洞不承载记录；profiling 禁用也不改变布局 |
-| source 返回子区 | sourceOffset=stateBytes | sourceBytes=BS*K*U_s；`[BS,K,U_s]`，DIRECT 和 partial 共用按原始 k 编码的槽位 |
+| source 返回子区 | sourceOffset=2 MiB | sourceBytes=BS*K*U_s；`[BS,K,U_s]`，DIRECT 和 partial 共用按原始 k 编码的槽位 |
 | Dispatch 接收子区 | dispatchOffset=A512(sourceOffset+sourceBytes) | dispatchBytes=N*BS*T；`[R,L,BS,T]`，保留 Memory 的 source 轮转位置 |
 | relay 中转结果区 | relayOffset=A512(dispatchOffset+dispatchBytes) | relayBytes=8*BS*K*U_m；`[8*BS,K,U_m]` |
 | 单份数据域需求 | requiredBytes=relayOffset+relayBytes | 本版三块区域的完整所需字节数，不含调用方的普通 GM 输入输出 |
@@ -1191,7 +1190,7 @@ group 保存的 recvSlot=t*K+k 直接用于第三块寻址，第一跳自身通�
 | source / relay 结果槽位 | Combine 当前调用的通信数据，按 sourceMask / group 只消费有效位置；与 Dispatch 槽位及彼此均不重叠 |
 | assistEx / sourceMask / group / expertScalesOut | 普通 GM 输出，持有到 Combine 消费完成；不保存 Dispatch 通信槽位指针 |
 
-这是单份通信数据域的布局，不自行乘 2 或新增窗口乒乓；counter 仍只有一份。
+每个 4 GiB 窗口各保存一份上述布局和 counter，状态不得超出前 2 MiB，requiredBytes 不得超过 4 GiB-4 MiB。
 框架决定通信数据域的实际分配/映射，R11 继续限定多调用、多 stream 及跨 Rank 的窗口复用；这些不改变本表，也不阻塞本轮 sendData 和 cnt 路径实现。
 本轮收口的是字节布局和正常使用边界，Combine 内部调度、数值计算和 Flag 清理细节仍在对应 Combine 议题讨论。
 
@@ -1205,11 +1204,11 @@ R=128、L=3、BS=256、H=7168、K=6、FP16/BF16 非量化时：
 | 16 份完整前缀 | 33280 | 24576 |
 | cumsum 就绪 Flag | 57856 | 8192 |
 | counter | 66560 | 1024 |
-| source 返回 | 67584 | 23592960（22.5MiB） |
-| Dispatch 接收 | 23660544 | 1560281088（1488MiB） |
-| relay 返回 | 1583941632 | 188743680（180MiB） |
+| source 返回 | 2097152 | 23592960（22.5MiB） |
+| Dispatch 接收 | 25690112 | 1560281088（1488MiB） |
+| relay 返回 | 1585971200 | 188743680（180MiB） |
 
-状态区为 67584B（66KiB），其中 ready 结束至 counter 起点有 512B 对齐空洞；单份数据域总量为 1772685312B（约 1690.564MiB）。
+状态区为 67584B（66KiB），其中 ready 结束至 counter 起点有 512B 对齐空洞；状态区仍置于前 2 MiB 内；每窗实际布局总量为 1774714880B（1692.5MiB）。
 上述预算不包含 metadata/权重/hidden 的普通 GM 输出，也不表示通信分配或 NPU 行为已经验证。
 
 ### 中转结果区与本卡返回
@@ -1294,7 +1293,7 @@ Flag 清理有两种尚未选择的时机（R06）：
 也不能因 source/expert 分区跨核共享而整段清零。
 清理及发送最后通过本核 PIPE_ALL 等待完成，但窗口复用还取决于所有相关生产者和消费者的完成边界。
 Dispatch 算子末尾全部 64 核 SyncAll 后由核 63 清零唯一 counter 的首 4B，写零在退出前完成；
-counter 不使用乒乓，旧 Token Flag、group 和通信数据的复用边界仍须独立满足。
+counter 随当前窗口翻转；group 等普通 GM 输出由调用方保证生命周期，不能因通信区翻转而提前覆盖。
 
 区分保存的 Dispatch plan 身份与每次 Combine 通信轮次。
 沿用运行时 `TileXRCommNextMagic` 的新轮次机制，局部 Flag 清理不替代代际管理。

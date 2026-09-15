@@ -3,9 +3,9 @@
 #include <random>
 
 #include "tilexr_ep_server_dedup_counts.h"
-#include "tilexr_ep_server_dedup_round.h"
 #include "tilexr_ep_server_dedup_receive_tasks.h"
 #include "server_dedup_test_checks.h"
+#include "server_dedup_test_memory.h"
 
 namespace AscendC {
 uint32_t testCore = 0;
@@ -18,7 +18,7 @@ using ServerDedupTest::Check;
 
 struct Rank {
     TileXR::CommArgs args {};
-    std::vector<uint32_t> state;
+    std::array<std::vector<uint32_t>, 2> states;
     std::vector<int32_t> routes, output;
     std::vector<int64_t> expertOutput;
     std::vector<AscendC::TPipe> pipes;
@@ -138,82 +138,35 @@ void CheckReceiveTaskBoundaries()
     }
 }
 
-void CheckCompletionEpochs()
-{
-    constexpr uint32_t world = 16;
-    constexpr uint64_t bytes = TileXREp::kEpServerDedupRoundBytes + 32U;
-    const uint64_t offset = TileXREp::TileXREpServerDedupRoundOffset(bytes);
-    Check(TileXREp::TileXREpServerDedupRoundOffset(UINT64_C(4) << 30) ==
-        (UINT64_C(4) << 30) - 4096U, "round records stay in the final flag window");
-    std::vector<std::vector<int64_t>> windows(world, std::vector<int64_t>((bytes + 32U) / 8U, 0));
-    TileXR::CommArgs args {};
-    args.rank = 0; args.rankSize = world; args.peerMemBytes = bytes;
-    for (uint32_t peer = 0; peer < world; ++peer) {
-        args.peerMems[peer] = reinterpret_cast<uint8_t *>(windows[peer].data());
-        std::fill_n(windows[peer].begin(), 4U, -9);
-        std::fill(windows[peer].end() - 4U, windows[peer].end(), -9);
-    }
-    for (int64_t epoch = 1; epoch <= 4; ++epoch) {
-        std::array<uint32_t, world> reads {};
-        uint32_t publications = 0;
-        AscendC::GmWriteObserver() = [&](const void *destination, const void *source, uint32_t count) {
-            Check(count == 32U, "one complete epoch record per peer");
-            Check(static_cast<const int64_t *>(source)[0] == epoch, "publish the current runtime magic");
-            bool owned = false;
-            for (uint32_t peer = 0; peer < world; ++peer)
-                owned = owned || destination == args.peerMems[peer] + offset;
-            Check(owned, "rank zero only writes its own slot on each peer");
-            ++publications;
-        };
-        AscendC::GmReadObserver() = [&](const void *source, uint32_t count) {
-            Check(publications == world, "publish to every peer before polling completion");
-            Check(count == 32U, "poll complete epoch records");
-            const uint64_t byte = static_cast<const uint8_t *>(source) - args.peerMems[0] - offset;
-            const uint32_t peer = uint32_t(byte / 32U);
-            if (peer >= world || ++reads[peer] > 4U) throw std::runtime_error("completion polling failed to progress");
-            auto *record = windows[0].data() + offset / 8U + peer * 4U;
-            if (peer != 0) {
-                // A delayed peer first exposes a partial new record. Old words
-                // must keep us waiting; a complete later epoch is also valid.
-                if (reads[peer] == 1U) record[0] = epoch;
-                if (reads[peer] == 3U) std::fill_n(record, 4U, epoch + (peer == 2 ? 1 : 0));
-            }
-        };
-        AscendC::TPipe pipe;
-        TileXREp::CompleteServerDedupRound(&args, epoch, &pipe);
-        AscendC::GmReadObserver() = {};
-        AscendC::GmWriteObserver() = {};
-        for (uint32_t peer = 1; peer < world; ++peer)
-            Check(reads[peer] == (peer == 2 && epoch % 2 == 0 ? 1U : 3U), "stale/partial epochs cannot release a new call");
-        for (const auto &window : windows) {
-            Check(std::all_of(window.begin(), window.begin() + 4U, [](int64_t v) { return v == -9; }) &&
-                std::all_of(window.end() - 4U, window.end(), [](int64_t v) { return v == -9; }),
-                "epoch writes preserve adjacent memory");
-        }
-    }
-}
-
 void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rounds)
 {
     const uint32_t localExperts = experts / world;
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<Rank> ranks(world);
+    ServerDedupTest::SparsePeerMemory memory;
     for (uint32_t r = 0; r < world; ++r) {
         auto &rank = ranks[r];
-        rank.state.assign(layout.stateBytes / 4 + 32, 0);
-        std::fill(rank.state.begin() + layout.counterOffset / 4, rank.state.end(), 0xa5a5a5a5);
+        for (uint32_t bank = 0; bank < 2U; ++bank) {
+            auto &state = rank.states[bank];
+            state.assign(layout.stateBytes / 4 + 32, 0);
+            std::fill(state.begin() + layout.counterOffset / 4, state.end(), 0xa5a5a5a5);
+            memory.Add(r, bank, state.data(), state.size() * sizeof(uint32_t));
+        }
         rank.args.rank = r;
         rank.args.rankSize = world;
-        rank.args.peerMemBytes = layout.stateBytes;
+        rank.args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
     }
     for (auto &rank : ranks) for (uint32_t r = 0; r < world; ++r)
-        rank.args.peerMems[r] = reinterpret_cast<uint8_t *>(ranks[r].state.data());
+        rank.args.peerMems[r] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(r));
 
     std::mt19937 rng(17 + world + bs + k);
     std::vector<uint32_t> order(world * 64);
     std::iota(order.begin(), order.end(), 0);
     for (uint32_t round = 1; round <= rounds; ++round) {
         // Alternate outputs and routes only after all simulated ranks finish each call.
+        const uint32_t bank = round % 2U;
+        std::vector<std::vector<uint32_t>> inactive;
+        for (const auto &rank : ranks) inactive.push_back(rank.states[1U - bank]);
         const uint32_t outputType = round % 2;
         const auto offset = layout.cntOffset;
         std::vector<std::vector<int32_t>> expected(world, std::vector<int32_t>(experts));
@@ -254,8 +207,8 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                 Check(AscendC::testCopies == before, "large-BS source cores perform no count IO");
         }
         for (uint32_t r = 0; r < world; ++r) for (uint32_t i = 0; i < experts; ++i) {
-            Check(ranks[r].state[offset / 4 + i * 8] == 0x3f800000, "every cnt record, including zero, is notified");
-            Check(int32_t(ranks[r].state[offset / 4 + i * 8 + 1]) == expected[r][i], "raw per-expert/source count matches independent route histogram");
+            Check(ranks[r].states[bank][offset / 4 + i * 8] == 0x3f800000, "every cnt record, including zero, is notified");
+            Check(int32_t(ranks[r].states[bank][offset / 4 + i * 8 + 1]) == expected[r][i], "raw per-expert/source count matches independent route histogram");
         }
         for (uint32_t id : order) if (id % 64 >= 48) ranks[id / 64].cores[id % 64].RecvCnt();
         std::shuffle(order.begin(), order.end(), rng);
@@ -268,13 +221,14 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 
         for (uint32_t r = 0; r < world; ++r) {
             const auto &rank = ranks[r];
+            Check(rank.states[1U - bank] == inactive[r], "count phases preserve the other round bank");
             int64_t cumulative = 0, previousExpert = 0;
             for (uint32_t i = 0; i < experts; ++i) {
                 cumulative += expected[r][i];
                 Check(rank.output[i + 1] == cumulative, "inclusive sendCountsOut follows localExpert/source order");
-                Check(rank.state[offset / 4 + i * 8] == 0, "cnt ready flag cleared by its receiver");
+                Check(rank.states[bank][offset / 4 + i * 8] == 0, "cnt ready flag cleared by its receiver");
                 for (uint32_t receiver = 0; receiver < 16; ++receiver)
-                    Check(int32_t(rank.state[(offset + layout.prefixOffset) / 4 + receiver * experts + i]) == cumulative,
+                    Check(int32_t(rank.states[bank][(offset + layout.prefixOffset) / 4 + receiver * experts + i]) == cumulative,
                         "all sixteen consumers receive the complete prefix");
                 if ((i + 1) % world == 0) {
                     Check(rank.expertOutput[(i + 1) / world] == (outputType ? cumulative - previousExpert : cumulative),
@@ -285,12 +239,12 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             for (uint32_t matrix = 0; matrix < 2; ++matrix) {
                 const uint64_t begin = matrix == 0 ? layout.cumsumOffset : layout.cumsumFlagOffset;
                 for (uint64_t byte = begin; byte < begin + 16U * 16U * 32U; byte += 4)
-                    Check(rank.state[(offset + byte) / 4] == 0, "segment and full-prefix readiness cleaned");
+                    Check(rank.states[bank][(offset + byte) / 4] == 0, "segment and full-prefix readiness cleaned");
             }
             Check(rank.output.front() == -777 && rank.output.back() == -777 &&
                 rank.expertOutput.front() == -888 && rank.expertOutput.back() == -888,
                 "exact output bytes preserve adjacent canaries");
-            Check(std::all_of(rank.state.begin() + layout.counterOffset / 4, rank.state.end(),
+            Check(std::all_of(rank.states[bank].begin() + layout.counterOffset / 4, rank.states[bank].end(),
                 [](uint32_t v) { return v == 0xa5a5a5a5; }), "count-only increment does not touch counter or payload space");
         }
     }
@@ -301,7 +255,6 @@ int main()
 {
     try {
         CheckReceiveTaskBoundaries();
-        CheckCompletionEpochs();
         Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
         Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
         Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.

@@ -1,10 +1,11 @@
 // Included inside the integration consumer namespace. No production debug ABI.
 std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
     const TileXREp::EpMemoryServerDedupLayout &layout, const std::vector<void *> &buffers,
-    const std::vector<float> &originalWeights)
+    const std::vector<float> &originalWeights, int64_t magic)
 {
     using namespace ServerDedupReference;
     const auto shape = SourceSendShape(c);
+    const uint64_t window = TileXREp::TileXREpServerDedupWindowOffset(magic);
     const auto rows = DispatchRows(shape, c.rank);
     Require(rows.size() <= layout.capacityRows, "reference exceeds public row capacity");
     const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);
@@ -84,7 +85,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         // After complete Dispatch every original route has been consumed. Check
         // all eight words in every Flag, including metadata-only tail blocks.
         std::vector<uint8_t> wire(layout.data.tokenStride);
-        read(wire.data(), wire.size(), args.peerMems[c.rank] + DispatchSlot(shape, c.rank, row, layout.data),
+        read(wire.data(), wire.size(), args.peerMems[c.rank] + window + DispatchSlot(shape, c.rank, row, layout.data),
             "read consumed dispatch slot");
         for (uint64_t block = 0; block < layout.data.blockCount; ++block) {
             for (uint32_t word = 0; word < 8U; ++word) {
@@ -96,10 +97,11 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         }
     }
     uint32_t counter = UINT32_MAX;
-    read(&counter, sizeof(counter), args.peerMems[c.rank] +
+    read(&counter, sizeof(counter), args.peerMems[c.rank] + window +
         TileXREp::TileXREpServerDedupCountLayout(shape.experts).counterOffset, "read cleared relay counter");
     Require(counter == 0U, "relay counter not cleared");
-    return ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"first_hop_packets\":" + std::to_string(firstHopSent) +
+    return ",\"last_magic\":" + std::to_string(magic) +
+        ",\"window_offset\":" + std::to_string(window) + ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"first_hop_packets\":" + std::to_string(firstHopSent) +
         ",\"first_hop_received\":" + std::to_string(firstHopReceived) + ",\"token_stride\":" + std::to_string(layout.data.tokenStride) +
         ",\"first_hop_bytes\":" + std::to_string(firstHopSent * layout.data.tokenStride) +
         ",\"direct_packets\":" + std::to_string(directSent) + ",\"direct_received\":" + std::to_string(directReceived) +

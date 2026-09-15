@@ -128,6 +128,22 @@ class TraceTests(unittest.TestCase):
         receiver = {e["name"] for e in events if e["args"]["core"] == 48}
         self.assertTrue({"probe", "acquire_load", "metadata", "atomic", "output_issue", "relay_issue"} <= receiver)
 
+    def test_pingpong_finish_returns_after_counter_reset_without_handshake(self):
+        rows = {core: [(0, 0x53000001), (100, 0x53000108),
+                      (200, 0x53000109), (300, 0x5300010A)] for core in range(64)}
+        rows[63].append((400, 0x5300010B))
+        for row in rows.values():
+            row.append((500, 0x53000009))
+        path = write_capture(self.root / "pingpong.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "pingpong")
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        events = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+        self.assertFalse({"finish_publish", "finish_wait"} & {event["name"] for event in events})
+        returns = [event for event in events if event["name"] == "finish_return"]
+        self.assertEqual(len(returns), 64)
+        for event in returns:
+            self.assertAlmostEqual(event["dur"], 0.1 if event["args"]["core"] == 63 else 0.2)
+
     def test_old_chrome_display_unit_is_removed_without_changing_events(self):
         source = self.root / "legacy-trace.json"
         trace = dict(displayTimeUnit="us", traceEvents=[dict(name="stage", ph="X", pid=0, tid=0,

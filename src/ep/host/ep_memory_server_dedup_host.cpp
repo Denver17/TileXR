@@ -71,9 +71,8 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     if (p.globalBs != 0 && (p.globalBs < 0 || static_cast<uint64_t>(p.globalBs) != next.globalBs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    // The communicator's final 4 MiB are flags, not payload capacity.
-    constexpr uint64_t flagBytes = 4ULL * 1024 * 1024;
-    if (commArgs.peerMemBytes < flagBytes || next.data.requiredBytes > commArgs.peerMemBytes - flagBytes) {
+    // Both fixed-stride windows must exist; the builder checks per-window fit.
+    if (commArgs.peerMemBytes < kEpServerDedupPeerBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 

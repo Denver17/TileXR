@@ -98,13 +98,6 @@ aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 }
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
-    if (rankId >= 0 && source == args.peerMems[rankId] + TileXREp::TileXREpServerDedupRoundOffset(args.peerMemBytes)
-        && bytes == uint64_t(args.rankSize) * 32U) {
-        auto *epochs = static_cast<int64_t *>(destination);
-        std::fill_n(epochs, bytes / sizeof(int64_t), int64_t(calls["launch"]));
-        if (std::getenv("TEST_ROUND_FAULT") != nullptr) --epochs[3];
-        return Call("round-read");
-    }
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
         return Call("boundary-host-read");
@@ -112,6 +105,12 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
     const uintptr_t address = reinterpret_cast<uintptr_t>(source);
     const uintptr_t peer = rankId < 0 ? 0 : reinterpret_cast<uintptr_t>(args.peerMems[rankId]);
     if (peer && address >= peer && address - peer < args.peerMemBytes) {
+        if (!boundaryMode) {
+            const uint64_t bank = calls["launch"] % 2U;
+            const uint64_t expectedBank = std::getenv("TEST_WINDOW_FAULT") ? 1U - bank : bank;
+            if ((address - peer) / TileXREp::kEpServerDedupWindowBytes != expectedBank)
+                return Call("wrong-bank-read") == 0 ? 92 : 91;
+        }
         auto found = packets.upper_bound(address);
         if (found != packets.begin()) --found;
         if (found != packets.end() && address >= found->first && address - found->first <= found->second.size() &&
@@ -156,10 +155,11 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
 }
 int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, int rank, TileXRCommPtr *comm)
 {
-    if (dataMiB != 4092) return 92;
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    boundaryMode = checkpoint && std::strcmp(checkpoint, "ep-sdedup-p1-memory-boundary") == 0;
+    if (dataMiB != (boundaryMode ? 4092 : 8188)) return 92;
     const int ret = TileXRCommInitRankMemoryDomain(domain, size, rank, comm);
     if (ret != 0) return ret;
-    boundaryMode = true;
     args.peerMemBytes = uint64_t(dataMiB) * 1024 * 1024 + TileXR::TILEXR_FLAG_BUFF_BYTES;
     for (int i = 0; i < size; ++i) {
         args.peerMems[i] = reinterpret_cast<GM_ADDR>(UINT64_C(0x1000000000) + uint64_t(i) * (UINT64_C(1) << 33));
@@ -322,7 +322,8 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
                 std::memset(wire.data() + block * 512U + 480U, 0, 32U);
             if (failure == "flag-first") wire[480U] = 1U;
             if (failure == "flag-last") wire[wire.size() - 1U] = 1U;
-            packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) + DispatchSlot(shape, rank, row, layout)] = wire;
+            packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) +
+                TileXREp::TileXREpServerDedupWindowOffset(int64_t(calls["launch"])) + DispatchSlot(shape, rank, row, layout)] = wire;
         }
         if (!outputRows.empty()) {
             if (failure == "hidden") static_cast<uint8_t *>(expandX)[0] ^= 1U;
@@ -334,6 +335,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         if (failure == "input-weight") static_cast<float *>(weights)[0] += 1.0f;
         if (failure == "source-weight") std::fill(weightsOut, weightsOut + bs * topK, 0.0f);
         if (failure == "counter") packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) +
+            TileXREp::TileXREpServerDedupWindowOffset(int64_t(calls["launch"])) +
             TileXREp::TileXREpServerDedupCountLayout(shape.experts).counterOffset] = {1U, 0U, 0U, 0U};
         const char *fault = std::getenv("TEST_COUNT_FAULT");
         if (fault && std::strcmp(fault, "unwritten") == 0) return 0;

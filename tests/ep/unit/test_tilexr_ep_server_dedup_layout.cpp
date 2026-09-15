@@ -16,19 +16,21 @@ int main()
         {16, 32, 1, 4096, 32}, {64, 384, 6, 98304, 64},
         {128, 384, 6, 98304, 64}, {16, 512, 32, 131072, 256},
         {64, 384, 8, 98304, 64}, {128, 384, 16, 98304, 128},
-        {16, 16, 1, 4096, 32}, {16, 1024, 32, 131072, 256},
-        {64, 1024, 16, 262144, 128}, {128, 1024, 8, 262144, 64},
-        {24, 1008, 32, 196608, 256}
+        {16, 16, 1, 4096, 32}, {16, 1024, 32, 65536, 256},
+        {64, 1024, 16, 131072, 128}, {128, 1024, 8, 131072, 64},
+        {24, 1008, 32, 98304, 256}
     };
     for (const auto &test : cases) {
-        Check(TileXREpBuildMemoryServerDedupLayout(test.ranks, 256, 7168, test.k, test.experts,
+        // Larger expert domains need fewer tokens to fit one 4 GiB bank.
+        const uint64_t bs = test.experts >= 1008 ? 128U : 256U;
+        Check(TileXREpBuildMemoryServerDedupLayout(test.ranks, bs, 7168, test.k, test.experts,
             &layout) == TILEXR_SUCCESS, "supported layout");
         Check(layout.capacityRows == test.rows && layout.groupRowStrideBytes == test.stride,
             "capacity and group stride");
-        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == 8 * 256 * test.stride,
+        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == 8 * bs * test.stride,
             "metadata byte sizes");
-        Check(layout.sourceMaskBytes == 1024 && layout.xBytes == 3670016, "input and mask sizes");
-        Check(layout.expertIdsBytes == 256U * test.k * 4U && layout.weightBytes == layout.expertIdsBytes,
+        Check(layout.sourceMaskBytes == bs * 4U && layout.xBytes == bs * 7168U * 2U, "input and mask sizes");
+        Check(layout.expertIdsBytes == bs * test.k * 4U && layout.weightBytes == layout.expertIdsBytes,
             "route input sizes");
         Check(layout.sendCountsBytes == static_cast<uint64_t>(test.experts) * 4U &&
             layout.expertTokenNumsBytes == static_cast<uint64_t>(test.experts / test.ranks) * 8U,
@@ -61,12 +63,23 @@ int main()
     Check(countLayout.cntOffset == 12800 && countLayout.cumsumOffset == 32768 &&
         countLayout.prefixOffset == 40960 && countLayout.prefixStride == 4096 &&
         countLayout.cumsumFlagOffset == 106496 && countLayout.counterOffset == 128000 && countLayout.stateBytes == 129024,
-        "single count state, reserved profile rows and one isolated counter");
+        "per-window count state and one isolated counter fit the control prefix");
     Check(TileXREpBuildMemoryServerDedupLayout(128, 256, 7168, 6, 384, &layout) == TILEXR_SUCCESS &&
-        layout.data.sourceOffset == 67584 && layout.data.sourceBytes == 23592960 &&
-        layout.data.dispatchOffset == 23660544 && layout.data.dispatchBytes == 1560281088 &&
-        layout.data.relayOffset == 1583941632 && layout.data.requiredBytes == 1772685312,
-        "R07-01 published non-quantized example, including all return reservations");
+        layout.data.sourceOffset == 2097152 && layout.data.sourceBytes == 23592960 &&
+        layout.data.dispatchOffset == 25690112 && layout.data.dispatchBytes == 1560281088 &&
+        layout.data.relayOffset == 1585971200 && layout.data.requiredBytes == 1774714880,
+        "fixed control prefix followed by token and return reservations");
+    Check(countLayout.stateBytes <= kEpServerDedupControlBytes &&
+        kEpServerDedupPeerBytes == UINT64_C(8589934592), "8 GiB domain has room for both control prefixes");
+    for (int64_t magic = 1; magic <= 5; ++magic) {
+        const uint64_t start = TileXREpServerDedupWindowOffset(magic);
+        Check(start == (magic % 2 ? UINT64_C(4294967296) : 0), "magic alternates exact 4 GiB windows");
+        Check(start == TileXREpServerDedupWindowOffset(magic + 2), "two calls later reuses the same bank");
+        Check(start + layout.data.requiredBytes <= kEpServerDedupPeerBytes - TILEXR_FLAG_BUFF_BYTES,
+            "either bank preserves the final runtime flag reservation");
+    }
+    Check(TileXREpBuildMemoryServerDedupLayout(64, 256, 65536, 6, 384, &layout) ==
+        TILEXR_ERROR_PARA_CHECK_FAIL, "oversized single-round payload is rejected even with 8 GiB total");
     Check(TileXREpBuildMemoryServerDedupLayout(16, 96, 7168, 6, 96, &layout, true) == TILEXR_SUCCESS &&
         layout.data.tokenStride == 8192 && layout.data.scaleBytes == 224 &&
         layout.expandXBytes == layout.capacityRows * 7168 && layout.dynamicScalesBytes == layout.capacityRows * 224,

@@ -15,13 +15,15 @@ class ServerDedupReceiver {
 public:
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args,
         GM_ADDR expandX, GM_ADDR dynamicScales, GM_ADDR assistEx, GM_ADDR group,
-        uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe)
+        uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0)
     {
         args_ = args; pipe_ = pipe; bs_ = bs; k_ = k; experts_ = experts;
         localExperts_ = experts / uint32_t(args_->rankSize);
         receiver_ = GetBlockIdx() - kEpServerDedupSendCoreNum;
         hiddenBytes_ = Quantized ? h : h * uint32_t(sizeof(XType));
         data_ = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
+        windowOffset_ = TileXREpServerDedupWindowOffset(magic);
+        data_.dispatchOffset += windowOffset_;
         groupStride_ = uint32_t(TileXREpDedupAlign(
             kEpServerDedupGroupMembersOffset + uint64_t(k - 1U) * sizeof(EpServerDedupGroupMember), 32U));
         expandX_.SetGlobalBuffer(expandX);
@@ -41,7 +43,7 @@ public:
         GlobalTensor<int32_t> prefixGlobal;
         const auto counts = TileXREpServerDedupCountLayout(experts_);
         prefixGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-            args_->peerMems[args_->rank] + counts.cntOffset + counts.prefixOffset +
+            args_->peerMems[args_->rank] + windowOffset_ + counts.cntOffset + counts.prefixOffset +
             uint64_t(receiver_) * counts.prefixStride));
         auto prefix = prefixBuf_.Get<int32_t>();
         DataCopyPad(prefix, prefixGlobal, {1U, prefixBytes, 0U, 0U, 0U}, {false, 0U, 0U, 0});
@@ -150,7 +152,7 @@ private:
         const uint32_t expert = uint32_t(args_->rank) * localExperts_ + tasks_.Position(j) / bs_ % localExperts_;
         uint32_t t = 0U;
         if (forwardCount > 0) {
-            auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[args_->rank] +
+            auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[args_->rank] + windowOffset_ +
                 TileXREpServerDedupCountLayout(experts_).counterOffset);
             profile.Begin(EpDedupDetailMetric::Atomic);
             t = AtomicAdd(counter, uint32_t(1));
@@ -203,6 +205,7 @@ private:
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
+    uint64_t windowOffset_ = 0;
     uint32_t bs_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U, receiver_ = 0U;
     uint32_t hiddenBytes_ = 0U, groupStride_ = 0U, laneStride_ = 0U, lanes_ = 0U;
     EpServerDedupDataLayout data_ {};

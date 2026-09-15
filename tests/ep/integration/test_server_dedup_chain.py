@@ -230,7 +230,7 @@ class ChainConsumerTests(unittest.TestCase):
                         record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
                         records.append(record)
                         linked, = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")
-                        self.assertEqual(linked["peer_mem_bytes"], 4 * 1024 ** 3)
+                        self.assertEqual(linked["peer_mem_bytes"], 8 * 1024 ** 3)
                         self.assertEqual(record["checkpoint"], "ep-sdedup-p2-dispatch")
                         self.assertEqual(record["dtype"], dtype)
                         self.assertEqual(record["quant_mode"], int(quant))
@@ -304,20 +304,22 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertEqual(self.trace_lines(0), [])
 
     def test_repeated_calls_reuse_buffers_and_sync_only_after_whole_batch(self):
-        for mode in ("functional", "performance"):
-            with self.subTest(mode=mode):
-                env = dict(TILEXR_VALIDATION_RUN_MODE=mode, TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
+        for mode, loops in (("functional", 3), ("performance", 2)):
+            with self.subTest(mode=mode, loops=loops):
+                env = dict(TILEXR_VALIDATION_RUN_MODE=mode, TILEXR_VALIDATION_LOOPS=str(loops), TILEXR_VALIDATION_WARMUP="2")
                 processes = [self.start(rank, environment=env) for rank in range(16)]
                 for rank, process in enumerate(processes):
                     output, errors = process.communicate(timeout=15)
                     self.assertEqual(process.returncode, 0, output + errors)
                     record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
                     self.assertEqual((record["submitted"], record["completed"], record["warmup_submitted"],
-                                      record["warmup_completed"]), (3, 3, 2, 2))
+                                      record["warmup_completed"]), (loops, loops, 2, 2))
+                    self.assertEqual(record["last_magic"], loops + 2)
+                    self.assertEqual(record["window_offset"], (loops + 2) % 2 * 4 * 1024 ** 3)
                     calls = self.trace_lines(rank)
                     self.assertEqual(calls.count("comm-init-sized"), 1)
                     self.assertEqual(calls.count("create-stream"), 1)
-                    self.assertEqual(calls.count("launch"), 5)
+                    self.assertEqual(calls.count("launch"), loops + 2)
                     self.assertEqual(calls.count("sync"), 1)
                     self.assertGreater(calls.index("sync"), max(i for i, call in enumerate(calls) if call == "launch"))
                     self.assertEqual(calls.count("malloc"), 10)
@@ -343,17 +345,17 @@ class ChainConsumerTests(unittest.TestCase):
                 self.stop(); self.processes.clear()
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 
-    def test_repeated_calls_reject_stale_device_completion(self):
+    def test_repeated_calls_reject_wrong_bank_readback(self):
         env = dict(TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
         processes = [self.start(rank, environment=dict(env, **(
-            {"TEST_ROUND_FAULT": "stale"} if rank == 1 else {}))) for rank in range(16)]
+            {"TEST_WINDOW_FAULT": "wrong-bank"} if rank == 1 else {}))) for rank in range(16)]
         for rank, process in enumerate(processes):
             output, errors = process.communicate(timeout=15)
             if rank == 1:
                 self.assertNotEqual(process.returncode, 0)
                 self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
-                self.assertIn("stage=round-read", errors)
-                self.assertIn("expected=5 actual=4", errors)
+                self.assertIn("stage=dispatch-read", errors)
+                self.assertIn("wrong-bank-read", self.trace_lines(rank))
             else:
                 self.assertEqual(process.returncode, 0, errors)
 
@@ -514,7 +516,7 @@ class ChainConsumerTests(unittest.TestCase):
                            if line.startswith("EP_SERVER_DEDUP_PROGRESS ")]
                 self.assertEqual([entry["stage"] for entry in entries], [
                     "acl-init", "device", "communicator", "allocation", "chain-barrier", "launch", "launch",
-                    "stream-sync", "batch-barrier", "round-read", "count-read", "dispatch-read",
+                    "stream-sync", "batch-barrier", "count-read", "dispatch-read",
                     "cleanup-buffers", "cleanup-communicator", "cleanup-stream", "cleanup-device", "cleanup-acl"])
                 launches = [entry for entry in entries if entry["stage"] == "launch"]
                 self.assertEqual([entry["batch"] for entry in launches], ["warmup", "measurement"])

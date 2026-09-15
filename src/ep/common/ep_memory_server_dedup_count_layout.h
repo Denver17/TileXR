@@ -2,6 +2,7 @@
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_COUNT_LAYOUT_H
 
 #include "comm_args.h"
+#include "tilexr_types.h"
 
 namespace TileXREp {
 
@@ -13,7 +14,13 @@ constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
 // Legacy padding retained for the R07 layout; standard profiling uses separate GM.
 constexpr uint64_t kEpServerDedupProfileReservedBytes = 12800U;
-constexpr uint64_t kEpServerDedupRoundBytes = uint64_t(TileXR::TILEXR_MAX_RANK_SIZE) * 32U;
+constexpr uint64_t kEpServerDedupPeerBytes = 8ULL * 1024U * 1024U * 1024U;
+constexpr uint64_t kEpServerDedupWindowBytes = kEpServerDedupPeerBytes / 2U;
+constexpr uint64_t kEpServerDedupControlBytes = 2ULL * 1024U * 1024U;
+// Runtime owns the domain's final flag region. Leave the same tail unused in
+// window 0 so both windows have identical capacity and shape-independent stride.
+constexpr uint64_t kEpServerDedupWindowUsableBytes =
+    kEpServerDedupWindowBytes - TileXR::TILEXR_FLAG_BUFF_BYTES;
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
 #define TILEXR_EP_DEDUP_INLINE FORCE_INLINE_AICORE
@@ -21,8 +28,8 @@ constexpr uint64_t kEpServerDedupRoundBytes = uint64_t(TileXR::TILEXR_MAX_RANK_S
 #define TILEXR_EP_DEDUP_INLINE inline
 #endif
 
-// R07-01: one state region. Matrix offsets are relative to cntOffset; counter
-// and stateBytes are relative to peerMems[rank]. Legacy leading padding is retained.
+// Matrix offsets are relative to cntOffset; cntOffset, counterOffset and
+// stateBytes are relative to the selected window. Leading padding is retained.
 struct EpServerDedupCountLayout {
     uint64_t cntOffset;
     uint64_t cumsumOffset;
@@ -33,11 +40,11 @@ struct EpServerDedupCountLayout {
     uint64_t stateBytes;
 };
 
-// The final 4 KiB of the communicator's 4 MiB flag window is reserved for
-// Server Dedup completion epochs; payload/count/profile offsets are unchanged.
-TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupRoundOffset(uint64_t peerBytes)
+// All ranks must use the same communicator call order and serialize its kernels
+// on one stream. Count publication (including zeros) protects two-call reuse.
+TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupWindowOffset(int64_t magic)
 {
-    return peerBytes - kEpServerDedupRoundBytes;
+    return (uint64_t(magic) % 2U) * kEpServerDedupWindowBytes;
 }
 
 TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(uint32_t experts)

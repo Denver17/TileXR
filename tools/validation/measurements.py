@@ -130,13 +130,19 @@ def breakdown_timeline(run):
             markers["end"] = replace(total, raw_start=total.raw_end, start_us=total.end_us,
                                      begin_event_id=total.end_event_id, source_index=total.end_source_index)
             markers["work_end"] = markers.get("send_data_end" if lane.core < 48 else "recv_data_end")
-            # No-task receivers return after PrepareEnd; only core 63 completes the round.
+            # No-task receivers return after PrepareEnd; only core 63 resets the counter.
             markers["recv_return_begin"] = markers.get("recv_clear_end")
             prepared, received = markers.get("recv_prepare_end"), markers.get("recv_data_end")
             if (markers["recv_return_begin"] is None and prepared is not None and received is not None
                     and received.source_index == prepared.source_index + 1):
                 markers["recv_return_begin"] = prepared
-            markers["finish_return_begin"] = markers.get("finish_wait_end" if lane.core == 63 else "finish_sync_end")
+            if lane.core == 63:
+                # Old captures include the removed cross-rank completion handshake.
+                legacy_finish = "finish_publish_end" in markers or "finish_wait_end" in markers
+                markers["finish_return_begin"] = markers.get(
+                    "finish_wait_end" if legacy_finish else "finish_counter_end")
+            else:
+                markers["finish_return_begin"] = markers.get("finish_sync_end")
             packets = [sample for sample in lane.samples if sample.name == "packet_issue"]
             markers["first_issue"] = packets[0] if packets else markers.get("send_data_end")
             markers["last_issue"] = packets[-1] if packets else None

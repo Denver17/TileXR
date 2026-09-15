@@ -40,7 +40,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
 // Fixed validation capacity through Dispatch/Combine Server Dedup qualification.
-constexpr uint64_t kServerDedupPeerBytes = UINT64_C(4) * 1024 * 1024 * 1024;
+constexpr uint64_t kServerDedupPeerBytes = TileXREp::kEpServerDedupPeerBytes;
 constexpr int kServerDedupDataMiB = static_cast<int>(
     (kServerDedupPeerBytes - TileXR::TILEXR_FLAG_BUFF_BYTES) / (1024 * 1024));
 
@@ -343,8 +343,12 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 {
     Require(args.rank == c.rank && args.rankSize == c.rankSize && args.localRank == c.localRank &&
         args.localRankSize == 8 && args.commDomain == 0, "communicator rank mapping mismatch");
-    Require(args.peerMemBytes == kServerDedupPeerBytes,
-        "peer window is not exactly 4 GiB; actual=" + std::to_string(args.peerMemBytes));
+    // The standalone boundary probe retains its historical 4 GiB allocation.
+    const uint64_t expectedBytes = c.checkpoint == "ep-sdedup-p1-memory-boundary" ?
+        UINT64_C(4) * 1024 * 1024 * 1024 : kServerDedupPeerBytes;
+    Require(args.peerMemBytes == expectedBytes,
+        "peer window is not exactly " + std::to_string(expectedBytes >> 30) +
+        " GiB; actual=" + std::to_string(args.peerMemBytes));
     for (int rank = 0; rank < c.rankSize; ++rank) {
         const uintptr_t begin = reinterpret_cast<uintptr_t>(args.peerMems[rank]);
         Require(begin != 0 && begin % 32 == 0 && args.peerMemBytes <= UINTPTR_MAX - begin,
@@ -458,7 +462,8 @@ int Run(const Config &c)
         const auto outputDtype = c.quantMode == 0 ? TileXR::TILEXR_DATA_TYPE_RESERVED :
             (c.fp8Format == "e4m3" ? TileXR::TILEXR_DATA_TYPE_FP8E4M3 : TileXR::TILEXR_DATA_TYPE_FP8E5M2);
         // One communicator, stream and buffer set for the entire continuous
-        // batch. Device completion agreement protects cross-rank window reuse.
+        // batch. Alternating windows and the existing all-rank count dependency
+        // protect reuse; there is no per-launch completion handshake.
         const uint64_t calls = uint64_t(c.warmup) + c.loops;
         for (uint64_t call = 0; call < calls; ++call) {
             const bool warming = call < c.warmup;
@@ -485,15 +490,6 @@ int Run(const Config &c)
         completed = submitted;
         warmupCompleted = warmupSubmitted;
         safeCleanup = true;
-        enterStage("round-read");
-        std::vector<int64_t> epochs(uint64_t(c.rankSize) * 4U);
-        Check(aclrtMemcpy(epochs.data(), epochs.size() * sizeof(int64_t),
-            host->peerMems[c.rank] + TileXREp::TileXREpServerDedupRoundOffset(host->peerMemBytes),
-            epochs.size() * sizeof(int64_t), ACL_MEMCPY_DEVICE_TO_HOST), "read completion epochs");
-        for (size_t word = 0; word < epochs.size(); ++word)
-            Require(epochs[word] == int64_t(calls), "completion epoch mismatch peer=" +
-                std::to_string(word / 4U) + " expected=" + std::to_string(calls) +
-                " actual=" + std::to_string(epochs[word]));
         enterStage("count-read");
         std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
         std::vector<int64_t> actualExperts(c.experts / c.rankSize);
@@ -524,7 +520,8 @@ int Run(const Config &c)
             }
         }
         enterStage("dispatch-read");
-        dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost);
+        // This fresh communicator's Dispatch-only sequence starts at magic 1.
+        dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, int64_t(calls));
         success = true;
     } catch (const std::exception &error) {
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch

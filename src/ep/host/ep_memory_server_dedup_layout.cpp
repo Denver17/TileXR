@@ -50,6 +50,10 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
     next.localExpertNum = static_cast<uint64_t>(moeExpertNum / rankSize);
     next.countStateBytes = TileXREpServerDedupCountLayout(uint32_t(moeExpertNum)).stateBytes;
     next.data = TileXREpServerDedupDataLayout(uint32_t(bs), uint32_t(h), uint32_t(topK), uint32_t(moeExpertNum), quantized);
+    if (next.countStateBytes > kEpServerDedupControlBytes ||
+        next.data.requiredBytes > kEpServerDedupWindowUsableBytes) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     const uint64_t logicalGroupBytes = kEpServerDedupGroupMembersOffset +
         static_cast<uint64_t>(topK - 1) * sizeof(EpServerDedupGroupMember);
     next.groupRowStrideBytes = (logicalGroupBytes + 31U) / 32U * 32U;

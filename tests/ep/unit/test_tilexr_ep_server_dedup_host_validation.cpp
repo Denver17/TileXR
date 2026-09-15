@@ -116,7 +116,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
 int main()
 {
     g_commArgs.rankSize = 64;
-    g_commArgs.peerMemBytes = 4ULL * 1024 * 1024 * 1024;
+    g_commArgs.peerMemBytes = kEpServerDedupPeerBytes;
     g_commArgs.rank = 9;
     for (auto &peer : g_commArgs.peerMems) {
         peer = reinterpret_cast<GM_ADDR>(0xE000);
@@ -246,10 +246,10 @@ int main()
     g_commArgs.peerMems[63] = nullptr;
     CheckRejected(valid, TILEXR_ERROR_NOT_INITIALIZED);
     g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(0xE000);
-    g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024 - 1;
+    g_commArgs.peerMemBytes = kEpServerDedupPeerBytes - 1U;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    g_commArgs.peerMemBytes = g_layout.data.requiredBytes + 4ULL * 1024 * 1024;
-    Check(Invoke(valid) == TILEXR_SUCCESS, "profiling needs no space in the exact data plus flag domain");
+    g_commArgs.peerMemBytes = kEpServerDedupPeerBytes;
+    Check(Invoke(valid) == TILEXR_SUCCESS, "exact 8 GiB domain covers both windows and runtime flags");
     g_commArgs.peerMems[63] += 1;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMems[63] -= 1;

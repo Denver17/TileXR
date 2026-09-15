@@ -16,7 +16,7 @@ class ServerDedupSender {
 public:
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, GM_ADDR x, GM_ADDR ids,
         GM_ADDR weights, GM_ADDR sourceMask, GM_ADDR sourceWeights, uint32_t bs, uint32_t h,
-        uint32_t k, uint32_t experts, TPipe *pipe)
+        uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0)
     {
         args_ = args; pipe_ = pipe;
         bs_ = bs; h_ = h; k_ = k; localExperts_ = experts / args->rankSize;
@@ -25,6 +25,7 @@ public:
         count_ = base + (core < remainder ? 1U : 0U);
         start_ = core * base + (core < remainder ? core : remainder);
         data_ = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
+        data_.dispatchOffset += TileXREpServerDedupWindowOffset(magic);
         x_.SetGlobalBuffer(reinterpret_cast<__gm__ XType *>(x));
         ids_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(ids));
         weights_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(weights));

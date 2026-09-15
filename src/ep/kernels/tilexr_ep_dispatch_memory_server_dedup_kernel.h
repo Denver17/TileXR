@@ -5,7 +5,6 @@
 #include "tilexr_ep_server_dedup_send.h"
 #include "tilexr_ep_server_dedup_recv.h"
 #include "tilexr_ep_server_dedup_profile.h"
-#include "tilexr_ep_server_dedup_round.h"
 
 namespace TileXREp {
 template<class XType, bool Quantized, bool E4M3>
@@ -20,13 +19,14 @@ public:
         profile_.Init(commArgs, profilingLaunchSlot);
         profile_.Mark(0);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
-        core_ = GetBlockIdx(); magic_ = magic; pipe_ = pipe;
-        counterOffset_ = TileXREpServerDedupCountLayout(experts).counterOffset;
+        core_ = GetBlockIdx(); pipe_ = pipe;
+        counterOffset_ = TileXREpServerDedupWindowOffset(magic) +
+            TileXREpServerDedupCountLayout(experts).counterOffset;
         counts_.Init(commArgs, expertIds, expertTokenNumsOut, sendCountsOut, bs, topK, experts, expertTokenNumsType, magic, pipe);
         if (core_ < kEpServerDedupSendCoreNum)
-            sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe);
+            sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe, magic);
         else
-            receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe);
+            receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe, magic);
         profile_.Mark(1);
     }
 
@@ -66,7 +66,6 @@ public:
             const TEventID after = pipe_->FetchEventID(HardEvent::MTE3_S);
             SetFlag<HardEvent::MTE3_S>(after); WaitFlag<HardEvent::MTE3_S>(after);
             profile_.Mark(EpDedupDetailPoint::CounterEnd);
-            CompleteServerDedupRound(args_, magic_, pipe_, &profile_);
         }
         profile_.Mark(8);
         profile_.Publish();
@@ -79,7 +78,6 @@ private:
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
     uint32_t core_ = 0;
-    int64_t magic_ = 0;
     uint64_t counterOffset_ = 0;
 };
 } // namespace TileXREp

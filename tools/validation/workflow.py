@@ -1406,7 +1406,7 @@ def run(config):
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
     elif config.checkpoint in CHAIN_CHECKPOINTS:
-        scope += (f"、{len(mappings)}P 每 rank 4 GiB communicator/peer window、"
+        scope += (f"、{len(mappings)}P 每 rank 8 GiB communicator（两个 4 GiB window）、"
                   f"{config.chain['warmup']} 轮预热＋{config.chain['loops']} 轮测量（同域连续提交）、"
                   "最后一轮 cnt/cumsum、DIRECT/第一跳/终端完整 route 覆盖、源端输出、"
                   "最终 hidden/scales/assistEx/group、跨 Rank relay/t 关联及轮末 Flag/counter 清理校验；不包含 Combine。")
