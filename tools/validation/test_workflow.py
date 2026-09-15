@@ -994,6 +994,10 @@ with output.open('w', newline='') as f:
         self.assertIn("atomic", summary["measurements"]["breakdown"]["stages_us"])
         self.assertEqual(len(summary["traces"]["ranks"]), 16)
         self.assertNotIn("all_ranks", summary["traces"])
+        trace_dir = Path(summary["traces"]["trace_dir"])
+        self.assertEqual({path.name for path in trace_dir.glob("*.json")},
+                         {f"rank-{rank}.json" for rank in range(16)})
+        self.assertTrue(all(Path(path).parent == trace_dir for path in summary["traces"]["ranks"].values()))
         self.assertEqual(summary["traces"]["status"], "complete")
         self.assertTrue(Path(summary["traces"]["index"]).is_file())
         for rank, path in summary["traces"]["ranks"].items():
@@ -1091,7 +1095,7 @@ with output.open('w', newline='') as f:
                 summary = workflow.read_json(created.pop())
                 index = summary["traces"]
                 self.assertEqual(index["status"], "incomplete")
-                self.assertTrue(Path(index["report"]).is_file())
+                self.assertTrue(Path(index["report"]).is_dir())
                 self.assertNotIn("8", index["rank_us"])
                 self.assertTrue(index["reports"]["0"]["artifacts_verified"])
                 self.assertNotIn("measurements", summary)

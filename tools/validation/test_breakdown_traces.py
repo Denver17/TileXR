@@ -40,7 +40,6 @@ class TraceTests(unittest.TestCase):
         for row in self.records:
             Path(row["breakdown"]["records_path"]).unlink()
         with mock.patch.object(measurements, "load_profile_run", side_effect=AssertionError("central raw parse")), \
-                mock.patch.object(measurements, "generate_reports", side_effect=AssertionError("central render")), \
                 mock.patch.object(measurements, "generate_reports_for_run", side_effect=AssertionError("central render")):
             result = self.collect()
         self.assertEqual(result["status"], "complete")
@@ -48,6 +47,15 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(result["kernel_us"], dict(median=4, minimum=1, maximum=9, mean=4.5))
         self.assertEqual(len(result["ranks"]), 4)
         self.assertNotIn("all_ranks", result)
+        directory = Path(result["trace_dir"])
+        self.assertEqual(result["report"], str(directory))
+        self.assertEqual({path.name for path in directory.iterdir()}, {f"rank-{rank}.json" for rank in range(4)})
+        for row in self.records:
+            copied = Path(result["ranks"][str(row["rank"])])
+            source = Path(row["breakdown"]["artifacts"]["perfetto_trace.json"])
+            self.assertEqual(copied.parent, directory)
+            self.assertEqual(copied.read_bytes(), source.read_bytes())
+        self.assertTrue(all(Path(path).parent == directory for path in result["selected"].values()))
         self.assertFalse(result["raw_records_collected"])
         self.assertEqual(json.loads(Path(result["index"]).read_text()), result)
         for row in self.records:
@@ -93,7 +101,8 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(relocated["records_path"], evidence["records_path"])
         self.assertEqual(result["reports"]["0"]["raw_records"],
                          dict(host="192.0.2.2", path=evidence["records_path"], local_path=None))
-        self.assertIn("collected%20nodes", Path(result["report"]).read_text())
+        self.assertEqual(Path(result["ranks"]["0"]).read_bytes(),
+                         (node / "profile-rank-0/perfetto_trace.json").read_bytes())
 
     def test_missing_corrupt_artifact_and_summary_retain_other_reports(self):
         for fault in ("missing", "corrupt", "summary", "scalar"):
@@ -114,7 +123,8 @@ class TraceTests(unittest.TestCase):
                 self.assertEqual(result["available_ranks"], 3)
                 self.assertFalse(result["reports"]["0"]["artifacts_verified"])
                 self.assertEqual(set(result["ranks"]), {"1", "2", "3"})
-                self.assertTrue(Path(result["report"]).is_file())
+                self.assertTrue(Path(result["report"]).is_dir())
+                self.assertFalse((Path(result["trace_dir"]) / "rank-0.json").exists())
 
     def test_missing_and_overflow_ranks_keep_partial_reports(self):
         self.records[0] = self.capture(0, fault="overflow")
@@ -150,6 +160,8 @@ class TraceTests(unittest.TestCase):
 
     def test_explicit_offline_reprocessing_and_cli_use_copied_raw_directory(self):
         offline = self.root / "offline"
+        (offline / "chrome").mkdir(parents=True)
+        (offline / "chrome/rank-99.json").write_text("{}")
         for row in self.records:
             row["breakdown"]["records_collected"] = False
         with self.assertRaisesRegex(ValueError, "--records-dir"):
@@ -164,9 +176,26 @@ class TraceTests(unittest.TestCase):
             "--records-dir", str(self.root), "--output-dir", str(offline)],
             capture_output=True, text=True, timeout=20)
         self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
-        trace = json.loads((offline / "all-ranks/perfetto_trace.json").read_text())
-        events = [e for e in trace["traceEvents"] if e["ph"] == "X" and e["name"] == "kernel_total"]
-        self.assertEqual(len(events), 4 * 64)
+        self.assertFalse((offline / "all-ranks").exists())
+        self.assertEqual({p.name for p in (offline / "chrome").iterdir()},
+                         {f"rank-{rank}.json" for rank in range(4)})
+        for rank in range(4):
+            trace = json.loads((offline / f"chrome/rank-{rank}.json").read_text())
+            events = [e for e in trace["traceEvents"] if e["ph"] == "X" and e["name"] == "kernel_total"]
+            self.assertEqual(len(events), 64)
+            self.assertEqual({e["args"]["rank"] for e in events}, {rank})
+
+    def test_cli_collects_retained_traces_without_raw_captures(self):
+        for row in self.records:
+            Path(row["breakdown"]["records_path"]).unlink()
+        summary = self.root / "summary.json"
+        summary.write_text(json.dumps(dict(nodes=[dict(reported_result=dict(ranks=self.records))],
+            chain_configuration=self.config, rank_size=4, run_id="run-test", traces=dict(kernel_sha256="a" * 64))))
+        command = subprocess.run([sys.executable, measurements.__file__, str(summary),
+            "--output-dir", str(self.output)], capture_output=True, text=True, timeout=20)
+        self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+        self.assertEqual({p.name for p in (self.output / "chrome").iterdir()},
+                         {f"rank-{rank}.json" for rank in range(4)})
 
     def test_installed_generic_package_and_mapping_work_without_source_tree(self):
         installed = self.root / "install/share/tilexr"

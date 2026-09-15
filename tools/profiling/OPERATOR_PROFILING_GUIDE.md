@@ -367,6 +367,11 @@ report/analysis.md
 report/report.html
 ```
 
+`perfetto_trace.json` uses the Chrome Trace Event format (`traceEvents`,
+`ph: "X"`, `ts` and `dur` in microseconds). Open `chrome://tracing`, select
+**Load**, and choose the JSON file to view each core's nested stage intervals.
+The HTML file is an auxiliary table, not the timeline viewer.
+
 ## Integration Checklist
 
 1. Assign capture-wide unique, nonzero event IDs.

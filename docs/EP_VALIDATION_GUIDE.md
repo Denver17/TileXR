@@ -230,13 +230,13 @@ R07 原始起始 12,800B 预留区保留为布局 padding，cnt/数据偏移和 
 
 ```text
 run/case-<时间>-<PID>/<run_id>/summary.json
-run/case-<时间>-<PID>/<run_id>/traces/index.html
+run/case-<时间>-<PID>/<run_id>/traces/chrome/rank-N.json
 run/case-<时间>-<PID>/<run_id>/traces/index.json
 ```
 
-`index.html`/`index.json` 链接各节点已生成的每卡报告，按最后一轮 kernel 时长选择 fastest/p50/slowest rank。每卡时间归零不构成跨 NPU 时钟同步。`measurements.breakdown.kernel_us` 取每 rank 最后一轮的核最大值，再汇总跨 rank median/min/max；保留各 rank 值，不先合并服务器中位数。操作统计使用该轮实际配对区间；多次操作的中位数不能称为多轮执行中位数。performance 仍使用关闭设备打点的 msprof 多轮样本，统计口径独立。
+`chrome/` 集中放置每 rank 一份 Chrome Trace JSON；`index.json` 记录文件路径，并按最后一轮 kernel 时长选择 fastest/p50/slowest rank。每核时间归零不构成跨核或跨 NPU 时钟同步。`measurements.breakdown.kernel_us` 取每 rank 最后一轮的核最大值，再汇总跨 rank median/min/max；保留各 rank 值，不先合并服务器中位数。操作统计使用该轮实际配对区间；多次操作的中位数不能称为多轮执行中位数。performance 仍使用关闭设备打点的 msprof 多轮样本，统计口径独立。
 
-需要全局 trace 时，显式取回各服务器的 `rank-N.records.v1` 到同一本地目录，再用 `--records-dir` 离线重新生成；输出目录须为空或尚不存在。默认执行不会承担这部分开销：
+需要从原始记录重新解析时，显式取回各服务器的 `rank-N.records.v1` 到同一本地目录，再用 `--records-dir` 生成每 rank 一份 JSON；输出目录须为空或尚不存在。默认执行仅归集已完成的 JSON：
 
 ```bash
 python3 tools/validation/measurements.py /path/to/run/summary.json --records-dir /path/to/copied-records --output-dir /path/to/new-report
@@ -388,26 +388,26 @@ bash run_commit_validation.sh
 
 ### breakdown Chrome Trace
 
-breakdown 成功后自动生成 `run/case-<时间>-<PID>/<run_id>/traces/`：
+breakdown 完成后，Chrome 可导入文件集中在 `run/case-<时间>-<PID>/<run_id>/traces/chrome/`：
 
-- `all-ranks.trace.json`：全部卡，每 rank 一个 process，每 AIV core 一个 thread。
-- `rank-N.trace.json`：每张卡的独立 trace，所有卡均保留。
-- `fastest.trace.json`、`p50.trace.json`、`slowest.trace.json`：按 Memory 版本相同规则筛选的三张代表卡。
-- `index.json`：全卡排序、筛选结果和文件路径，也写入 summary.json 的 traces 字段。
+- `rank-0.json`、`rank-1.json`……：每张卡独立一份，每份包含该 rank 最后一轮的 64 核耗时分段和实际重复操作。
+- 父目录 `traces/index.json`：记录各 rank 状态、排序、fastest/p50/slowest 代表卡及 JSON 路径，同时写入 `summary.json` 的 `traces` 字段。
 
-将 `.trace.json` 拖入 Chrome tracing；summary.json/index.json 是汇总索引，不能当作 trace 导入。核心结果区打印全卡和三份筛选 trace 的绝对路径，人工批测和提交验收复用同一导出流程。
+在 `chrome://tracing` 点击 Load，选择任意 `rank-N.json`；文件使用标准 `traceEvents`，其中 `ph: "X"`、`ts`、`dur` 描述区间，时间单位为微秒。终端直接打印 JSON 目录及代表卡的文件路径。HTML 仅作为节点辅助报告，主节点不生成表格入口或全卡合并 JSON。
 
-筛选依据为每 rank 的 `max_core(end-start)`，按耗时升序、同耗时按 rank 排序；p50 选择 `ceil(N/2)-1` 的实际卡，不平均两张卡。各 rank 时间戳先以本卡最早 start 做整数减法，再按 1000 ticks/us 转换；不同卡不具备同步时钟，合并图不能用来判断跨卡先后关系。每核输出 entry_checks、record_prepare 两段，完整区间为二者之和。当前仅保存最后一轮打点，空 kernel 也必须有有效事件；不声称输出所有轮次或算子算法阶段。
+主节点校验各节点的 capture 身份、摘要与文件摘要后，将已经生成的 `perfetto_trace.json` 原样复制并重命名为 `rank-N.json`，不重新解析 records，不加载全部 trace 到内存。重复导出时清除当前结果中不可用的旧 rank JSON，避免将旧文件误认为本次结果。原始打点、事件配对及 64 核分段信息保持不变。
 
-已有成功 breakdown summary 可以离线导出，不重新编译或启动 NPU：
+代表卡筛选依据为每 rank 最后一轮最慢核耗时，按耗时、rank 升序排列；p50 选择实际的下中位卡，跨 rank 数值 median 仍按普通中位数计算。每核保持通用 reader 的局部时间原点，不能用此图判断跨核或跨卡的绝对先后关系。
+
+已有成功 breakdown summary 可直接归集 JSON，无需重新编译或启动 NPU：
 
 ```bash
-python3 tools/validation/measurements.py run/case-实际目录/summary.json
+python3 tools/validation/measurements.py /path/to/run/summary.json --output-dir /path/to/run/trace-export
 ```
 
-可用 `--output-dir run/trace-review` 指定输出目录。缺卡、缺核、错误 generation 或非法时间戳使导出失败；自动导出失败不能将该 breakdown case 标为 PASS。当前验证重点是解析、Chrome Trace 序列化、全卡覆盖和筛选，不重复旧硬件检查点；后续算子内容增加时再扩展设备打点。
+结果位于 `trace-export/chrome/`，保留 summary 中所引用的节点报告目录即可，不需要原始 records。显式提供 `--records-dir` 或 `--mapping` 时才重新解析原始文件，仍按 rank 分文件输出。
 
-breakdown 的关键结果区和 summary.log 额外打印 `JSON: <绝对路径>`，指向 `run/case-<时间>-<PID>/summary.json`。其中 `measurements.breakdown.stages_us` 为微秒汇总，`stages` 为原始 ticks 汇总，`rank_stages` 为每 rank 各段的跨核最大值；各核原始时间戳与 generation 位于 `nodes[].reported_result.ranks[].breakdown`。若未完成汇总，measurements 可能缺失，应查看 errors 和节点记录。
+缺卡、损坏文件或不完整采集继续保留错误状态，不将该 breakdown case 标为 PASS。`summary.json` 的 `traces.trace_dir`、`traces.ranks`、`traces.selected` 指向输出；耗时汇总保留在 `measurements.breakdown`，每核详细区间由各 JSON 文件展示。
 
 每次运行在仓库 `run/` 下生成独立目录，保留节点/rank 日志、summary.json 与 summary.log。关键输出使用空行和 32 个 `=` 分隔，在 PASS 或 kernel 性能之前展示两行实际 case 参数。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
 

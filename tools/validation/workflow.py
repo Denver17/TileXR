@@ -1460,7 +1460,7 @@ def run(config):
     if "measurements" in report:
         print(measurements.render_measurements(report["measurements"]), flush=True)
     if "traces" in report:
-        print("最后一轮打点报告索引: " + report["traces"]["report"], flush=True)
+        print("Chrome tracing JSON 目录（每 rank 一份）: " + report["traces"]["trace_dir"], flush=True)
         for role, path in report["traces"]["selected"].items():
             print(f"{role}: {path}", flush=True)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "

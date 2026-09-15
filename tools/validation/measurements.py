@@ -4,8 +4,9 @@
 import math
 import json
 import hashlib
-import html
 import os
+import shutil
+import tempfile
 from pathlib import Path
 import statistics
 import sys
@@ -16,12 +17,11 @@ import msprof_kernel_stats as profiler
 
 # EP contributes only event mapping; parsing, pairing and traces use the shared package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from profiling import RECORDS_SCHEMA, generate_reports, generate_reports_for_run
+from profiling import RECORDS_SCHEMA, generate_reports_for_run
 from profiling.analysis import analyze_run
 from profiling.pairing import load_profile_run
-from profiling.io import atomic_write_json, atomic_write_text
+from profiling.io import atomic_write_json
 from dataclasses import replace
-from urllib.parse import quote
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 KERNEL_NAME = "tilexr_ep_dispatch_memory_server_dedup_kernel"
@@ -431,19 +431,45 @@ def validate_report_artifacts(evidence, rank, chain_config):
     return summary
 
 
+def copy_rank_trace(source, directory, rank):
+    """Copy finished Chrome JSON without parsing it or buffering it in memory."""
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / f"rank-{rank}.json"
+    with tempfile.NamedTemporaryFile(dir=directory, prefix=f".rank-{rank}.", suffix=".tmp", delete=False) as handle:
+        temporary = Path(handle.name)
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return str(destination)
+
+
+def _write_trace_index(output_dir, result):
+    # Re-exporting a partial run must not leave an old rank looking available.
+    current_files = {Path(path).name for path in result["ranks"].values()}
+    for previous in Path(result["trace_dir"]).glob("rank-*.json"):
+        if previous.stem[5:].isdigit() and previous.name not in current_files:
+            previous.unlink()
+    atomic_write_json(Path(output_dir) / "index.json", result)
+
+
 def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, kernel_sha):
-    """Build a compact coordinator index from finished reports; never parse raw records."""
+    """Collect one Chrome JSON per rank and a compact index; never reparse captures."""
     if chain_config["run_mode"] != "breakdown":
         raise ValueError("report collection requires breakdown mode")
     rank_size = _integer(chain_config["rank_size"], "rank_size", 1)
     output_dir = Path(output_dir).resolve()
+    trace_dir = output_dir / "chrome"
+    trace_dir.mkdir(parents=True, exist_ok=True)
     records = {}
     for row in rank_records:
         rank = _integer(row.get("rank"), "rank")
         if rank >= rank_size or rank in records:
             raise ValueError("profiling report ranks are duplicated or outside the requested run")
         records[rank] = row
-    reports, errors, values = {}, [], {}
+    reports, errors, values, traces = {}, [], {}, {}
     expected_capture_id = str(uuid5(NAMESPACE_URL, "tilexr-validation:" + run_id))
     for rank in range(rank_size):
         evidence = records.get(rank, {}).get("breakdown")
@@ -459,6 +485,7 @@ def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, ke
             validate_report_artifacts(evidence, rank, chain_config)
             if evidence.get("capture_id") != expected_capture_id:
                 raise ValueError("profiling report capture UUID does not belong to this run")
+            traces[str(rank)] = copy_rank_trace(evidence["artifacts"]["perfetto_trace.json"], trace_dir, rank)
             entry.update(status="incomplete", artifacts_verified=True)
             validate_rank_measurements(dict(rank=rank, breakdown=evidence), chain_config)
             entry["status"] = "complete"
@@ -479,36 +506,12 @@ def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, ke
                   reduction="statistics across available ranks of each last-launch slowest core",
                   p50_representative="lower middle rank after sorting by (kernel_us, rank); numeric median averages the two middle values",
                   selected_ranks=selected,
-                  selected={role: reports[str(rank)]["artifacts"]["report.html"] for role, rank in selected.items()},
-                  ranks={rank: entry["artifacts"]["perfetto_trace.json"] for rank, entry in reports.items()
-                         if entry["artifacts_verified"]},
-                  report=str(output_dir / "index.html"), index=str(output_dir / "index.json"),
+                  selected={role: traces[str(rank)] for role, rank in selected.items()},
+                  ranks=traces, trace_dir=str(trace_dir),
+                  report=str(trace_dir), index=str(output_dir / "index.json"),
                   raw_records_collected=False)
 
-    def link(path, label):
-        relative = os.path.relpath(path, output_dir).replace(os.sep, "/")
-        return '<a href="' + html.escape(quote(relative, safe="/"), quote=True) + '">' + html.escape(label) + "</a>"
-
-    rows = []
-    for rank, entry in reports.items():
-        artifacts = entry.get("artifacts", {})
-        links = " ".join(link(path, name) for name, path in artifacts.items() if Path(path).is_file())
-        rows.append("<tr><td>" + rank + "</td><td>" + html.escape(entry["status"]) + "</td><td>" +
-                    html.escape(str(entry.get("kernel_us", "unavailable"))) + "</td><td>" + links +
-                    "</td><td>" + html.escape(entry.get("error", "")) + "</td></tr>")
-    stats = result["kernel_us"]
-    latency = (f"Median {stats['median']:.6f} us; min {stats['minimum']:.6f} us; max {stats['maximum']:.6f} us"
-               if stats else "No complete rank latency is available.")
-    document = ("<!doctype html><html><head><meta charset=\"utf-8\"><title>Profiling report index</title>"
-                "<style>body{font:16px system-ui;margin:2rem}table{border-collapse:collapse}td,th{padding:.5rem;border:1px solid #aaa}</style>"
-                "</head><body><h1>Last-launch profiling reports</h1><p>" + html.escape(latency) + "</p><p>" +
-                f"{len(values)}/{rank_size} ranks with complete last-launch data. " +
-                "Raw captures remain on their producer servers. Median/min/max are across ranks.</p><p>" +
-                " | ".join(link(path, role + " rank " + str(selected[role])) for role, path in result["selected"].items()) +
-                "</p><table><tr><th>Rank</th><th>Status</th><th>Last launch (us)</th><th>Reports</th><th>Evidence</th></tr>" +
-                "".join(rows) + "</table></body></html>")
-    atomic_write_json(output_dir / "index.json", result)
-    atomic_write_text(output_dir / "index.html", document)
+    _write_trace_index(output_dir, result)
     return result
 
 
@@ -538,7 +541,8 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                       selection="last_launch", capture_mode="latest_launch",
                       captured_launch=chain_config["warmup"] + chain_config["loops"] - 1)
     output_dir = Path(output_dir).resolve()
-    combined = generate_reports(mapping, paths, output_dir / "all-ranks", attributes=attributes, **selection)
+    trace_dir = output_dir / "chrome"
+    status = "complete"
     per_rank, order = {}, []
     for row, path in zip(ranks, paths):
         run = load_profile_run(mapping, [path], **selection)
@@ -547,7 +551,9 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
                 or any(lane.rank != row["rank"] for launch in run.launches for lane in launch.lanes)):
             raise ValueError("offline raw capture does not match this run/rank")
         reports = generate_reports_for_run(run, output_dir / ("rank-" + str(row["rank"])))
-        per_rank[str(row["rank"])] = str(reports.output_dir / "perfetto_trace.json")
+        per_rank[str(row["rank"])] = copy_rank_trace(reports.output_dir / "perfetto_trace.json", trace_dir, row["rank"])
+        if reports.status != "complete":
+            status = "incomplete"
         if reports.status == "complete":
             duration = max((sample.duration_us for launch in run.launches for lane in launch.lanes
                             for sample in lane.samples if sample.critical), default=0)
@@ -556,17 +562,17 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
     order.sort()
     selected = (dict(fastest=order[0][1], p50=order[(len(order) - 1) // 2][1], slowest=order[-1][1])
                 if order else {})
-    result = dict(status=combined.status, all_ranks=str(combined.output_dir / "perfetto_trace.json"),
-                  report=str(combined.output_dir / "report.html"), ranks=per_rank, selected_ranks=selected,
+    result = dict(status=status, trace_dir=str(trace_dir),
+                  report=str(trace_dir), ranks=per_rank, selected_ranks=selected,
                   selected={role: per_rank[str(rank)] for role, rank in selected.items()},
                   records=[str(path) for path in paths], mapping=str(mapping))
-    (output_dir / "index.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+    _write_trace_index(output_dir, result)
     return result
 
 
 if __name__ == "__main__":
     import argparse
-    parser = argparse.ArgumentParser(description="Report retained standard profiling records; no NPU launch.")
+    parser = argparse.ArgumentParser(description="Collect per-rank Chrome trace JSON from finished reports; no NPU launch.")
     parser.add_argument("summary", type=Path)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--mapping", type=Path)
@@ -581,11 +587,17 @@ if __name__ == "__main__":
             records.extend(result.get("ranks", []))
             records.extend(item["communication"] for item in result.get("profiling_failures", [])
                            if isinstance(item.get("communication"), dict))
-        index = export_breakdown_traces(records, dict(report["chain_configuration"], rank_size=report["rank_size"]),
-            args.output_dir or args.summary.parent / "offline-traces", report["run_id"],
-            report.get("measurements", report.get("traces", {}))["kernel_sha256"],
-            args.mapping, args.records_dir)
-        print("Trace: " + index["all_ranks"])
+        config = dict(report["chain_configuration"], rank_size=report["rank_size"])
+        destination = args.output_dir or args.summary.parent / "offline-traces"
+        kernel_sha = report.get("measurements", report.get("traces", {}))["kernel_sha256"]
+        if args.records_dir is not None or args.mapping is not None:
+            index = export_breakdown_traces(records, config, destination, report["run_id"],
+                                             kernel_sha, args.mapping, args.records_dir)
+        else:
+            index = collect_breakdown_reports(records, config, destination, report["run_id"], kernel_sha)
+        print("Chrome trace JSON directory: " + index["trace_dir"])
+        if index["status"] != "complete":
+            sys.exit(1)
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"ERROR trace export: {error}", file=sys.stderr)
         sys.exit(1)
