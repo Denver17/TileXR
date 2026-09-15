@@ -1,9 +1,9 @@
 # Server Dedup 接收优化方案
 
-状态：**B（深度 2 预取）及 Probe 分段打点已实现，验证结果见第 8 节；A/C 尚未实现**。日期：2026-09-15；本次实现基于 `7ec8ab1`。
+状态：**B（深度 2 预取）及 Probe 分段打点已实现；metadata Scalar 压缩见第 9 节；A/C 尚未实现**。日期：2026-09-15；预取实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
 固定考虑 A5 / Ascend 950、CANN 9.1、64 核，沿用 48 个发送核和 16 个接收核。第 1 节保留优化前的证据，第 2/4 节为后续方案。
 
-本次只实施「深度 2 的 payload 预取」和 Probe 分段打点；保留逐包 ReduceSum 与 Scalar ready 比较，批量 Sum + Compares 和 probe 双缓冲留作后续优化。
+当前已实施「深度 2 的 payload 预取」、Probe 分段打点及 metadata 重复读取/计算压缩；保留逐包 ReduceSum 与 Scalar ready 比较，批量 Sum + Compares 和 probe 双缓冲留作后续优化。
 目标是减少逐 Token 的归约调用、Scalar 判定和立即等待，让不同包的 MTE2、Scalar 和 MTE3 工作重叠，同时保持现有包格式、输出身份和完成条件。
 
 ## 1. 现状和证据边界
@@ -295,3 +295,20 @@ reference 仅作审查证据，生产构建不得 include/link 其中源码。�
 维护要点：延迟加载等待时，MTE2_S 必须在对应 DataCopy 后、后续加载之前发布，消费端仅 wait；若把整段 set/wait 一起移动到消费端，会把后续加载也纳入当前等待，失去预取效果。补位必须发生在前一个消费者已经下发所有输出之后，避免等待尚未下发的 lane 归还事件。预取深度与物理 lane 数分开，不能提前复用正在输出的 UB。
 
 验证结果：本地 receive_packet（OFF）、receive_profile（ON）、profile 三个目标编译及 CTest 3/3 通过；两项新旧 JSON 区间解析检查通过；完整 Dispatch 和接收模板的 GM 地址空间 Clang 检查（OFF/ON）通过。主审及独立 review 未发现本次 diff 引入的可达功能缺陷。blue 编译前 SSH 探测返回 255：`banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1 A5 OFF/ON 编译。源码基线、SHA-256、连接日志及本地 CTest 日志保存在忽略目录 `build/server-dedup-prefetch-verification/`。未运行 NPU，不能据此宣称真实 DMA 重叠、设备事件或性能收益已验证。
+
+## 9. Metadata Scalar 重复工作压缩
+
+用户回传 `0a99364` 执行成功且有一定优化效果；未提供新 trace 或完整二进制/shape 身份，保留为用户运行反馈，不外推量化收益。本次在该版本上继续减少 metadata 的重复读取和计算，不实施 A/C，不改变预取、同步、AtomicAdd 分配和打点边界。
+
+实现范围为接收调度 header 和 packet helper，依次完成：
+
+1. 包尾对象先把原点定位到包头所在的 payload 块，保留块内偏移，`Header()` 不再重复除余。`Entry(i)` 每次访问只换算一次地址，多个字段复用同一个 16B 视图，避免逐 word 重做除法和偏移。`WireOffset` 使用等价的 `logical + floor(logical/480)*32`。视图引用原 UB，不复制尾表。
+2. 消费端已读取的 role 传给 assist helper，循环前读取 entry 数量，group 的 `relayIndex*topK` 移到循环外。terminal 才读取 `tasks.Position(j)`、计算本核专家 ID；DIRECT/first-hop 不再承担这部分 UB 读取和除余计算。
+3. terminal 先选中 entry，再生成 assist 的 k/weight；first-hop 直接写最终 relay 引用，不先复制随后覆盖。assist 的八个字段各写一次。group 与 relay 仍分阶段访问 entry，不缓存整张表或增加 lane 元数据。
+4. relay 下发前读取一次 source rank 和 rank 数，循环内每个 entry 复用地址读取 expert/q。新变量限制在使用范围内，不新增持久缓存字段、栈数组、UB 分配、Host 校验或额外同步。
+
+边界与维护要点：tailOffset 由数据布局保证 32B 对齐，480 同时是 32 和 16 的倍数，因此包头和单 entry 均不会跨 Flag；完整尾表可能跨一个或多个 Flag，**不能把整个 tail 当作物理连续数组**。必须逐 entry 跳过 Flag。复用 role 时保留 first-hop 修改前的正值，转发包头改为 -1 后不能反过来覆盖本地 assist 的原始角色。
+
+验证范围：复用 receive_packet/profile OFF/ON 的真实 helper/接收替身，检查 DIRECT/first-hop/terminal、精确 weight bits、首末 entry、跨 Flag 长尾、量化/非量化、两窗地址和在途 lane 所有权；补充 H209/K32 长尾场景。做 GM 地址空间检查、blue CANN 9.1 A5 编译尝试及限定 diff review。测试不证明 CANN 优化后的 Scalar 指令数、栈/寄存器占用或实际性能；这些仍需真实编译与同配置实测。
+
+本次本地 receive_packet（OFF）、receive_profile（ON）目标编译与 CTest 2/2 通过；最终 GM 地址空间 Clang 检查 OFF/ON 通过。主审和独立 review 未发现本次修改引入的可达功能缺陷。blue 编译前探测返回 255：`banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1 A5 编译。源码 SHA-256、基线、连接与本地检查记录保存在忽略目录 `build/server-dedup-metadata-verification/`。未运行 NPU。

@@ -168,21 +168,23 @@ private:
         auto meta = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
         auto group = wire[uint32_t(data_.tokenStride) + 32U].template ReinterpretCast<uint32_t>();
         ServerDedupPacketTail tail(wire, uint32_t(data_.tailOffset));
-        const int32_t forwardCount = int32_t(tail.Word(4U));
+        const int32_t forwardCount = int32_t(tail.Header().GetValue(4U));
         const uint32_t row = tasks_.Begin() + j;
-        const uint32_t expert = uint32_t(args_->rank) * localExperts_ + tasks_.Position(j) / bs_ % localExperts_;
+        const uint32_t rank = uint32_t(args_->rank);
+        // Only terminal packets search the tail for this expert's k/weight.
+        const uint32_t expert = forwardCount == -1 ? rank * localExperts_ + tasks_.Position(j) / bs_ % localExperts_ : 0U;
         uint32_t t = 0U;
         if (forwardCount > 0) {
-            auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[args_->rank] + windowOffset_ +
+            auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[rank] + windowOffset_ +
                 TileXREpServerDedupCountLayout(experts_).counterOffset);
             profile.Begin(EpDedupDetailMetric::Atomic);
             t = AtomicAdd(counter, uint32_t(1));
             profile.End(EpDedupDetailMetric::Atomic);
         }
-        BuildServerDedupAssist(meta, tail, expert, uint32_t(args_->rank), t);
+        BuildServerDedupAssist(meta, tail, forwardCount, expert, rank, t);
         if (forwardCount > 0) {
             BuildServerDedupGroup(group, tail, row, t, k_);
-            PrepareServerDedupForward(tail, uint32_t(args_->rank), t);
+            PrepareServerDedupForward(tail, rank, t);
         }
         ServerDedupReceiveSync<HardEvent::S_MTE3>();
         profile.End(EpDedupDetailMetric::Metadata);
@@ -198,13 +200,16 @@ private:
         profile.End(EpDedupDetailMetric::OutputIssue);
         if (forwardCount > 0) {
             profile.Begin(EpDedupDetailMetric::RelayIssue);
+            const uint32_t sourceRank = tail.Header().GetValue(0U);
+            const uint32_t ranks = uint32_t(args_->rankSize);
             for (uint32_t i = 0; i < uint32_t(forwardCount); ++i) {
-                const uint32_t expertId = tail.Word(8U + i * 4U);
+                auto entry = tail.Entry(i);
+                const uint32_t expertId = entry.GetValue(0U);
                 const uint32_t destination = expertId / localExperts_;
                 GlobalTensor<uint8_t> output;
                 output.SetGlobalBuffer(args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
-                    data_, tail.Word(0U), destination, expertId % localExperts_, tail.Word(9U + i * 4U),
-                    uint32_t(args_->rankSize), localExperts_, bs_));
+                    data_, sourceRank, destination, expertId % localExperts_, entry.GetValue(1U),
+                    ranks, localExperts_, bs_));
                 DataCopy(output, wire, uint32_t(data_.tokenStride));
             }
             profile.End(EpDedupDetailMetric::RelayIssue);

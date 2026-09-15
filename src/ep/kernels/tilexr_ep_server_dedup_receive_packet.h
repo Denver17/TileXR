@@ -17,26 +17,27 @@ __aicore__ inline void ServerDedupReceiveSync()
 
 __aicore__ inline uint32_t ServerDedupWireOffset(uint32_t logical)
 {
-    return logical / 480U * 512U + logical % 480U;
+    return logical + logical / 480U * 32U;
 }
 
-// All words and entries are individually aligned; the complete tail need not
-// be physically contiguous. The caller establishes MTE2_S before Scalar reads.
+// The 32B-aligned header and each 16B-aligned entry fit within one 480B
+// payload block. The complete tail can cross Flag gaps, so map each entry
+// separately. The caller establishes MTE2_S before Scalar reads.
 class ServerDedupPacketTail {
 public:
     __aicore__ inline ServerDedupPacketTail(LocalTensor<uint8_t> wire, uint32_t offset)
-        : wire_(wire), offset_(offset) {}
-    __aicore__ inline uint32_t Word(uint32_t index)
+        : wire_(wire[offset / 480U * 512U]), withinBlock_(offset % 480U) {}
+    __aicore__ inline LocalTensor<uint32_t> Header()
     {
-        return wire_[ServerDedupWireOffset(offset_ + index * 4U)].ReinterpretCast<uint32_t>().GetValue(0);
+        return wire_[withinBlock_].ReinterpretCast<uint32_t>();
     }
-    __aicore__ inline void SetWord(uint32_t index, uint32_t value)
+    __aicore__ inline LocalTensor<uint32_t> Entry(uint32_t index)
     {
-        wire_[ServerDedupWireOffset(offset_ + index * 4U)].ReinterpretCast<uint32_t>().SetValue(0, value);
+        return wire_[ServerDedupWireOffset(withinBlock_ + 32U + index * 16U)].ReinterpretCast<uint32_t>();
     }
 private:
-    LocalTensor<uint8_t> wire_;
-    uint32_t offset_;
+    LocalTensor<uint8_t> wire_; // Origin is the block containing the header.
+    uint32_t withinBlock_;
 };
 
 __aicore__ inline void ReadServerDedupFlags(GM_ADDR slot, uint32_t blocks, LocalTensor<float> flags)
@@ -70,32 +71,39 @@ __aicore__ inline void WriteServerDedupPayloadRange(GlobalTensor<uint8_t> output
 }
 
 __aicore__ inline void BuildServerDedupAssist(LocalTensor<uint32_t> meta,
-    ServerDedupPacketTail tail, uint32_t myExpert, uint32_t relayRank, uint32_t relayIndex)
+    ServerDedupPacketTail tail, int32_t role, uint32_t myExpert, uint32_t relayRank, uint32_t relayIndex)
 {
-    for (uint32_t word = 0; word < 8U; ++word) meta.SetValue(word, tail.Word(word));
-    const int32_t role = int32_t(tail.Word(4U));
-    if (role > 0) {
-        meta.SetValue(6U, relayRank);
-        meta.SetValue(7U, relayIndex);
-    } else if (role == -1) {
-        for (uint32_t i = 0; i < tail.Word(5U); ++i) {
-            const uint32_t entry = 8U + i * 4U;
-            if (tail.Word(entry) != myExpert) continue;
-            meta.SetValue(2U, tail.Word(entry + 2U));
-            meta.SetValue(3U, tail.Word(entry + 3U));
+    auto header = tail.Header();
+    const uint32_t entries = header.GetValue(5U);
+    auto route = header;
+    if (role == -1) {
+        for (uint32_t i = 0; i < entries; ++i) {
+            auto entry = tail.Entry(i);
+            if (entry.GetValue(0U) != myExpert) continue;
+            route = entry;
             break;
         }
     }
+    meta.SetValue(0U, header.GetValue(0U));
+    meta.SetValue(1U, header.GetValue(1U));
+    meta.SetValue(2U, route.GetValue(2U));
+    meta.SetValue(3U, route.GetValue(3U));
+    meta.SetValue(4U, uint32_t(role));
+    meta.SetValue(5U, entries);
+    meta.SetValue(6U, role > 0 ? relayRank : header.GetValue(6U));
+    meta.SetValue(7U, role > 0 ? relayIndex : header.GetValue(7U));
 }
 
 __aicore__ inline void BuildServerDedupGroup(LocalTensor<uint32_t> group,
     ServerDedupPacketTail tail, uint32_t row, uint32_t relayIndex, uint32_t topK)
 {
     group.SetValue(0U, row);
-    for (uint32_t i = 0; i < tail.Word(5U); ++i) {
-        const uint32_t entry = 8U + i * 4U;
-        group.SetValue(1U + i * 2U, relayIndex * topK + tail.Word(entry + 2U));
-        group.SetValue(2U + i * 2U, tail.Word(entry + 3U));
+    const uint32_t entries = tail.Header().GetValue(5U);
+    const uint32_t returnBase = relayIndex * topK;
+    for (uint32_t i = 0; i < entries; ++i) {
+        auto entry = tail.Entry(i);
+        group.SetValue(1U + i * 2U, returnBase + entry.GetValue(2U));
+        group.SetValue(2U + i * 2U, entry.GetValue(3U));
     }
 }
 
@@ -104,9 +112,10 @@ __aicore__ inline void BuildServerDedupGroup(LocalTensor<uint32_t> group,
 __aicore__ inline void PrepareServerDedupForward(ServerDedupPacketTail tail,
     uint32_t relayRank, uint32_t relayIndex)
 {
-    tail.SetWord(4U, UINT32_MAX);
-    tail.SetWord(6U, relayRank);
-    tail.SetWord(7U, relayIndex);
+    auto header = tail.Header();
+    header.SetValue(4U, UINT32_MAX);
+    header.SetValue(6U, relayRank);
+    header.SetValue(7U, relayIndex);
 }
 } // namespace TileXREp
 #endif

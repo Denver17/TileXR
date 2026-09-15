@@ -123,7 +123,7 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
         Check(std::all_of(output.begin(), output.begin() + 32U, [](uint8_t v) { return v == 0xcd; }) &&
             std::all_of(output.end() - 32U, output.end(), [](uint8_t v) { return v == 0xcd; }), "range output guards");
     }
-    BuildServerDedupAssist(meta, tail, 48U, 8U, 7U);
+    BuildServerDedupAssist(meta, tail, int32_t(tail.Header().GetValue(4U)), 48U, 8U, 7U);
     for (uint32_t word = 0; word < 8U; ++word) {
         const uint32_t expected = fixture.entries && word >= 6U ? (word == 6U ? 8U : 7U) : fixture.Word(word);
         Check(meta.GetValue(word) == expected, "DIRECT/first-hop assist preserves identity and assigns only the relay reference");
@@ -143,7 +143,7 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
         Check(std::memcmp(wire.Data(expected.wire.size()), expected.wire.data(), expected.wire.size()) == 0,
             "in-place common forwarded packet changes only role/return reference and retains all flags and entries");
         for (uint32_t i = 0; i < fixture.entries; ++i) {
-            BuildServerDedupAssist(meta, tail, fixture.Word(8U + 4U * i), 99U, 99U);
+            BuildServerDedupAssist(meta, tail, int32_t(tail.Header().GetValue(4U)), fixture.Word(8U + 4U * i), 99U, 99U);
             for (uint32_t word = 0; word < 8U; ++word) {
                 const uint32_t value = word == 2U ? fixture.Word(10U + 4U * i) :
                     word == 3U ? fixture.Word(11U + 4U * i) : expected.Word(word);
@@ -460,6 +460,7 @@ int main()
         CheckBatchReceiver<false>(42000U, 1U);
         for (bool quantized : {false, true}) {
             for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
+            CheckPacket(209U, 32U, quantized);
             CheckPacket(225U, 32U, quantized);
         }
         for (int64_t magic : {1, 2, 3}) for (int32_t role : {0, 1, -1}) {
