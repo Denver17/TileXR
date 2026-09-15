@@ -372,6 +372,14 @@ report/report.html
 **Load**, and choose the JSON file to view each core's nested stage intervals.
 The HTML file is an auxiliary table, not the timeline viewer.
 
+Omit the optional `displayTimeUnit` field: Chrome rejects `"us"` there with
+`Unit us is not supported`, even though Trace Event `ts` and `dur` are in
+microseconds. Perfetto accepting a file does not prove Chrome compatibility.
+The per-rank collection command also removes this header from reports written
+by the older standard generator, without rescaling events or changing the
+checksummed producer files. Re-export retained reports to repair old downloads;
+no kernel execution is required.
+
 ## Integration Checklist
 
 1. Assign capture-wide unique, nonzero event IDs.

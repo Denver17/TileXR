@@ -439,7 +439,14 @@ def copy_rank_trace(source, directory, rank):
     with tempfile.NamedTemporaryFile(dir=directory, prefix=f".rank-{rank}.", suffix=".tmp", delete=False) as handle:
         temporary = Path(handle.name)
     try:
-        shutil.copyfile(source, temporary)
+        # Older atomic_write_json output starts with this sorted, optional
+        # header. Chrome rejects "us" although event ts/dur must remain in us.
+        # Strip only that legacy header; preserve events and producer artifacts.
+        legacy_header = b'{\n  "displayTimeUnit": "us",\n'
+        with Path(source).open("rb") as reader, temporary.open("wb") as writer:
+            prefix = reader.read(len(legacy_header))
+            writer.write(b'{\n' if prefix == legacy_header else prefix)
+            shutil.copyfileobj(reader, writer, length=1024 * 1024)
         os.replace(temporary, destination)
     finally:
         temporary.unlink(missing_ok=True)

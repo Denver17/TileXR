@@ -72,6 +72,7 @@ class ProfilingRendererTests(unittest.TestCase):
         run, analysis = self.load()
         trace = render_perfetto(run, analysis)
         encoded = json.dumps(trace, allow_nan=False)
+        self.assertNotIn("displayTimeUnit", trace)
 
         process = next(event for event in trace["traceEvents"] if event.get("name") == "process_name")
         thread = next(event for event in trace["traceEvents"] if event.get("name") == "thread_name")

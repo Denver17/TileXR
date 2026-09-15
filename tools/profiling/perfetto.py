@@ -270,7 +270,8 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
 
     return {
         "traceEvents": events,
-        "displayTimeUnit": "us",
+        # Trace Event ts/dur are microseconds. Chrome's optional display unit
+        # uses a separate enum which does not accept "us"; use its default.
         "metadata": {
             "schema": "tilexr_perfetto_trace.v1",
             "capture_id": run.capture_id,

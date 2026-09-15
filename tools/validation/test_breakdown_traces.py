@@ -76,6 +76,18 @@ class TraceTests(unittest.TestCase):
             self.capture(0)
         self.assertEqual(reader.call_count, 1)
 
+    def test_old_chrome_display_unit_is_removed_without_changing_events(self):
+        source = self.root / "legacy-trace.json"
+        trace = dict(displayTimeUnit="us", traceEvents=[dict(name="stage", ph="X", pid=0, tid=0,
+            ts=1.25, dur=2.5, args=dict(displayTimeUnit="us"))])
+        measurements.atomic_write_json(source, trace)
+        original = source.read_bytes()
+        copied = Path(measurements.copy_rank_trace(source, self.output, 0))
+        exported = json.loads(copied.read_text())
+        self.assertNotIn("displayTimeUnit", exported)
+        self.assertEqual(exported["traceEvents"], trace["traceEvents"])
+        self.assertEqual(source.read_bytes(), original)
+
     def test_even_rank_median_averages_middle_values(self):
         self.records[3] = self.capture(3, 6000)
         result = self.collect(list(reversed(self.records)))
