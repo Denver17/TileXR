@@ -71,7 +71,8 @@ public:
         profile.Mark(EpDedupDetailPoint::PrepareEnd);
 
         auto snapshot = probeIdxBuf_.Get<uint32_t>();
-        const uint32_t depth = lanes_ < 2U ? lanes_ : 2U;
+        // Fill every allocated lane (up to eight); reuse still waits for MTE3.
+        const uint32_t depth = lanes_;
         uint32_t scan = 0U, issued = 0U, consumed = 0U;
         while (tasks_.PendingCount() != 0U) {
             if (scan >= tasks_.PendingCount()) scan = 0U;

@@ -1,9 +1,9 @@
 # Server Dedup 接收优化方案
 
-状态：**B（深度 2 预取）及 Probe 分段打点已实现；metadata Scalar 压缩见第 9 节；A/C 尚未实现**。日期：2026-09-15；预取实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
+状态：**B 预取已扩至全部可用槽位（最多 8，见第 10 节）；Probe 分段打点及第 9 节 metadata Scalar 压缩已实现；A/C 尚未实现**。原深度 2 实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
 固定考虑 A5 / Ascend 950、CANN 9.1、64 核，沿用 48 个发送核和 16 个接收核。第 1 节保留优化前的证据，第 2/4 节为后续方案。
 
-当前已实施「深度 2 的 payload 预取」、Probe 分段打点及 metadata 重复读取/计算压缩；保留逐包 ReduceSum 与 Scalar ready 比较，批量 Sum + Compares 和 probe 双缓冲留作后续优化。
+当前已实施「最多 8 槽的 payload 预取」、Probe 分段打点及 metadata 重复读取/计算压缩；保留逐包 ReduceSum 与 Scalar ready 比较，批量 Sum + Compares 和 probe 双缓冲留作后续优化。
 目标是减少逐 Token 的归约调用、Scalar 判定和立即等待，让不同包的 MTE2、Scalar 和 MTE3 工作重叠，同时保持现有包格式、输出身份和完成条件。
 
 ## 1. 现状和证据边界
@@ -135,18 +135,18 @@ scratch 除了查询 API 容量，还要核对实际 A5 分支的最后一次向
 | probe snapshot | `16 * 4 = 64` B |
 | 每个数据 lane | `tokenStride + 32 + align32(4 + 8*(K-1))` B，依次为 wire、meta、group |
 
-令前七项合计为 `fixedBytes`，每 lane 大小为 `laneBytes`；深度 2 调度复用 snapshot，不另占描述符 UB：
+令前七项合计为 `fixedBytes`，每 lane 大小为 `laneBytes`；预取调度复用 snapshot，不另占描述符 UB：
 
 ```text
 N = min(8, floor((190*1024 - fixedBytes) / laneBytes))
-D = min(2, N)
+D = N
 ```
 
 kernel 的资源计算须保证 `fixedBytes < 190*1024` 且至少容纳一个 lane，再做无符号减法和除法，不能依赖无符号下溢后的结果。
 若新预算使边界内的 case 无一路可用，必须在 kernel 验证中判为实现失败并修复；不能以 `N=0` 继续执行、静默跳过任务，或交给 Host 拦截该 case。
 不增加按 Token 总数增长的队列，不使用大栈数组，也不为每 lane 复制 Sum scratch。GM 容量充足无法代替 Vector 必需的 UB 工作空间。
 
-## 3. 本次增量 B：深度 2 的跨包输入预取
+## 3. 增量 B：最多 8 槽的跨包输入预取
 
 ### 3.1 调度方式
 
@@ -170,7 +170,7 @@ ConsumeLoaded(C,0) → ...
 
 实际 MTE2 可在 A 的 Scalar metadata 期间加载 B，MTE3 输出 A 可与后续独立槽位上的工作重叠。
 C 的 MTE2 加载必须等 A 的所有 MTE3 读取结束；这种回压是正确的槽位保护，不应为追求重叠而删除。
-当 N 大于 2 时仍只预取 D=2 个未消费包，轮转使用 N 个物理槽，以给已下发输出保留更长复用间隔。
+预取深度等于物理槽数 N，最多可有 8 个已下发但尚未消费的包。消费并下发完一个包的全部输出后才补位；新加载仍通过该槽的 MTE3_MTE2 事件等待上一包完成写出。
 当 N=1 时 D=1，自然退化为单槽顺序处理。
 
 ### 3.2 事件与缓冲区所有权
@@ -209,12 +209,12 @@ Scalar 改写 meta/group 前也必须确定前一占用者已经结束；由该 
 
 ### 3.4 并发度的含义
 
-16 是每批监听包数；N≤8 是物理 UB 数据槽数；D≤2 是首版已下发但尚未消费的 payload 加载数。
+16 是每批监听包数；N≤8 是物理 UB 数据槽数；当前 D=N 是已下发但尚未消费的 payload 加载数上限（最初版本为 D=min(2,N)）。
 三者独立，64 核也不表示单个接收核有 64 路 DMA。16 个接收核分别运行自己的局部流水。
 MTE2 和 MTE3 是共享搬运流水，不应把 N 或 D 解释为同类指令可以同时满带宽执行的独立引擎数。
 metadata 仍由该核 Scalar 顺序执行，AtomicAdd 竞争和多目的 relay 的 MTE3 压力仍可能成为限制。
 
-先固定 D=2。只有 A/B 表明输入等待仍可被隐藏、输出回压没有抵消收益时，才考虑 D=4 或 D=8；不默认增加调度复杂度或修改核角色比例。
+用户反馈移除 AtomicAdd 的实验中 load_wait 仍明显暴露，因此将 D 从 min(2,N) 提升到 N。复用已分配槽位，不增加 UB、描述符队列或核角色。性能对比同时观察 load_wait 和整个接收阶段耗时；槽位回压或 MTE2 带宽限制仍需实机区分。
 
 ## 4. 第三阶段（可选）：probe 与包处理重叠
 
@@ -233,14 +233,14 @@ probe 复用 MTE2，必须优先保证已就绪 payload 的预取，不能让投
 
 两批共享同一冻结边界，不能在其消费完成前任意滑动成第三批。Flag 缓冲区须等 Vector 完成读取才可复用，sums/mask/snapshot 须等对应消费者用完才可复用。
 探测为未就绪后才到达的包留待下一次扫描，不把旧 mask 当作实时状态。
-这一阶段改变扫描顺序，必须单独 review 和验证；不作为深度 2 预取的前置条件，也不增加非阻塞完成轮询或无界队列。
+这一阶段改变扫描顺序，必须单独 review 和验证；不作为批内预取的前置条件，也不增加非阻塞完成轮询或无界队列。
 
 ## 5. 改动划分和 profiling 口径
 
 | 增量 | 修改范围 | 预期效果 |
 | --- | --- | --- |
 | A：批量判定 | 接收 Probe、kernel 显式 UB/scratch 容量计算与分配；开发阶段核对标准 API 容量 | 移除逐 Token ReduceSum 调用及 Scalar 比较；Flag 拷贝方式不变 |
-| B：深度 2 预取 | 接收调度与 ReceiveOne 拆分、每 lane 加载事件、复用现有 snapshot 的双游标 | 为输入加载与其他包 metadata/输出重叠提供调度条件 |
+| B：最多 8 槽预取 | 接收调度与 ReceiveOne 拆分、每 lane 加载事件、复用现有 snapshot 的双游标 | 为输入加载与其他包 metadata/输出重叠提供调度条件 |
 | C：可选 probe 重叠 | 两批快照调度、probe 缓冲和事件归属 | 隐藏部分 Flag 搬运/归约，代价是额外 UB 和扫描复杂度 |
 
 首版不重写包解析、输出和转发算法，不调整任务分核，也不把 AtomicAdd 分配改成批量号段；后者需要独立论证 group 索引和输出布局契约。
@@ -312,3 +312,13 @@ reference 仅作审查证据，生产构建不得 include/link 其中源码。�
 验证范围：复用 receive_packet/profile OFF/ON 的真实 helper/接收替身，检查 DIRECT/first-hop/terminal、精确 weight bits、首末 entry、跨 Flag 长尾、量化/非量化、两窗地址和在途 lane 所有权；补充 H209/K32 长尾场景。做 GM 地址空间检查、blue CANN 9.1 A5 编译尝试及限定 diff review。测试不证明 CANN 优化后的 Scalar 指令数、栈/寄存器占用或实际性能；这些仍需真实编译与同配置实测。
 
 本次本地 receive_packet（OFF）、receive_profile（ON）目标编译与 CTest 2/2 通过；最终 GM 地址空间 Clang 检查 OFF/ON 通过。主审和独立 review 未发现本次修改引入的可达功能缺陷。blue 编译前探测返回 255：`banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1 A5 编译。源码 SHA-256、基线、连接与本地检查记录保存在忽略目录 `build/server-dedup-metadata-verification/`。未运行 NPU。
+
+## 10. 预取使用全部可用槽位
+
+本次基于 `2138024`，将接收调度的深度上限从 `min(2, lanes_)` 改为 `lanes_`。当前常用 H7168 配置已经分配 8 个槽，现可先下发 8 个 ready 包，再按 FIFO 消费、逐包补位；实际可用槽少于 8 时按实际数量运行。复用原 UB、16 项 snapshot、pending 身份及事件 ID，不添加栈数组或 Host UB 校验。
+
+提高深度后必须继续遵守 `D<=N`：补位只发生在对应旧包完成 ConsumeLoaded 的全部下发之后，MTE3_MTE2 再保护真实写出完成，不能为了提前加载而删除该事件。测试须检查预取实际达到 N、每 lane 的加载/消费身份一致、在途 wire/meta/group 不被覆盖，以及跨批删除和末尾事件回收；仅确认存在 8 份 UB 分配无法证明预取已加深。
+
+Probe 与消费仍按批切换，metadata 仍由 Scalar 逐包处理。load_wait 可以同时包含输入搬运剩余时间和上一包 MTE3 占槽造成的回压；本次提高提前量不等于已有性能提升证据，需保持相同 shape、量化和打点配置对比接收总耗时。
+
+本次 receive_packet（profiling OFF）和 receive_profile（ON）本地目标编译及 CTest 2/2 通过，独立 review 无确定性缺陷。blue 编译前连接返回 255：`banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1/A5 编译。源码摘要、编译/测试及连接日志保存在忽略目录 `build/server-dedup-eight-prefetch-verification/`；Host 替身不证明设备异步时序或性能收益，未运行 NPU。

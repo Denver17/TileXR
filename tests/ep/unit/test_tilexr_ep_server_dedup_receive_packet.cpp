@@ -311,7 +311,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
     const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
     const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + 32U + groupStride));
     Check(lanes == expectedLanes, "fixture exercises the intended physical lane count");
-    const uint32_t depth = std::min(2U, lanes);
+    const uint32_t depth = expectedLanes;
     std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(owned * 8U + 16U, 0xcdcdcdcdU);
     std::vector<uint32_t> groups((8U * bs * groupStride + 64U) / 4U, 0xcdcdcdcdU);
@@ -333,7 +333,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
         if (event == AscendC::HardEvent::MTE2_S && loadPending[lane]) {
             if (set) {
                 const uint32_t pending = uint32_t(loaded.size() - processed.size());
-                Check(pending <= depth, "at most two unconsumed loads, or one for a single lane");
+                Check(pending <= depth, "unconsumed loads never exceed the allocated lane pool");
                 peakLoads = std::max(peakLoads, pending);
             } else {
                 if (processed.empty()) Check(loaded.size() == depth, "prefetch fills before the first consumer wait");
