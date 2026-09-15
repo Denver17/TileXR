@@ -617,3 +617,9 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 连续 Dispatch 要求同 comm 单 stream、各 Rank 一致的调用/shape 次序，且每轮发布全部 count（包含零计数）。快 Rank 完成 N+1 需要收到每个 Rank 的 N+1 count，其同 stream 顺序证明这些 Rank 的 N 已结束，故 N+2 可复用 N 的窗口。后续 Dispatch/Combine 交替会让相邻 Dispatch 使用相同 parity，必须核对实际 Combine 通信、零流量及 relay 清理的依赖；当前未实现 Combine，不据此宣称其生命周期已验证。普通 GM 的 group/assistEx/sourceMask 等输出仍须保存到消费者完成。
 
 本次 8 个相关 Host 目标编译和对应回归、5 项 integration 替身、2 项新旧 trace 分段检查通过，覆盖双窗地址、inactive 窗口保护及最终窗口读取；独立并发/地址 review 无未解决发现。blue SSH 编译前探测返回 `banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入 CANN 9.1/A5 OFF/ON 编译；记录位于本地 `build/server-dedup-pingpong-verification/`。未运行 NPU，历史 4 GiB 或单窗结果不代表本次 8 GiB 双窗实机通过。
+
+### 2026-09-15：8 GiB 迁移后的 ABI 测试夹具
+
+若执行在 `test_tilexr_ep_server_dedup_public_abi` 报 `ABI consumer propagates submit result and rejects non-A5`，先核对该测试的模拟 CommArgs 容量。双窗实现要求至少 8 GiB，旧夹具仍填写 4 GiB 会在提交替身之前返回参数错误，使原本检查提交返回值的断言失败；随后的 profiling 报告缺失是流程提前中止的结果。容量夹具应引用 `kEpServerDedupPeerBytes`，通信域契约变化时把公开 ABI consumer 纳入相关回归。
+
+此问题已在当前 Host 目标重编译后复现同一断言失败；只修正夹具容量后重新编译，原用例通过。本次未修改 kernel 或生产 Host，不代表 32P 多轮或 NPU 执行已经验证。

@@ -50,7 +50,7 @@ int main()
 {
     using ServerDedupTest::Check;
     g_args.rankSize = 16;
-    g_args.peerMemBytes = 4ULL * 1024 * 1024 * 1024;
+    g_args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
     for (auto &peer : g_args.peerMems) { peer = reinterpret_cast<GM_ADDR>(0x1000); }
     alignas(32) uint16_t x[1] = {123};
     int32_t expertId[1] = {0};
