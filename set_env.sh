@@ -38,9 +38,10 @@ _tilexr_validation_env() {
     if [[ "$TILEXR_VALIDATION_HOSTFILE" != /* ]]; then
         export TILEXR_VALIDATION_HOSTFILE="$root/$TILEXR_VALIDATION_HOSTFILE"
     fi
-    # File distribution and installed-artifact verification do not load CANN or
-    # resolve runtime endpoints. The configured Python and SSH suffice.
-    if [[ ${TILEXR_VALIDATION_ACTION:-} == sync || ${TILEXR_VALIDATION_ACTION:-} == verify ]]; then
+    # Distribution, artifact verification and local Host tests do not load CANN
+    # or resolve runtime endpoints.
+    if [[ ${TILEXR_VALIDATION_ACTION:-} == sync || ${TILEXR_VALIDATION_ACTION:-} == verify ||
+          ${TILEXR_VALIDATION_ACTION:-} == host-validate ]]; then
         command -v "$TILEXR_VALIDATION_PYTHON" >/dev/null || return 1
         printf 'ENV_READY root=%s\n' "$root"
         return 0

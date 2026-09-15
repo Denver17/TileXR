@@ -3,10 +3,17 @@
 This directory contains utility scripts for building, testing, and managing the TileXR project.
 
 EP 服务器验证的统一入口与配置见[EP 七步验证](../docs/EP_VALIDATION_GUIDE.md)。根目录提供
-`set_env.sh`、`build_all.sh`、`sync.sh`、`run.sh`，PC 首次同步使用 `tools/validation/push.ps1`。
+`set_env.sh`、`build_all.sh`、`sync.sh`、`run.sh`、`run_host_validation.sh`，PC 首次同步使用 `tools/validation/push.ps1`。
 `bash build_all.sh` 默认关闭设备打点；`bash build_all.sh breakdown=1` 编译 cnt/cumsum breakdown 产物。
 随后手动执行 `bash sync.sh`，再执行 `bash run.sh -n 2 -e 96 -m 2 -l 3 2`；同步无需设置运行模式、服务器数或专家数。hostfile 每行一个 IP；sync 分发全部机器，run 的 `-n` 选择前 N 台，每台固定 8 卡。
 这些入口负责构建、分发和结果汇总；下列模块脚本保留为内部实现及单独开发入口。
+
+`bash run_host_validation.sh` 按需在当前机器执行已安装的 Host/Python 回归，
+不通过 SSH 分发执行，也不加载 CANN 或访问 NPU。先用 `build_all.sh` 构建安装；
+Host 回归不会在 build 后自动执行；`run.sh` 默认 `host_validation=0`，跳过回归。
+传入 `host_validation=1` 时先在主节点调用同一独立入口，通过后再执行 NPU 工作流，失败则直接返回。
+报告保存在 `run/validation/host-<id>/summary.json`，每项测试的原始日志放在同一目录。
+修改 Host/ABI/布局、Planner 或 Python 分析工具后，以及完整交付验收时，建议手动执行此入口。
 
 ## Environment Setup
 

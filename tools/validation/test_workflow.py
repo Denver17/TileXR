@@ -133,6 +133,18 @@ class ResultTests(unittest.TestCase):
         self.result["tests"].reverse()
         workflow.validate_result(self.result, "run-current", self.manifest)
 
+    def test_rank_checkpoint_rejects_host_pass_records(self):
+        self.manifest["checkpoint"] = workflow.DISPATCH_CHECKPOINT
+        self.result["checkpoint"] = workflow.DISPATCH_CHECKPOINT
+        with mock.patch.object(workflow, "validate_rank_records") as ranks:
+            with self.assertRaises(workflow.Failure) as error:
+                workflow.validate_result(self.result, "run-current", self.manifest, [])
+            self.assertEqual(error.exception.kind, "RESULT_FAILED")
+            ranks.assert_not_called()
+            self.result["tests"] = []
+            workflow.validate_result(self.result, "run-current", self.manifest, [])
+            ranks.assert_called_once()
+
     def test_rejects_stale_failed_missing_duplicate_and_wrong_scope_results(self):
         changes = [{"run_id": "old-run"}, {"build_id": "old-build"}, {"status": "FAIL"},
                    {"cleanup": "pending"}, {"checkpoint": "another-checkpoint"}, {"mode": "production"},
@@ -528,6 +540,66 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.assertEqual(list(self.root.rglob("pid.json")), [])
         self.assertEqual(list(self.remote.rglob("pid.json")), [])
 
+    def test_host_validate_runs_locally_without_sync_or_runtime_configuration(self):
+        self.enable_chain(run_mode="breakdown")
+        self.hostfile.unlink()
+        # Exercise the installed executable command shape as well as @python tests.
+        executable = self.config_instance.install / "bin/test_host_extra"
+        executable.write_text("#!" + sys.executable + "\nprint('extra Host test completed')\n")
+        executable.chmod(0o755)
+        self.manifest["tests"].append({"name": "test_host_extra", "argv": ["install/validation/bin/test_host_extra"]})
+        self.manifest["artifacts"] = workflow.artifact_files(self.config_instance.install)
+        # A device-only test must never be launched by the Host entry.
+        self.manifest["tests"].append({"name": workflow.REGISTRATION_TEST, "argv": ["missing-device-test"]})
+        manifest_path = self.config_instance.install / "manifest.json"
+        workflow.write_json(manifest_path, self.manifest)
+        before = manifest_path.read_bytes()
+        command = self.invoke("host-validate", environment={
+            "TILEXR_VALIDATION_HOSTFILE": "/missing/hostfile", "TILEXR_VALIDATION_SSH_USER": "invalid;user",
+            "TILEXR_VALIDATION_SERVERS": "invalid", "TILEXR_VALIDATION_RUN_MODE": "invalid",
+            "TILEXR_VALIDATION_BS": "invalid", "TILEXR_VALIDATION_TIMEOUT": "invalid", "TILEXR_COMM_ID": "invalid"})
+        self.assert_success(command)
+        self.assertIn("HOST_VALIDATION_PASS", command.stdout)
+        summary = self.summary()
+        self.assertEqual(summary["build_id"], self.manifest["build_id"])
+        self.assertEqual(summary["cleanup"], "complete")
+        self.assertEqual(len(summary["tests"]), len(workflow.CHECKS) + 1)
+        self.assertEqual({test["status"] for test in summary["tests"]}, {"PASS"})
+        log = self.config_instance.logs / summary["run_id"]
+        self.assertEqual(len(list(log.glob("*.log"))), len(workflow.CHECKS) + 1)
+        self.assertFalse(self.remote.exists())
+        self.assertFalse((self.config_instance.logs / "sync.json").exists())
+        self.assertEqual(before, manifest_path.read_bytes())
+
+    def test_host_validate_reports_test_failures_and_releases_lock(self):
+        for behavior, kind in (("nonzero", "EXIT_FAILED"), ("result-fail", "RESULT_FAILED"),
+                               ("missing-marker", "LOG_PARSE_FAILED"), ("decorated-marker", "LOG_PARSE_FAILED")):
+            with self.subTest(behavior=behavior):
+                logs = self.config_instance.logs / behavior
+                command = self.invoke("host-validate", environment={"TEST_PROGRAM_BEHAVIOR": behavior,
+                                      "TILEXR_VALIDATION_RESULT_ROOT": str(logs)})
+                self.assertEqual(command.returncode, workflow.FAILURE_CODES[kind], command.stdout + command.stderr)
+                self.assertIn("HOST_VALIDATION_FAIL", command.stdout)
+                report = workflow.read_json(next(logs.glob("host-*/summary.json")))
+                self.assertEqual(report["errors"][0]["type"], kind)
+                self.assertEqual(report["tests"][0]["status"], "FAIL")
+                self.assertEqual(report["cleanup"], "complete")
+                self.assertFalse((logs / ".operation.lock").exists())
+
+    def test_host_validate_rejects_empty_host_suite(self):
+        self.manifest["tests"] = [{"name": workflow.REGISTRATION_TEST, "argv": ["missing-device-test"]}]
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        command = self.invoke("host-validate")
+        self.assertEqual(command.returncode, workflow.FAILURE_CODES["CONFIG_FAILED"])
+        self.assertEqual(self.summary()["status"], "FAIL")
+        self.assertEqual(self.summary()["tests"], [])
+
+    def test_host_validate_rejects_changed_installation(self):
+        (self.config_instance.install / "artifact").write_bytes(b"changed")
+        command = self.invoke("host-validate")
+        self.assertEqual(command.returncode, workflow.FAILURE_CODES["CONFIG_FAILED"])
+        self.assertEqual(self.summary()["tests"], [])
+
     def test_empty_kernel_uses_first_device_per_host_with_existing_entry_points(self):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         entry = self.root / "set_env.sh"
@@ -548,7 +620,8 @@ class WorkflowIntegrationTests(TemporaryRoot):
             self.assert_success(result)
         self.assertEqual(self.summary()["status"], "PASS")
         self.assertEqual(self.summary()["scope"],
-                         "ABI/Host、A5 空 kernel 安装与设备注册；未执行 NPU launch 或去重通信。")
+                         "A5 空 kernel 安装与设备注册；未执行 NPU launch 或去重通信。")
+        self.assertTrue(all(node["tests"] == 1 for node in self.summary()["nodes"]))
         self.assertIn("范围：" + self.summary()["scope"], result.stdout)
         for root, device in ((self.root, 0), (self.remote, 0)):
             logs = list((root / "run/validation").glob("*/" + workflow.REGISTRATION_TEST + ".log"))
@@ -759,7 +832,7 @@ if behavior == 'launch-failure':
     sys.exit(9)
 if behavior != 'missing-chain':
     print('EP_SERVER_DEDUP_CHAIN_PASS ' + json.dumps(dict(record, peer_count=rank_size,
-                                                       peer_mem_bytes=4 * 1024 ** 3)))
+                                                       peer_mem_bytes=(4 if boundary else 8) * 1024 ** 3)))
 if behavior == 'stale-round':
     record['run_id'] = 'old-run'
 if run_mode != 'functional':
@@ -802,7 +875,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
     def test_chain_single_sync_run_and_collect_native_rank_protocol(self):
         self.enable_chain()
         self.prepare_sync()
-        command = self.invoke("run")
+        command = self.invoke("run", environment={"TEST_PROGRAM_BEHAVIOR": "nonzero"})
         self.assert_success(command)
         summary = self.summary()
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
@@ -812,7 +885,8 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertIn("最后一轮 cnt/cumsum", summary["scope"])
         self.assertNotIn("未执行 NPU launch", summary["scope"])
         for node in summary["nodes"]:
-            self.assertEqual(node["tests"], len(self.manifest["tests"]))
+            self.assertEqual(node["tests"], 0)
+            self.assertEqual(node["reported_result"]["tests"], [])
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["chain"]["peer_count"], 16)
                 self.assertEqual(rank["completed"], 1)
@@ -951,11 +1025,12 @@ with output.open('w', newline='') as f:
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="performance", TILEXR_VALIDATION_LOOPS="3",
                           TILEXR_VALIDATION_WARMUP="2")
         self.prepare_sync()
-        command = self.invoke("run")
+        command = self.invoke("run", environment={"TEST_PROGRAM_BEHAVIOR": "nonzero"})
         self.assert_success(command)
         summary = self.summary()
         self.assertEqual(summary["measurements"]["run_mode"], "performance")
         for node in summary["nodes"]:
+            self.assertEqual(node["tests"], 0)
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["performance"]["sample_us"], [3, 4, 5])
                 self.assertEqual(rank["performance"]["median_us"], 4)
@@ -986,8 +1061,9 @@ with output.open('w', newline='') as f:
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn("设备打点开关", mismatch.stderr)
         # run.sh forwards case arguments independently of the configuration used to sync.
-        self.assert_success(self.invoke("run", environment={"TILEXR_DIRECT_RUN": "1"}))
+        self.assert_success(self.invoke("run", environment={"TILEXR_DIRECT_RUN": "1", "TEST_PROGRAM_BEHAVIOR": "nonzero"}))
         summary = self.summary()
+        self.assertTrue(all(node["tests"] == 0 for node in summary["nodes"]))
         self.assertEqual(summary["measurements"]["run_mode"], "breakdown")
         self.assertEqual(summary["measurements"]["breakdown"]["schema"], workflow.measurements.RECORDS_SCHEMA)
         self.assertIn("metadata", summary["measurements"]["breakdown"]["stages_us"])

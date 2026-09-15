@@ -37,8 +37,8 @@ DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
 DISPATCH_ABI = {"launch_bytes": 192, "layout": "r07-single", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
-SERVER_DEDUP_PEER_BYTES = 4 * 1024 ** 3
-MEMORY_BOUNDARY_BYTES = SERVER_DEDUP_PEER_BYTES
+SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
+MEMORY_BOUNDARY_BYTES = 4 * 1024 ** 3
 CHAIN_CHECKPOINTS = (DISPATCH_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
@@ -260,9 +260,9 @@ class Config:
         if not self.checkpoint:
             installed = self.root / "install/validation/manifest.json"
             self.checkpoint = read_json(installed)["checkpoint"] if installed.exists() else CHECKPOINT
-        self.hostfile = (self.root / "hostfile" if action in ("build", "verify") else
+        self.hostfile = (self.root / "hostfile" if action in ("build", "verify", "host-validate") else
                          Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile")))
-        self.user = "" if action in ("build", "verify") else os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
+        self.user = "" if action in ("build", "verify", "host-validate") else os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
         self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4")) if action == "build" else 4
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180")) if self.is_run else 180
         self.server_count = None
@@ -874,8 +874,13 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                         measurements.validate_rank_measurements(record, chain_config)
                     except (ValueError, TypeError, KeyError) as error:
                         raise Failure("RESULT_FAILED", f"rank 测量记录无效：{error}", rank=mapping["rank"]) from error
+            expected_peer_bytes = (MEMORY_BOUNDARY_BYTES if manifest["checkpoint"] == MEMORY_BOUNDARY_CHECKPOINT
+                                   else SERVER_DEDUP_PEER_BYTES)
+            if type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] != expected_peer_bytes:
+                raise Failure("RESULT_FAILED", "rank peer window 容量不符合当前检查点",
+                              rank=mapping["rank"], expected_bytes=expected_peer_bytes,
+                              actual_bytes=linked.get("peer_mem_bytes"))
             if (linked.get("peer_count") != mapping["rank_size"] or
-                    type(linked.get("peer_mem_bytes")) is not int or linked["peer_mem_bytes"] != SERVER_DEDUP_PEER_BYTES or
                     linked["pid"] != record["pid"] or any(type(record.get(key)) is not int or record[key] != loops
                         for key in ("submitted", "completed")) or record.get("cleanup") != "complete"):
                 raise Failure("RESULT_FAILED", "rank 未完成 peer window 检查、指定轮数 launch 或资源清理",
@@ -883,8 +888,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
             if manifest["checkpoint"] == MEMORY_BOUNDARY_CHECKPOINT:
                 expected_numbers = {"peer_mem_bytes": MEMORY_BOUNDARY_BYTES,
                                     "boundary_offset": MEMORY_BOUNDARY_BYTES - 32, "probe_bytes": 32}
-                if (linked["peer_mem_bytes"] != MEMORY_BOUNDARY_BYTES or
-                        any(type(record.get(key)) is not int or record[key] != value
+                if (any(type(record.get(key)) is not int or record[key] != value
                             for key, value in expected_numbers.items()) or
                         any(record.get(key) is not True for key in
                             ("initial_zero", "device_initial_zero", "device_readback_ff", "host_boundary_ff", "guard_zero"))):
@@ -1016,6 +1020,94 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
     result["ranks"].sort(key=lambda record: record["rank"])
 
 
+def node_tests(manifest):
+    # The manifest is the installed catalog, not a prerequisite suite for NPU runs.
+    if manifest["checkpoint"] == CHECKPOINT:
+        return manifest["tests"]  # Preserve the explicit legacy ABI/Host checkpoint.
+    if manifest["checkpoint"] == EMPTY_KERNEL_CHECKPOINT:
+        return [test for test in manifest["tests"] if test["name"] == REGISTRATION_TEST]
+    return []
+
+
+def run_validation_test(config, test, log, timeout, *, device=None, cancelled=None):
+    name = test["name"]
+    argv = [sys.executable if value == "@python" else str(config.root / value)
+            for value in test["argv"]]
+    env = None
+    if name == REGISTRATION_TEST:
+        if device is None or not str(device).isdigit() or not 0 <= int(device) <= 255:
+            raise ValueError("设备注册检查缺少有效的 hostfile device ID")
+        env = dict(os.environ, TILEXR_EP_SERVER_DEDUP_TEST_DEVICE=str(device))
+        env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
+    path = log / (name + ".log")
+    output = execute(argv, path, timeout=timeout, cwd=config.root, env=env, cancelled=cancelled)
+    prefix = "test_tilexr_ep_server_dedup_"
+    marker = None
+    if name == REGISTRATION_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=registration"
+    elif name.startswith(prefix):
+        marker, suffix = "EP_SERVER_DEDUP_ABI_HOST_", " test=" + name[len(prefix):]
+    elif name == "test_tilexr_ep_kernel_launch" and config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
+        marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=launch"
+    if marker:
+        markers = [line for line in output.splitlines() if line.startswith(marker)]
+        if markers == [marker + "FAIL" + suffix]:
+            raise Failure("RESULT_FAILED", "测试完成但结果校验失败", log=str(path))
+        if markers != [marker + "PASS" + suffix]:
+            raise Failure("LOG_PARSE_FAILED", "缺少或无法解析唯一的 PASS/FAIL marker", log=str(path))
+
+
+def host_validate(config):
+    run_id = "host-" + uuid.uuid4().hex
+    log = config.logs / run_id
+    result = {"run_id": run_id, "host": socket.gethostname(), "checkpoint": config.checkpoint,
+              "mode": config.mode, "status": "FAIL", "tests": [], "errors": [],
+              "scope": "本机已安装的 Host/Python 回归；不包含设备注册、NPU launch 或通信验证。"}
+    started = time.monotonic()
+    cancelled = threading.Event()
+    handlers = {sig: signal.signal(sig, lambda signum, frame: cancelled.set())
+                for sig in (signal.SIGTERM, signal.SIGHUP)}
+    current_test = None
+    try:
+        manifest = verify_build(config, check_run_mode=False)
+        result.update(build_id=manifest["build_id"], commit=manifest["source"]["commit"],
+                      source_provenance=manifest["source"]["provenance"])
+        tests = [test for test in manifest["tests"] if test["name"] != REGISTRATION_TEST]
+        names = [test["name"] for test in tests]
+        if not names or len(names) != len(set(names)):
+            raise ValueError("安装包没有 Host/Python 测试或测试名称重复，请检查构建 manifest")
+        result["expected_tests"] = names
+        for test in tests:
+            current_test = test["name"]
+            if cancelled.is_set():
+                raise InterruptedError("Host/Python 回归已取消")
+            run_validation_test(config, test, log, config.timeout, cancelled=cancelled)
+            result["tests"].append({"name": current_test, "status": "PASS"})
+            current_test = None
+        if cancelled.is_set():
+            raise InterruptedError("Host/Python 回归已取消")
+        result["status"] = "PASS"
+    except (Exception, KeyboardInterrupt) as error:
+        kind = "EXIT_FAILED" if isinstance(error, (InterruptedError, KeyboardInterrupt)) else "CONFIG_FAILED"
+        result["errors"] = failure_records(error, kind, **({"test": current_test} if current_test else {}))
+        if current_test:
+            result["tests"].append({"name": current_test, "status": "FAIL",
+                                    "failure_type": result["errors"][0]["type"]})
+    finally:
+        for sig, handler in handlers.items():
+            signal.signal(sig, handler)
+        config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in result["errors"])
+        result["cleanup"] = "failed" if config.cleanup_failed else "complete"
+        result["elapsed_seconds"] = time.monotonic() - started
+        write_json(log / "summary.json", result)
+    for error in result["errors"]:
+        report_failure(error)
+    print(f"HOST_VALIDATION_{result['status']} build_id={result.get('build_id', 'unknown')} "
+          f"tests={sum(test['status'] == 'PASS' for test in result['tests'])}/{len(result.get('expected_tests', []))}", flush=True)
+    print(f"结果：{log / 'summary.json'}\n范围：{result['scope']}", flush=True)
+    return 0 if result["status"] == "PASS" else FAILURE_CODES[result["errors"][0]["type"]]
+
+
 def node(config, run_id, build_id, execution_budget=None, device=None, host_index=None):
     log = config.logs / identifier(run_id)
     log.mkdir(parents=True, exist_ok=True)
@@ -1044,39 +1136,17 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
         manifest = verify_build(config)
         if manifest["build_id"] != build_id:
             raise Failure("RESULT_FAILED", "远端 build_id 与本次请求不一致")
-        for test in manifest["tests"]:
+        for test in node_tests(manifest):
             current_test = test["name"]
             if cancelled.is_set():
                 raise InterruptedError("节点已收到取消信号")
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise Failure("EXIT_FAILED", "节点测试超过执行期限", timeout=True)
-            argv = [sys.executable if value == "@python" else str(config.root / value)
-                    for value in test["argv"]]
-            env = None
+            run_validation_test(config, test, log, remaining, device=device,
+                                cancelled=cancelled if config.checkpoint in RANK_CHECKPOINTS else None)
             if current_test == REGISTRATION_TEST:
-                if device is None or not str(device).isdigit() or not 0 <= int(device) <= 255:
-                    raise ValueError("设备注册检查缺少有效的 hostfile device ID")
-                env = dict(os.environ, TILEXR_EP_SERVER_DEDUP_TEST_DEVICE=str(device))
-                env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
                 result["device"] = int(device)
-            output = execute(argv, log / (test["name"] + ".log"), timeout=remaining, cwd=config.root, env=env,
-                             cancelled=cancelled if config.checkpoint in RANK_CHECKPOINTS else None)
-            prefix = "test_tilexr_ep_server_dedup_"
-            marker = None
-            if current_test == REGISTRATION_TEST:
-                marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=registration"
-            elif current_test.startswith(prefix):
-                marker, suffix = "EP_SERVER_DEDUP_ABI_HOST_", " test=" + current_test[len(prefix):]
-            elif current_test == "test_tilexr_ep_kernel_launch" and config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
-                marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=launch"
-            if marker:
-                markers = [line for line in output.splitlines() if line.startswith(marker)]
-                if markers == [marker + "FAIL" + suffix]:
-                    raise Failure("RESULT_FAILED", "测试完成但结果校验失败", log=str(log / (current_test + ".log")))
-                if markers != [marker + "PASS" + suffix]:
-                    raise Failure("LOG_PARSE_FAILED", "缺少或无法解析唯一的 PASS/FAIL marker",
-                                  log=str(log / (current_test + ".log")))
             result["tests"].append({"name": test["name"], "status": "PASS"})
         current_test = None
         if config.checkpoint in RANK_CHECKPOINTS:
@@ -1132,7 +1202,7 @@ def validate_result(result, run_id, manifest, expected_ranks=None, chain_config=
                    or test.get("status") not in ("PASS", "FAIL") for test in result["tests"])
             or result["status"] not in ("PASS", "FAIL")):
         raise Failure("LOG_PARSE_FAILED", "节点结果缺少字段或格式错误")
-    expected = {test["name"] for test in manifest["tests"]}
+    expected = {test["name"] for test in node_tests(manifest)}
     actual = [test["name"] for test in result["tests"]]
     if (result["run_id"] != run_id or result["build_id"] != manifest["build_id"]
             or result["checkpoint"] != manifest["checkpoint"] or result["mode"] != manifest["mode"]):
@@ -1399,14 +1469,14 @@ def run(config):
     config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in errors)
     scope = "ABI/Host"
     if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
-        scope += "、A5 空 kernel 安装与设备注册"
+        scope = "A5 空 kernel 安装与设备注册"
     elif config.checkpoint == DRY_RUN_CHECKPOINT:
-        scope += f"、{len(mappings)}P rank/device 映射与进程退出；不创建设备上下文或 communicator"
+        scope = f"{len(mappings)}P rank/device 映射与进程退出；不创建设备上下文或 communicator"
     if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
     elif config.checkpoint in CHAIN_CHECKPOINTS:
-        scope += (f"、{len(mappings)}P 每 rank 8 GiB communicator（两个 4 GiB window）、"
+        scope = (f"{len(mappings)}P 每 rank 8 GiB communicator（两个 4 GiB window）、"
                   f"{config.chain['warmup']} 轮预热＋{config.chain['loops']} 轮测量（同域连续提交）、"
                   "最后一轮 cnt/cumsum、DIRECT/第一跳/终端完整 route 覆盖、源端输出、"
                   "最终 hidden/scales/assistEx/group、跨 Rank relay/t 关联及轮末 Flag/counter 清理校验；不包含 Combine。")
@@ -1465,7 +1535,7 @@ def run(config):
             print(f"{role}: {path}", flush=True)
     print(f"VALIDATION_{report['status']} checkpoint={config.checkpoint} mode={config.mode} "
           f"hosts={sum(node['status'] == 'PASS' for node in nodes)}/{len(hosts)} "
-          f"tests_per_host={len(manifest['tests'])} {rank_summary}commit={report['commit'] or 'unknown'} (unverified)", flush=True)
+          f"tests_per_host={len(node_tests(manifest))} {rank_summary}commit={report['commit'] or 'unknown'} (unverified)", flush=True)
     print("================================\n", flush=True)
     for error in errors:
         report_failure(error)
@@ -1475,7 +1545,7 @@ def run(config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("env", "build", "sync", "run", "node", "rank", "verify", "cancel"))
+    parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "node", "rank", "verify", "cancel"))
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     try:
@@ -1501,6 +1571,11 @@ def main():
         elif args.action == "run":
             with operation_lock(config, ".operation.lock"):
                 return run(config)
+        elif args.action == "host-validate":
+            if args.arguments:
+                raise ValueError("host-validate 不接受额外参数")
+            with operation_lock(config, ".operation.lock"):
+                return host_validate(config)
         elif args.action == "node":
             with operation_lock(config, "node.lock"):
                 return node(config, *args.arguments)

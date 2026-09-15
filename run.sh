@@ -12,13 +12,14 @@ Usage: bash run.sh -n SERVERS -e EXPERTS [-m 0|1|2] [-l LOOPS WARMUP] [key=value
   -h, --help  Show help without loading the runtime environment.
 Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 quant_mode=0 fp8_format=e4m3
                     block_dim=auto comm_id=IP:PORT barrier_addr=IP:PORT
-                    msprof=PATH hostfile=PATH
+                    msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
+  host_validation=1 runs local Host/Python tests before the NPU workflow.
 HELP
 }
 fail() { printf '[run] Failed: %s\n' "$*" >&2; exit 2; }
 declare -A seen=()
 declare -a assignments=()
-servers= experts= run_mode=functional loops=1 warmup=0
+servers= experts= run_mode=functional loops=1 warmup=0 host_validation=0
 while (( $# )); do
     key=$1
     [[ -n $key ]] || fail 'empty argument'
@@ -39,6 +40,11 @@ while (( $# )); do
             [[ $2 =~ ^[1-9][0-9]{0,9}$ && $3 =~ ^(0|[1-9][0-9]{0,9})$ ]] || fail '-l requires positive LOOPS and nonnegative WARMUP'
             (( $2 <= 4294967295 && $3 <= 4294967295 )) || fail '-l values must fit uint32'
             loops=$2; warmup=$3; seen[$key]=1; shift 3;;
+        host_validation=*)
+            [[ -z ${seen[host_validation]+set} ]] || fail 'duplicate argument: host_validation'
+            host_validation=${key#*=}
+            [[ $host_validation == 0 || $host_validation == 1 ]] || fail 'host_validation must be 0 or 1'
+            seen[host_validation]=1; shift;;
         bs=*|h=*|topk=*|dtype=*|quant_mode=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*)
             name=${key%%=*}; value=${key#*=}
             [[ -n $value ]] || fail "missing value for $name"
@@ -72,6 +78,22 @@ mkdir -p "$result_root"
 result_root=$(cd -- "$result_root" && pwd -P)
 export TILEXR_VALIDATION_RESULT_ROOT="$result_root"
 printf '[run] Environment log: %s/environment.log\n[run] Workflow log: %s/workflow.log\n' "$result_root" "$result_root"
+if [[ $host_validation == 1 ]]; then
+    printf '[run] Host validation log: %s/host-validation.log\n' "$result_root"
+    if bash ./run_host_validation.sh 2>&1 | tee "$result_root/host-validation.log"; then
+        stage_status=("${PIPESTATUS[@]}")
+    else
+        stage_status=("${PIPESTATUS[@]}")
+    fi
+    if (( stage_status[0] != 0 )); then
+        printf '[run] Failed: host validation exit=%s; log=%s/host-validation.log\n' "${stage_status[0]}" "$result_root" >&2
+        exit "${stage_status[0]}"
+    fi
+    if (( stage_status[1] != 0 )); then
+        printf '[run] Failed: host log capture exit=%s; log=%s/host-validation.log\n' "${stage_status[1]}" "$result_root" >&2
+        exit "${stage_status[1]}"
+    fi
+fi
 # Source in this shell so the configured environment reaches the workflow.
 if source ./set_env.sh >"$result_root/environment.log" 2>&1; then
     cat -- "$result_root/environment.log"

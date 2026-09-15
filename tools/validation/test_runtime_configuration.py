@@ -18,7 +18,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         repo = Path(__file__).resolve().parents[2]
-        for name in ("set_env.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "tools/validation/measurements.py",
+        for name in ("set_env.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "run_host_validation.sh", "tools/validation/measurements.py",
                      "tools/ep/msprof_kernel_stats.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -110,7 +110,7 @@ print(action + ' stdout detail')
 print(action + ' stderr detail', file=sys.stderr)
 sys.exit(int(os.environ['INJECT_EXIT']))
 ''')
-        for entry, code in (("build_all", 11), ("sync", 12), ("run", 10),
+        for entry, code in (("build_all", 11), ("sync", 12), ("run_host_validation", 0), ("run_host_validation", 15), ("run", 10),
                             ("run", 13), ("run", 14), ("run", 15), ("run", 0)):
             with self.subTest(entry=entry, code=code):
                 output = self.root / f"run/{entry}-{code}"
@@ -119,11 +119,11 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                 result = subprocess.run([str(self.bash), entry + ".sh", *(["-n", "2", "-e", "96"] if entry == "run" else [])], cwd=self.root,
                     env=dict(self.env, INJECT_EXIT=str(code), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
                     text=True, capture_output=True, timeout=10)
-                action = "build" if entry == "build_all" else entry
+                action = {"build_all": "build", "run_host_validation": "host-validate"}.get(entry, entry)
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
                 calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
                 self.assertEqual([call['action'] for call in calls], [action])
-                self.assertEqual(calls[0]['comm_id'], None if entry == 'sync' else '192.0.2.1:10177')
+                self.assertEqual(calls[0]['comm_id'], None if entry in ('sync', 'run_host_validation') else '192.0.2.1:10177')
                 self.assertIn(action + ' stdout detail', result.stdout)
                 self.assertIn(action + ' stderr detail', result.stdout + result.stderr)
                 if entry == 'run':
@@ -134,6 +134,47 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                     self.assertIn('run stderr detail', log)
                     if code:
                         self.assertIn(f'workflow exit={code}', result.stderr)
+
+    def test_run_host_validation_is_optional_and_failure_stops_workflow(self):
+        (self.root / 'tools/validation/workflow.py').write_text('''import json, os, sys
+from pathlib import Path
+action = sys.argv[1]
+with Path('calls.jsonl').open('a') as log:
+    print(json.dumps(dict(action=action, environment_action=os.environ['TILEXR_VALIDATION_ACTION'])), file=log)
+print(action + ' stdout detail')
+print(action + ' stderr detail', file=sys.stderr)
+sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0)
+''')
+        for mode in ('0', '1', '2'):
+            for option in (None, '1'):
+                self.check_host_validation_invocation(mode, option, 0)
+        self.check_host_validation_invocation('0', '0', 15)
+        self.check_host_validation_invocation('0', '1', 15)
+
+    def check_host_validation_invocation(self, mode, option, host_exit):
+        with self.subTest(mode=mode, option=option, host_exit=host_exit):
+            output = self.root / f'run/host-option-{mode}-{option}-{host_exit}'
+            calls_path = self.root / 'calls.jsonl'
+            calls_path.unlink(missing_ok=True)
+            result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96', '-m', mode,
+                                     *([] if option is None else ['host_validation=' + option])], cwd=self.root,
+                env=dict(self.env, INJECT_HOST_EXIT=str(host_exit), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+                text=True, capture_output=True, timeout=10)
+            enabled = option == '1'
+            expected_code = host_exit if enabled else 0
+            self.assertEqual(result.returncode, expected_code, result.stdout + result.stderr)
+            calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
+            expected = (['host-validate'] if enabled else []) + ([] if expected_code else ['run'])
+            self.assertEqual([call['action'] for call in calls], expected)
+            self.assertEqual([call['environment_action'] for call in calls], expected)
+            self.assertEqual((output / 'host-validation.log').exists(), enabled)
+            self.assertEqual((output / 'workflow.log').exists(), not expected_code)
+            if enabled:
+                log = (output / 'host-validation.log').read_text()
+                self.assertIn('host-validate stdout detail', log)
+                self.assertIn('host-validate stderr detail', log)
+            if expected_code:
+                self.assertIn('host validation exit=15', result.stderr)
 
     def test_build_default_selects_dispatch_only_for_production(self):
         (self.root / "tools/validation/workflow.py").write_text(
@@ -248,6 +289,10 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                      ['-n', '2', '-e', '96', '-l', '4294967296', '0'],
                      ['-n', '2', '-e', '96', '-l', '1', '-m', '0'],
                      ['-n', '2', '-e', '96', '-e', '192'],
+                     ['-n', '2', '-e', '96', 'host_validation='],
+                     ['-n', '2', '-e', '96', 'host_validation=2'],
+                     ['-n', '2', '-e', '96', 'host_validation=01'],
+                     ['-n', '2', '-e', '96', 'host_validation=0', 'host_validation=1'],
                      ['-n', '2', '-e', '96', 'bs=96', 'bs=128']):
             with self.subTest(args=args):
                 command = subprocess.run([str(self.bash), 'run.sh', *args], cwd=self.root,
@@ -270,6 +315,26 @@ sys.exit(int(os.environ['INJECT_EXIT']))
         self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
         self.assertNotIn('unexpected-toolchain-load', command.stdout + command.stderr)
         self.assertEqual(command.stdout.splitlines()[-1], 'sync')
+
+    def test_host_validate_help_and_bad_arguments_do_not_load_environment(self):
+        (self.root / 'set_env.sh').write_text('echo unexpected-environment >&2\nreturn 9\n')
+        for args, code in ((['--help'], 0), (['-h'], 0), (['-n', '2'], 2), (['--help', 'extra'], 2)):
+            with self.subTest(args=args):
+                result = subprocess.run([str(self.bash), 'run_host_validation.sh', *args], cwd=self.root,
+                    env=self.env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.assertNotIn('unexpected-environment', result.stdout + result.stderr)
+        self.assertFalse((self.root / 'run').exists())
+
+    def test_host_validate_does_not_load_cann_or_require_runtime_environment(self):
+        self.local.write_text('TILEXR_CANN_ENV_SCRIPT=/missing/cann/set_env.sh\nTILEXR_COMM_ID=invalid\n')
+        (self.root / 'scripts/common_env.sh').write_text('echo unexpected-toolchain-load >&2\nreturn 9\n')
+        (self.root / 'tools/validation/workflow.py').write_text("import sys; print(sys.argv[1])\n")
+        result = subprocess.run([str(self.bash), 'run_host_validation.sh'], cwd=self.root,
+            env=dict(self.env, TILEXR_VALIDATION_BUILD_MODE='production'), capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn('unexpected-toolchain-load', result.stdout + result.stderr)
+        self.assertEqual(result.stdout.splitlines()[-1], 'host-validate')
 
     def test_remote_verify_receives_commit_mode_without_editing_remote_config(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n")

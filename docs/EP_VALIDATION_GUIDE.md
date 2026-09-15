@@ -86,6 +86,54 @@ bash run.sh -n 2 -e 96 -m 1 -l 100 10
 
 每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为完整 Dispatch，包含 cnt/cumsum、源端发送、接收转发、输出、清理和轮末完成等待。有效带宽使用每次调用的第一跳/DIRECT/relay 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留，此值不是纯网络带宽。sendData 细打点仍表示相邻 MTE3 下发间隔；recv_data 包括接收准备、等待、输出、转发与本核 Flag 清理，finish 包括全核及跨 rank 收尾。
 
+## 按需执行 Host/Python 回归
+
+在当前机器已有 `build_all.sh` 安装产物后，独立执行：
+
+```bash
+bash run_host_validation.sh
+```
+
+`run.sh` 默认 `host_validation=0`，跳过 Host/Python 回归；显式开启时先在主节点调用同一入口，
+通过后再启动 NPU 工作流，失败则保留退出码并停止：
+
+```bash
+bash run.sh -n 2 -e 96 -m 0 host_validation=1
+```
+
+该参数只接受 `0` 或 `1`。开启后 Host 总日志为本次 case 目录下的 `host-validation.log`，
+逐项日志和报告在该目录的 `host-<id>/` 中，不计入后续 NPU 工作流的执行期限。
+
+此入口检查安装 manifest、CPU 架构和产物摘要，随后执行其中的 Host C++ 与 Python 测试，
+排除需要真实设备的 registration 测试。无需 hostfile、sync 凭据、SSH、通信地址或 CANN 环境加载；
+不会启动 NPU rank。默认 production 安装可直接运行；若安装的是 host 模式产物，调用时保持
+`TILEXR_VALIDATION_BUILD_MODE=host`。不接受运行用例参数，单项测试期限为 180 秒。
+
+成功输出 `HOST_VALIDATION_PASS`；非零退出、FAIL marker、缺失或重复 marker、超时均使回归失败，
+空测试集也不会记为通过。每次结果保存到 `run/validation/host-<id>/summary.json`，同目录保留每项原始日志；
+设置 `TILEXR_VALIDATION_RESULT_ROOT` 可改变结果根目录。报告记录 build_id、已完成测试及首个失败，
+测试进程退出或中断时清理其所属进程组。该结果只覆盖本机安装包，不代表跨机通信或 NPU 通过。
+
+Host/Python 回归保护协议/内存布局、公共 ABI、Host 参数和 launch 包装、Planner、日志和性能解析工具等契约。
+建议在修改这些模块后或完整交付验收时执行；纯 NPU 参数调试不必每次重复。
+`build_all.sh` 继续编译安装测试并登记完整清单，不新增强制执行步骤。
+Server Dedup 的 functional/performance/breakdown 默认均不执行这套回归，也不要求已有 Host PASS 报告。
+`run.sh` 仍检查各节点安装包、实际 NPU 初始化/建链、rank 结果、正确性和对应模式的测量数据。
+
+维护边界：原流程在每个节点启动 NPU rank 前串行执行完整 Host/Python 清单，增加了启动等待。
+安装清单与本次运行的必需结果集合必须分开维护：NPU 报告不再声称 ABI/Host 回归通过，
+也不为跳过的测试伪造 PASS；节点执行与结果汇总必须使用同一测试选择逻辑。
+历史显式 `ep-sdedup-p1-abi-host` 检查点仍保留原 Host 验证行为；empty-kernel 节点仅保留真实设备注册检查，
+其 Host 替身测试移至独立入口。memory-boundary 安装包原本不含 Host 测试，不能用于该入口。
+
+容量迁移维护：Dispatch 改用 8 GiB 通信域后，C++ consumer 上报 8589934592，而 Python 仍期待 4 GiB，
+会在设备程序成功退出后误报 RESULT_FAILED，继而取消其他 rank。容量必须按 checkpoint 验收：
+Dispatch 为 8 GiB，独立 memory-boundary 为 4 GiB；同步更新合法记录夹具并覆盖旧容量被拒绝。
+容量失败单独记录 expected_bytes/actual_bytes，避免与 launch 轮数或 cleanup 错误混淆。
+本地验证仅覆盖 Python 判据和脚本编排，不能替代 NPU 全 rank 正确性验证。
+2026-09-15：37 项针对性回归通过（chain 9、runtime_configuration 15、workflow 集成 9、结果协议 4），
+并通过 Bash 语法与 Python 编译检查。集成使用模拟 rank/传输；未执行真实 SSH 集群或 NPU 验证。
+
 ## 整服务器调度与参数归属
 
 同一 A5 产物同步到 8 台服务器后，可以连续运行 16P/32P/48P/64P 和不同专家数。
@@ -472,6 +520,9 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 同日可选 spdlog 修正：新增回归先复现 production 模式被空 spdlog 目录阻断，移除预检后确认能进入生产 CMake 配置调用（测试在调用边界停止，不代表生产构建成功）。52 项脚本回归中 51 项通过，1 项 symlink 跳过。在临时目录仅复制真实 `tilexr_log.h`，不提供 spdlog 头文件、不定义 `TILEXR_LOG_DISABLE_SPDLOG`，按项目默认 GNU C++14 模式编译并运行现有日志测试通过，编译断言确认使用自动替代路径；现有 fake-spdlog API 测试亦通过。MSYS 严格 `-std=c++14` 下现有测试的 POSIX `setenv`/`unsetenv` 声明不可见，故使用与 CMake 一致的 `-std=gnu++14`；未修改生产日志代码或测试源码。CANN 生产编译与 NPU 执行未在本地验证。
 
 ## 七步流程检查审计与落实（2026-09-09）
+
+以下为 2026-09-09 的历史审计快照；表中的“每节点全部 Host/Python 测试”和“当前 17 项”描述当时实现。
+现在的测试数量以安装 manifest 为准，执行归属以本文“按需执行 Host/Python 回归”为准。
 
 > 下列历史审计表中的 hostfile device 字段、全配置同步签名及 run_case 参数描述已由上文“整服务器调度与参数归属”替代。
 

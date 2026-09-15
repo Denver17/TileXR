@@ -67,7 +67,7 @@ class ChainTests(TemporaryRoot):
         records = []
         for mapping in mappings:
             identity = dict(workflow.rank_record(mapping, "run", manifest), pid=mapping["rank"] + 100, **config.chain)
-            records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
+            records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
                                 submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                                 first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
                                 local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
@@ -81,7 +81,8 @@ class ChainTests(TemporaryRoot):
                                    (None, "cleanup", "failed"), (None, "chain", None),
                                    ("chain", "peer_count", 8), ("chain", "peer_mem_bytes", 0),
                                    ("chain", "peer_mem_bytes", 12 * 1024 ** 2),
-                                   ("chain", "peer_mem_bytes", 4 * 1024 ** 3 + 32),
+                                   ("chain", "peer_mem_bytes", 4 * 1024 ** 3),
+                                   ("chain", "peer_mem_bytes", 8 * 1024 ** 3 + 32),
                                    ("chain", "pid", 777), ("chain", "run_id", "old-run"),
                                    ("chain", "checkpoint", workflow.DRY_RUN_CHECKPOINT)):
             changed = copy.deepcopy(records)
@@ -116,7 +117,7 @@ class ChainTests(TemporaryRoot):
         mapping = workflow.rank_mapping(config.hosts())[0]
         identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
                         **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope")})
-        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
+        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
                       submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                       first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
                                 local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
@@ -153,6 +154,10 @@ class ChainTests(TemporaryRoot):
                       submitted=1, completed=1, cleanup="complete", initial_zero=True, device_initial_zero=True,
                       device_readback_ff=True, host_boundary_ff=True, guard_zero=True)
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
+        changed = copy.deepcopy(record)
+        changed["chain"]["peer_mem_bytes"] = 8 * 1024 ** 3
+        with self.assertRaises(workflow.Failure):
+            workflow.validate_rank_records([changed], [mapping], "run", manifest, config.chain)
         for key, value in (("peer_mem_bytes", 12 * 1024 ** 2), ("boundary_offset", 0), ("probe_bytes", 31),
                            ("initial_zero", False), ("device_initial_zero", False), ("device_readback_ff", False),
                            ("host_boundary_ff", False), ("guard_zero", False), ("completed", 0)):
