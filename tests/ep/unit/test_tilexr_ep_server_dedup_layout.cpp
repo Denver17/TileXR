@@ -60,10 +60,15 @@ int main()
     Check(TileXREpBuildMemoryServerDedupLayout(128, 4096, 1, 32, 1024, &layout) ==
         TILEXR_ERROR_PARA_CHECK_FAIL, "route scratch exceeding UB rejected");
     const auto countLayout = TileXREpServerDedupCountLayout(1024);
+    const uint64_t matrixBytes = uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * 32U;
     Check(countLayout.cntOffset == 12800 && countLayout.cumsumOffset == 32768 &&
-        countLayout.prefixOffset == 40960 && countLayout.prefixStride == 4096 &&
-        countLayout.cumsumFlagOffset == 106496 && countLayout.counterOffset == 128000 && countLayout.stateBytes == 129024,
-        "per-window count state and one isolated counter fit the control prefix");
+        countLayout.prefixStride == 4096,
+        "Count records retain 32B stride and each receiver has a full expert prefix");
+    Check(countLayout.prefixOffset >= countLayout.cumsumOffset + matrixBytes &&
+        countLayout.cumsumFlagOffset >= countLayout.prefixOffset + kEpServerDedupRecvCoreNum * 4096U &&
+        countLayout.counterOffset >= countLayout.cntOffset + countLayout.cumsumFlagOffset + matrixBytes &&
+        countLayout.counterOffset % 1024U == 0 && countLayout.stateBytes == countLayout.counterOffset + 1024U,
+        "both receiver matrices, every prefix and the isolated counter have disjoint storage");
     Check(TileXREpBuildMemoryServerDedupLayout(128, 256, 7168, 6, 384, &layout) == TILEXR_SUCCESS &&
         layout.data.sourceOffset == 2097152 && layout.data.sourceBytes == 23592960 &&
         layout.data.dispatchOffset == 25690112 && layout.data.dispatchBytes == 1560281088 &&

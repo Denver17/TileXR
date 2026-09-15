@@ -38,7 +38,7 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    const uint32_t countCores = bs < kEpServerDedupSendCoreNum ?
+    const uint32_t countCores = bs < kEpServerDedupAllCoreCountBsThreshold ?
         kEpServerDedupCoreNum : kEpServerDedupRecvCoreNum;
     if (TileXREpServerDedupCountSendUbBytes(uint64_t(bs) * topK, uint32_t(moeExpertNum),
         countCores) > kEpServerDedupCountUbBytes) {

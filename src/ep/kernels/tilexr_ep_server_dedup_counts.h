@@ -28,7 +28,7 @@ public:
         rscvStatusNum_ = experts;
         moeExpertNumPerRank_ = experts / epWorldSize_;
         expertTokenNumsType_ = expertTokenNumsType;
-        useAllCoreCount_ = bs < kEpServerDedupSendCoreNum;
+        useAllCoreCount_ = bs < kEpServerDedupAllCoreCountBsThreshold;
         layout_ = TileXREpServerDedupCountLayout(experts);
         stateOffset_ = TileXREpServerDedupWindowOffset(magic) + layout_.cntOffset;
         GM_ADDR localState = args_->peerMems[epRankId_] + stateOffset_;
@@ -86,6 +86,7 @@ private:
     __aicore__ inline void WaitDispatchClearStatus();
     __aicore__ inline void GatherSumRecvCnt(LocalTensor<float> &gatherMaskOutTensor,
         LocalTensor<uint32_t> &gatherTmpTensor, LocalTensor<float> &statusSumOutTensor);
+    __aicore__ inline void PublishRecvCntSum(float sumOfRecvCnt);
     __aicore__ inline void GetCumSum(LocalTensor<int32_t> &outLocal, uint32_t newAivId);
     __aicore__ inline void WaitDispatch();
     __aicore__ inline void CalRecvAndSetFlag();
@@ -214,7 +215,9 @@ __aicore__ inline void ServerDedupCounts::RecvCnt()
 {
     SplitToCore(rscvStatusNum_, aivUsedCumSum_, aivId_ - aivUsedAllToAll_,
         startStatusIndex_, endStatusIndex_, recStatusNumPerCore_);
-    tpipe_->InitBuffer(waitStatusBuf_, Ceil(recStatusNumPerCore_ * UB_ALIGN, SIZE_ALIGN_256) * SIZE_ALIGN_256);
+    if (recStatusNumPerCore_ != 0U) {
+        tpipe_->InitBuffer(waitStatusBuf_, Ceil(recStatusNumPerCore_ * UB_ALIGN, SIZE_ALIGN_256) * SIZE_ALIGN_256);
+    }
     tpipe_->InitBuffer(gatherMaskOutBuf_, Ceil(rscvStatusNum_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN);
     tpipe_->InitBuffer(sumCoreBuf_, aivUsedCumSum_ * UB_ALIGN);
     tpipe_->InitBuffer(sumLocalBuf_, aivUsedCumSum_ * UB_ALIGN);
@@ -225,7 +228,7 @@ __aicore__ inline void ServerDedupCounts::RecvCnt()
 
 __aicore__ inline void ServerDedupCounts::CompleteCumsum()
 {
-    // These are receive-group indices, not physical AIV indices 48..63.
+    // Convert the physical AIV index to its receive-group index.
     const uint32_t receiver = aivId_ - aivUsedAllToAll_;
     tpipe_->InitBuffer(readyBuf_, aivUsedCumSum_ * UB_ALIGN);
     tpipe_->InitBuffer(cleanBuf_, aivUsedCumSum_ * UB_ALIGN);
@@ -318,6 +321,11 @@ __aicore__ inline void ServerDedupCounts::GatherSumRecvCnt(
     SyncFunc<AscendC::HardEvent::V_S>();
     float sumOfRecvCnt = statusSumOutTensor.ReinterpretCast<float>().GetValue(0);
 
+    PublishRecvCntSum(sumOfRecvCnt);
+}
+
+__aicore__ inline void ServerDedupCounts::PublishRecvCntSum(float sumOfRecvCnt)
+{
     uint32_t newAivId = aivId_ - aivUsedAllToAll_;
 
     LocalTensor<float> sumCoreFP32Tensor = sumCoreBuf_.Get<float>();
@@ -392,6 +400,11 @@ __aicore__ inline void ServerDedupCounts::GetCumSum(LocalTensor<int32_t> &outLoc
 
 __aicore__ inline void ServerDedupCounts::WaitDispatch()
 {
+    if (recStatusNumPerCore_ == 0U) {
+        // Empty segments still contribute to the all-receiver cumsum protocol.
+        PublishRecvCntSum(0.0F);
+        return;
+    }
     LocalTensor<float> gatherMaskOutTensor = gatherMaskOutBuf_.Get<float>();
     LocalTensor<uint32_t> gatherTmpTensor = scalarBuf_.GetWithOffset<uint32_t>(UB_ALIGN / sizeof(uint32_t), 0);
     LocalTensor<float> statusSumOutTensor = scalarBuf_.GetWithOffset<float>(UB_ALIGN / sizeof(float), UB_ALIGN);
@@ -424,24 +437,25 @@ __aicore__ inline void ServerDedupCounts::CalRecvAndSetFlag()
     uint32_t newAivId = aivId_ - aivUsedAllToAll_;
     GetCumSum(outCountLocal, newAivId);
 
-    uint32_t preSum = outCountLocal.GetValue(0);
-    uint32_t curCnt = preSum;
-    waitStatusTensor_ = waitStatusBuf_.Get<int32_t>();
-    for (uint32_t index = startStatusIndex_; index < endStatusIndex_; index++) {
-        uint32_t i = index - startStatusIndex_;
-        uint32_t count = waitStatusTensor_.GetValue(i * UB_ALIGN_DATA_COUNT + 1U);
-        curCnt += count;
-        outCountLocal.SetValue(i, curCnt);
-    }
-    SyncFunc<AscendC::HardEvent::S_MTE3>();
-    GlobalTensor<int32_t> sendCountsGlobal, workspaceGlobal;
-    sendCountsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sendCountsOutGM_));
-    workspaceGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(recvCntWorkspaceGM_));
-    DataCopyExtParams dataCopyOutParams{1U, static_cast<uint32_t>(recStatusNumPerCore_ * sizeof(int32_t)), 0U, 0U, 0U};
-    DataCopyPad(sendCountsGlobal[startStatusIndex_], outCountLocal, dataCopyOutParams);
+    if (recStatusNumPerCore_ != 0U) {
+        uint32_t curCnt = outCountLocal.GetValue(0);
+        waitStatusTensor_ = waitStatusBuf_.Get<int32_t>();
+        for (uint32_t index = startStatusIndex_; index < endStatusIndex_; index++) {
+            uint32_t i = index - startStatusIndex_;
+            uint32_t count = waitStatusTensor_.GetValue(i * UB_ALIGN_DATA_COUNT + 1U);
+            curCnt += count;
+            outCountLocal.SetValue(i, curCnt);
+        }
+        SyncFunc<AscendC::HardEvent::S_MTE3>();
+        GlobalTensor<int32_t> sendCountsGlobal, workspaceGlobal;
+        sendCountsGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t*>(sendCountsOutGM_));
+        workspaceGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(recvCntWorkspaceGM_));
+        DataCopyExtParams dataCopyOutParams{1U, static_cast<uint32_t>(recStatusNumPerCore_ * sizeof(int32_t)), 0U, 0U, 0U};
+        DataCopyPad(sendCountsGlobal[startStatusIndex_], outCountLocal, dataCopyOutParams);
 
-    for (uint32_t index = 0; index < aivUsedCumSum_; index++) {
-        DataCopyPad(workspaceGlobal[index * rscvStatusNum_ + startStatusIndex_], outCountLocal, dataCopyOutParams);
+        for (uint32_t index = 0; index < aivUsedCumSum_; index++) {
+            DataCopyPad(workspaceGlobal[index * rscvStatusNum_ + startStatusIndex_], outCountLocal, dataCopyOutParams);
+        }
     }
     uint8_t repeatTimes = Ceil(aivUsedCumSum_, 8);
     DataCopyParams sumIntriParams{static_cast<uint16_t>(aivUsedCumSum_), 1, 0, static_cast<uint16_t>(aivUsedCumSum_ - 1)};

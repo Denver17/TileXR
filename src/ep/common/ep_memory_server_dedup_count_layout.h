@@ -4,11 +4,26 @@
 #include "comm_args.h"
 #include "tilexr_types.h"
 
+// Shared build-time defaults: rebuild Host and kernels together after changing
+// either value. Overrides must be identical in every translation unit/rank.
+#ifndef TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM
+#define TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 48U
+#endif
+#ifndef TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD
+#define TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD 48U
+#endif
+
 namespace TileXREp {
 
 constexpr uint32_t kEpServerDedupCoreNum = 64U;
-constexpr uint32_t kEpServerDedupSendCoreNum = 48U;
-constexpr uint32_t kEpServerDedupRecvCoreNum = 16U;
+constexpr uint32_t kEpServerDedupSendCoreNum = TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM;
+static_assert(kEpServerDedupSendCoreNum >= 32U && kEpServerDedupSendCoreNum <= 48U &&
+    kEpServerDedupSendCoreNum % 8U == 0U,
+    "Server Dedup requires 32, 40 or 48 send cores out of 64 total cores");
+constexpr uint32_t kEpServerDedupRecvCoreNum = kEpServerDedupCoreNum - kEpServerDedupSendCoreNum;
+// BS below this threshold uses all 64 cores for Count; otherwise only receivers.
+constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold =
+    TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD;
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;

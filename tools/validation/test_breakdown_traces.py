@@ -77,6 +77,11 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(reader.call_count, 1)
 
     def test_timeline_shows_core_work_as_nested_positive_intervals(self):
+        for send_cores in (48, 40, 32):
+            with self.subTest(send_cores=send_cores):
+                self.check_timeline_for_split(send_cores)
+
+    def check_timeline_for_split(self, send_cores):
         # These sequences follow the existing sender, receiver and core-63 paths.
         common = [(0, 0x53000001), (100, 0x53000002), (200, 0x53000003)]
         send = common + [(300, 0x53000300), (500, 0x53000300), (500, 0x53000300),
@@ -90,21 +95,26 @@ class TraceTests(unittest.TestCase):
             (900, 0x53000208), (920, 0x53000209), (930, 0x5300020A), (940, 0x5300020B),
             (950, 0x53000104), (960, 0x53000105), (970, 0x53000106), (980, 0x53000107),
             (990, 0x53000008), (1000, 0x53000108), (1100, 0x53000109), (1200, 0x5300010A)]
-        rows = {core: send if core < 48 else recv + [(1500, 0x53000009)] for core in range(64)}
-        rows[49] = recv_prefix + [(810, 0x53000008), (820, 0x53000108),
+        rows = {core: send if core < send_cores else recv + [(1500, 0x53000009)] for core in range(64)}
+        rows[send_cores + 1] = recv_prefix + [(810, 0x53000008), (820, 0x53000108),
             (900, 0x53000109), (1200, 0x5300010A), (1500, 0x53000009)]
         rows[63] = recv + [(1250, 0x5300010B), (1300, 0x5300010C),
             (1310, 0x5300020C), (1440, 0x5300020D), (1450, 0x5300010D), (1500, 0x53000009)]
-        path = write_capture(self.root / "timeline.records.v1", events_by_core=rows)
-        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "timeline")
+        path = write_capture(self.root / f"timeline-{send_cores}.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID,
+                                               self.root / f"timeline-{send_cores}")
         self.assertEqual(result["status"], "complete")
         trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
         events = [e for e in trace["traceEvents"] if e["ph"] != "M"]
         self.assertTrue(all(e["ph"] == "X" and e["dur"] > 0 for e in events))
         self.assertEqual(len({e["tid"] for e in events}), 64)
+        self.assertEqual({e["args"]["core"] for e in events if e["name"] == "send_data"},
+                         set(range(send_cores)))
+        self.assertEqual({e["args"]["core"] for e in events if e["name"] == "recv_data"},
+                         set(range(send_cores, 64)))
         for core in range(64):
             lane = [e for e in events if e["args"]["core"] == core]
-            phases = ("init", "send_cnt", "send_data", "finish") if core < 48 else (
+            phases = ("init", "send_cnt", "send_data", "finish") if core < send_cores else (
                 "init", "send_cnt", "recv_cnt", "cumsum", "prefix_consume", "recv_data", "finish")
             coarse = [next(e for e in lane if e["name"] == name) for name in phases]
             total = next(e for e in lane if e["name"] == "kernel_total")
@@ -121,11 +131,11 @@ class TraceTests(unittest.TestCase):
         sender = [e for e in events if e["args"]["core"] == 0]
         self.assertEqual([e["dur"] for e in sender if e["name"] == "packet_issue_interval"], [0.2])
         self.assertEqual([e["dur"] for e in sender if e["name"] == "send_drain_and_outputs"], [0.1])
-        empty_receiver = {e["name"] for e in events if e["args"]["core"] == 49}
+        empty_receiver = {e["name"] for e in events if e["args"]["core"] == send_cores + 1}
         self.assertNotIn("recv_loop", empty_receiver)
         self.assertIn("recv_return", empty_receiver)
         self.assertEqual({e["args"]["core"] for e in events if e["name"] == "finish_counter"}, {63})
-        receiver = {e["name"] for e in events if e["args"]["core"] == 48}
+        receiver = {e["name"] for e in events if e["args"]["core"] == send_cores}
         self.assertTrue({"probe", "acquire_load", "metadata", "atomic", "output_issue", "relay_issue"} <= receiver)
 
     def test_prefetch_and_split_probe_are_positive_intervals(self):

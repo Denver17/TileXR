@@ -129,7 +129,8 @@ def breakdown_timeline(run):
             markers["start"] = total
             markers["end"] = replace(total, raw_start=total.raw_end, start_us=total.end_us,
                                      begin_event_id=total.end_event_id, source_index=total.end_source_index)
-            markers["work_end"] = markers.get("send_data_end" if lane.core < 48 else "recv_data_end")
+            # Role belongs to the capture; the producer's send/recv split can change.
+            markers["work_end"] = markers.get("send_data_end") or markers.get("recv_data_end")
             # No-task receivers return after PrepareEnd; only core 63 resets the counter.
             markers["recv_return_begin"] = markers.get("recv_clear_end")
             prepared, received = markers.get("recv_prepare_end"), markers.get("recv_data_end")

@@ -1,7 +1,7 @@
 #include "tilexr_ep_dispatch_memory_server_dedup_kernel.h"
 #include "tilexr_types.h"
 
-// One production entry and one 48/16-core process, including the final hard SyncAll.
+// One production entry and one 64-core process with a compile-time send/recv split.
 extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_server_dedup_kernel(
     GM_ADDR commArgs, GM_ADDR x, GM_ADDR expertIds, GM_ADDR expertScales,
     GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
@@ -9,7 +9,7 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     GM_ADDR expertScalesOut, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t globalBs,
     int64_t expertTokenNumsType, int64_t quantMode, int64_t dtype, int64_t expandXOutDtype, int64_t magic, int64_t profilingLaunchSlot)
 {
-    // Host owns parameter validation and always launches the fixed 48/16 AIV split.
+    // Host owns parameter validation and always launches all 64 AIVs.
     (void)assistInfoForCombineOut;
     (void)globalBs;
     AscendC::TPipe pipe;

@@ -178,8 +178,8 @@ void CheckReceiver(int32_t role, int64_t magic)
     std::vector<uint8_t> peer(local.size(), 0);
     const auto slot = TileXREpServerDedupDispatchOffset(data, 2U, rank, 0U, 0U, world, 6U, bs);
     std::memcpy(local.data() + slot, fixture.wire.data(), fixture.wire.size());
-    auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset + 15U * counts.prefixStride);
-    std::fill(prefix + 2U, prefix + experts, 1U); // One row, owned by receive core 15.
+    auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset + (kEpServerDedupRecvCoreNum - 1U) * counts.prefixStride);
+    std::fill(prefix + 2U, prefix + experts, 1U); // One row, owned by the final receive core.
     const uint32_t initialCounter = 7U;
     std::memcpy(local.data() + counts.counterOffset, &initialCounter, 4U);
     TileXR::CommArgs args {};
@@ -275,7 +275,9 @@ void CheckReceiver(int32_t role, int64_t magic)
 template<bool Quantized>
 void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
 {
-    constexpr uint32_t bs = 64U, k = 6U, experts = 96U, world = 16U, rank = 8U, owned = 24U;
+    constexpr uint32_t k = 6U, experts = 96U, world = 16U, rank = 8U, owned = 24U;
+    // Six experts each contribute BS rows: keep 24 tasks per receiver for every split.
+    constexpr uint32_t bs = owned * kEpServerDedupRecvCoreNum / (experts / world);
     const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
     const auto counts = TileXREpServerDedupCountLayout(experts);
     const auto start = TileXREpServerDedupDispatchOffset(data, 0U, rank, 0U, 0U, world, 6U, bs);
@@ -315,7 +317,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
     std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(owned * 8U + 16U, 0xcdcdcdcdU);
     std::vector<uint32_t> groups((8U * bs * groupStride + 64U) / 4U, 0xcdcdcdcdU);
-    AscendC::testCore = 48U;
+    AscendC::testCore = kEpServerDedupSendCoreNum;
     AscendC::TPipe pipe;
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
     receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,

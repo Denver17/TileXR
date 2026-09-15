@@ -114,9 +114,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         writes.clear();
         AscendC::GmWriteObserver() = observeWrite;
         if (round != 0) for (auto &value : hidden) value = uint16_t(value + 0x100U);
-        for (uint32_t core = 0; core < 48U; ++core) {
-            const uint32_t start = core * (bs / 48U) + std::min(core, bs % 48U);
-            const uint32_t count = bs / 48U + (core < bs % 48U);
+        for (uint32_t core = 0; core < TileXREp::kEpServerDedupSendCoreNum; ++core) {
+            const uint32_t start = core * (bs / TileXREp::kEpServerDedupSendCoreNum) + std::min(core, bs % TileXREp::kEpServerDedupSendCoreNum);
+            const uint32_t count = bs / TileXREp::kEpServerDedupSendCoreNum + (core < bs % TileXREp::kEpServerDedupSendCoreNum);
             const auto priorMasks = masks;
             const auto priorOutput = output;
             AscendC::testCore = core;
@@ -150,14 +150,14 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         }
         AscendC::GmWriteObserver() = {};
         Check(writes.size() == packets.size(), "exactly one send per expected physical packet");
-        for (uint32_t core = 0; core < 48U; ++core) {
+        for (uint32_t core = 0; core < TileXREp::kEpServerDedupSendCoreNum; ++core) {
             bool directStarted = false;
             uint32_t previousDirect = 0, previousServerStep = 0;
             std::vector<uintptr_t> lanes;
             uint32_t issued = 0;
             for (const auto &write : writes) if (write.core == core) {
-                const uint32_t start = core * (bs / 48U) + std::min(core, bs % 48U);
-                const uint32_t count = bs / 48U + (core < bs % 48U);
+                const uint32_t start = core * (bs / TileXREp::kEpServerDedupSendCoreNum) + std::min(core, bs % TileXREp::kEpServerDedupSendCoreNum);
+                const uint32_t count = bs / TileXREp::kEpServerDedupSendCoreNum + (core < bs % TileXREp::kEpServerDedupSendCoreNum);
                 Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;

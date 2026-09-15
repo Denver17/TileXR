@@ -362,7 +362,7 @@ def chain_configuration(checkpoint):
         if run_mode == "breakdown":
             measurements.capture_capacity(loops, warmup)
         if block_dim not in ("auto", "64"):
-            raise ValueError("Dispatch 固定 48/16 核组，block_dim 必须为 auto/64")
+            raise ValueError("Dispatch 总核数固定为 64，block_dim 必须为 auto/64")
 
     def endpoint(value, name):
         try:

@@ -322,3 +322,26 @@ reference 仅作审查证据，生产构建不得 include/link 其中源码。�
 Probe 与消费仍按批切换，metadata 仍由 Scalar 逐包处理。load_wait 可以同时包含输入搬运剩余时间和上一包 MTE3 占槽造成的回压；本次提高提前量不等于已有性能提升证据，需保持相同 shape、量化和打点配置对比接收总耗时。
 
 本次 receive_packet（profiling OFF）和 receive_profile（ON）本地目标编译及 CTest 2/2 通过，独立 review 无确定性缺陷。blue 编译前连接返回 255：`banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1/A5 编译。源码摘要、编译/测试及连接日志保存在忽略目录 `build/server-dedup-eight-prefetch-verification/`；Host 替身不证明设备异步时序或性能收益，未运行 NPU。
+
+## 11. 固定 64 核下调整发送与接收配比
+
+配置集中在 `src/ep/common/ep_memory_server_dedup_count_layout.h`。修改头文件中的两个独立默认值后，重新编译、安装 Host 和 kernel，并向所有 rank 同步同一版本：
+
+- `TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM`：默认 48，只允许 32、40、48；对应 `kEpServerDedupSendCoreNum`，recv 自动取 `64-send`。不调整 block_dim，仍为 64。
+- `TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD`：默认 48，对应 `kEpServerDedupAllCoreCountBsThreshold`。`BS < 阈值` 时全部 64 核参与 Count，否则仅 recv 核参与；取 0 可关闭全核 Count。此阈值不随 send 核数变化。
+
+这些是共享头文件的编译期配置，不是 run.sh 或 CMake cache 参数。宏覆盖用于定向编译验证时，所有相关翻译单元也必须保持一致；只改 Host 或只改 kernel 会使 Count 布局不一致。trace 按实际 send_data_end/recv_data_end 事件判断角色，可以读取三种配比及历史 48/16 数据。
+
+Count/cumsum 保留已有按 recv 核数计算的 GM 布局：两张 `recv×recv×32B` 矩阵，每个 recv 核一份完整 expert prefix，之后按 1KiB 对齐放独立 counter。最大 1024 专家时，各配置占用如下（含前导预留和 counter）：
+
+| send / recv | 单张矩阵 | 全部 prefix | 完整 Count 控制区 |
+| --- | --- | --- | --- |
+| 48 / 16 | 8 KiB | 64 KiB | 126 KiB |
+| 40 / 24 | 18 KiB | 96 KiB | 178 KiB |
+| 32 / 32 | 32 KiB | 128 KiB | 238 KiB |
+
+三种配置均在每窗原有 2 MiB 控制区内。recv 是 8 的倍数，`recv×32B` UB 缓冲恰好覆盖 Duplicate 的整次 256B repeat，无需额外尾部预留。没有新增 Host UB 容量拦截。
+
+维护要点：增加 recv 核数后，16 专家等合法小输入会产生没有 Count 记录的接收核。这些核不能执行零长度分配、搬运或归约，也不能退出整个 cumsum 协议；必须发布值为零的贡献、参与 prefix 完成通知并获取完整 prefix，否则其他核可能永久等待。本次将贡献发布抽为共同路径，对空分段跳过记录访问与输出拷贝。
+
+本次基于 `006c529`，使用本地 CPU API 替身分别编译 48/16、40/24、32/32，最后一组将 BS 阈值独立设为 64；layout、counts、source_send/profile、receive_packet/profile 每组 6 项，共 18 项通过。覆盖空 Count 核、阈值两侧的实际 Count IO、全部 prefix 与矩阵清理、两窗保护、收发分区和 8 槽流水；3 项 trace 检查通过。编译配置、日志及源码摘要保留于 `build/server-dedup-core-split-verification/`。blue 连接报 `banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1 A5 Host/kernel OFF/ON 编译；未运行 NPU，替身结果不证明设备异步时序或性能收益。
