@@ -821,6 +821,10 @@ previous_relay = rank // 8 * 8 + (rank + 7) % 8
 record['relay_links'] = [[(rank + 8) % rank_size, token * 2, 0, rank, token, 0, 5] for token in range(48)] + [
     [(previous_relay + 8) % rank_size, token * 2, 0, previous_relay, token, k, -1] for token in range(48) for k in range(1, 6)]
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
+# Leave another node in flight when rank 8 reports an invalid output.
+if os.environ.get('CHAIN_TEST_BEHAVIOR') == 'invalid-output' and rank == 0:
+    import time
+    time.sleep(1)
 if behavior == 'wrong-relay-index':
     record['relay_links'][-1][4] += 1
 if behavior == 'missing-relay-link':
@@ -861,8 +865,18 @@ if boundary:
                   host_boundary_ff=behavior != 'boundary-mismatch', guard_zero=True)
 if behavior == 'single-marker':
     prefix = 'EP_SERVER_DEDUP_SINGLE_ROUND_PASS '
+if behavior.startswith('invalid-output'):
+    prefix = 'EP_SERVER_DEDUP_DISPATCH_INVALID '
+    record = {key: record[key] for key in (
+        'run_id', 'build_id', 'commit', 'checkpoint', 'host', 'host_index', 'local_rank', 'device',
+        'rank', 'rank_size', 'pid', 'loops', 'warmup', 'run_mode', 'bs', 'h', 'topk', 'moe_expert_num',
+        'dtype', 'route_mode', 'seed', 'quant_mode', 'fp8_format', 'kernel_scope', 'native_status', 'token_stride')}
+    record.update(status='FAIL', validation_status='FAIL', validation_stage='dispatch-read',
+                  validation_error='group firstHopRow mismatch row=0')
+    if behavior == 'invalid-output-stale':
+        record['run_id'] = 'old-run'
 print(prefix + json.dumps(dict(record, submitted=loops,
-      completed=loops - 1 if behavior == 'incomplete-round' else loops,
+      completed=loops - 1 if behavior in ('incomplete-round', 'invalid-output-incomplete') else loops,
       warmup_submitted=warmup, warmup_completed=warmup, cleanup='complete')))
 ''', encoding="utf-8")
         program.chmod(0o755)
@@ -1102,6 +1116,42 @@ with output.open('w', newline='') as f:
                     self.assertTrue(Path(evidence["source_records_path"]).is_file())
                     copied = Path(evidence["summary_path"]).parent.parent
                     self.assertFalse(list(copied.glob("*.records.v1*")))
+
+    def test_breakdown_invalid_output_exports_every_rank_before_reporting_failure(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
+        self.prepare_sync()
+        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "invalid-output"})
+        self.assertEqual(command.returncode, workflow.FAILURE_CODES["RESULT_FAILED"], command.stdout + command.stderr)
+        summary = self.summary()
+        self.assertEqual(summary["status"], "FAIL")
+        self.assertEqual(summary["completed_ranks"], 16)
+        self.assertNotIn("measurements", summary)
+        self.assertEqual(summary["traces"]["status"], "complete")
+        self.assertEqual(len(summary["traces"]["ranks"]), 16)
+        self.assertEqual({path.name for path in Path(summary["traces"]["trace_dir"]).glob("*.json")},
+                         {f"rank-{rank}.json" for rank in range(16)})
+        index = workflow.read_json(Path(summary["traces"]["index"]))
+        self.assertEqual(index["reports"]["8"]["validation_status"], "FAIL")
+        self.assertIn("group firstHopRow mismatch", index["reports"]["8"]["validation_error"])
+        self.assertEqual([(error["type"], error["rank"]) for error in summary["errors"]], [("RESULT_FAILED", 8)])
+        for node in summary["nodes"]:
+            result = node["reported_result"]
+            self.assertEqual(len(result["ranks"]), 8)
+            self.assertEqual(result["errors"], [])
+        self.assertIn("VALIDATION_FAIL", command.stdout)
+        self.assertIn("Chrome tracing JSON", command.stdout)
+
+    def test_breakdown_invalid_output_still_requires_current_completed_execution(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
+        for behavior in ("invalid-output-stale", "invalid-output-incomplete"):
+            with self.subTest(behavior=behavior):
+                command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
+                                      environment={"CHAIN_TEST_BEHAVIOR": behavior})
+                self.assertNotEqual(command.returncode, 0)
+                result = workflow.read_json(self.config_instance.logs / behavior / "result.json")
+                self.assertEqual(result["status"], "FAIL")
+                self.assertTrue(result["errors"])
+                self.assertFalse(any(row["rank"] == 8 for row in result["ranks"]))
 
     def test_dispatch_breakdown_missing_or_accumulating_record_fails(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")

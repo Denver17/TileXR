@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/validation"))
 import measurements
+import workflow
 from test_profiling_fixture import CAPTURE_ID
 from profiling.records import load_record_files
 
@@ -422,6 +423,61 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(process.returncode, 0, errors)
                 for rank in range(16):
                     (Path(self.trace.name) / str(rank)).unlink()
+
+    def test_breakdown_output_mismatch_preserves_completed_capture(self):
+        for fault in ({"TEST_PACKET_FAULT": "group-row"}, {"TEST_COUNT_FAULT": "prefix"}):
+            env = dict(fault, TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                       TILEXR_VALIDATION_WARMUP="2")
+            processes = [self.start(rank, environment=env) for rank in range(16)]
+            invalid = 0
+            for rank, process in enumerate(processes):
+                output, errors = process.communicate(timeout=30)
+                self.assertEqual(process.returncode, 0, output + errors)
+                self.assertEqual(self.trace_lines(rank)[-1], "finalize")
+                marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
+                failed = self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")
+                if not failed:
+                    self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")), 1)
+                    continue
+                invalid += 1
+                self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
+                self.assertIn("EP_SERVER_DEDUP_VALIDATION_FAIL", errors)
+                record = failed[0]
+                self.assertEqual(record["status"], "FAIL")
+                self.assertIn("mismatch", record["validation_error"])
+                self.assertEqual((record["completed"], record["warmup_completed"]), (3, 2))
+                self.assertEqual(record["cleanup"], "complete")
+                config = dict(record, block_dim="auto")
+                record["breakdown"] = measurements.breakdown_record(
+                    Path(marker["records_path"]), config, rank, CAPTURE_ID,
+                    Path(self.trace.name) / f"profile-rank-{rank}")
+                self.assertEqual(record["breakdown"]["status"], "complete")
+                record["chain"] = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")[0]
+                mapping = {key: record[key] for key in ("rank", "rank_size", "host", "host_index", "local_rank", "device")}
+                manifest = dict(build_id=record["build_id"], checkpoint=record["checkpoint"], source=dict(commit=None),
+                                server_dedup_profile_schema=measurements.RECORDS_SCHEMA)
+                workflow.validate_rank_records([record], [mapping], record["run_id"], manifest, config,
+                                               allow_invalid_output=True)
+            self.assertGreater(invalid, 0)
+            shutil.rmtree(self.trace.name)
+            Path(self.trace.name).mkdir()
+
+    def test_breakdown_api_or_cleanup_failure_is_not_output_mismatch(self):
+        for fault in ({"TEST_FAIL_STAGE": "memcpy", "TEST_FAIL_CALL": "5"},
+                      {"TEST_FAIL_STAGE": "comm-destroy", "TEST_COUNT_FAULT": "prefix"}):
+            processes = [self.start(rank, environment=dict(TILEXR_VALIDATION_RUN_MODE="breakdown",
+                         **(fault if rank == 1 else {}))) for rank in range(16)]
+            for rank, process in enumerate(processes):
+                output, errors = process.communicate(timeout=30)
+                if rank == 1:
+                    self.assertNotEqual(process.returncode, 0, output + errors)
+                    self.assertIn("EP_SERVER_DEDUP_FAIL", errors)
+                    for marker in ("DISPATCH_PASS", "DISPATCH_INVALID", "BREAKDOWN_PASS"):
+                        self.assertNotIn("EP_SERVER_DEDUP_" + marker, output)
+                else:
+                    self.assertEqual(process.returncode, 0, output + errors)
+            shutil.rmtree(self.trace.name)
+            Path(self.trace.name).mkdir()
 
     def test_breakdown_uses_standard_export_after_communication_cleanup(self):
         config = dict(run_mode="breakdown", loops=3, warmup=2, block_dim="auto")

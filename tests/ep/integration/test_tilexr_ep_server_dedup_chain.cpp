@@ -49,6 +49,15 @@ void Require(bool condition, const std::string &message)
     if (!condition) { throw std::runtime_error(message); }
 }
 
+struct OutputValidationFailure : std::runtime_error {
+    using std::runtime_error::runtime_error;
+};
+
+void ValidateOutput(bool condition, const std::string &message)
+{
+    if (!condition) { throw OutputValidationFailure(message); }
+}
+
 void Check(int code, const char *operation)
 {
     Require(code == 0, std::string(operation) + " ret=" + std::to_string(code));
@@ -71,7 +80,7 @@ void CheckCountValue(const char *name, const std::vector<T> &actual, size_t inde
         error << actual[i];
     }
     error << ']';
-    throw std::runtime_error(error.str());
+    throw OutputValidationFailure(error.str());
 }
 
 int64_t Number(const char *text, const char *name)
@@ -202,11 +211,11 @@ std::string Json(const std::string &text)
     return out.str() + '"';
 }
 
-void Marker(const Config &c, const char *name, const std::string &details)
+void Marker(const Config &c, const char *name, const std::string &details, const char *status = "PASS")
 {
     std::cout << name << " {\"run_id\":" << Json(c.run) << ",\"build_id\":" << Json(c.build)
         << ",\"commit\":" << (c.commit == "unknown" ? "null" : Json(c.commit))
-        << ",\"checkpoint\":" << Json(c.checkpoint) << ",\"status\":\"PASS\",\"host\":" << Json(c.host)
+        << ",\"checkpoint\":" << Json(c.checkpoint) << ",\"status\":" << Json(status) << ",\"host\":" << Json(c.host)
         << ",\"run_mode\":" << Json(c.runMode) << ",\"loops\":" << c.loops << ",\"warmup\":" << c.warmup
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
@@ -375,12 +384,13 @@ int Run(const Config &c)
     TileXREp::EpMemoryServerDedupLayout layout {};
     Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(c.rankSize, c.bs, c.h, c.topK, c.experts, &layout, c.quantMode == 4),
         "layout");
-    bool initialized = false, deviceSet = false, safeCleanup = true, success = false;
+    bool initialized = false, deviceSet = false, safeCleanup = true, executionSucceeded = false;
     aclrtStream stream = nullptr;
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
     std::string stage = "acl-init", batch = "initialization", dispatch;
+    std::string validationError, validationStage;
     const std::string profilePath = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
         stage = name;
@@ -522,7 +532,15 @@ int Run(const Config &c)
         enterStage("dispatch-read");
         // This fresh communicator's Dispatch-only sequence starts at magic 1.
         dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, int64_t(calls));
-        success = true;
+        executionSucceeded = true;
+    } catch (const OutputValidationFailure &error) {
+        validationError = error.what();
+        validationStage = stage;
+        std::cerr << "EP_SERVER_DEDUP_VALIDATION_FAIL rank=" << c.rank << " stage=" << stage
+            << " " << validationError << std::endl;
+        // Only output mismatches are recoverable for capture. API/stream and
+        // teardown failures must still prevent a completed-execution marker.
+        executionSucceeded = c.runMode == "breakdown";
     } catch (const std::exception &error) {
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
             << " submission=" << submission << " submitted=" << submitted << " completed=" << completed
@@ -535,7 +553,7 @@ int Run(const Config &c)
     }
     auto cleanup = [&](int code, const char *name) {
         if (code != 0) {
-            success = false;
+            executionSucceeded = false;
             std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=cleanup batch=" << batch
                 << " submission=" << submission
                 << " submitted=" << submitted << " completed=" << completed << " warmup_submitted=" << warmupSubmitted
@@ -548,7 +566,7 @@ int Run(const Config &c)
     if (stream != nullptr) { enterStage("cleanup-stream"); cleanup(aclrtDestroyStream(stream), "aclrtDestroyStream"); }
     if (deviceSet) { enterStage("cleanup-device"); cleanup(aclrtResetDevice(c.device), "aclrtResetDevice"); }
     if (initialized) { enterStage("cleanup-acl"); cleanup(aclFinalize(), "aclFinalize"); }
-    if (success) {
+    if (executionSucceeded) {
         std::string details = ",\"submitted\":" + std::to_string(submitted) + ",\"completed\":" +
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
@@ -558,9 +576,16 @@ int Run(const Config &c)
             ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops) +
             ",\"capture_mode\":\"latest_launch\",\"captured_launches\":1,\"captured_launch\":" +
             std::to_string(uint64_t(c.warmup) + c.loops - 1U));
-        Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
+        if (validationError.empty()) {
+            Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
+        } else {
+            Marker(c, "EP_SERVER_DEDUP_DISPATCH_INVALID", details +
+                ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"token_stride\":" +
+                std::to_string(layout.data.tokenStride) + ",\"validation_status\":\"FAIL\",\"validation_stage\":" +
+                Json(validationStage) + ",\"validation_error\":" + Json(validationError), "FAIL");
+        }
     }
-    return success ? 0 : 1;
+    return executionSucceeded ? 0 : 1;
 }
 } // namespace
 

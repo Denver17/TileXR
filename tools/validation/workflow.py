@@ -34,6 +34,7 @@ CHAIN_CHECKPOINT = "ep-sdedup-p1-chain-single"
 CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
+DISPATCH_INVALID_MARKER = "EP_SERVER_DEDUP_DISPATCH_INVALID "
 DISPATCH_ABI = {"launch_bytes": 192, "layout": "r07-single", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
@@ -818,7 +819,8 @@ def validate_dispatch_links(records, config):
         raise ValueError("完整 Dispatch 物理包总数与原始 route 总数不一致")
 
 
-def validate_rank_records(records, expected, run_id, manifest, chain_config=None, *, check_measurements=True):
+def validate_rank_records(records, expected, run_id, manifest, chain_config=None, *, check_measurements=True,
+                          allow_invalid_output=False):
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
         raise Failure("LOG_PARSE_FAILED", "rank 记录格式错误")
     actual = [record.get("rank") for record in records]
@@ -827,11 +829,15 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         raise Failure("RESULT_FAILED", "rank 缺失、重复或不属于本节点")
     for record, mapping in zip(sorted(records, key=lambda item: item["rank"]), expected):
         wanted = rank_record(mapping, run_id, manifest)
+        invalid_output = (allow_invalid_output and manifest["checkpoint"] == DISPATCH_CHECKPOINT
+                          and chain_config is not None and chain_config["run_mode"] == "breakdown"
+                          and record.get("validation_status") == "FAIL")
         chain = manifest["checkpoint"] in CHAIN_CHECKPOINTS
         for marker in (record, record.get("chain")) if chain else (record,):
             if not isinstance(marker, dict):
                 raise Failure("LOG_PARSE_FAILED", "缺少 rank 的建链记录", rank=mapping["rank"])
-            if any(marker.get(key) != value for key, value in wanted.items()):
+            expected_marker = dict(wanted, status="FAIL") if marker is record and invalid_output else wanted
+            if any(marker.get(key) != value for key, value in expected_marker.items()):
                 raise Failure("RESULT_FAILED", "rank 身份或设备映射不一致", rank=mapping["rank"])
             if type(marker.get("pid")) is not int or marker["pid"] <= 0:
                 raise Failure("LOG_PARSE_FAILED", "rank 缺少有效的进程 PID", rank=mapping["rank"])
@@ -848,17 +854,23 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     if record.get(key) != chain_config[key]:
                         raise Failure("RESULT_FAILED", "Dispatch 实际类型或范围不一致", rank=mapping["rank"], field=key)
                 stride = source_send_stride(chain_config)
-                if (any(record.get(key) is not True for key in
-                        ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated",
-                         "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated",
-                         "group_validated", "flags_cleared", "counter_cleared")) or
-                        record.get("native_status") != "dispatch" or record.get("token_stride") != stride):
-                    raise Failure("RESULT_FAILED", "Dispatch 数据、metadata、group 或轮末清理缺少完整校验", rank=mapping["rank"])
-                try:
-                    measurements.validate_dispatch_traffic(record, chain_config)
-                    validate_relay_links(record, chain_config, mapping["rank_size"])
-                except (ValueError, TypeError, KeyError) as error:
-                    raise Failure("RESULT_FAILED", f"Dispatch 流量记录无效：{error}", rank=mapping["rank"]) from error
+                if record.get("native_status") != "dispatch" or record.get("token_stride") != stride:
+                    raise Failure("RESULT_FAILED", "Dispatch 执行范围或 token stride 不一致", rank=mapping["rank"])
+                if invalid_output:
+                    if (record.get("validation_stage") not in ("count-read", "dispatch-read") or
+                            not isinstance(record.get("validation_error"), str) or not record["validation_error"]):
+                        raise Failure("LOG_PARSE_FAILED", "缺少明确的输出校验失败原因", rank=mapping["rank"])
+                else:
+                    if any(record.get(key) is not True for key in
+                           ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated",
+                            "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated",
+                            "group_validated", "flags_cleared", "counter_cleared")):
+                        raise Failure("RESULT_FAILED", "Dispatch 数据、metadata、group 或轮末清理缺少完整校验", rank=mapping["rank"])
+                    try:
+                        measurements.validate_dispatch_traffic(record, chain_config)
+                        validate_relay_links(record, chain_config, mapping["rank_size"])
+                    except (ValueError, TypeError, KeyError) as error:
+                        raise Failure("RESULT_FAILED", f"Dispatch 流量记录无效：{error}", rank=mapping["rank"]) from error
                 loops = chain_config["loops"]
                 for marker in (record, linked):
                     if any(marker.get(key) != chain_config[key] for key in ("run_mode", "loops", "warmup")):
@@ -953,13 +965,22 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 marker = DISPATCH_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
                     marker = MEMORY_BOUNDARY_MARKER
+                if (config.chain["run_mode"] == "breakdown" and
+                        any(line.startswith(DISPATCH_INVALID_MARKER) for line in output.splitlines())):
+                    if any(line.startswith(DISPATCH_MARKER) for line in output.splitlines()):
+                        raise Failure("LOG_PARSE_FAILED", "Dispatch 同时报告 PASS 和 INVALID")
+                    marker = DISPATCH_INVALID_MARKER
                 record = parse_rank_marker(output, marker)
                 if not isinstance(record, dict):
                     raise Failure("LOG_PARSE_FAILED", "轮次记录不是 JSON 对象")
+                if marker == DISPATCH_INVALID_MARKER and record.get("validation_status") != "FAIL":
+                    raise Failure("LOG_PARSE_FAILED", "INVALID marker 缺少输出校验失败状态")
+                if marker == DISPATCH_MARKER and record.get("validation_status") == "FAIL":
+                    raise Failure("LOG_PARSE_FAILED", "PASS marker 与输出校验失败状态矛盾")
                 record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
                 if config.chain["run_mode"] == "breakdown":
                     validate_rank_records([record], [mapping], run_id, manifest, config.chain,
-                                          check_measurements=False)
+                                          check_measurements=False, allow_invalid_output=True)
                     communication_completed = True
                 if config.chain["run_mode"] == "performance":
                     try:
@@ -992,7 +1013,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                                       rank=rank) from error
             else:
                 record = parse_rank_marker(output, DRY_RUN_MARKER)
-            validate_rank_records([record], [mapping], run_id, manifest, config.chain)
+            validate_rank_records([record], [mapping], run_id, manifest, config.chain, allow_invalid_output=True)
             return record
         except Exception as error:
             capture = (dict(communication_completed=True,
@@ -1018,6 +1039,11 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
             if record is not None:
                 result["ranks"].append(record)
     result["ranks"].sort(key=lambda record: record["rank"])
+    # Node status describes execution/capture; output correctness is reported
+    # separately so a completed experiment cannot cancel the other nodes.
+    result["validation_status"] = "FAIL" if any(
+        record.get("validation_status") == "FAIL" for record in result["ranks"]) else (
+        "PASS" if not result["errors"] else "UNKNOWN")
 
 
 def node_tests(manifest):
@@ -1225,7 +1251,8 @@ def validate_result(result, run_id, manifest, expected_ranks=None, chain_config=
     if manifest["checkpoint"] in RANK_CHECKPOINTS:
         if expected_ranks is None:
             raise Failure("RESULT_FAILED", "缺少预期 rank 映射")
-        validate_rank_records(result.get("ranks"), expected_ranks, run_id, manifest, chain_config)
+        validate_rank_records(result.get("ranks"), expected_ranks, run_id, manifest, chain_config,
+                              allow_invalid_output=True)
 
 
 def result_errors(result, run_id, manifest, expected_ranks=None, chain_config=None):
@@ -1307,7 +1334,8 @@ def node_profile_records(nodes, run_id, manifest, mappings, chain_config):
             if mapping is None or mapping["host"] != node["host"]:
                 continue
             try:
-                validate_rank_records([row], [mapping], run_id, manifest, chain_config, check_measurements=False)
+                validate_rank_records([row], [mapping], run_id, manifest, chain_config,
+                                      check_measurements=False, allow_invalid_output=True)
             except (Failure, ValueError, TypeError, KeyError):
                 continue
             records.append(row)
@@ -1429,6 +1457,13 @@ def run(config):
                         start_failure="LOG_COLLECT_FAILED", exit_failure="LOG_COLLECT_FAILED")
             result = read_json(node_log / "result.json")
             failures.extend(result_errors(result, run_id, manifest, expected_ranks(index), config.chain))
+            # Launches have all finished. Fold output mismatches into the final
+            # result now, after the cancellation decision, while retaining traces.
+            if not failures and config.chain and config.chain["run_mode"] == "breakdown":
+                failures.extend(Failure("RESULT_FAILED", "输出校验失败：" + rank["validation_error"],
+                                        rank=rank["rank"], stage=rank["validation_stage"],
+                                        validation_status="FAIL", communication_completed=True).record()
+                                for rank in result["ranks"] if rank.get("validation_status") == "FAIL")
             if config.chain and config.chain["run_mode"] == "breakdown":
                 rebase_node_breakdown_reports(result, node_log, host["host"], local_records=index == 0)
                 rebase_node_breakdown_reports({"errors": failures}, node_log, host["host"], local_records=index == 0)
@@ -1489,7 +1524,9 @@ def run(config):
               "scope": scope}
     rank_summary = ""
     if mappings is not None:
-        completed = sum(len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
+        completed = len(node_profile_records(nodes, run_id, manifest, mappings, config.chain)) if (
+            config.chain and config.chain["run_mode"] == "breakdown") else sum(
+            len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
             report["chain_configuration"] = dict(config.chain)

@@ -574,6 +574,10 @@ def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, ke
     for rank in range(rank_size):
         evidence = records.get(rank, {}).get("breakdown")
         entry = dict(rank=rank, status="unavailable", artifacts_verified=False)
+        row = records.get(rank, {})
+        entry["validation_status"] = row.get("validation_status", row.get("status", "UNKNOWN"))
+        if entry["validation_status"] == "FAIL":
+            entry["validation_error"] = row.get("validation_error")
         if isinstance(evidence, dict):
             entry.update(artifacts=evidence.get("artifacts", {}), summary=evidence.get("summary_path"),
                          raw_records=dict(host=evidence.get("source_host"),

@@ -22,7 +22,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
     read(mask.data(), layout.sourceMaskBytes, buffers[6], "read dispatch sourceMask");
     read(weights.data(), layout.weightBytes, buffers[8], "read input weights");
     read(weightsOut.data(), layout.weightBytes, buffers[9], "read dispatch source weights");
-    Require(std::memcmp(weights.data(), originalWeights.data(), layout.weightBytes) == 0, "input weights modified");
+    ValidateOutput(std::memcmp(weights.data(), originalWeights.data(), layout.weightBytes) == 0, "input weights modified");
     uint64_t firstHopSent = 0, firstHopReceived = 0, directSent = 0, directReceived = 0;
     uint64_t relaySent = 0, relayReceived = 0, localBytes = 0, sameServerBytes = 0, crossServerBytes = 0;
     const auto traffic = [&](uint32_t destination) {
@@ -38,10 +38,10 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         else ++firstHopSent;
         traffic(first.expert / uint32_t(layout.localExpertNum));
         expectedMask[packet.token] |= uint32_t(1) << first.k;
-        Require(FloatBits(weightsOut[packet.token * shape.k + first.k]) == FloatBits(direct ? first.weight : 1.0f),
+        ValidateOutput(FloatBits(weightsOut[packet.token * shape.k + first.k]) == FloatBits(direct ? first.weight : 1.0f),
             "source weight mismatch token=" + std::to_string(packet.token) + " k=" + std::to_string(first.k));
     }
-    Require(mask == expectedMask, "sourceMask mismatch");
+    ValidateOutput(mask == expectedMask, "sourceMask mismatch");
     std::set<uint32_t> groupIds;
     std::ostringstream links;
     bool firstLink = true;
@@ -50,15 +50,15 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         const std::string context = " row=" + std::to_string(index) + " source=" + std::to_string(row.source) +
             " token=" + std::to_string(row.token) + " expert=" + std::to_string(row.expert) + " k=" + std::to_string(row.k);
         const auto payload = Payload(shape, row.source, row.packet, layout.data);
-        Require(std::memcmp(hidden.data() + index * hiddenStride, payload.data(), hiddenStride) == 0,
+        ValidateOutput(std::memcmp(hidden.data() + index * hiddenStride, payload.data(), hiddenStride) == 0,
             "dispatch hidden mismatch" + context);
-        if (shape.quantized) Require(std::memcmp(scales.data() + index * scaleStride,
+        if (shape.quantized) ValidateOutput(std::memcmp(scales.data() + index * scaleStride,
             payload.data() + layout.data.quantCount, scaleStride) == 0, "dispatch scale mismatch" + context);
         const uint32_t t = assist[index * 8U + 7U];
-        if (!row.Direct()) Require(t < 8U * shape.bs, "assistEx t outside group capacity" + context);
+        if (!row.Direct()) ValidateOutput(t < 8U * shape.bs, "assistEx t outside group capacity" + context);
         const auto expected = DispatchAssist(row, t);
         for (uint32_t word = 0; word < 8U; ++word)
-            Require(assist[index * 8U + word] == expected[word], "assistEx mismatch word=" + std::to_string(word) + context);
+            ValidateOutput(assist[index * 8U + word] == expected[word], "assistEx mismatch word=" + std::to_string(word) + context);
         if (row.Direct()) ++directReceived;
         else {
             if (!firstLink) links << ',';
@@ -67,16 +67,16 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
                 << t << ',' << row.k << ',' << (row.FirstHop() ? int64_t(row.packet.members.size() - 1U) : -1) << ']';
             if (row.FirstHop()) {
                 ++firstHopReceived;
-                Require(groupIds.insert(t).second, "duplicate first-hop group t" + context);
+                ValidateOutput(groupIds.insert(t).second, "duplicate first-hop group t" + context);
                 const uint32_t n = uint32_t(row.packet.members.size() - 1U);
                 std::vector<uint32_t> group(1U + 2U * n);
                 read(group.data(), group.size() * sizeof(uint32_t),
                     static_cast<const uint8_t *>(buffers[7]) + t * layout.groupRowStrideBytes, "read valid dispatch group");
-                Require(group[0] == index, "group firstHopRow mismatch" + context);
+                ValidateOutput(group[0] == index, "group firstHopRow mismatch" + context);
                 for (uint32_t member = 0; member < n; ++member) {
                     const auto &route = row.packet.members[member + 1U];
-                    Require(group[1U + member * 2U] == t * shape.k + route.k, "group recvSlot mismatch" + context);
-                    Require(group[2U + member * 2U] == FloatBits(route.weight), "group weight mismatch" + context);
+                    ValidateOutput(group[1U + member * 2U] == t * shape.k + route.k, "group recvSlot mismatch" + context);
+                    ValidateOutput(group[2U + member * 2U] == FloatBits(route.weight), "group weight mismatch" + context);
                     ++relaySent;
                     traffic(route.expert / uint32_t(layout.localExpertNum));
                 }
@@ -91,7 +91,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
             for (uint32_t word = 0; word < 8U; ++word) {
                 uint32_t flag;
                 std::memcpy(&flag, wire.data() + block * 512U + 480U + word * 4U, sizeof(flag));
-                Require(flag == 0U, "dispatch Flag not cleared block=" + std::to_string(block) +
+                ValidateOutput(flag == 0U, "dispatch Flag not cleared block=" + std::to_string(block) +
                     " word=" + std::to_string(word) + context);
             }
         }
@@ -99,7 +99,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
     uint32_t counter = UINT32_MAX;
     read(&counter, sizeof(counter), args.peerMems[c.rank] + window +
         TileXREp::TileXREpServerDedupCountLayout(shape.experts).counterOffset, "read cleared relay counter");
-    Require(counter == 0U, "relay counter not cleared");
+    ValidateOutput(counter == 0U, "relay counter not cleared");
     return ",\"last_magic\":" + std::to_string(magic) +
         ",\"window_offset\":" + std::to_string(window) + ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"first_hop_packets\":" + std::to_string(firstHopSent) +
         ",\"first_hop_received\":" + std::to_string(firstHopReceived) + ",\"token_stride\":" + std::to_string(layout.data.tokenStride) +

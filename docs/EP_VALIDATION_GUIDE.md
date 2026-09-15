@@ -219,7 +219,7 @@ FP16 的量化组合使用相同命令并设置 `dtype=fp16`。两种 FP8 均为
 - DIRECT 保留原 k/weight 且计数为 0、返回字段为 -1；第一跳保留正 n 并关联有效 group，终端为 -1 且引用同一 relay/t。只读 group 前 n 项，不消费空洞/padding。
 - sourceMask 保留各 group 首 k 和全部 DIRECT k；expertScalesOut 对应为 1.0 和真实权重，原始权重逐字节不变。
 - 所有原始 route 接收槽的全部块 Flag 均为零，唯一 counter 首 4B 为零。
-- 每 rank 正常清理后输出 `EP_SERVER_DEDUP_DISPATCH_PASS`，包含 `submitted=completed=loops`、预热完成计数和 `cleanup=complete`。汇总进一步检查跨 Rank 第一跳/终端的 `relay_links`、t 一致性及 route 完整性，最后才输出 `VALIDATION_PASS`；仅有 Host marker 或旧 SOURCE_SEND_PASS 不算完整 Dispatch 通过。
+- 每 rank 输出校验通过且正常清理后输出 `EP_SERVER_DEDUP_DISPATCH_PASS`，包含 `submitted=completed=loops`、预热完成计数和 `cleanup=complete`。汇总进一步检查跨 Rank 第一跳/终端的 `relay_links`、t 一致性及 route 完整性，最后才输出 `VALIDATION_PASS`；仅有 Host marker 或旧 SOURCE_SEND_PASS 不算完整 Dispatch 通过。
 
 固定 H/K 下非量化 T=15872B，MXFP8 T=8192B。`first_hop_*`、`direct_*`、`relay_*` 分别记录三类实际路径包数与完整 T 字节；`data_bytes` 为三者之和。`local_data_bytes/same_server_data_bytes/cross_server_data_bytes` 互斥并覆盖全部发送字节。全 Rank 三类发送与接收数各自守恒，最终总接收数等于原始 route 数。远端 cnt 每源 rank 为 `(E-E/R)*32`，固定16P/E96时是2880B。
 
@@ -359,12 +359,12 @@ breakdown 模式在 Host 阶段入口刷新 `EP_SERVER_DEDUP_PROGRESS`，每 ran
 | `batch-barrier` | 本 rank stream 同步已成功，正在等待其他 rank 的 Host barrier |
 | `round-read` / `count-read` / `dispatch-read` | 整批 stream 和 Host barrier 已完成，正在读取/校验对应输出 |
 | `cleanup-communicator` | 释放 communicator，同时由标准 runtime 读取并导出 records；大 capture 的 Host 内存、拷贝及文件写入也发生在此处 |
-| `cleanup-*` | 当前对应资源释放阶段；仅在最终 DISPATCH_PASS 中看到 cleanup=complete 才能确认收尾成功 |
+| `cleanup-*` | 当前对应资源释放阶段；最终 DISPATCH_PASS 或 breakdown 的 DISPATCH_INVALID 中 cleanup=complete 确认资源收尾；INVALID 仍表示输出校验失败 |
 
 在本次运行的 `<run_id>` 结果目录执行以下只读命令，保留全部 rank 的最后阶段和已有错误：
 
 ```bash
-find . -type f -name 'rank-*.log' -exec sh -c 'for f do printf "\n%s\n" "$f"; grep "EP_SERVER_DEDUP_FAIL " "$f"; grep "EP_SERVER_DEDUP_PROGRESS " "$f" | tail -n 3; done' sh {} +
+find . -type f -name 'rank-*.log' -exec sh -c 'for f do printf "\n%s\n" "$f"; grep -E "EP_SERVER_DEDUP_(VALIDATION_)?FAIL " "$f"; grep "EP_SERVER_DEDUP_PROGRESS " "$f" | tail -n 3; done' sh {} +
 ```
 
 2026-09-14：用户回传 16P/E384、BS96/H7168/TopK6、BF16/MXFP8 E4M3、breakdown 100+50 轮运行达到统一期限，rank 0 最后一条为 CHAIN_PASS。旧代码仅在异常或最终成功时输出后续状态，外部取消使具体阻塞边界丢失，因此补充调用前刷新的有界阶段日志。当前尚未确认设备根因；`3fa9d1b` 仅修正 Host 测试标记，设备 recv/finish 打点变化位于 `ba67a77`。本地以真实 C++14 consumer 配合 ACL 替身暂停 launch、stream-sync 和 communicator destroy，确认 API 尚未返回时日志已可读，解除暂停后全部 16 rank 完成；四项聚焦测试通过，还覆盖异步错误、清理失败和普通模式六种类型组合。这只验证 Host 定位能力，不表示卡死已修复或 CANN/A5 已通过。
@@ -451,7 +451,7 @@ breakdown 完成后，Chrome 可导入文件集中在 `run/case-<时间>-<PID>/<
 
 代表卡筛选依据为每 rank 最后一轮最慢核耗时，按耗时、rank 升序排列；p50 选择实际的下中位卡，跨 rank 数值 median 仍按普通中位数计算。每核保持通用 reader 的局部时间原点，不能用此图判断跨核或跨卡的绝对先后关系。
 
-已有成功 breakdown summary 可直接归集 JSON，无需重新编译或启动 NPU：
+已有完成采集的 breakdown summary（包括输出校验失败的实验）可直接归集 JSON，无需重新编译或启动 NPU：
 
 ```bash
 python3 tools/validation/measurements.py /path/to/run/summary.json --output-dir /path/to/run/trace-export
@@ -460,6 +460,12 @@ python3 tools/validation/measurements.py /path/to/run/summary.json --output-dir 
 结果位于 `trace-export/chrome/`，保留 summary 中所引用的节点报告目录即可，不需要原始 records。显式提供 `--records-dir` 或 `--mapping` 时才重新解析原始文件，仍按 rank 分文件输出。
 
 缺卡、损坏文件或不完整采集继续保留错误状态，不将该 breakdown case 标为 PASS。`summary.json` 的 `traces.trace_dir`、`traces.ranks`、`traces.selected` 指向输出；耗时汇总保留在 `measurements.breakdown`，每核详细区间由各 JSON 文件展示。
+
+breakdown 允许结果错误的性能实验继续收集 trace。例如将转发 group 的原子分配替换为固定 `t=0` 会破坏 group 唯一性，可能触发 `group firstHopRow mismatch` 或重复 group 检查。仅当整批 kernel 同步、批末 Host barrier 和资源释放均成功时，consumer 将 count/Dispatch 输出不一致记录为 `EP_SERVER_DEDUP_DISPATCH_INVALID`（`status=FAIL`，保留首个错误），同时完成标准打点导出。节点运行状态描述执行与采集是否完成，另以 `validation_status` 标记输出正确性；不能将节点进程退出 0 当作算子正确。
+
+此类输出错误不取消其他 rank/节点：所有节点先各自解析，主节点再归集每 rank JSON，最后打印 `VALIDATION_FAIL` 并返回结果校验失败退出码。`traces/index.json` 的每 rank `validation_status`/`validation_error` 与采集完整性 `status` 分开；错误结果不生成依赖正确流量的带宽汇总，仍可从 `traces.kernel_us`、`traces.rank_us` 和 JSON 查看耗时。functional/performance 模式保持严格失败行为。设备/API 错误、超时、释放失败以及旧运行身份或损坏 capture 仍属于执行/采集失败，不能通过输出错误标记绕过。
+
+维护此流程时，须分别验证“真实 consumer 输出错误后完成导出”和“节点/主节点不因该错误取消同伴”；只验证原始 records 文件存在会漏掉上层提前退出。Host 替身可覆盖上述失败处理和 JSON 归集，不证明 NPU 上固定 `t=0` 实验本身能正常结束或其性能收益。
 
 每次运行在仓库 `run/` 下生成独立目录，保留节点/rank 日志、summary.json 与 summary.log。关键输出使用空行和 32 个 `=` 分隔，在 PASS 或 kernel 性能之前展示两行实际 case 参数。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
 
