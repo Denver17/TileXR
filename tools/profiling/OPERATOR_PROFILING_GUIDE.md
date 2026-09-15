@@ -380,6 +380,32 @@ by the older standard generator, without rescaling events or changing the
 checksummed producer files. Re-export retained reports to repair old downloads;
 no kernel execution is required.
 
+Server Dedup's validation exporter converts the recorded boundary markers into
+the shared framework's interval samples before analysis/rendering. Each core
+shows `init`, `send_cnt`, its send or receive stages, and `finish`; receive and
+finish detail nests within those stages. Adjacent packet-issue observations form
+`packet_issue_interval` slices, with `send_drain_and_outputs` for the final tail.
+They measure Scalar issue spacing, not DMA completion; the minimal records do
+not carry token, route, or first-hop/DIRECT identity. Instant and zero-duration
+samples are omitted from this timeline, while raw records and capture diagnostics
+remain available. Missing boundaries must not be filled with invented durations.
+
+This restores the stage view used before migration to the standard recorder:
+declaring every boundary as an instant loses the visible work intervals even
+when timestamp capture succeeds. The adapter runs on each rank's server; central
+collection still only copies the completed per-rank JSON. Existing point-only
+reports need raw reprocessing (ordinary collection preserves their old content):
+
+```bash
+python3 tools/validation/measurements.py /run/summary.json \
+  --records-dir /copied-records --output-dir /run/interval-traces
+```
+
+The raw directory must contain `rank-N.records.v1` for each rank; the output JSON
+files are in `interval-traces/chrome/`. Host fixture tests cover 64-core interval
+coverage, nesting, equal timestamps, and the no-task receive branch; they do not
+establish real NPU timing accuracy.
+
 ## Integration Checklist
 
 1. Assign capture-wide unique, nonzero event IDs.

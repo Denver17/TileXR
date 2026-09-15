@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "ep"))
 import msprof_kernel_stats as profiler
 
 
-# EP contributes only event mapping; parsing, pairing and traces use the shared package.
+# EP supplies stage boundaries; record parsing, analysis and rendering use the shared package.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from profiling import RECORDS_SCHEMA, generate_reports_for_run
 from profiling.analysis import analyze_run
@@ -82,6 +82,92 @@ def _file_digest(path):
     return digest.hexdigest()
 
 
+def breakdown_timeline(run):
+    """Turn EP boundary observations into the shared framework's interval samples."""
+    # Keep stage IDs stable across send/receive lanes, including optional branches.
+    spans = (
+        ("init", "start", "init_end", "setup", "kernel_total"),
+        ("send_cnt", "init_end", "send_cnt_end", "issue", "kernel_total"),
+        ("send_data", "send_cnt_end", "send_data_end", "issue", "kernel_total"),
+        ("recv_cnt", "send_cnt_end", "recv_cnt_end", "wait", "kernel_total"),
+        ("cumsum", "recv_cnt_end", "cumsum_end", "compute", "kernel_total"),
+        ("prefix_consume", "cumsum_end", "prefix_end", "copy", "kernel_total"),
+        ("recv_data", "prefix_end", "recv_data_end", "copy", "kernel_total"),
+        ("finish", "work_end", "end", "finalize", "kernel_total"),
+        ("recv_enter", "prefix_end", "recv_begin", "sync", "recv_data"),
+        ("recv_prefix_load", "recv_begin", "recv_prefix_end", "copy", "recv_data"),
+        ("recv_tasks", "recv_prefix_end", "recv_tasks_end", "compute", "recv_data"),
+        ("recv_prepare", "recv_tasks_end", "recv_prepare_end", "setup", "recv_data"),
+        ("recv_loop", "recv_prepare_end", "recv_loop_end", "copy", "recv_data"),
+        ("recv_drain", "recv_loop_end", "recv_drain_end", "wait", "recv_data"),
+        ("recv_clear_issue", "recv_drain_end", "recv_clear_issue_end", "issue", "recv_data"),
+        ("recv_clear_wait", "recv_clear_issue_end", "recv_clear_end", "sync", "recv_data"),
+        ("recv_return", "recv_return_begin", "recv_data_end", "finalize", "recv_data"),
+        ("finish_enter", "work_end", "finish_begin", "finalize", "finish"),
+        ("finish_local", "finish_begin", "finish_local_end", "finalize", "finish"),
+        ("finish_sync", "finish_local_end", "finish_sync_end", "sync", "finish"),
+        ("finish_counter", "finish_sync_end", "finish_counter_end", "finalize", "finish"),
+        ("finish_publish", "finish_counter_end", "finish_publish_end", "issue", "finish"),
+        ("finish_wait", "finish_publish_end", "finish_wait_end", "wait", "finish"),
+        ("finish_return", "finish_return_begin", "end", "finalize", "finish"),
+        ("send_prepare", "send_cnt_end", "first_issue", "setup", "send_data"),
+        ("packet_issue_interval", None, None, "issue", "send_data"),
+        ("send_drain_and_outputs", "last_issue", "send_data_end", "finalize", "send_data"),
+    )
+    stage_ids = {span[0]: 0x53010000 + index for index, span in enumerate(spans)}
+    launches = []
+    for launch in run.launches:
+        lanes = []
+        for lane in launch.lanes:
+            samples = [sample for sample in lane.samples
+                       if sample.kind == "interval" and sample.raw_end > sample.raw_start]
+            total = next((sample for sample in samples if sample.critical), None)
+            if total is None:
+                lanes.append(replace(lane, samples=tuple(samples)))
+                continue
+            markers = {sample.name: sample for sample in lane.samples if sample.kind == "instant"}
+            markers["start"] = total
+            markers["end"] = replace(total, raw_start=total.raw_end, start_us=total.end_us,
+                                     begin_event_id=total.end_event_id, source_index=total.end_source_index)
+            markers["work_end"] = markers.get("send_data_end" if lane.core < 48 else "recv_data_end")
+            # No-task receivers return after PrepareEnd; only core 63 completes the round.
+            markers["recv_return_begin"] = markers.get("recv_clear_end")
+            prepared, received = markers.get("recv_prepare_end"), markers.get("recv_data_end")
+            if (markers["recv_return_begin"] is None and prepared is not None and received is not None
+                    and received.source_index == prepared.source_index + 1):
+                markers["recv_return_begin"] = prepared
+            markers["finish_return_begin"] = markers.get("finish_wait_end" if lane.core == 63 else "finish_sync_end")
+            packets = [sample for sample in lane.samples if sample.name == "packet_issue"]
+            markers["first_issue"] = packets[0] if packets else markers.get("send_data_end")
+            markers["last_issue"] = packets[-1] if packets else None
+
+            def append_span(name, begin, end, category, parent, **attributes):
+                if begin is None or end is None:
+                    return
+                if (begin.raw_start >= end.raw_start or begin.source_index >= end.source_index
+                        or begin.source_index < total.source_index
+                        or end.source_index > total.end_source_index):
+                    return
+                samples.append(replace(begin, name=name, stage_id=stage_ids[name], kind="interval",
+                    parent_stage_id=total.stage_id if parent == "kernel_total" else stage_ids[parent],
+                    instance_id=None, category=category, critical=False, raw_end=end.raw_start,
+                    end_us=end.start_us, duration_us=(end.raw_start - begin.raw_start) / run.cycles_per_us,
+                    end_event_id=end.begin_event_id, end_source_index=end.source_index,
+                    attributes={"timing": "Scalar observation interval; not DMA completion", **attributes}))
+
+            for name, begin, end, category, parent in spans:
+                append_span(name, markers.get(begin), markers.get(end), category, parent)
+            for index, (begin, end) in enumerate(zip(packets, packets[1:])):
+                append_span("packet_issue_interval", begin, end, "issue", "send_data", packet_index=index)
+            samples.sort(key=lambda sample: (sample.raw_start, -sample.raw_end, sample.stage_id))
+            lanes.append(replace(lane, samples=tuple(samples)))
+        launches.append(replace(launch, lanes=tuple(lanes)))
+    return replace(run, launches=tuple(launches), attributes={**run.attributes,
+        "timeline": "per_core_stage_intervals.v1",
+        "packet_timing": "adjacent issue observations; final issue to send_data_end is cleanup",
+        "omitted_markers": "instant and zero-duration samples; raw records and diagnostics retained"})
+
+
 def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=None):
     """Validate producer identity using the standard reader and retain incomplete reports."""
     mapping = profiling_mapping(mapping_path)
@@ -97,6 +183,7 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
     run = replace(run, attributes={**run.attributes, "selection": "last_launch",
                   "capture_mode": "latest_launch", "captured_launch": config["warmup"] + config["loops"] - 1,
                   "submitted_launches": config["warmup"] + config["loops"]})
+    run = breakdown_timeline(run)
     generated = generate_reports_for_run(run, Path(output_dir))
     # Common analysis owns timing semantics; EP only reduces each rank's result.
     analysis = analyze_run(run)
@@ -557,6 +644,7 @@ def export_breakdown_traces(rank_records, chain_config, output_dir, run_id, kern
         if (run.capture_id != str(uuid5(NAMESPACE_URL, "tilexr-validation:" + run_id))
                 or any(lane.rank != row["rank"] for launch in run.launches for lane in launch.lanes)):
             raise ValueError("offline raw capture does not match this run/rank")
+        run = breakdown_timeline(run)
         reports = generate_reports_for_run(run, output_dir / ("rank-" + str(row["rank"])))
         per_rank[str(row["rank"])] = copy_rank_trace(reports.output_dir / "perfetto_trace.json", trace_dir, row["rank"])
         if reports.status != "complete":

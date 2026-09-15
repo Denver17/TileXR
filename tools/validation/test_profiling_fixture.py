@@ -6,7 +6,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 CAPTURE_ID = str(uuid5(NAMESPACE_URL, "tilexr-validation:run-test"))
 
 
-def write_capture(path, rank=0, launches=5, warmup=2, duration=8000, fault="", capture_id=CAPTURE_ID):
+def write_capture(path, rank=0, launches=5, warmup=2, duration=8000, fault="", capture_id=CAPTURE_ID,
+                  events_by_core=None):
     blocks = []
     for core in range(64):
         records = []
@@ -18,6 +19,8 @@ def write_capture(path, rank=0, launches=5, warmup=2, duration=8000, fault="", c
                       (span // 4, 0x53000204), (span // 4, 0x53000206),
                       (span // 2, 0x53000207), (span // 2, 0x53000205),
                       (span * 3 // 4, 0x53000300), (span, 0x53000009)]
+            if events_by_core is not None:
+                events = list(events_by_core[core])
             if fault == "overflow" and core == 63 and launch == launches - 1:
                 events.pop()
             records.extend(struct.pack("<QII", begin + tick, event, 0) for tick, event in events)

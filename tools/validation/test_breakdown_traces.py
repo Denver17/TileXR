@@ -76,6 +76,58 @@ class TraceTests(unittest.TestCase):
             self.capture(0)
         self.assertEqual(reader.call_count, 1)
 
+    def test_timeline_shows_core_work_as_nested_positive_intervals(self):
+        # These sequences follow the existing sender, receiver and core-63 paths.
+        common = [(0, 0x53000001), (100, 0x53000002), (200, 0x53000003)]
+        send = common + [(300, 0x53000300), (500, 0x53000300), (500, 0x53000300),
+            (600, 0x53000004), (610, 0x53000108), (700, 0x53000109),
+            (1200, 0x5300010A), (1500, 0x53000009)]
+        recv_prefix = common + [(300, 0x53000005), (400, 0x53000006), (500, 0x53000007),
+            (510, 0x53000100), (600, 0x53000101), (700, 0x53000102), (800, 0x53000103)]
+        recv = recv_prefix + [(820, 0x53000200), (840, 0x53000201),
+            (850, 0x53000202), (860, 0x53000203), (870, 0x53000204),
+            (880, 0x53000206), (885, 0x53000207), (890, 0x53000205),
+            (900, 0x53000208), (920, 0x53000209), (930, 0x5300020A), (940, 0x5300020B),
+            (950, 0x53000104), (960, 0x53000105), (970, 0x53000106), (980, 0x53000107),
+            (990, 0x53000008), (1000, 0x53000108), (1100, 0x53000109), (1200, 0x5300010A)]
+        rows = {core: send if core < 48 else recv + [(1500, 0x53000009)] for core in range(64)}
+        rows[49] = recv_prefix + [(810, 0x53000008), (820, 0x53000108),
+            (900, 0x53000109), (1200, 0x5300010A), (1500, 0x53000009)]
+        rows[63] = recv + [(1250, 0x5300010B), (1300, 0x5300010C),
+            (1310, 0x5300020C), (1440, 0x5300020D), (1450, 0x5300010D), (1500, 0x53000009)]
+        path = write_capture(self.root / "timeline.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "timeline")
+        self.assertEqual(result["status"], "complete")
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        events = [e for e in trace["traceEvents"] if e["ph"] != "M"]
+        self.assertTrue(all(e["ph"] == "X" and e["dur"] > 0 for e in events))
+        self.assertEqual(len({e["tid"] for e in events}), 64)
+        for core in range(64):
+            lane = [e for e in events if e["args"]["core"] == core]
+            phases = ("init", "send_cnt", "send_data", "finish") if core < 48 else (
+                "init", "send_cnt", "recv_cnt", "cumsum", "prefix_consume", "recv_data", "finish")
+            coarse = [next(e for e in lane if e["name"] == name) for name in phases]
+            total = next(e for e in lane if e["name"] == "kernel_total")
+            self.assertEqual(coarse[0]["args"]["raw_start"], total["args"]["raw_start"])
+            self.assertEqual(coarse[-1]["args"]["raw_end"], total["args"]["raw_end"])
+            for left, right in zip(coarse, coarse[1:]):
+                self.assertEqual(left["args"]["raw_end"], right["args"]["raw_start"])
+            # Overlapping slices must nest, otherwise Chrome moves them between tracks.
+            ordered = sorted(lane, key=lambda e: (e["args"]["raw_start"], -e["args"]["raw_end"]))
+            for i, first in enumerate(ordered):
+                for second in ordered[i + 1:]:
+                    self.assertFalse(first["args"]["raw_start"] < second["args"]["raw_start"]
+                        < first["args"]["raw_end"] < second["args"]["raw_end"])
+        sender = [e for e in events if e["args"]["core"] == 0]
+        self.assertEqual([e["dur"] for e in sender if e["name"] == "packet_issue_interval"], [0.2])
+        self.assertEqual([e["dur"] for e in sender if e["name"] == "send_drain_and_outputs"], [0.1])
+        empty_receiver = {e["name"] for e in events if e["args"]["core"] == 49}
+        self.assertNotIn("recv_loop", empty_receiver)
+        self.assertIn("recv_return", empty_receiver)
+        self.assertEqual({e["args"]["core"] for e in events if e["name"] == "finish_counter"}, {63})
+        receiver = {e["name"] for e in events if e["args"]["core"] == 48}
+        self.assertTrue({"probe", "acquire_load", "metadata", "atomic", "output_issue", "relay_issue"} <= receiver)
+
     def test_old_chrome_display_unit_is_removed_without_changing_events(self):
         source = self.root / "legacy-trace.json"
         trace = dict(displayTimeUnit="us", traceEvents=[dict(name="stage", ph="X", pid=0, tid=0,
@@ -196,6 +248,9 @@ class TraceTests(unittest.TestCase):
             events = [e for e in trace["traceEvents"] if e["ph"] == "X" and e["name"] == "kernel_total"]
             self.assertEqual(len(events), 64)
             self.assertEqual({e["args"]["rank"] for e in events}, {rank})
+            self.assertTrue(any(e["name"] == "init" and e["ph"] == "X" for e in trace["traceEvents"]))
+            self.assertFalse(any(e["ph"] == "i" and e.get("cat") != "diagnostic"
+                                 for e in trace["traceEvents"]))
 
     def test_cli_collects_retained_traces_without_raw_captures(self):
         for row in self.records:
