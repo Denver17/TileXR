@@ -441,7 +441,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         tool_root = self.root / "tools/validation"
         tool_root.mkdir(parents=True)
-        for name in ("workflow.py", "source.py", "measurements.py"):
+        for name in ("workflow.py", "source.py", "measurements.py", "run_summary.py"):
             shutil.copy2(Path(workflow.__file__).with_name(name), tool_root / name)
         profiler_source = Path(workflow.__file__).resolve().parents[1] / "ep/msprof_kernel_stats.py"
         profiler_target = self.root / "tools/ep/msprof_kernel_stats.py"
@@ -471,7 +471,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
             "          (' unexpected-suffix' if behavior == 'decorated-marker' else ''))\n", encoding="utf-8")
         source = {"commit": "a" * 40, "provenance": "manifest-unverified",
                   "files": [str(path.relative_to(self.root))
-                            for path in (self.script, tool_root / "source.py", tool_root / "measurements.py",
+                            for path in (self.script, tool_root / "source.py", tool_root / "measurements.py", tool_root / "run_summary.py",
                                          profiler_target, self.root / "set_env.sh", helper)]}
         source["files"].extend(str(path.relative_to(self.root)) for path in profiling_target.rglob("*") if path.is_file())
         source["files"].append("tools/validation/test_profiling_fixture.py")
@@ -1125,7 +1125,9 @@ with output.open('w', newline='') as f:
         summary = self.summary()
         self.assertEqual(summary["status"], "FAIL")
         self.assertEqual(summary["completed_ranks"], 16)
-        self.assertNotIn("measurements", summary)
+        self.assertEqual(summary["measurements"]["validation_status"], "FAIL")
+        self.assertIn("kernel_us", summary["measurements"]["breakdown"])
+        self.assertIsNone(summary["measurements"]["algorithm_communication_bytes"])
         self.assertEqual(summary["traces"]["status"], "complete")
         self.assertEqual(len(summary["traces"]["ranks"]), 16)
         self.assertEqual({path.name for path in Path(summary["traces"]["trace_dir"]).glob("*.json")},
@@ -1140,6 +1142,44 @@ with output.open('w', newline='') as f:
             self.assertEqual(result["errors"], [])
         self.assertIn("VALIDATION_FAIL", command.stdout)
         self.assertIn("Chrome tracing JSON", command.stdout)
+
+    def test_performance_invalid_output_preserves_all_rank_measurements(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "performance")
+        self.enable_msprof()
+        self.prepare_sync()
+        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "invalid-output"})
+        self.assertEqual(command.returncode, workflow.FAILURE_CODES["RESULT_FAILED"], command.stdout + command.stderr)
+        summary = self.summary()
+        self.assertEqual(summary["status"], "FAIL")
+        self.assertEqual(summary["completed_ranks"], 16)
+        measured = summary["measurements"]
+        self.assertEqual(measured["validation_status"], "FAIL")
+        self.assertEqual(len(measured["performance"]["rank_median_us"]), 16)
+        self.assertIsNone(measured["algorithm_communication_bytes"])
+        self.assertNotIn("bandwidth_gbps", measured)
+        self.assertEqual([(error["type"], error["rank"]) for error in summary["errors"]], [("RESULT_FAILED", 8)])
+        line = (self.config_instance.logs / "result.txt").read_text()
+        self.assertEqual(len(line.splitlines()), 1)
+        self.assertIn("VALIDATION_FAIL 结果校验失败", line)
+        self.assertIn("latency(us) median/min/max=", line)
+        self.assertIn("bandwidth=N/A", line)
+
+    def test_collection_failure_retains_timing_but_cannot_certify_unchecked_links(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "performance")
+        self.enable_msprof()
+        self.prepare_sync()
+        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "wrong-relay-index",
+                                                   "FAKE_SCENARIO": "collect-fail"})
+        self.assertEqual(command.returncode, workflow.FAILURE_CODES["LOG_COLLECT_FAILED"])
+        summary = self.summary()
+        self.assertEqual(summary["completed_ranks"], 16)
+        self.assertNotIn("relay_links_validated", summary)
+        measured = summary["measurements"]
+        self.assertEqual(len(measured["performance"]["rank_median_us"]), 16)
+        self.assertEqual(measured["validation_status"], "FAIL")
+        self.assertIsNone(measured["algorithm_communication_bytes"])
+        self.assertNotIn("bandwidth_gbps", measured)
+        self.assertIn("VALIDATION_FAIL 执行阶段失败", (self.config_instance.logs / "result.txt").read_text())
 
     def test_breakdown_invalid_output_still_requires_current_completed_execution(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "breakdown")
@@ -1494,7 +1534,7 @@ class EnvironmentEntryTests(TemporaryRoot):
     def source_real_entry(self, hostfile=None):
         repo = Path(workflow.__file__).resolve().parents[2]
         for name in ("set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
-                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py",
+                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py", "tools/validation/run_summary.py",
                      "tools/ep/msprof_kernel_stats.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)

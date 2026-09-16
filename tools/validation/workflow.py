@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 import measurements
+import run_summary
 
 from source import inventory
 
@@ -830,7 +831,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
     for record, mapping in zip(sorted(records, key=lambda item: item["rank"]), expected):
         wanted = rank_record(mapping, run_id, manifest)
         invalid_output = (allow_invalid_output and manifest["checkpoint"] == DISPATCH_CHECKPOINT
-                          and chain_config is not None and chain_config["run_mode"] == "breakdown"
+                          and chain_config is not None
                           and record.get("validation_status") == "FAIL")
         chain = manifest["checkpoint"] in CHAIN_CHECKPOINTS
         for marker in (record, record.get("chain")) if chain else (record,):
@@ -965,8 +966,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 marker = DISPATCH_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
                     marker = MEMORY_BOUNDARY_MARKER
-                if (config.chain["run_mode"] == "breakdown" and
-                        any(line.startswith(DISPATCH_INVALID_MARKER) for line in output.splitlines())):
+                if any(line.startswith(DISPATCH_INVALID_MARKER) for line in output.splitlines()):
                     if any(line.startswith(DISPATCH_MARKER) for line in output.splitlines()):
                         raise Failure("LOG_PARSE_FAILED", "Dispatch 同时报告 PASS 和 INVALID")
                     marker = DISPATCH_INVALID_MARKER
@@ -978,7 +978,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if marker == DISPATCH_MARKER and record.get("validation_status") == "FAIL":
                     raise Failure("LOG_PARSE_FAILED", "PASS marker 与输出校验失败状态矛盾")
                 record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
-                if config.chain["run_mode"] == "breakdown":
+                if config.checkpoint == DISPATCH_CHECKPOINT:
                     validate_rank_records([record], [mapping], run_id, manifest, config.chain,
                                           check_measurements=False, allow_invalid_output=True)
                     communication_completed = True
@@ -1016,10 +1016,10 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
             validate_rank_records([record], [mapping], run_id, manifest, config.chain, allow_invalid_output=True)
             return record
         except Exception as error:
-            capture = (dict(communication_completed=True,
-                            profile_status=record.get("breakdown", {}).get("status", "unavailable"),
-                            records_path=str(records_path), report_dir=str(log.parent / f"profile-rank-{rank}"))
-                       if communication_completed else {})
+            capture = dict(communication_completed=True) if communication_completed else {}
+            if communication_completed and config.chain["run_mode"] == "breakdown":
+                capture.update(profile_status=record.get("breakdown", {}).get("status", "unavailable"),
+                               records_path=str(records_path), report_dir=str(log.parent / f"profile-rank-{rank}"))
             failures = failure_records(error, "LAUNCH_FAILED", rank=rank, log=str(log), **capture)
             # 保留第一个观察到的失败；其他 rank 的取消/清理错误作为后续证据。
             with error_lock:
@@ -1459,7 +1459,7 @@ def run(config):
             failures.extend(result_errors(result, run_id, manifest, expected_ranks(index), config.chain))
             # Launches have all finished. Fold output mismatches into the final
             # result now, after the cancellation decision, while retaining traces.
-            if not failures and config.chain and config.chain["run_mode"] == "breakdown":
+            if not failures and config.checkpoint == DISPATCH_CHECKPOINT:
                 failures.extend(Failure("RESULT_FAILED", "输出校验失败：" + rank["validation_error"],
                                         rank=rank["rank"], stage=rank["validation_stage"],
                                         validation_status="FAIL", communication_completed=True).record()
@@ -1525,26 +1525,40 @@ def run(config):
     rank_summary = ""
     if mappings is not None:
         completed = len(node_profile_records(nodes, run_id, manifest, mappings, config.chain)) if (
-            config.chain and config.chain["run_mode"] == "breakdown") else sum(
+            config.checkpoint == DISPATCH_CHECKPOINT) else sum(
             len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
             report["chain_configuration"] = dict(config.chain)
-            if not errors and config.checkpoint == DISPATCH_CHECKPOINT:
+            if config.checkpoint == DISPATCH_CHECKPOINT:
+                records = node_profile_records(nodes, run_id, manifest, mappings, config.chain)
+                full_config = dict(config.chain, rank_size=len(mappings))
+                kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
+                if not errors:
+                    try:
+                        validate_dispatch_links(records, full_config)
+                        report["relay_links_validated"] = True
+                    except (ValueError, TypeError, KeyError) as error:
+                        failure = Failure("RESULT_FAILED", f"Dispatch 跨 rank 校验失败：{error}",
+                                          validation_status="FAIL", communication_completed=True).record()
+                        errors.append(failure)
+                        primary_error = failure
+                        report.update(status="FAIL", primary_error=failure)
+                # A failed correctness verdict must not discard complete timing.
+                # Missing/invalid captures remain failures, never partial-rank aggregates.
                 try:
-                    records = [rank for node in nodes for rank in node["reported_result"]["ranks"]]
-                    full_config = dict(config.chain, rank_size=len(mappings))
-                    validate_dispatch_links(records, full_config)
-                    kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
-                    aggregate = measurements.summarize_measurements(records, full_config, kernel_sha)
+                    aggregate = measurements.summarize_measurements(records, full_config, kernel_sha,
+                        output_valid=report.get("relay_links_validated", False))
                     if config.chain["run_mode"] != "functional":
                         report["measurements"] = aggregate
-                    report["relay_links_validated"] = True
                 except (ValueError, TypeError, KeyError, OSError) as error:
-                    failure = Failure("RESULT_FAILED", f"Dispatch 结果或测量汇总失败：{error}").record()
-                    errors.append(failure)
-                    primary_error = failure
-                    report.update(status="FAIL", primary_error=failure)
+                    if not errors:
+                        failure = Failure("RESULT_FAILED", f"Dispatch 测量汇总失败：{error}").record()
+                        errors.append(failure)
+                        primary_error = failure
+                        report.update(status="FAIL", primary_error=failure)
+                    else:
+                        report["measurement_error"] = str(error)
             if config.checkpoint == DISPATCH_CHECKPOINT and config.chain["run_mode"] == "breakdown":
                 try:
                     kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
@@ -1556,12 +1570,14 @@ def run(config):
                                               **({"rank": item["rank"]} if "rank" in item else {})).record())
                 except (ValueError, TypeError, KeyError, OSError) as error:
                     errors.append(Failure("LOG_COLLECT_FAILED", f"profiling report index failed: {error}").record())
-                if errors:
+                if report.get("traces", {}).get("status") != "complete":
                     report.pop("measurements", None)
+                if errors:
                     primary_error = primary_error or errors[0]
                     report.update(status="FAIL", primary_error=primary_error)
         rank_summary = f"ranks={completed}/{len(mappings)} "
     write_json(log / "summary.json", report)
+    run_summary.write_result(config.logs, report, log / "summary.json")
     print("\n================================", flush=True)
     print(measurements.render_case_description(report), flush=True)
     if "measurements" in report:
@@ -1628,6 +1644,11 @@ def main():
         kind = {"build": "BUILD_FAILED", "sync": "SYNC_FAILED", "cancel": "CLEANUP_FAILED",
                 "node": "LAUNCH_FAILED"}.get(args.action, "CONFIG_FAILED")
         records = failure_records(error, kind, stage=args.action)
+        if args.action == "run":
+            directory = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", "run/validation"))
+            report = dict(status="FAIL", primary_error=records[0], errors=records)
+            write_json(directory / "failure.json", report)
+            run_summary.write_result(directory, report, directory / "failure.json")
         for record in records:
             report_failure(record)
         return FAILURE_CODES[records[0]["type"]]

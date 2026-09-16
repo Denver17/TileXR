@@ -16,7 +16,7 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 quant_mode=0 fp8_format=e4m3
   host_validation=1 runs local Host/Python tests before the NPU workflow.
 HELP
 }
-fail() { printf '[run] Failed: %s\n' "$*" >&2; exit 2; }
+fail() { printf 'VALIDATION_FAIL 执行阶段失败 | %s\n' "$*" >&2; exit 2; }
 declare -A seen=()
 declare -a assignments=()
 servers= experts= run_mode=functional loops=1 warmup=0 host_validation=0
@@ -77,45 +77,28 @@ result_root="${TILEXR_VALIDATION_RESULT_ROOT:-$PWD/run/$case_id}"
 mkdir -p "$result_root"
 result_root=$(cd -- "$result_root" && pwd -P)
 export TILEXR_VALIDATION_RESULT_ROOT="$result_root"
-printf '[run] Environment log: %s/environment.log\n[run] Workflow log: %s/workflow.log\n' "$result_root" "$result_root"
-if [[ $host_validation == 1 ]]; then
-    printf '[run] Host validation log: %s/host-validation.log\n' "$result_root"
-    if bash ./run_host_validation.sh 2>&1 | tee "$result_root/host-validation.log"; then
-        stage_status=("${PIPESTATUS[@]}")
+# Keep all stage/rank details on disk. The EXIT trap is the only terminal writer.
+# Clear the previous result when an explicit result root is reused.
+: >"$result_root/result.txt"
+exec 3>&1
+finish() {
+    local status=$?
+    trap - EXIT
+    if [[ -s $result_root/result.txt ]]; then
+        cat -- "$result_root/result.txt" >&3
     else
-        stage_status=("${PIPESTATUS[@]}")
+        printf 'VALIDATION_FAIL 执行阶段失败 | exit=%s | logs=%s\n' "$status" "$result_root" >&3
+        # Missing a workflow result cannot certify a successful case.
+        (( status != 0 )) || status=1
     fi
-    if (( stage_status[0] != 0 )); then
-        printf '[run] Failed: host validation exit=%s; log=%s/host-validation.log\n' "${stage_status[0]}" "$result_root" >&2
-        exit "${stage_status[0]}"
-    fi
-    if (( stage_status[1] != 0 )); then
-        printf '[run] Failed: host log capture exit=%s; log=%s/host-validation.log\n' "${stage_status[1]}" "$result_root" >&2
-        exit "${stage_status[1]}"
-    fi
+    exit "$status"
+}
+trap finish EXIT
+exec >"$result_root/launcher.log" 2>&1
+if [[ $host_validation == 1 ]]; then
+    bash ./run_host_validation.sh >"$result_root/host-validation.log" 2>&1
 fi
 # Source in this shell so the configured environment reaches the workflow.
-if source ./set_env.sh >"$result_root/environment.log" 2>&1; then
-    cat -- "$result_root/environment.log"
-else
-    environment_status=$?
-    cat -- "$result_root/environment.log" >&2
-    printf '[run] Failed: environment exit=%s; log=%s/environment.log\n' "$environment_status" "$result_root" >&2
-    exit "$environment_status"
-fi
+source ./set_env.sh >"$result_root/environment.log" 2>&1
 for assignment in "${assignments[@]}"; do export "$assignment"; done
-# The workflow owns validation and reports its exact summary.json path. Keep its
-# stdout/stderr visible and retain the real exit code through tee.
-if "$TILEXR_VALIDATION_PYTHON" -u tools/validation/workflow.py run 2>&1 | tee "$result_root/workflow.log"; then
-    stage_status=("${PIPESTATUS[@]}")
-else
-    stage_status=("${PIPESTATUS[@]}")
-fi
-if (( stage_status[0] != 0 )); then
-    printf '[run] Failed: workflow exit=%s; log=%s/workflow.log\n' "${stage_status[0]}" "$result_root" >&2
-    exit "${stage_status[0]}"
-fi
-if (( stage_status[1] != 0 )); then
-    printf '[run] Failed: log capture exit=%s; log=%s/workflow.log\n' "${stage_status[1]}" "$result_root" >&2
-    exit "${stage_status[1]}"
-fi
+"$TILEXR_VALIDATION_PYTHON" -u tools/validation/workflow.py run >"$result_root/workflow.log" 2>&1

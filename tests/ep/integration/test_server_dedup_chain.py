@@ -274,7 +274,8 @@ class ChainConsumerTests(unittest.TestCase):
                 records, failed = [], 0
                 for process in processes:
                     output, errors = process.communicate(timeout=20)
-                    if process.returncode:
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    if self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID"):
                         failed += 1
                         self.assertIn("stage=dispatch-read", errors)
                         self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
@@ -353,7 +354,8 @@ class ChainConsumerTests(unittest.TestCase):
         for rank, process in enumerate(processes):
             output, errors = process.communicate(timeout=15)
             if rank == 1:
-                self.assertNotEqual(process.returncode, 0)
+                self.assertEqual(process.returncode, 0, output + errors)
+                self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")), 1)
                 self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
                 self.assertIn("stage=dispatch-read", errors)
                 self.assertIn("wrong-bank-read", self.trace_lines(rank))
@@ -384,7 +386,8 @@ class ChainConsumerTests(unittest.TestCase):
                 failures = 0
                 for rank, process in enumerate(processes):
                     output, errors = process.communicate(timeout=15)
-                    if process.returncode:
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    if self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID"):
                         failures += 1
                         self.assertIn("stage=dispatch-read", errors)
                         self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
@@ -406,7 +409,8 @@ class ChainConsumerTests(unittest.TestCase):
                 for rank, process in enumerate(processes):
                     output, errors = process.communicate(timeout=15)
                     if rank == 1:
-                        self.assertNotEqual(process.returncode, 0)
+                        self.assertEqual(process.returncode, 0, output + errors)
+                        self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")), 1)
                         self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
                         self.assertIn("stage=count-read", errors)
                         line = next(line for line in errors.splitlines() if "stage=count-read" in line)
@@ -430,9 +434,10 @@ class ChainConsumerTests(unittest.TestCase):
                 for rank in range(16):
                     (Path(self.trace.name) / str(rank)).unlink()
 
-    def test_breakdown_output_mismatch_preserves_completed_capture(self):
-        for fault in ({"TEST_PACKET_FAULT": "group-row"}, {"TEST_COUNT_FAULT": "prefix"}):
-            env = dict(fault, TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+    def test_output_mismatch_preserves_completed_execution_and_capture(self):
+        for mode, fault in ((mode, fault) for mode in ("functional", "performance", "breakdown")
+                            for fault in ({"TEST_PACKET_FAULT": "group-row"}, {"TEST_COUNT_FAULT": "prefix"})):
+            env = dict(fault, TILEXR_VALIDATION_RUN_MODE=mode, TILEXR_VALIDATION_LOOPS="3",
                        TILEXR_VALIDATION_WARMUP="2")
             processes = [self.start(rank, environment=env) for rank in range(16)]
             invalid = 0
@@ -440,7 +445,6 @@ class ChainConsumerTests(unittest.TestCase):
                 output, errors = process.communicate(timeout=30)
                 self.assertEqual(process.returncode, 0, output + errors)
                 self.assertEqual(self.trace_lines(rank)[-1], "finalize")
-                marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
                 failed = self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")
                 if not failed:
                     self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")), 1)
@@ -454,16 +458,18 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertEqual((record["completed"], record["warmup_completed"]), (3, 2))
                 self.assertEqual(record["cleanup"], "complete")
                 config = dict(record, block_dim="auto")
-                record["breakdown"] = measurements.breakdown_record(
-                    Path(marker["records_path"]), config, rank, CAPTURE_ID,
-                    Path(self.trace.name) / f"profile-rank-{rank}")
-                self.assertEqual(record["breakdown"]["status"], "complete")
+                if mode == "breakdown":
+                    marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
+                    record["breakdown"] = measurements.breakdown_record(
+                        Path(marker["records_path"]), config, rank, CAPTURE_ID,
+                        Path(self.trace.name) / f"profile-rank-{rank}")
+                    self.assertEqual(record["breakdown"]["status"], "complete")
                 record["chain"] = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")[0]
                 mapping = {key: record[key] for key in ("rank", "rank_size", "host", "host_index", "local_rank", "device")}
                 manifest = dict(build_id=record["build_id"], checkpoint=record["checkpoint"], source=dict(commit=None),
                                 server_dedup_profile_schema=measurements.RECORDS_SCHEMA)
                 workflow.validate_rank_records([record], [mapping], record["run_id"], manifest, config,
-                                               allow_invalid_output=True)
+                                               check_measurements=mode != "performance", allow_invalid_output=True)
             self.assertGreater(invalid, 0)
             shutil.rmtree(self.trace.name)
             Path(self.trace.name).mkdir()

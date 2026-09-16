@@ -361,7 +361,7 @@ breakdown 模式在 Host 阶段入口刷新 `EP_SERVER_DEDUP_PROGRESS`，每 ran
 | `batch-barrier` | 本 rank stream 同步已成功，正在等待其他 rank 的 Host barrier |
 | `round-read` / `count-read` / `dispatch-read` | 整批 stream 和 Host barrier 已完成，正在读取/校验对应输出 |
 | `cleanup-communicator` | 释放 communicator，同时由标准 runtime 读取并导出 records；大 capture 的 Host 内存、拷贝及文件写入也发生在此处 |
-| `cleanup-*` | 当前对应资源释放阶段；最终 DISPATCH_PASS 或 breakdown 的 DISPATCH_INVALID 中 cleanup=complete 确认资源收尾；INVALID 仍表示输出校验失败 |
+| `cleanup-*` | 当前对应资源释放阶段；最终 DISPATCH_PASS 或 DISPATCH_INVALID 中 cleanup=complete 确认资源收尾；INVALID 仍表示输出校验失败 |
 
 在本次运行的 `<run_id>` 结果目录执行以下只读命令，保留全部 rank 的最后阶段和已有错误：
 
@@ -463,13 +463,13 @@ python3 tools/validation/measurements.py /path/to/run/summary.json --output-dir 
 
 缺卡、损坏文件或不完整采集继续保留错误状态，不将该 breakdown case 标为 PASS。`summary.json` 的 `traces.trace_dir`、`traces.ranks`、`traces.selected` 指向输出；耗时汇总保留在 `measurements.breakdown`，每核详细区间由各 JSON 文件展示。
 
-breakdown 允许结果错误的性能实验继续收集 trace。例如将转发 group 的原子分配替换为固定 `t=0` 会破坏 group 唯一性，可能触发 `group firstHopRow mismatch` 或重复 group 检查。仅当整批 kernel 同步、批末 Host barrier 和资源释放均成功时，consumer 将 count/Dispatch 输出不一致记录为 `EP_SERVER_DEDUP_DISPATCH_INVALID`（`status=FAIL`，保留首个错误），同时完成标准打点导出。节点运行状态描述执行与采集是否完成，另以 `validation_status` 标记输出正确性；不能将节点进程退出 0 当作算子正确。
+functional、performance、breakdown 均区分执行完成与输出正确性；performance 和 breakdown 允许结果错误的实验继续完成采集。例如将转发 group 的原子分配替换为固定 `t=0` 会破坏 group 唯一性，可能触发 `group firstHopRow mismatch` 或重复 group 检查。仅当整批 kernel 同步、批末 Host barrier 和资源释放均成功时，consumer 将 count/Dispatch 输出不一致记录为 `EP_SERVER_DEDUP_DISPATCH_INVALID`（`status=FAIL`，保留首个错误），同时完成资源收尾；模式 1 的 msprof 完成导出，模式 2 完成标准打点导出。节点运行状态描述执行与采集是否完成，另以 `validation_status` 标记输出正确性；不能将节点进程退出 0 当作算子正确。
 
-此类输出错误不取消其他 rank/节点：所有节点先各自解析，主节点再归集每 rank JSON，最后打印 `VALIDATION_FAIL` 并返回结果校验失败退出码。`traces/index.json` 的每 rank `validation_status`/`validation_error` 与采集完整性 `status` 分开；错误结果不生成依赖正确流量的带宽汇总，仍可从 `traces.kernel_us`、`traces.rank_us` 和 JSON 查看耗时。functional/performance 模式保持严格失败行为。设备/API 错误、超时、释放失败以及旧运行身份或损坏 capture 仍属于执行/采集失败，不能通过输出错误标记绕过。
+此类输出错误不取消其他 rank/节点：所有节点先各自解析，主节点再归集每 rank JSON，最后打印 `VALIDATION_FAIL` 并返回结果校验失败退出码。`traces/index.json` 的每 rank `validation_status`/`validation_error` 与采集完整性 `status` 分开；全部 rank 的计时完整时，即使输出校验失败，也保留 `measurements.performance` 或 `measurements.breakdown` 的跨 rank median/min/max；错误结果或因日志收集失败等原因未完成跨 rank 校验时，通信量为 null、带宽为 N/A，不使用未通过完整校验的流量。缺卡、样本不完整或损坏时不生成部分 rank 的性能汇总。所有模式的算例最终状态仍为 FAIL、退出码非零。设备/API 错误、超时、释放失败以及旧运行身份或损坏 capture 仍属于执行/采集失败，不能通过输出错误标记绕过。
 
-维护此流程时，须分别验证“真实 consumer 输出错误后完成导出”和“节点/主节点不因该错误取消同伴”；只验证原始 records 文件存在会漏掉上层提前退出。Host 替身可覆盖上述失败处理和 JSON 归集，不证明 NPU 上固定 `t=0` 实验本身能正常结束或其性能收益。
+维护此流程时，须分别验证“真实 consumer 输出错误后完成导出”和“节点/主节点不因该错误取消同伴”；只验证原始 records 文件存在会漏掉上层提前退出。若把输出不一致直接作为 consumer 执行异常退出，msprof 或调度器可能提前退出/取消同伴，模式 1、2 的完整耗时因此丢失。维护时应保持 INVALID 与执行失败分离，并验证最终 case 仍失败。Host 替身可覆盖上述失败处理和 JSON 归集，不证明 NPU 上固定 `t=0` 实验本身能正常结束或其性能收益。
 
-每次运行在仓库 `run/` 下生成独立目录，保留节点/rank 日志、summary.json 与 summary.log。关键输出使用空行和 32 个 `=` 分隔，在 PASS 或 kernel 性能之前展示两行实际 case 参数。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
+每次运行在仓库 `run/` 下生成独立目录。`run.sh` 终端只输出一行最终汇总，并保存为 `result.txt`：PASS 携带可用的性能数据或 trace 路径；FAIL 分为“执行阶段失败”“执行卡死（超时）”“结果校验失败”，有完整计时/trace 时一并保留。执行超时不等价于已证明 kernel 死锁。环境详情在 `environment.log`，可选 Host 回归在 `host-validation.log`，调度输出在 `workflow.log`，入口重定向等错误在 `launcher.log`，逐卡日志和结构化结果在汇总指定的 `<run_id>/summary.json` 同级目录；配置错误可能指向 `failure.json`。不再向终端展开各卡错误栈。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
 
 同一 stream 连续提交整批，批末才 stream 同步与 Host barrier；删除 Host 计时不改变同步策略。functional 不采集 profiling；performance 使用 msprof；breakdown 读取最后一轮各核的设备记录。
 

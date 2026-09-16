@@ -75,6 +75,23 @@ class MeasurementTests(unittest.TestCase):
             with self.subTest(field=field), self.assertRaises(ValueError):
                 measure.summarize_measurements(changed, config, "d" * 64)
 
+    def test_invalid_output_keeps_complete_timing_without_trusting_traffic(self):
+        config = dict(self.config, kernel_scope="dispatch")
+        ranks = [self.performance_rank(0), self.performance_rank(1)]
+        ranks[0]["validation_status"] = "FAIL"
+        summary = measure.summarize_measurements(ranks, config, "d" * 64)
+        self.assertEqual(summary["validation_status"], "FAIL")
+        self.assertEqual(summary["performance"]["rank_median_us"], [4, 4])
+        self.assertIsNone(summary["algorithm_communication_bytes"])
+        self.assertNotIn("rank_traffic", summary)
+        self.assertNotIn("bandwidth_gbps", summary)
+        self.assertIn("N/A（流量未通过完整校验）", measure.render_measurements(summary))
+        with self.assertRaises(ValueError):
+            measure.summarize_measurements(ranks[:1], config, "d" * 64)
+        ranks[1]["performance"]["sample_us"] = []
+        with self.assertRaises(ValueError):
+            measure.summarize_measurements(ranks, config, "d" * 64)
+
     def test_source_send_performance_includes_direct_and_local_copy_bytes(self):
         config = dict(self.config, rank_size=16, bs=96, moe_expert_num=96, loops=1, warmup=0,
                       kernel_scope="source_send", route_mode="balance_shift", seed=2026, quant_mode=0, fp8_format="e4m3")

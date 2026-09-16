@@ -19,7 +19,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         repo = Path(__file__).resolve().parents[2]
         for name in ("set_env.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "run_host_validation.sh", "tools/validation/measurements.py",
-                     "tools/ep/msprof_kernel_stats.py"):
+                     "tools/ep/msprof_kernel_stats.py", "tools/validation/run_summary.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text((repo / name).read_text(), encoding="utf-8")
@@ -63,6 +63,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         stub.write_text('''import json, os, sys
 from pathlib import Path
 from measurements import render_case_description
+from run_summary import write_result
 config = dict(run_mode=os.environ.get('TILEXR_VALIDATION_RUN_MODE', 'functional'),
               loops=int(os.environ.get('TILEXR_VALIDATION_LOOPS', '1')), warmup=0,
               bs=int(os.environ.get('TILEXR_VALIDATION_BS', '256')), h=7168, topk=6,
@@ -71,6 +72,7 @@ root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])/'fixture'
 root.mkdir(parents=True)
 report = dict(status='PASS', rank_size=16, chain_configuration=config)
 (root/'summary.json').write_text(json.dumps(report))
+write_result(root.parent, report, root/'summary.json')
 print(render_case_description(report))
 print('VALIDATION_' + report['status'])
 print('Summary: ' + str(root/'summary.json'))
@@ -94,7 +96,7 @@ sys.exit(0 if report['status'] == 'PASS' else 15)
                                 env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(self.root / "run/failed")),
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 15)
-        self.assertIn("Failed", result.stderr)
+        self.assertIn("VALIDATION_FAIL 执行阶段失败", result.stdout)
         self.assertNotIn("PASS", result.stdout)
 
     def test_manual_entries_invoke_only_requested_action_and_preserve_failures(self):
@@ -108,6 +110,10 @@ with Path('calls.jsonl').open('a') as log:
         comm_id=os.environ.get('TILEXR_COMM_ID'))), file=log)
 print(action + ' stdout detail')
 print(action + ' stderr detail', file=sys.stderr)
+if action == 'run':
+    from run_summary import write_result
+    root = Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])
+    write_result(root, dict(status='FAIL' if int(os.environ['INJECT_EXIT']) else 'PASS'), root/'summary.json')
 sys.exit(int(os.environ['INJECT_EXIT']))
 ''')
         for entry, code in (("build_all", 11), ("sync", 12), ("run_host_validation", 0), ("run_host_validation", 15), ("run", 10),
@@ -124,16 +130,17 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                 calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
                 self.assertEqual([call['action'] for call in calls], [action])
                 self.assertEqual(calls[0]['comm_id'], None if entry in ('sync', 'run_host_validation') else '192.0.2.1:10177')
-                self.assertIn(action + ' stdout detail', result.stdout)
-                self.assertIn(action + ' stderr detail', result.stdout + result.stderr)
                 if entry == 'run':
-                    self.assertIn(str(output / 'environment.log'), result.stdout)
-                    self.assertIn(str(output / 'workflow.log'), result.stdout)
+                    self.assertEqual(len(result.stdout.splitlines()), 1)
+                    self.assertEqual(result.stderr, '')
+                    self.assertNotIn('detail', result.stdout)
+                    self.assertIn(str(output / 'summary.json'), result.stdout)
                     log = (output / 'workflow.log').read_text()
                     self.assertIn('run stdout detail', log)
                     self.assertIn('run stderr detail', log)
-                    if code:
-                        self.assertIn(f'workflow exit={code}', result.stderr)
+                else:
+                    self.assertIn(action + ' stdout detail', result.stdout)
+                    self.assertIn(action + ' stderr detail', result.stdout + result.stderr)
 
     def test_run_host_validation_is_optional_and_failure_stops_workflow(self):
         (self.root / 'tools/validation/workflow.py').write_text('''import json, os, sys
@@ -143,6 +150,10 @@ with Path('calls.jsonl').open('a') as log:
     print(json.dumps(dict(action=action, environment_action=os.environ['TILEXR_VALIDATION_ACTION'])), file=log)
 print(action + ' stdout detail')
 print(action + ' stderr detail', file=sys.stderr)
+if action == 'run':
+    from run_summary import write_result
+    root = Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])
+    write_result(root, dict(status='PASS'), root/'summary.json')
 sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0)
 ''')
         for mode in ('0', '1', '2'):
@@ -174,7 +185,8 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertIn('host-validate stdout detail', log)
                 self.assertIn('host-validate stderr detail', log)
             if expected_code:
-                self.assertIn('host validation exit=15', result.stderr)
+                self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
+                self.assertEqual(len(result.stdout.splitlines()), 1)
 
     def test_build_default_selects_dispatch_only_for_production(self):
         (self.root / "tools/validation/workflow.py").write_text(
@@ -215,9 +227,11 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                      TILEXR_CANN_ENV_SCRIPT=str(missing), TILEXR_VALIDATION_RESULT_ROOT=str(output)),
             text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertIn('type=CONFIG_FAILED', result.stderr)
-        self.assertIn(str(missing), result.stderr)
-        self.assertIn(str(output / 'environment.log'), result.stderr)
+        self.assertIn('VALIDATION_FAIL 执行阶段失败', result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(result.stderr, '')
+        self.assertIn(str(output), result.stdout)
+        self.assertIn(str(missing), (output / 'environment.log').read_text())
         self.assertIn('type=CONFIG_FAILED', (output / 'environment.log').read_text())
         self.assertFalse((output / 'workflow.log').exists())
 
@@ -229,9 +243,24 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
             text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn('workflow finished', result.stdout)
-        self.assertIn('log capture exit=', result.stderr)
-        self.assertIn(str(output / 'workflow.log'), result.stderr)
+        self.assertNotIn('workflow finished', result.stdout)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertIn('VALIDATION_FAIL 执行阶段失败', result.stdout)
+        self.assertIn('workflow.log', (output / 'launcher.log').read_text())
+
+    def test_missing_workflow_result_never_reuses_previous_pass(self):
+        (self.root / 'tools/validation/workflow.py').write_text("print('unfinished workflow')\n")
+        output = self.root / 'run/reused'
+        output.mkdir(parents=True)
+        (output / 'result.txt').write_text('VALIDATION_PASS stale\n')
+        result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96'], cwd=self.root,
+            env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+            text=True, capture_output=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertIn('VALIDATION_FAIL 执行阶段失败', result.stdout)
+        self.assertNotIn('PASS', result.stdout)
+        self.assertIn('unfinished workflow', (output / 'workflow.log').read_text())
 
     def test_bad_arguments_and_missing_configuration_name_the_problem(self):
         for arguments in (['breakdown=2'], ['run_mode=breakdown'], ['breakdown=1']):
@@ -261,17 +290,21 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
 
     def test_short_options_defaults_modes_and_stale_environment(self):
         (self.root / 'tools/validation/workflow.py').write_text(
-            "import os,json; print(json.dumps(dict(os.environ)))\n")
+            "import os,json\nfrom pathlib import Path\nfrom run_summary import write_result\n"
+            "print(json.dumps(dict(os.environ)))\n"
+            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
+            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
         stale = dict(self.env, TILEXR_VALIDATION_MOE_EXPERT_NUM="1024", TILEXR_VALIDATION_SERVERS="16",
                      TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="999",
                      TILEXR_VALIDATION_WARMUP="99", TILEXR_VALIDATION_BS="512",
                      TILEXR_DIRECT_HOSTS_JSON='[]')
         for mode, name in ((None, "functional"), ("0", "functional"), ("1", "performance"), ("2", "breakdown")):
             args = ['-n', '6', '-e', '288'] + ([] if mode is None else ['-m', mode, '-l', '7', '2'])
+            output = self.root / f'run/options-{mode}'
             command = subprocess.run([str(self.bash), 'run.sh', *args], cwd=self.root,
-                env=stale, capture_output=True, text=True, timeout=10)
+                env=dict(stale, TILEXR_VALIDATION_RESULT_ROOT=str(output)), capture_output=True, text=True, timeout=10)
             self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
-            values = json.loads(command.stdout.splitlines()[-1])
+            values = json.loads((output / 'workflow.log').read_text().splitlines()[-1])
             self.assertEqual(values['TILEXR_VALIDATION_SERVERS'], '6')
             self.assertEqual(values['TILEXR_VALIDATION_MOE_EXPERT_NUM'], '288')
             self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], name)
@@ -298,7 +331,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 command = subprocess.run([str(self.bash), 'run.sh', *args], cwd=self.root,
                     env=self.env, capture_output=True, text=True, timeout=10)
                 self.assertEqual(command.returncode, 2)
-                self.assertIn('[run] Failed:', command.stderr)
+                self.assertIn('VALIDATION_FAIL 执行阶段失败', command.stderr)
                 self.assertNotIn('validation.local.sh', command.stderr)
         help_result = subprocess.run([str(self.bash), 'run.sh', '--help'], cwd=self.root,
             env=self.env, capture_output=True, text=True, timeout=10)

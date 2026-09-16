@@ -540,7 +540,9 @@ int Run(const Config &c)
             << " " << validationError << std::endl;
         // Only output mismatches are recoverable for capture. API/stream and
         // teardown failures must still prevent a completed-execution marker.
-        executionSucceeded = c.runMode == "breakdown";
+        // The coordinator owns the failed correctness verdict. Let every rank
+        // finish cleanup and profiler export before it reports that verdict.
+        executionSucceeded = true;
     } catch (const std::exception &error) {
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
             << " submission=" << submission << " submitted=" << submitted << " completed=" << completed

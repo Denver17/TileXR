@@ -20,7 +20,7 @@ class EnvironmentTests(unittest.TestCase):
         self.root = Path(self.temporary.name) / "source with spaces"
         repo = Path(__file__).resolve().parents[2]
         for name in ("set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
-                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py",
+                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py", "tools/validation/run_summary.py",
                      "tools/ep/msprof_kernel_stats.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)

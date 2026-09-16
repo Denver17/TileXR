@@ -358,7 +358,7 @@ def validate_dispatch_traffic(record, config):
         raise ValueError("Dispatch data_bytes 未包含完整 first-hop/DIRECT/relay 流量")
 
 
-def summarize_measurements(rank_records, chain_config, kernel_sha):
+def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_valid=True):
     """跨 rank 汇总：performance 取测量轮 median，breakdown 取最后一轮。"""
     rank_size = _integer(chain_config["rank_size"], "rank_size", 1)
     if (not isinstance(rank_records, list) or len(rank_records) != rank_size
@@ -368,11 +368,12 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     ranks = sorted(rank_records, key=lambda row: row["rank"])
     for record in ranks:
         validate_rank_measurements(record, chain_config)
+    output_valid = output_valid and all(row.get("validation_status") != "FAIL" for row in ranks)
     mode = chain_config["run_mode"]
     source_send = chain_config.get("kernel_scope") == "source_send"
     dispatch = chain_config.get("kernel_scope") == "dispatch"
     kinds = ("first_hop", "direct", "relay") if dispatch else ("first_hop", "direct")
-    if source_send or dispatch:
+    if output_valid and (source_send or dispatch):
         for record in ranks:
             (validate_dispatch_traffic if dispatch else validate_source_send_traffic)(record, chain_config)
         for kind in kinds:
@@ -381,21 +382,21 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
     count_scope = chain_config.get("kernel_scope") == "cnt_cumsum"
     summary = {"run_mode": mode, "backend": "memory", "native_status": "dispatch" if dispatch else "source_send" if source_send else "cnt_cumsum" if count_scope else "empty",
                "kernel": KERNEL_NAME, "kernel_sha256": kernel_sha,
-               "rank_size": rank_size,
+               "rank_size": rank_size, "validation_status": "PASS" if output_valid else "FAIL",
                "configuration": {name: chain_config[name] for name in
                                  ("bs", "h", "topk", "moe_expert_num", "dtype", "block_dim", "loops", "warmup")},
                "host_barrier": "enabled", "submission": "continuous_batch_then_sync_and_host_barrier"}
     if mode == "functional":
         return summary
-    summary.update(algorithm_communication_bytes=0, bandwidth="N/A")
-    if count_scope or source_send or dispatch:
+    summary.update(algorithm_communication_bytes=0 if output_valid else None, bandwidth="N/A")
+    if output_valid and (count_scope or source_send or dispatch):
         # One 32B record per remote expert per source rank; excludes self-target
         # counts, local prefix traffic and polling reads.
         remote_bytes = (chain_config["moe_expert_num"] - chain_config["moe_expert_num"] // rank_size) * 32
         summary.update(algorithm_communication_bytes=remote_bytes * rank_size,
                        communication_bytes_per_rank=remote_bytes,
                        communication_scope="remote cnt records; excludes local traffic and polling")
-    if source_send or dispatch:
+    if output_valid and (source_send or dispatch):
         summary.pop("communication_bytes_per_rank", None)
         traffic = [{"rank": row["rank"], "original_routes": chain_config["bs"] * chain_config["topk"],
                     **{kind + suffix: row[kind + suffix] for kind in kinds for suffix in ("_packets", "_received", "_bytes")},
@@ -417,11 +418,11 @@ def summarize_measurements(rank_records, chain_config, kernel_sha):
                            " full T including local copies, plus remote cnt records; excludes polling/local prefix/completion epoch traffic")
     if mode == "performance":
         medians = [row["performance"]["median_us"] for row in ranks]
-        if count_scope:
+        if output_valid and count_scope:
             summary.update(bandwidth="effective remote-count GB/s",
                            bandwidth_gbps=_statistics([remote_bytes / (us * 1000) for us in medians]),
                            route_mode=chain_config["route_mode"], seed=chain_config["seed"])
-        if source_send or dispatch:
+        if output_valid and (source_send or dispatch):
             summary.update(bandwidth=("effective Dispatch with relay" if dispatch else "effective source-send") +
                                " (including local copies) plus remote-count GB/s over whole kernel",
                            bandwidth_gbps=_statistics([(sum(row[kind + "_bytes"] for kind in kinds) + remote_bytes) / (us * 1000)
@@ -450,8 +451,10 @@ def render_measurements(summary):
     """生成与结构化结果一致的简短中文报告；functional 无性能输出。"""
     if summary["run_mode"] == "functional":
         return ""
+    traffic = summary["algorithm_communication_bytes"]
+    traffic_text = f"{traffic}B" if traffic is not None else "N/A（流量未通过完整校验）"
     lines = [f"单算子测量：mode={summary['run_mode']} backend=memory native={summary['native_status']} "
-             f"ranks={summary['rank_size']} 算法通信={summary['algorithm_communication_bytes']}B 带宽={summary['bandwidth']}",
+             f"ranks={summary['rank_size']} 算法通信={traffic_text} 带宽={summary['bandwidth']}",
              f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}"]
 
     def append(label, stats, unit, suffix=""):
