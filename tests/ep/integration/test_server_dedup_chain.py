@@ -388,6 +388,12 @@ class ChainConsumerTests(unittest.TestCase):
                         failures += 1
                         self.assertIn("stage=dispatch-read", errors)
                         self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
+                        if fault == "hidden":
+                            self.assertIn("byte=0", errors)
+                            self.assertIn("mismatches=1", errors)
+                            self.assertIn("assist_actual=[", errors)
+                            self.assertIn("assist_expected=[", errors)
+                            self.assertIn("wire_hidden_match=1 wire_output_match=0", errors)
                     self.assertEqual(self.trace_lines(rank)[-1], "finalize")
                 self.assertGreater(failures, 0, fault)
                 for path in Path(self.trace.name).iterdir(): path.unlink()

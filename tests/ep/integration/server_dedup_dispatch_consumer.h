@@ -50,8 +50,56 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         const std::string context = " row=" + std::to_string(index) + " source=" + std::to_string(row.source) +
             " token=" + std::to_string(row.token) + " expert=" + std::to_string(row.expert) + " k=" + std::to_string(row.k);
         const auto payload = Payload(shape, row.source, row.packet, layout.data);
-        ValidateOutput(std::memcmp(hidden.data() + index * hiddenStride, payload.data(), hiddenStride) == 0,
-            "dispatch hidden mismatch" + context);
+        const auto *actualHidden = hidden.data() + index * hiddenStride;
+        if (std::memcmp(actualHidden, payload.data(), hiddenStride) != 0) {
+            uint64_t first = 0, mismatches = 0;
+            while (actualHidden[first] == payload[first]) ++first;
+            for (uint64_t byte = 0; byte < hiddenStride; ++byte)
+                mismatches += actualHidden[byte] != payload[byte];
+            std::ostringstream detail;
+            detail << "dispatch hidden mismatch" << context << " q=" << row.q
+                   << " route=" << (row.Direct() ? "direct" : row.FirstHop() ? "first-hop" : "relay")
+                   << " byte=" << first << " expected=" << unsigned(payload[first])
+                   << " actual=" << unsigned(actualHidden[first]) << " mismatches=" << mismatches;
+            if (shape.quantized)
+                detail << " scale_match=" << (std::memcmp(scales.data() + index * scaleStride,
+                    payload.data() + layout.data.quantCount, scaleStride) == 0);
+            const auto expectedAssist = DispatchAssist(row, assist[index * 8U + 7U]);
+            detail << " assist_actual=[";
+            for (uint32_t word = 0; word < 8U; ++word)
+                detail << (word == 0U ? "" : ",") << assist[index * 8U + word];
+            detail << "] assist_expected=[";
+            for (uint32_t word = 0; word < 8U; ++word)
+                detail << (word == 0U ? "" : ",") << expectedAssist[word];
+            detail << ']';
+            // Read only after batch synchronization. Cleared ready flags do not
+            // erase payload; compare logical bytes while skipping the flag gaps.
+            try {
+                std::vector<uint8_t> wire(layout.data.tokenStride);
+                read(wire.data(), wire.size(), args.peerMems[c.rank] + window +
+                    DispatchSlot(shape, c.rank, row, layout.data), "read mismatched dispatch slot");
+                bool wireHiddenMatch = true, wireOutputMatch = true;
+                for (uint64_t byte = 0; byte < hiddenStride; ++byte) {
+                    const auto value = wire[byte / 480U * 512U + byte % 480U];
+                    wireHiddenMatch &= value == payload[byte];
+                    wireOutputMatch &= value == actualHidden[byte];
+                }
+                detail << " wire_hidden_match=" << wireHiddenMatch
+                       << " wire_output_match=" << wireOutputMatch
+                       << " wire_byte=" << unsigned(wire[first / 480U * 512U + first % 480U]);
+                if (shape.quantized) {
+                    bool wireScaleMatch = true;
+                    for (uint64_t byte = layout.data.quantCount;
+                         byte < layout.data.quantCount + scaleStride; ++byte)
+                        wireScaleMatch &= wire[byte / 480U * 512U + byte % 480U] == payload[byte];
+                    detail << " wire_scale_match=" << wireScaleMatch;
+                }
+            } catch (const std::exception &error) {
+                // Diagnostic readback must not replace the original mismatch.
+                detail << " wire_read_error=" << error.what();
+            }
+            ValidateOutput(false, detail.str());
+        }
         if (shape.quantized) ValidateOutput(std::memcmp(scales.data() + index * scaleStride,
             payload.data() + layout.data.quantCount, scaleStride) == 0, "dispatch scale mismatch" + context);
         const uint32_t t = assist[index * 8U + 7U];

@@ -346,6 +346,8 @@ core60 的 recv_data 从 24.997 到 83.161，是接收阶段最慢核；core63 �
 
 `stage=count-read` 或 `stage=dispatch-read` 表示 stream 与 Host barrier 已完成，随后数值/包校验失败，不代表等待超时。错误保留首个不匹配字段、source/token/k/q 或 count 邻域。count 输出预填 -1，mask/权重输出预填哨兵；保留实际原始输入供复现。提交、同步或 barrier 失败而完成状态未知时，不释放可能仍在使用的设备资源，交由进程退出和调度器收尾。
 
+全核 Count 阈值调整后若仅量化 hidden 失败，应先区分发送数据与接收输出，不能仅凭非量化通过认定量化公式或 `TPipe::Reset()` 有错。hidden 首次不匹配会报告 byte/expected/actual、差异字节数、scale 比较和 assist 原值/期望，并在整批同步后读回该行接收槽：`wire_hidden_match` 比较槽内 hidden 与 golden，`wire_output_match` 比较槽内 hidden 与最终输出，`wire_scale_match` 比较槽内 scale 与 golden。读取跳过每块的 Flag，清 Flag 不清 payload；额外读回失败仍保留原 hidden 错误。槽正确而输出错误优先查接收搬运；槽和输出一致但都错误则向发送/量化或错误槽位归属追溯。该诊断只观察最终状态，不能单独证明设备时序或根因；首个 hidden 错误也不代表后续行和 metadata 已校验通过。
+
 ### 只有 CHAIN_PASS 后超时
 
 `EP_SERVER_DEDUP_CHAIN_PASS` 在第一次 Dispatch 提交前输出，只证明建链和启动前检查通过。`primary_error` 为 `EXIT_FAILED / 集群达到统一执行期限 / stage=execution` 时，表示控制端期限到达并取消集群任务，不能据此认定 kernel 已运行、recv_data 死锁或环境故障。统一执行预算为 `min(配置总期限 - 20 秒, 120 秒)`，从控制端 run 开始计入产物检查、启动及测试，不是单个 kernel 的等待时长。
