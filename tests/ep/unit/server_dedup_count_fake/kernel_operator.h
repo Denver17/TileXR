@@ -267,7 +267,31 @@ template<class T> void ReduceSum(LocalTensor<T> dst, LocalTensor<T> src, LocalTe
 }
 struct SumParams { uint32_t outter, inner, n; };
 template<class T> void Sum(LocalTensor<T> dst, LocalTensor<T> src, SumParams p) {
-    T sum = 0; for (uint32_t i = 0; i < p.n; ++i) sum += src.GetValue(i); dst.SetValue(0, sum);
+    for (uint32_t row = 0; row < p.outter; ++row) {
+        T sum = 0;
+        for (uint32_t i = 0; i < p.n; ++i) sum += src.GetValue(row * p.inner + i);
+        dst.SetValue(row, sum);
+    }
+}
+inline std::function<void(SumParams)> &SumObserver() {
+    static std::function<void(SumParams)> observer;
+    return observer;
+}
+template<class T> void Sum(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<uint8_t> tmp, SumParams p) {
+    if (!p.outter || !p.n || p.n > p.inner || p.inner * sizeof(T) % 32U ||
+        dst.storage == src.storage || dst.storage == tmp.storage || src.storage == tmp.storage)
+        throw std::runtime_error("invalid explicit Sum shape or overlapping storage");
+    // Bound the full vector loads in CANN 9.1/A5, even for masked-off elements.
+    // This is an access-range model, not a model of device ordering or timing.
+    constexpr uint32_t vl = 256U / sizeof(T);
+    const uint32_t repeats = (p.n + vl - 1U) / vl;
+    src.Data(((p.outter - 1U) * p.inner + repeats * vl) * sizeof(T));
+    if (repeats > 1U) {
+        const uint32_t stride = ((p.inner + vl - 1U) / vl + 31U) / 32U * 32U;
+        tmp.Data(((p.outter - 1U) * stride + ((repeats + vl - 1U) / vl) * vl) * sizeof(T));
+    }
+    Sum(dst, src, p);
+    if (SumObserver()) SumObserver()(p);
 }
 enum class CMPMODE { GE, LT };
 template<class T> void Compares(LocalTensor<uint8_t> dst, LocalTensor<T> src, T value, CMPMODE mode, uint32_t n) {

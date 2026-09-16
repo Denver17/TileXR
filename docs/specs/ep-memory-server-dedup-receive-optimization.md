@@ -1,9 +1,9 @@
 # Server Dedup 接收优化方案
 
-状态：**B 预取已扩至全部可用槽位（最多 8，见第 10 节）；Probe 分段打点及第 9 节 metadata Scalar 压缩已实现；A/C 尚未实现**。原深度 2 实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
-固定考虑 A5 / Ascend 950、CANN 9.1、64 核，沿用 48 个发送核和 16 个接收核。第 1 节保留优化前的证据，第 2/4 节为后续方案。
+状态：**B 预取已扩至全部可用槽位（最多 8，见第 10 节）；Probe 分段打点及第 9 节 metadata Scalar 压缩已实现；A 的二维 Sum 已实现，向量 ready 比较及 C 尚未实现**。原深度 2 实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
+固定考虑 A5 / Ascend 950、CANN 9.1、64 核，沿用 48 个发送核和 16 个接收核。第 1 节保留优化前的证据，第 2 节区分已实现归约和后续向量比较，第 4 节为后续方案。
 
-当前已实施「最多 8 槽的 payload 预取」、Probe 分段打点及 metadata 重复读取/计算压缩；保留逐包 ReduceSum 与 Scalar ready 比较，批量 Sum + Compares 和 probe 双缓冲留作后续优化。
+当前已实施「最多 8 槽的 payload 预取」、Probe 分段打点及 metadata 重复读取/计算压缩；Probe 已改为每批一次二维 Sum，保留 Scalar ready 比较；Compares 和 probe 双缓冲留作后续优化。
 目标是减少逐 Token 的归约调用、Scalar 判定和立即等待，让不同包的 MTE2、Scalar 和 MTE3 工作重叠，同时保持现有包格式、输出身份和完成条件。
 
 ## 1. 现状和证据边界
@@ -20,7 +20,7 @@
 当前源码已用二分查找定位本核起始前缀记录，不再把这项作为待实施优化。
 
 设每包有 `B=blockCount` 个 512B 块，每块由 480B 数据和 32B Flag 构成，Flag 是 8 个 FP32 值；当前协议以全 1 表示到达。
-一次 probe 最多检查 `M=16` 个包，过程为：
+优化前一次 probe 最多检查 `M=16` 个包，过程为：
 
 1. 保存每个 pending 项对应的稳定任务 ID `j`。
 2. 每包下发一次 `DataCopyParams{B, 1, 15, 0}`：从 `slot+480` 开始，每次读 32B、跳过 480B，读满 B 块；目的 UB 连续排列。这些参数的长度、间隔单位均为 32B。
@@ -47,7 +47,7 @@ UB 已经是 `[count, B*8]` 的二维行布局，无需转置。16 个包的 GM 
 同一包必须按数据依赖顺序处理；当前不足是下一包的 copy-in 在本包 metadata 和输出下发之后才开始。
 已有异步 MTE3 输出可能与下一包 MTE2 重叠，不能说全部物理搬运完全串行；但最多 8 个槽位尚未形成主动的多包输入预取。
 
-## 2. 后续增量 A：二维 Sum 和向量 ready 位图（未实现）
+## 2. 增量 A：二维 Sum（已实现）和向量 ready 位图（后续）
 
 ### 2.1 按 Token 行归约
 
@@ -61,14 +61,16 @@ flags[count][B*8]  --Sum(最后一维)-->  sums[count]
 输出改为紧凑的 `sums[i]`，后续不能继续使用旧的 `sums[i*8]`。
 
 必须传入显式的 `LocalTensor<uint8_t>` scratch。不使用自动申请临时空间的重载，因为参考实现会调用 `PopStackBuffer`，不符合控制隐式 local memory/栈资源的目标。
-开发和编译验证阶段使用已安装 CANN 9.1 的 `GetSumMaxMinTmpSize`，核对支持边界内的 B 及 `count=1..16`，结合实际 A5 实现的物理访问范围，确定 kernel 内显式 scratch 容量规则。
-该查询不是 device API，也不接入运行时 Host 调用路径。scratch 容量计算、分配和复用由 kernel 负责，不为此新增 Host 计算逻辑或由 Host 传入的 `sumTmpBytes`/tiling 容量字段；不能把当前单包 `B*32` 的 workBuf 当作批量 scratch 容量。
+开发阶段使用已安装 CANN 9.1.0 的 `GetSumMaxMinTmpSize(n=B*8, typeSize=4, isReuseSource=false)`，核对 B=1..255；它不接收 outter，只返回单行容量，min=max 为 `align32(ceil(B/8)*4)` 字节。
+实际 A5 `SumCompute` 的 scratch 行步长为 `align32(ceil(B/8))` **个 float**，与查询的字节对齐粒度不同。kernel 分配 `16 * align32(ceil(B/8)) * 4 + 256` 字节，覆盖整批所有行及最后一次整向量读取；B≤256 时为 2304B。不得只乘单行查询结果就认定安全。
+当前调用 `Sum<float>(sums, flags, work, SumParams{count, B*8, B*8})` 后做一次 V_S，再读取 `sums[i]` 形成 ready 位图；不再下发逐包 ReduceSum 和 scratch 复用 PIPE_V。空任务直接返回，不调用 Sum。
+该查询不是 device API，也不接入运行时 Host 调用路径。scratch 容量计算、分配和复用由 kernel 负责，不为此新增 Host 计算逻辑或由 Host 传入的 `sumTmpBytes`/tiling 容量字段；不能把旧单包 `B*32` 的 workBuf 当作批量 scratch 容量。
 
 参考 A5 实现的 `SumForOneRepeatTime` / `ReduceSumNextN` 在 SIMD 函数内部仍按行、向量块进行加载和归约。
 因此这是**一次标准二维归约 API 调用，不是用一条硬件指令归约任意大小的 16 个包**。
 预期减少外层 API 调用和逐 Token scratch 复用屏障，实际指令数、寄存器和耗时由编译与实测确认。
 
-### 2.2 用 Compares 直接产生 ready mask
+### 2.2 用 Compares 直接产生 ready mask（尚未实现）
 
 可以使用 `Compares(sums, float(B*8), EQ)`。目标是压缩位图，不是每 Token 一个字节：结果 bit i 对应 `sums[i]`，小端存储。
 例如 16 项中第 0、3、15 项到达，得到 `0x8009`；Scalar 同步后读一次整数即可获得整批 ready 状态。
@@ -119,10 +121,10 @@ Compares 在参考实现中执行向量加载、`Reg::CompareScalar`、压缩位
 支持边界内的 case 出现 UB 容量不足、分配错误或越界，属于必须在 kernel 验证中暴露并修复的实现 bug。修复应落实到 kernel 的容量计算、布局、分块或资源复用，不能通过新增 Host UB 校验或缩小入参边界来掩盖。后文的 UB 公式和检查均属于 kernel 实现与验证职责，不是 Host 准入条件。
 
 按逻辑元素数计算容量不足以保证新 API 的物理访问安全：参考 Sum 实现含整向量 `Reg::LoadAlign`，最后一行不足一个向量的尾块也可能执行完整加载。
-首版在 Flag 矩阵末尾额外预留并初始化 256B 保护空间，保持行步长仍为 `B*8`，不改变有效归约范围；确认实际 CANN 实现的加载范围后可收紧该余量。
+当前在 Flag 矩阵末尾额外预留 256B，每轮接收准备时将整个 Flag UB（含未使用行及保护区）清零，并以 V_MTE2 发布初始化完成。行步长仍为 `B*8`，有效归约范围不变。后续批次通过 V_S 完成归约后才复用 Flag/scratch，尾批只归约 count 行。
 scratch 除了查询 API 容量，还要核对实际 A5 分支的最后一次向量访问，不能从旧 ReduceSum 的临时空间大小推断。
 
-后续 A 增量的每核预算继续为 190KiB，所有项目按实际 TPipe 分配的对齐量计入；下表的 Sum/位图/尾部保护空间尚未引入本次 B：
+当前每核预算继续为 190KiB，所有项目按实际 TPipe 分配的对齐量计入；向量比较的 readyBits 留作后续：
 
 | 项目 | 首版容量 |
 | --- | --- |
@@ -130,8 +132,8 @@ scratch 除了查询 API 容量，还要核对实际 A5 分支的最后一次向
 | tokenPos + pendingIdx | `2 * align32(tasks.Count() * 4)` |
 | Flag 矩阵及尾部保护 | `16 * B * 32 + 256` B |
 | 紧凑 Sum 结果存储 | 保留 512B；只有前 count 个 float 有效 |
-| Sum scratch | kernel 按开发阶段核对的容量规则计算，覆盖 count=1..16，按 32B 对齐并包含物理访问余量 |
-| readyBits | 32B |
+| Sum scratch | `16 * align32(ceil(B/8)) * 4 + 256` B；align32 此处按 float 元素数对齐 |
+| readyBits | 当前不分配；后续 Compares 增加 32B |
 | probe snapshot | `16 * 4 = 64` B |
 | 每个数据 lane | `tokenStride + 32 + align32(4 + 8*(K-1))` B，依次为 wire、meta、group |
 
@@ -239,7 +241,7 @@ probe 复用 MTE2，必须优先保证已就绪 payload 的预取，不能让投
 
 | 增量 | 修改范围 | 预期效果 |
 | --- | --- | --- |
-| A：批量判定 | 接收 Probe、kernel 显式 UB/scratch 容量计算与分配；开发阶段核对标准 API 容量 | 移除逐 Token ReduceSum 调用及 Scalar 比较；Flag 拷贝方式不变 |
+| A：批量判定 | 接收 Probe、kernel 显式 UB/scratch 容量计算与分配；开发阶段核对标准 API 容量 | 已移除逐 Token ReduceSum 调用；Scalar 比较待第 2.2 节，Flag 拷贝方式不变 |
 | B：最多 8 槽预取 | 接收调度与 ReceiveOne 拆分、每 lane 加载事件、复用现有 snapshot 的双游标 | 为输入加载与其他包 metadata/输出重叠提供调度条件 |
 | C：可选 probe 重叠 | 两批快照调度、probe 缓冲和事件归属 | 隐藏部分 Flag 搬运/归约，代价是额外 UB 和扫描复杂度 |
 
@@ -250,7 +252,7 @@ profiling 保留每 core 的耗时区间，以及每 rank 独立 JSON、只保�
 保留完整 `probe` 区间，本次按每个 probe 批次增加两个嵌套子区间：
 
 - `Probe_load_flag`：索引快照、整批 Flag 拷贝下发，以及现有 MTE2_V 依赖指令下发。
-- `Probe_cal_sum`：逐包 ReduceSum、共享 scratch 的 PIPE_V、V_S 等待，以及读取每个 sum、与预期值比较、形成 ready 位图的完整逻辑。它覆盖哪些/多少个包达到预期 sum 的判定，不额外增加 popcount 或记录 ready 数量。
+- `Probe_cal_sum`：一次二维 Sum、V_S 等待，以及读取每个紧凑 sum、与预期值比较、形成 ready 位图的完整逻辑。它覆盖哪些/多少个包达到预期 sum 的判定，不额外增加 popcount 或记录 ready 数量。
 
 这里记录的是 Scalar 观察区间。MTE2_V 约束 Vector 而非 Scalar，`Probe_load_flag` 结束不证明 Flag DMA 已完成；剩余加载等待可能在 V_S 处体现到 `Probe_cal_sum`。不为分摊物理流水耗时新增 MTE2_S 或其他同步。
 B 阶段需要调整 `acquire_load` 的定义，不能拆开函数后仍把非连续工作拼成一个连续耗时段：
@@ -354,3 +356,15 @@ Count/cumsum 保留已有按 recv 核数计算的 GM 布局：两张 `recv×recv
 删除原子取号和 counter 清零；保留本核完成及全核 SyncAll。Atomic/CounterEnd 事件 ID 不复用，
 新 trace 不生成这些样本，历史 trace 仍可读取。新增 prefix_indices_validated 验收字段并更新
 构建清单的编号契约，避免旧任意 t 的 consumer 被当作新协议验证。Combine 实现及内存优化另行推进。
+
+## 13. Probe 二维归约验证（2026-09-16）
+
+本次仅实施第 2.1 节的批量 Sum 和对应 UB 布局。CANN 9.1.0 安装头 `adv_api/reduce/sum.h` 与 A5 `sum_3510_impl.h` 为实现依据；[官方 Sum 接口说明（9.1 beta3）](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta3/API/ascendcopapi/atlasascendc_api_07_0826.html) 仅作接口参考，最终重载和物理访问以实际 9.1.0 编译包为准。
+
+维护要点：二维归约同时改变输出步长和整批临时空间。保留旧 `sums[i*8]` 会读到错行；只按单行查询结果分配会漏算 A5 partial 行步长及 masked load 的完整 256B 访问。当前显式区分 Flag、512B sums、uint8 scratch，并将保护空间计入 lane 预算。切换 CANN 版本时须重新核对 Sum 实现和 scratch 查询，不能把本次公式视为跨版本 API 保证。
+
+本地基于 `d49a56b` 加本次补丁，receive_packet/profile、counts、source_send/profile 共 5 项 CPU 替身回归通过。接收用例覆盖 1..16 项尾批、B=1/8/9/31 的行边界、量化和非量化、一个 Flag 缺失、整批未就绪后重扫、1/2/3/8 lanes，以及空任务和跨轮清理；替身检查完整向量源/临时区访问范围。隔离副本分别恢复旧输出步长、单行 scratch 或移除 Flag guard，三项负向检查均失败，正常实现通过。
+
+blue 上真实 CANN 9.1.0、Bisheng/Clang 15.0.5（2026-05-18，clang-5c68a1cb1231）编译 `tilexr_ep_dispatch_memory_server_dedup_kernel`，目标 `dav-c310-vec` / `CATLASS_ARCH=3510`，profiling OFF/ON 均编译链接成功，退出码均为 0。源码基线为 `d49a56b` 加本次补丁；源码摘要、编译器版本、配置、完整编译日志及产物摘要保留在 `build/probe-reduce-verification/`，blue 工作目录为 `~/hzy/probe-reduce-20260916.BOu4Fn/`。
+
+blue 仅作编译，未运行 NPU；本地替身不模拟异步 Vector/MTE 流水，不能证明设备正确性或加速幅度。A5 对比应使用相同 shape、收发核划分、量化模式及 profiling 配置，同时观察 Probe_cal_sum、完整 probe、接收阶段和 kernel 耗时；不能把一次 API 调用等同于一条硬件指令。

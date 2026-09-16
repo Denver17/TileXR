@@ -273,11 +273,11 @@ void CheckReceiver(int32_t role, int64_t magic)
 // each issued MTE3 source snapshot until the corresponding lane wait, so an
 // early Scalar overwrite of packet/meta/group storage is observable.
 template<bool Quantized>
-void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
+void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U)
 {
-    constexpr uint32_t k = 6U, experts = 96U, world = 16U, rank = 8U, owned = 24U;
-    // Six experts each contribute BS rows: keep 24 tasks per receiver for every split.
-    constexpr uint32_t bs = owned * kEpServerDedupRecvCoreNum / (experts / world);
+    constexpr uint32_t k = 6U, experts = 96U, world = 16U, rank = 8U;
+    // Choose BS so floor(6*BS/16) gives this receiver exactly owned tasks.
+    const uint32_t bs = (owned * kEpServerDedupRecvCoreNum + 5U) / (experts / world);
     const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
     const auto counts = TileXREpServerDedupCountLayout(experts);
     const auto start = TileXREpServerDedupDispatchOffset(data, 0U, rank, 0U, 0U, world, 6U, bs);
@@ -310,7 +310,9 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
     args.rank = rank; args.rankSize = world; args.peerMems[rank] = local.data();
     const uint32_t hiddenBytes = Quantized ? h : 2U * h;
     const uint32_t groupStride = uint32_t(TileXREpDedupAlign(4U + 8U * (k - 1U), 32U));
-    const uint32_t fixed = experts * 4U + 2U * 96U + uint32_t(data.blockCount) * 544U + 576U;
+    const uint32_t workBytes = 16U * ((uint32_t(data.blockCount) + 255U) / 256U) * 128U + 256U;
+    const uint32_t fixed = experts * 4U + 2U * ((owned + 7U) / 8U * 32U) +
+        uint32_t(data.blockCount) * 512U + 256U + workBytes + 576U;
     const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + 32U + groupStride));
     Check(lanes == expectedLanes, "fixture exercises the intended physical lane count");
     const uint32_t depth = expectedLanes;
@@ -325,6 +327,12 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
         bs, h, k, experts, &pipe);
     bool released = false, inLane = false;
     uint32_t flagReads = 0U, peak = 0U, currentLane = 0U, loadLane = 0U, peakLoads = 0U;
+    uint32_t reducedRows = 0U, sumCalls = 0U;
+    AscendC::SumObserver() = [&](AscendC::SumParams params) {
+        Check(params.outter == std::min(16U, flagReads - reducedRows), "one Sum reduces exactly this probe's Flag snapshot");
+        reducedRows += params.outter;
+        ++sumCalls;
+    };
     std::vector<uint32_t> loaded, processed;
     struct Read { const uint8_t *pointer; std::vector<uint8_t> bytes; };
     std::array<std::vector<Read>, 8> reads;
@@ -338,7 +346,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
                 Check(pending <= depth, "unconsumed loads never exceed the allocated lane pool");
                 peakLoads = std::max(peakLoads, pending);
             } else {
-                if (processed.empty()) Check(loaded.size() == depth, "prefetch fills before the first consumer wait");
+                if (processed.empty()) Check(loaded.size() == std::min(depth, owned - 16U), "prefetch fills the ready tail before the first consumer wait");
                 Check(lane == processed.size() % lanes && laneTask[lane] == loaded[processed.size()],
                     "loads are consumed FIFO using the same lane and stable task identity");
                 processed.push_back(laneTask[lane]);
@@ -394,8 +402,10 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
     receiver.Process(profile);
     AscendC::GmReadObserver() = {}; AscendC::GmWriteObserver() = {};
     AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
-    CheckReceiveProfile(profile, capture, owned, 8U);
-    Check(processed.size() == owned && processed.front() == 23U && processed[7U] == 16U,
+    AscendC::SumObserver() = {};
+    Check(reducedRows == flagReads && sumCalls >= 3U, "full and tail probes each use one batched Sum");
+    CheckReceiveProfile(profile, capture, owned, (owned + 2U) / 3U);
+    Check(processed.size() == owned && processed.front() == owned - 1U && processed[owned - 17U] == 16U,
         "scan advances past an unready full batch and consumes a ready tail in reverse order");
     Check(loaded == processed && peakLoads == depth, "every prefetched packet is consumed with the requested depth");
     for (const auto &events : {AscendC::Events<AscendC::HardEvent::MTE2_S>(),
@@ -541,7 +551,9 @@ int main()
     try {
         CheckPacket(1U, 1U, false);
         CheckSparsePrefixReceivers();
-        CheckBatchReceiver<false>(7168U, 8U);
+        for (uint32_t owned = 17U; owned <= 32U; ++owned)
+            for (uint32_t h : {176U, 1856U, 2096U, 7168U})
+                CheckBatchReceiver<false>(h, 8U, owned);
         CheckBatchReceiver<true>(7168U, 8U);
         CheckBatchReceiver<false>(20000U, 3U);
         CheckBatchReceiver<false>(26000U, 2U);
@@ -558,6 +570,7 @@ int main()
     } catch (const std::exception &error) {
         AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};
         AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
+        AscendC::SumObserver() = {};
         std::cerr << error.what() << '\n';
         return 1;
     }

@@ -2,6 +2,7 @@
 #define TILEXR_EP_SERVER_DEDUP_RECV_H
 
 #include "kernel_operator.h"
+#include "adv_api/reduce/sum.h"
 #include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_receive_tasks.h"
 #include "tilexr_ep_server_dedup_receive_packet.h"
@@ -57,12 +58,19 @@ public:
         }
 
         const uint32_t blocks = uint32_t(data_.blockCount);
-        pipe_->InitBuffer(flagsBuf_, kProbeBatch * blocks * 32U);
+        const uint32_t flagsBytes = kProbeBatch * blocks * 32U + 256U;
+        // CANN 9.1/A5 Sum stores ceil(B*8/64) partials per row at a
+        // 32-element stride. Reserve all rows plus a full-vector tail read.
+        const uint32_t workBytes = kProbeBatch * uint32_t(TileXREpDedupAlign((blocks + 7U) / 8U, 32U)) * 4U + 256U;
+        pipe_->InitBuffer(flagsBuf_, flagsBytes);
         pipe_->InitBuffer(sumBuf_, kProbeBatch * 32U);
-        pipe_->InitBuffer(workBuf_, blocks * 32U);
+        pipe_->InitBuffer(workBuf_, workBytes);
+        // LoadAlign may read past the masked tail, including inactive rows.
+        Duplicate(flagsBuf_.Get<float>(), 0.0f, flagsBytes / 4U);
+        ServerDedupReceiveSync<HardEvent::V_MTE2>();
         pipe_->InitBuffer(probeIdxBuf_, kProbeBatch * 4U);
         const uint32_t tablesBytes = 2U * uint32_t(TileXREpDedupAlign(uint64_t(tasks_.Count()) * 4U, 32U));
-        const uint32_t fixed = prefixBytes + tablesBytes + (kProbeBatch + 1U) * blocks * 32U + kProbeBatch * 36U;
+        const uint32_t fixed = prefixBytes + tablesBytes + flagsBytes + workBytes + kProbeBatch * 36U;
         laneStride_ = uint32_t(data_.tokenStride) + 32U + groupStride_;
         const uint32_t available = (kEpServerDedupCountUbBytes - fixed) / laneStride_;
         lanes_ = available < 8U ? available : 8U; // Safe inputs guarantee at least one lane.
@@ -122,7 +130,7 @@ private:
         auto indices = probeIdxBuf_.Get<uint32_t>();
         auto flags = flagsBuf_.Get<float>();
         auto sums = sumBuf_.Get<float>();
-        auto work = workBuf_.Get<float>();
+        auto work = workBuf_.Get<uint8_t>();
         const uint32_t blocks = uint32_t(data_.blockCount);
         profile.Begin(EpDedupDetailMetric::ProbeLoadFlag);
         for (uint32_t i = 0; i < count; ++i) {
@@ -133,14 +141,11 @@ private:
         ServerDedupReceiveSync<HardEvent::MTE2_V>();
         profile.End(EpDedupDetailMetric::ProbeLoadFlag);
         profile.Begin(EpDedupDetailMetric::ProbeCalSum);
-        for (uint32_t i = 0; i < count; ++i) {
-            ReduceSum(sums[i * 8U], flags[i * blocks * 8U], work, 8U, uint8_t(blocks), 1U);
-            PipeBarrier<PIPE_V>(); // Reuse only the shared reduction scratch.
-        }
+        Sum<float>(sums, flags, work, SumParams{count, blocks * 8U, blocks * 8U});
         ServerDedupReceiveSync<HardEvent::V_S>();
         uint32_t ready = 0U;
         for (uint32_t i = 0; i < count; ++i)
-            if (sums.GetValue(i * 8U) == float(blocks * 8U)) ready |= uint32_t(1) << i;
+            if (sums.GetValue(i) == float(blocks * 8U)) ready |= uint32_t(1) << i;
         profile.End(EpDedupDetailMetric::ProbeCalSum);
         return ready;
     }

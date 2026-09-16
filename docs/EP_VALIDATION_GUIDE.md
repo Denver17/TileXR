@@ -24,7 +24,7 @@
 
 2026-09-15 此优化的本地 counts、receive_packet、receive_profile 三项 Host 替身回归通过，新增前导零、相等前缀、区间内部起点、全零/不足 16 行及 1024 总专家的槽位对照。已尝试通过配置的 blue SSH 连接进行 A5 编译，但连接返回 255 且无远端输出，未进入 CANN 编译；日志保存在本地 `build/recv-tasks-verification/`。本地测试不证明 A5 性能收益；用户复测时保持相同配置，对比 48～63 核的 recv_tasks 及完整 kernel 耗时。
 
-每路只分配一份 T 字节带 Flag 包、32B metaUB 和对齐 group 行，数据池按扣除前缀、双表及 `544*blockCount+576` 字节监听区后的剩余 190KiB 预算选择 1～8 路。`MTE3_MTE2` 保护复用，`MTE2_MTE3` 发布搬入，`MTE2_S/S_MTE3` 保护 Scalar 元数据访问。hidden/scale 用 DataCopyPad 跳过 Flag 直接写 GM，同一 Token 的转发连续读取这一份包；完成事件在最后一笔写出后记录，下一次复用 lane 才等待。核末回收 lane 后统一清理本核稳定 tokenPos 的所有 Flag。
+每路只分配一份 T 字节带 Flag 包、32B metaUB 和对齐 group 行，数据池按扣除前缀、双表及 `512*blockCount+832+sumTmpBytes` 字节监听区（`sumTmpBytes=16*align32(ceil(blockCount/8))*4+256`，对齐单位为 float 元素）后的剩余 190KiB 预算选择 1～8 路。`MTE3_MTE2` 保护复用，`MTE2_MTE3` 发布搬入，`MTE2_S/S_MTE3` 保护 Scalar 元数据访问。hidden/scale 用 DataCopyPad 跳过 Flag 直接写 GM，同一 Token 的转发连续读取这一份包；完成事件在最后一笔写出后记录，下一次复用 lane 才等待。核末回收 lane 后统一清理本核稳定 tokenPos 的所有 Flag。
 
 第一跳先生成保留正 forwardCount 的独立 assistEx/group，再把公共包改为终端角色；终端按 expert 匹配原 k/weight。权重按位复制，group 按 `t*K+originalK` 保存返回槽位，t 由并发取号产生，不预设其顺序。完整元数据关联由所有 rank 结果汇总后验收。
 
