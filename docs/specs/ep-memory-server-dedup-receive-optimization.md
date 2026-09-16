@@ -1,9 +1,9 @@
 # Server Dedup 接收优化方案
 
-状态：**B 预取已扩至全部可用槽位（最多 8，见第 10 节）；Probe 分段打点及第 9 节 metadata Scalar 压缩已实现；A 的二维 Sum 已实现，向量 ready 比较及 C 尚未实现**。原深度 2 实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
+状态：**B 预取已扩至全部可用槽位（最多 8，见第 10 节）；Probe 空扫描打点已合并（见第 14 节），第 9 节 metadata Scalar 压缩已实现；A 的二维 Sum 已实现，向量 ready 比较及 C 尚未实现**。原深度 2 实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
 固定考虑 A5 / Ascend 950、CANN 9.1、64 核，沿用 48 个发送核和 16 个接收核。第 1 节保留优化前的证据，第 2 节区分已实现归约和后续向量比较，第 4 节为后续方案。
 
-当前已实施「最多 8 槽的 payload 预取」、Probe 分段打点及 metadata 重复读取/计算压缩；Probe 已改为每批一次二维 Sum，保留 Scalar ready 比较；Compares 和 probe 双缓冲留作后续优化。
+当前已实施「最多 8 槽的 payload 预取」、Probe 等待区间合并及 metadata 重复读取/计算压缩；Probe 已改为每批一次二维 Sum，保留 Scalar ready 比较；Compares 和 probe 双缓冲留作后续优化。
 目标是减少逐 Token 的归约调用、Scalar 判定和立即等待，让不同包的 MTE2、Scalar 和 MTE3 工作重叠，同时保持现有包格式、输出身份和完成条件。
 
 ## 1. 现状和证据边界
@@ -249,7 +249,8 @@ probe 复用 MTE2，必须优先保证已就绪 payload 的预取，不能让投
 当前接收元数据包含角色分支、包尾间接索引、group/relay 构造，不宜为「全部向量化」盲目增加转置、临时数组和寄存器。
 
 profiling 保留每 core 的耗时区间，以及每 rank 独立 JSON、只保留最后一次执行的输出约定。
-保留完整 `probe` 区间，本次按每个 probe 批次增加两个嵌套子区间：
+以下为第 14 节之前的历史打点布局；新采集已合并空扫描并移除两个子区间，旧 ID 仍可解析。
+当时保留完整 `probe` 区间，按每个 probe 批次增加两个嵌套子区间：
 
 - `Probe_load_flag`：索引快照、整批 Flag 拷贝下发，以及现有 MTE2_V 依赖指令下发。
 - `Probe_cal_sum`：一次二维 Sum、V_S 等待，以及读取每个紧凑 sum、与预期值比较、形成 ready 位图的完整逻辑。它覆盖哪些/多少个包达到预期 sum 的判定，不额外增加 popcount 或记录 ready 数量。
@@ -367,4 +368,40 @@ Count/cumsum 保留已有按 recv 核数计算的 GM 布局：两张 `recv×recv
 
 blue 上真实 CANN 9.1.0、Bisheng/Clang 15.0.5（2026-05-18，clang-5c68a1cb1231）编译 `tilexr_ep_dispatch_memory_server_dedup_kernel`，目标 `dav-c310-vec` / `CATLASS_ARCH=3510`，profiling OFF/ON 均编译链接成功，退出码均为 0。源码基线为 `d49a56b` 加本次补丁；源码摘要、编译器版本、配置、完整编译日志及产物摘要保留在 `build/probe-reduce-verification/`，blue 工作目录为 `~/hzy/probe-reduce-20260916.BOu4Fn/`。
 
-blue 仅作编译，未运行 NPU；本地替身不模拟异步 Vector/MTE 流水，不能证明设备正确性或加速幅度。A5 对比应使用相同 shape、收发核划分、量化模式及 profiling 配置，同时观察 Probe_cal_sum、完整 probe、接收阶段和 kernel 耗时；不能把一次 API 调用等同于一条硬件指令。
+blue 仅作编译，未运行 NPU；本地替身不模拟异步 Vector/MTE 流水，不能证明设备正确性或加速幅度。A5 对比应使用相同 shape、收发核划分、量化模式及 profiling 配置，同时观察完整 probe、接收阶段和 kernel 耗时；Probe_cal_sum 仅在第 14 节之前的历史分段 trace 中存在；不能把一次 API 调用等同于一条硬件指令。
+
+## 14. 合并 Probe 空扫描打点（2026-09-16）
+
+基线 `fda2d5c` 已实现每批最多 16 个 Token 的一次二维 `Sum` 调用，每个 Token
+仍有独立归约结果和 Scalar ready 判断，不是把所有 Token 合成一个 ready 标量，
+也不等于一条硬件 ReduceSum 指令。本次保持归约、Flag 同步、pending 删除及预取协议不变。
+
+原实现每次扫描（包括 ready=0）写入 Probe、Probe_load_flag、Probe_cal_sum 三对事件。
+标准 writer 每条事件读取时钟，并向 GM 写入 8B 时间戳和 4B ID；发布时刷新已写区间。
+因此 P 次扫描产生 6P 条 Probe 相关记录，长时间空轮询会增加 Scalar/GM 工作并可能耗尽
+每核 65536 条的记录容量。用户观察的 breakdown 330us / performance 45us 尚未在本次复测，
+不能仅凭源码将全部差值归因于这些事件；逐包阶段打点和发布也仍有开销。
+
+现在在开始扫描前记录一次 Probe begin；ready=0 时继续推进 scan，扫描到表尾回绕，
+不写任何中间事件。直到某批 ready!=0 才记录 Probe end，然后执行原有加载、消费和删除。
+下一轮消费结束后重新开始 Probe。所有空扫描、同步等待和最终成功扫描都计入 Probe；
+不把计时起点移到发现 token 之后，也不把消费时间并入 Probe。空任务不产生 Probe。
+Probe 相关记录变为 2S 条，S 为成功扫描批数，S 不超过本核任务数，与空轮询次数无关。
+
+新采集不再生成 Probe_load_flag / Probe_cal_sum。保留其枚举、事件 ID 和映射，
+历史 trace 仍可解析，不复用 ID。新旧 trace 的 probe 样本粒度不同，不能直接比较单样本均值；
+应比较每核 Probe 总时间及接收/kernel 总耗时，并保持 shape、收发核划分和二进制来源一致。
+
+维护经验：轮询热点中按尝试打点会改变被测等待本身；优先用成功边界包围整个等待，
+同时验证空任务、跨批扫描、回绕和时间区间完整性。减少记录不等于隐藏等待时间或证明性能提升。
+
+本次验证基于 `d64fc25` 加本补丁：blue 的 receive_packet（OFF）和 receive_profile（ON）
+两个 CPU 替身用例通过，覆盖 128 次空扫描后到达仍只生成一对 Probe、首末扫描时间被包围、
+跨批 pending 压缩、量化/非量化和 1/2/3/8 槽预取；本地 18 项 trace 测试通过，
+包含新合并区间和历史细分事件的解析。替身时钟只验证边界顺序，不模拟设备耗时。
+blue 使用真实 CANN 9.1.0、Bisheng/Clang 15.0.5（2026-05-18，clang-5c68a1cb1231），
+分别编译 `tilexr_ep_dispatch_memory_server_dedup_kernel` 的 profiling OFF/ON，
+目标 `dav-c310-vec` / `CATLASS_ARCH=3510`，编译和链接退出码均为 0。
+源码摘要、配置、编译器及日志保留于 `build/probe-profile-verification/`；
+blue 隔离目录为 `/home/d00520898/tilexr-probe-profile-20260916.wpCBu2/`。
+未运行 NPU，未验证异步设备时序或 330us/45us case 的优化幅度。

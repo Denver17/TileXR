@@ -23,7 +23,8 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
     const auto probes = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase);
     Check(rows == 0U ? probes == 0 : probes > 0, "probe samples reflect actual work");
     const uint32_t expected[] = {uint32_t(probes), 0U, rows, 0U, rows, firstHops, 0U,
-        rows, rows, uint32_t(probes), uint32_t(probes)};
+        rows, rows, 0U, 0U};
+    Check(probes <= rows, "empty retries never add probe intervals");
     for (uint32_t op = 0; op < sizeof(expected) / sizeof(expected[0]); ++op) {
         const auto begin = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op);
         const auto end = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op + 1U);
@@ -36,9 +37,6 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
         const uint32_t offset = event - kEpServerDedupOperationEventBase;
         const uint32_t op = offset / 2U;
         if (offset % 2U == 0U) {
-            if (op == uint32_t(EpDedupDetailMetric::ProbeLoadFlag) || op == uint32_t(EpDedupDetailMetric::ProbeCalSum))
-                Check(!active.empty() && active.back() == uint32_t(EpDedupDetailMetric::Probe),
-                    "flag loading and sum/ready comparison remain nested within Probe");
             active.push_back(op);
         } else {
             Check(!active.empty() && active.back() == op, "receive intervals close in nested order");
@@ -162,7 +160,7 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
 }
 
 template<bool Quantized>
-void CheckReceiver(int32_t role, int64_t magic)
+void CheckReceiver(int32_t role, int64_t magic, uint32_t emptyProbes = 0U)
 {
     constexpr uint32_t h = 209U, k = 6U, rank = 8U, world = 16U, experts = 96U, bs = 2U;
     Packet fixture(h, k, Quantized, role);
@@ -223,9 +221,36 @@ void CheckReceiver(int32_t role, int64_t magic)
     ServerDedupTest::ProfileCapture capture(args);
     ServerDedupProfile profile;
     profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
+    // Hold back one Flag through repeated whole-table scans, then publish it.
+    // Advance the fake clock on reads so the interval must include the wait.
+    if (emptyProbes != 0U) std::memset(local.data() + slot + 480U, 0, 4U);
+    uint32_t flagReads = 0U;
+    uint64_t firstRead = 0U, lastRead = 0U;
+    AscendC::GmReadObserver() = [&](const void *pointer, uint32_t) {
+        if (pointer != local.data() + slot + 480U) return;
+        lastRead = AscendC::GetSystemCycle();
+        if (++flagReads == 1U) firstRead = lastRead;
+        Check(flagReads <= emptyProbes + 1U, "receiver progresses after delayed Flag publication");
+        if (flagReads == emptyProbes + 1U)
+            std::memcpy(local.data() + slot + 480U, fixture.wire.data() + 480U, 4U);
+    };
     receiver.Process(profile);
+    AscendC::GmReadObserver() = {};
     AscendC::GmWriteObserver() = {};
+    Check(flagReads == emptyProbes + 1U, "all empty scans run before consuming the packet");
     CheckReceiveProfile(profile, capture, 1U, role > 0 ? 1U : 0U);
+#if defined(TILEXR_ENABLE_PROFILING)
+    const auto events = capture.Events(AscendC::testCore);
+    Check(std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase) == 1,
+        "one Probe interval covers every retry until this packet arrives");
+    const uint64_t base = uint64_t(AscendC::testCore) * capture.recordsPerCore + 1U;
+    const auto begin = std::find(events.begin(), events.end(), kEpServerDedupOperationEventBase) - events.begin();
+    const auto end = std::find(events.begin(), events.end(), kEpServerDedupOperationEventBase + 1U) - events.begin();
+    Check(capture.timestamps[base + begin] < firstRead && capture.timestamps[base + end] > lastRead,
+        "Probe brackets both the first empty scan and the successful scan");
+    Check(capture.dropped[AscendC::testCore * TileXR::TILEXR_PROFILING_COUNT_STRIDE] == 0U,
+        "empty polling does not overflow the trace");
+#endif
     Check(sends == (role > 0 ? fixture.entries : 0U), "DIRECT and terminal rows do not start relay groups");
     Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "receiver writes the exact hidden row");
     if (Quantized) Check(std::memcmp(scales.data() + 32U, fixture.payload.data() + data.quantCount, data.scaleBytes) == 0,
@@ -567,6 +592,8 @@ int main()
             CheckReceiver<false>(role, magic);
             CheckReceiver<true>(role, magic);
         }
+        CheckReceiver<false>(1, 1, 128U);
+        CheckReceiver<true>(-1, 2, 128U);
     } catch (const std::exception &error) {
         AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};
         AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};

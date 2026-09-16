@@ -172,6 +172,25 @@ class TraceTests(unittest.TestCase):
             self.assertLess(child["args"]["raw_end"], parent["args"]["raw_end"])
         self.assertNotIn("acquire_load", result["stages_us"])
 
+    def test_probe_includes_idle_scans_without_substage_records(self):
+        # All unsuccessful scans and the successful batch share this interval.
+        recv = [(0, 0x53000001), (100, 0x53000200), (10100, 0x53000201),
+                (10200, 0x5300020E), (10300, 0x5300020F), (10400, 0x53000009)]
+        rows = {core: [(0, 0x53000001), (10400, 0x53000009)] if core < 48 else recv
+                for core in range(64)}
+        path = write_capture(self.root / "coalesced-probe.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID,
+                                               self.root / "coalesced-probe")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["diagnostic_count"], 0)
+        self.assertEqual(result["stages_us"]["probe"]["sample_count"], 16)
+        self.assertNotIn("Probe_load_flag", result["stages_us"])
+        self.assertNotIn("Probe_cal_sum", result["stages_us"])
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        probes = [e for e in trace["traceEvents"] if e["name"] == "probe"]
+        self.assertEqual(len(probes), 16)
+        self.assertTrue(all(e["ph"] == "X" and e["dur"] == 10.0 for e in probes))
+
     def test_pingpong_finish_returns_after_counter_reset_without_handshake(self):
         rows = {core: [(0, 0x53000001), (100, 0x53000108),
                       (200, 0x53000109), (300, 0x5300010A)] for core in range(64)}

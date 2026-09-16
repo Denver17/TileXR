@@ -83,11 +83,17 @@ public:
         const uint32_t depth = lanes_;
         uint32_t scan = 0U, issued = 0U, consumed = 0U;
         while (tasks_.PendingCount() != 0U) {
-            if (scan >= tasks_.PendingCount()) scan = 0U;
-            const uint32_t remaining = tasks_.PendingCount() - scan;
-            const uint32_t count = remaining < kProbeBatch ? remaining : kProbeBatch;
+            // Include all empty scans in one wait interval. Recording every
+            // retry perturbs the polling loop and can exhaust the trace buffer.
             profile.Begin(EpDedupDetailMetric::Probe);
-            const uint32_t ready = Probe(scan, count, profile);
+            uint32_t count, ready;
+            do {
+                if (scan >= tasks_.PendingCount()) scan = 0U;
+                const uint32_t remaining = tasks_.PendingCount() - scan;
+                count = remaining < kProbeBatch ? remaining : kProbeBatch;
+                ready = Probe(scan, count);
+                if (ready == 0U) scan += count;
+            } while (ready == 0U);
             profile.End(EpDedupDetailMetric::Probe);
             // Load and consume the immutable snapshot in the same descending
             // order. Higher-index removals cannot change lower pending entries.
@@ -105,7 +111,6 @@ public:
                 tasks_.RemovePending(scan + index);
                 ++consumed;
             }
-            if (ready == 0U) scan += count;
         }
         profile.Mark(EpDedupDetailPoint::LoopEnd);
         for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_MTE2>(lane);
@@ -125,28 +130,24 @@ private:
         return args_->peerMems[args_->rank] + data_.dispatchOffset + uint64_t(tasks_.Position(j)) * data_.tokenStride;
     }
 
-    __aicore__ inline uint32_t Probe(uint32_t start, uint32_t count, ServerDedupProfile &profile)
+    __aicore__ inline uint32_t Probe(uint32_t start, uint32_t count)
     {
         auto indices = probeIdxBuf_.Get<uint32_t>();
         auto flags = flagsBuf_.Get<float>();
         auto sums = sumBuf_.Get<float>();
         auto work = workBuf_.Get<uint8_t>();
         const uint32_t blocks = uint32_t(data_.blockCount);
-        profile.Begin(EpDedupDetailMetric::ProbeLoadFlag);
         for (uint32_t i = 0; i < count; ++i) {
             const uint32_t j = tasks_.PendingIndex(start + i);
             indices.SetValue(i, j);
             ReadServerDedupFlags(Slot(j), blocks, flags[i * blocks * 8U]);
         }
         ServerDedupReceiveSync<HardEvent::MTE2_V>();
-        profile.End(EpDedupDetailMetric::ProbeLoadFlag);
-        profile.Begin(EpDedupDetailMetric::ProbeCalSum);
         Sum<float>(sums, flags, work, SumParams{count, blocks * 8U, blocks * 8U});
         ServerDedupReceiveSync<HardEvent::V_S>();
         uint32_t ready = 0U;
         for (uint32_t i = 0; i < count; ++i)
             if (sums.GetValue(i) == float(blocks * 8U)) ready |= uint32_t(1) << i;
-        profile.End(EpDedupDetailMetric::ProbeCalSum);
         return ready;
     }
 
