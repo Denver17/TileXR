@@ -461,7 +461,7 @@ breakdown 完成后，Chrome 可导入文件集中在 `run/case-<时间>-<PID>/<
 - `rank-0.json`、`rank-1.json`……：每张卡独立一份，每份包含该 rank 最后一轮的 64 核耗时分段和实际重复操作。
 - 父目录 `traces/index.json`：记录各 rank 状态、排序、fastest/p50/slowest 代表卡及 JSON 路径，同时写入 `summary.json` 的 `traces` 字段。
 
-在 `chrome://tracing` 点击 Load，选择任意 `rank-N.json`；文件使用标准 `traceEvents`，其中 `ph: "X"`、`ts`、`dur` 描述区间，时间单位为微秒。终端直接打印 JSON 目录及代表卡的文件路径。HTML 仅作为节点辅助报告，主节点不生成表格入口或全卡合并 JSON。
+在 `chrome://tracing` 点击 Load，选择任意 `rank-N.json`；文件使用标准 `traceEvents`，其中 `ph: "X"`、`ts`、`dur` 描述区间，时间单位为微秒。`run.sh` 终端摘要打印 JSON 目录及 `fastest_rank=N | slowest_rank=M`，对应目录下的 `rank-N.json` / `rank-M.json`；完整代表卡路径保留在 workflow 日志。排名直接使用 trace 索引的 `selected_ranks`，没有有效选中项时不打印排名，rank 0 仍正常显示，避免与 trace 选择口径不一致。HTML 仅作为节点辅助报告，主节点不生成表格入口或全卡合并 JSON。
 
 主节点校验各节点的 capture 身份、摘要与文件摘要后，将已经生成的 `perfetto_trace.json` 原样复制并重命名为 `rank-N.json`，不重新解析 records，不加载全部 trace 到内存。重复导出时清除当前结果中不可用的旧 rank JSON，避免将旧文件误认为本次结果。原始打点、事件配对及 64 核分段信息保持不变。
 

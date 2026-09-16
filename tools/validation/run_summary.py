@@ -44,6 +44,10 @@ def render_result(report, summary_path):
     traces = report.get("traces")
     if traces:
         parts.append(f"trace={traces['trace_dir']}")
+        selected = traces.get("selected_ranks", {})
+        for role in ("fastest", "slowest"):
+            if role in selected:
+                parts.append(f"{role}_rank={selected[role]}")
     parts.append(f"result={summary_path}")
     return " | ".join(parts).replace("\n", " ").replace("\r", " ")
 
