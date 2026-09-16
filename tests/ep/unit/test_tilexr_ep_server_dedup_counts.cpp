@@ -205,7 +205,11 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
         std::shuffle(order.begin(), order.end(), rng);
         for (uint32_t id : order) {
             const auto before = AscendC::testCopies;
+            // Each simulated core enters with the mode established by Init.
+            AscendC::SetCtrlSpr<60, 60>(0);
             ranks[id / 64].cores[id % 64].SendCnt();
+            Check(AscendC::GetCtrlSpr<60, 60>() == 0,
+                "Count preserves the FP overflow mode for subsequent quantization, including after pipe reset");
             if (bs >= kEpServerDedupAllCoreCountBsThreshold && id % 64 < kEpServerDedupSendCoreNum)
                 Check(AscendC::testCopies == before, "BS at/above the independent threshold leaves send cores out of Count");
             if (bs < kEpServerDedupAllCoreCountBsThreshold && experts >= 64U)
@@ -266,6 +270,7 @@ int main()
         Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
         Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
         Run(64, 384, 48, 6, 4);     // Default threshold boundary, independent of the split.
+        Run(64, 384, 96, 6, 2);     // Reported FP8 failure: threshold 48 bypasses Count, 128 resets the pipe.
         Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology and 63 records/core.
         Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
         Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.

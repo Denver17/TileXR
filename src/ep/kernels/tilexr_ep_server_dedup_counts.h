@@ -150,6 +150,9 @@ __aicore__ inline void ServerDedupCounts::SendCnt()
     // All count packets must finish before the sender scratch is reused by recvCnt.
     PipeBarrier<PIPE_ALL>();
     tpipe_->Reset();
+    // A5 Reset reinitializes CTRL[60] to 1. Keep Init's overflow mode
+    // through the next stage, including MXFP8 casts on all-core Count senders.
+    SetCtrlSpr<60, 60>(0);
 }
 
 __aicore__ inline void ServerDedupCounts::CountByVectorRange(

@@ -75,8 +75,14 @@ template<HardEvent E> void WaitFlag(TEventID id) {
     if (EventObserver()) EventObserver()(E, id, false);
 }
 template<Pipeline> void PipeBarrier() { ++TestSyncOperations(); }
-template<int, int> int64_t GetCtrlSpr() { return 0; }
-template<int, int> void SetCtrlSpr(int64_t) {}
+inline uint64_t &TestCtrlSpr() { static uint64_t value = UINT64_C(0x1000000000000008); return value; }
+template<int First, int Last> int64_t GetCtrlSpr() {
+    return (TestCtrlSpr() >> First) & ((UINT64_C(1) << (Last - First + 1)) - 1U);
+}
+template<int First, int Last> void SetCtrlSpr(int64_t value) {
+    const uint64_t mask = ((UINT64_C(1) << (Last - First + 1)) - 1U) << First;
+    TestCtrlSpr() = (TestCtrlSpr() & ~mask) | ((uint64_t(value) << First) & mask);
+}
 inline void SyncAll() {}
 template<class T> inline T AtomicAdd(__gm__ T *address, T value) {
     T *mapped = static_cast<T *>(ResolveGm(reinterpret_cast<uintptr_t>(address)));
@@ -164,7 +170,12 @@ struct TPipe {
         TBuf<> b; InitBuffer(b, size); pool.storage = b.storage;
     }
     template<TPosition P> void InitBufPool(TBufPool<P> &pool, uint32_t, TBufPool<P> &other) { pool.storage = other.storage; }
-    void Reset() { for (auto &b : buffers) b->alive = false; buffers.clear(); bytes = 0; }
+    void Reset() {
+        for (auto &b : buffers) b->alive = false;
+        buffers.clear(); bytes = 0;
+        // CANN 9.1 A5 InitSocStateImpl, also called by TPipe::Reset.
+        TestCtrlSpr() = UINT64_C(0x1000000000000008) | (TestCtrlSpr() & (UINT64_C(1) << 48));
+    }
 };
 struct DataCopyParams { uint16_t blockCount, blockLen, srcStride, dstStride; };
 struct DataCopyExtParams { uint16_t blockCount; uint32_t blockLen, srcStride, dstStride, rsv; };

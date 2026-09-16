@@ -65,6 +65,33 @@ performance/breakdown 还需对应的 `measurements` 结果。1 轮 PASS 不证�
 
 2026-09-13：用户回传 `EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet`，按最近交付 `06c00ca` 登记接收包处理的 Host 测试通过。该测试使用 CPU AscendC 替身，未执行 NPU kernel；未直接读取实际提交和构建日志，不据此登记 CANN/A5 编译或设备通过。下一验证增量应补独立 A5 接收包测试，验证真实 API、UB 搬运及流水依赖；完整多卡接收、异步转发和多轮复用仍待接收调度与清理闭环。
 
+### 2026-09-16：全核 Count 后的 FP8 溢出模式丢失
+
+用户回传 64P/E384、BS96/H7168/K6、BF16→E4M3、performance 0+1 轮失败，
+run_id=`0a16163122c2489581e777d54d581b18`、build_id=`ecbc2f381cd647e288ffe8dbd552293a`。
+Count 阈值 128 时失败，48 时通过；非量化两者均通过。rank23 的首错是
+source0/token16/byte53：期望 `0xfe`，实际 `0x7f`，共 176 字节不符；
+接收槽与输出一致，scale 和已打印 assist 字段一致。按夹具重建该行，byte53 的输入为
+`-15.625`、scale 为 `1/32`，缩放后为 `-500`；整行恰有 176 个元素的绝对值大于
+E4M3 最近偶数舍入的有限值边界 464。这与饱和到 ±448 变为溢出 NaN 的模式吻合，
+不应先修改 relay、放宽 golden 或归因于 profiler 的退出提示。
+
+源码边界：`Counts::Init` 设置 `CTRL[60]=0`，但阈值 128 使 BS96 的发送核进入
+`SendCnt` 并执行 `TPipe::Reset`；阈值 48 则直接返回。官方 asc-devkit v9.1.0
+[A5 Reset 实现](https://gitcode.com/cann/asc-devkit/blob/e5451c7feba11f9e259f4fbc19c4bf82f8c0496c/impl/basic_api/dav_3510/kernel_tpipe_impl_c310.h)
+调用 [InitSocStateImpl](https://gitcode.com/cann/asc-devkit/blob/e5451c7feba11f9e259f4fbc19c4bf82f8c0496c/impl/basic_api/kernel_utils_base.h)，
+将 CTRL 重设为 `0x1000000000000008 | (old & (1ULL << 48))`，因此 bit60 重新变为 1。
+修复在 Count 的 Reset 后重新设置 bit60 为 0，维持后续阶段契约；`Finish` 仍恢复入口值。
+维护时不要把 Reset 当作只回收 UB/Event：阶段依赖的控制寄存器状态也须重建。
+
+验证边界：Host 替身补齐上述 Reset 副作用后，未修复版本在状态断言失败；修复后
+阈值 48/128 的 C++14 counts 测试通过，包含 64P/E384/BS96；阈值 128 下的发送、接收
+Host 替身测试也分别在 profiling OFF/ON 通过，共六项检查。这些测试只证明阶段状态
+契约和 Host 模型，不证明真实 FP8 指令或多卡异步行为。当前环境无 CANN，
+`ssh -o BatchMode=yes -o ConnectTimeout=10 blue true` 返回 255（无法解析 blue），
+未进入 A5 编译。回传日志的 commit 为 null，尚未取得实机工具链和 binary 哈希；
+需重新构建、同步后以相同阈值 128 和原命令复测，再补阈值 48、非量化及多轮回归。
+
 ## 阶段 3：Combine 空算子工程
 
 | 检查方向 | 状态 | 通过 commit |
