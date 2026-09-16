@@ -2,6 +2,12 @@
 
 Ask the user to install missing `ascendc-development` or `superpowers-neo` skills from [LingquLab/skills](https://github.com/LingquLab/skills).
 
+## Default Workspace and Branch
+
+- Default code path: `/users/hzy/workspace/TileXR`.
+- Default working branch: `codex/SilentEmotion`, tracking `origin/codex/SilentEmotion`. Continue subsequent work on this branch unless the user explicitly requests another branch.
+- Before locating or changing code, verify the repository root and current branch. Server dedup Dispatch development is on this branch; inspecting `main` can lead to selecting the unrelated EP memory implementation.
+
 ## Project
 
 TileXR is a C++14 communication runtime for Huawei Ascend NPUs. It provides tile-level synchronization, optional collectives and EP libraries, IPC/MTE communication, registered-memory UDMA, and opt-in local SDMA.
