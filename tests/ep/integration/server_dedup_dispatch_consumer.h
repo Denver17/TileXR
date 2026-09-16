@@ -103,7 +103,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         if (shape.quantized) ValidateOutput(std::memcmp(scales.data() + index * scaleStride,
             payload.data() + layout.data.quantCount, scaleStride) == 0, "dispatch scale mismatch" + context);
         const uint32_t t = assist[index * 8U + 7U];
-        if (!row.Direct()) ValidateOutput(t < 8U * shape.bs, "assistEx t outside group capacity" + context);
+        if (!row.Direct()) ValidateOutput(t < layout.capacityRows, "assistEx t outside group capacity" + context);
         const auto expected = DispatchAssist(row, t);
         for (uint32_t word = 0; word < 8U; ++word)
             ValidateOutput(assist[index * 8U + word] == expected[word], "assistEx mismatch word=" + std::to_string(word) + context);
@@ -115,6 +115,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
                 << t << ',' << row.k << ',' << (row.FirstHop() ? int64_t(row.packet.members.size() - 1U) : -1) << ']';
             if (row.FirstHop()) {
                 ++firstHopReceived;
+                ValidateOutput(t == index, "first-hop t differs from Token prefix row" + context);
                 ValidateOutput(groupIds.insert(t).second, "duplicate first-hop group t" + context);
                 const uint32_t n = uint32_t(row.packet.members.size() - 1U);
                 std::vector<uint32_t> group(1U + 2U * n);
@@ -144,10 +145,6 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
             }
         }
     }
-    uint32_t counter = UINT32_MAX;
-    read(&counter, sizeof(counter), args.peerMems[c.rank] + window +
-        TileXREp::TileXREpServerDedupCountLayout(shape.experts).counterOffset, "read cleared relay counter");
-    ValidateOutput(counter == 0U, "relay counter not cleared");
     return ",\"last_magic\":" + std::to_string(magic) +
         ",\"window_offset\":" + std::to_string(window) + ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"first_hop_packets\":" + std::to_string(firstHopSent) +
         ",\"first_hop_received\":" + std::to_string(firstHopReceived) + ",\"token_stride\":" + std::to_string(layout.data.tokenStride) +
@@ -161,5 +158,5 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         ",\"cross_server_data_bytes\":" + std::to_string(crossServerBytes) + ",\"relay_links\":[" + links.str() + ']' +
         ",\"first_hop_validated\":true,\"direct_validated\":true,\"relay_validated\":true,\"route_coverage_validated\":true"
         ",\"source_outputs_validated\":true,\"weights_unchanged\":true,\"dispatch_outputs_validated\":true,\"group_validated\":true"
-        ",\"flags_cleared\":true,\"counter_cleared\":true";
+        ",\"flags_cleared\":true,\"prefix_indices_validated\":true";
 }

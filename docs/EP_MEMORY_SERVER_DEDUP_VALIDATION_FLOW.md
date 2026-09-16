@@ -87,7 +87,7 @@ cnt 任务与 Token 分配独立，无 Token 的核仍发送所分配的 cnt；�
 复用已有真实输入构造：BF16/FP16 `x[BS,H]`、保持原顺序且每 Token 不重复的 `expertIds[BS,K]`、非空只读 FP32 `expertScales[BS,K]`。
 权重采用可复现的随机归一化值，行和允许 FP32 `1e-6` 误差；K=1 时为 1。hidden 应能区分 source/token，路由和尾部进一步区分 expert/k。
 `balance`、`random`、`balance_shift` 沿用已有生成逻辑，保存 seed 和完整原始输入；必要的定向小例只在测试中指定路由。
-所有 Rank 使用一致的正 BS/H 和配置，总专家数 N=R*L 不超过 1024，K<=min(32,N)，安全用例保证每个 relay 的实际 group 数不超过 8*BS。
+所有 Rank 使用一致的正 BS/H 和配置，总专家数 N=R*L 不超过 1024，K<=min(32,N)，Dispatch group 表按 C=R*BS*min(K,L) 行预留，第一跳 t 为 Token 级 prefix row，不使用旧 8*BS 编号上界。
 共享专家等未支持功能维持现有 0/null 占位，不为 BS=0、非法/重复路由、mask 或中转超限添加新行为。
 
 | 接口适配 | 当前验收要求 |

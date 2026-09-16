@@ -20,8 +20,6 @@ public:
         profile_.Mark(0);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         core_ = GetBlockIdx(); pipe_ = pipe;
-        counterOffset_ = TileXREpServerDedupWindowOffset(magic) +
-            TileXREpServerDedupCountLayout(experts).counterOffset;
         counts_.Init(commArgs, expertIds, expertTokenNumsOut, sendCountsOut, bs, topK, experts, expertTokenNumsType, magic, pipe);
         if (core_ < kEpServerDedupSendCoreNum)
             sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe, magic);
@@ -52,21 +50,6 @@ public:
         // All 64 cores participate exactly once, after their GM writes complete.
         SyncAll();
         profile_.Mark(EpDedupDetailPoint::SyncEnd);
-        if (core_ == kEpServerDedupCoreNum - 1U) {
-            pipe_->Reset();
-            TBuf<> counter;
-            pipe_->InitBuffer(counter, 32U);
-            auto zero = counter.Get<uint32_t>();
-            zero.SetValue(0, 0U);
-            const TEventID before = pipe_->FetchEventID(HardEvent::S_MTE3);
-            SetFlag<HardEvent::S_MTE3>(before); WaitFlag<HardEvent::S_MTE3>(before);
-            GlobalTensor<uint32_t> output;
-            output.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[args_->rank] + counterOffset_));
-            DataCopyPad(output, zero, {1U, 4U, 0U, 0U, 0U});
-            const TEventID after = pipe_->FetchEventID(HardEvent::MTE3_S);
-            SetFlag<HardEvent::MTE3_S>(after); WaitFlag<HardEvent::MTE3_S>(after);
-            profile_.Mark(EpDedupDetailPoint::CounterEnd);
-        }
         profile_.Mark(8);
         profile_.Publish();
     }
@@ -78,7 +61,6 @@ private:
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
     uint32_t core_ = 0;
-    uint64_t counterOffset_ = 0;
 };
 } // namespace TileXREp
 #endif

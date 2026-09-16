@@ -59,7 +59,6 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
     next.groupRowStrideBytes = (logicalGroupBytes + 31U) / 32U * 32U;
     uint64_t rowBytes = 0;
     uint64_t routeCount = 0;
-    uint64_t groupRows = 0;
     if (!MultiplyBytes(next.globalBs, std::min<uint64_t>(topK, next.localExpertNum), &next.capacityRows) ||
         !MultiplyBytes(h, sizeof(uint16_t), &rowBytes) ||
         !MultiplyBytes(bs, rowBytes, &next.xBytes) ||
@@ -72,9 +71,8 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
         !MultiplyBytes(moeExpertNum, sizeof(int32_t), &next.sendCountsBytes) ||
         !MultiplyBytes(next.capacityRows, sizeof(EpServerDedupAssistEx), &next.assistExBytes) ||
         !MultiplyBytes(bs, sizeof(uint32_t), &next.sourceMaskBytes) ||
-        // 最新设计按每个 relay 合计 8*BS 行预留，不按发送卡或全局 rank 数再展开。
-        !MultiplyBytes(bs, 8U, &groupRows) ||
-        !MultiplyBytes(groupRows, next.groupRowStrideBytes, &next.groupBytes)) {
+        // Sparse first-hop indices use the full Dispatch output-row capacity.
+        !MultiplyBytes(next.capacityRows, next.groupRowStrideBytes, &next.groupBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     *out = next;

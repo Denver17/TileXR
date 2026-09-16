@@ -1,5 +1,8 @@
 # EP Memory Server Dedup Combine 待确认项
 
+> 2026-09-16 更新：AtomicAdd/密排 t/group 表 8*BS 行的历史结论已由[主设计的 Token 级 prefix 契约](ep-memory-server-dedup.md#2026-09-16dispatch-使用-token-级-prefix-编号当前契约)替代。Dispatch 第一跳使用 t=row，group 表按 C=R*BS*min(K,L) 预留；终端继承第一跳编号。Combine 返回区按 C*K*returnStride 的扩容及内部实现留到 Combine 阶段，当前旧 relay 预留不能按新编号使用。以下旧编号保留作历史追溯。
+
+
 ## 文档状态
 
 第一轮 Combine 问题已与 Dispatch 共同归并到[主设计](ep-memory-server-dedup.md)及

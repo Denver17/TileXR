@@ -27,7 +27,7 @@ int main()
             &layout) == TILEXR_SUCCESS, "supported layout");
         Check(layout.capacityRows == test.rows && layout.groupRowStrideBytes == test.stride,
             "capacity and group stride");
-        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == 8 * bs * test.stride,
+        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == test.rows * test.stride,
             "metadata byte sizes");
         Check(layout.sourceMaskBytes == bs * 4U && layout.xBytes == bs * 7168U * 2U, "input and mask sizes");
         Check(layout.expertIdsBytes == bs * test.k * 4U && layout.weightBytes == layout.expertIdsBytes,
@@ -37,7 +37,7 @@ int main()
             "count output sizes");
     }
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS &&
-        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.groupBytes == 256, "tight H tail and K=1");
+        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.groupBytes == 512, "tight H tail and K=1");
     const int64_t invalid[][5] = {
         {0, 1, 1, 1, 32}, {8, 1, 1, 1, 32}, {17, 1, 1, 1, 34}, {136, 1, 1, 1, 272},
         {16, 0, 1, 1, 32}, {16, -1, 1, 1, 32}, {16, 1, 0, 1, 32}, {16, 1, -1, 1, 32},
@@ -90,15 +90,15 @@ int main()
         layout.expandXBytes == layout.capacityRows * 7168 && layout.dynamicScalesBytes == layout.capacityRows * 224,
         "MXFP8 packet and separate output scales");
 
-    alignas(32) uint8_t storage[256] = {};
+    alignas(32) uint8_t storage[512] = {};
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS,
         "one-token group capacity");
-    EpServerDedupAllocation group {storage, 32, layout.groupBytes, 32, 1};
+    EpServerDedupAllocation group {storage, 256, layout.groupBytes, 32, 1};
     Check(TileXREpValidateServerDedupAllocations(&group, 1, 1) == TILEXR_ERROR_PARA_CHECK_FAIL,
-        "old BS-row group allocation is insufficient");
+        "old 8*BS-row group allocation is insufficient");
     group.bytes = sizeof(storage);
     Check(TileXREpValidateServerDedupAllocations(&group, 1, 1) == TILEXR_SUCCESS,
-        "8*BS-row group allocation fits exactly");
+        "capacityRows group allocation fits exactly");
     const EpServerDedupAllocation valid[] = {
         {storage, 64, 64, 32, 1}, {storage + 64, 32, 4, 4, 1}, {storage + 96, 160, 128, 32, 1}
     };

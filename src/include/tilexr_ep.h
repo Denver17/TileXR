@@ -57,7 +57,9 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 // 当前仅支持新建 communicator 上的单次调用；数据 Flag 清理和跨调用复用尚未启用。
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
 // expertScalesOut 是独立 FP32[bs,topK] 输出；当前仅 sourceMask 中的第一跳首 k 有效，权重为 1.0。
-// groupOut 预留 8*bs 行，行字节数为 align32(4*(1+2*(topK-1)))；sourceMaskOut 仍为 bs 个 uint32。
+// groupOut 按 epWorldSize*bs*min(topK,moeExpertNum/epWorldSize) 行预留；仅第一跳 row 有效。
+// forwardTokenIdx 为 relay 第一跳的零基输出 row；行字节数为 align32(4*(1+2*(topK-1)))。
+// 调用方须按新容量重新分配 groupOut；sourceMaskOut 仍为 bs 个 uint32。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,

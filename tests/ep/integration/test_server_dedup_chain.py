@@ -239,7 +239,7 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["loops"], 1)
                         self.assertEqual(record["warmup"], 0)
                         self.assertEqual(record["cleanup"], "complete")
-                        for key in ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated", "group_validated", "flags_cleared", "counter_cleared"):
+                        for key in ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated", "group_validated", "flags_cleared", "prefix_indices_validated"):
                             self.assertIs(record[key], True)
                         sent += record["first_hop_packets"]; received += record["first_hop_received"]
                         direct_sent += record["direct_packets"]; direct_received += record["direct_received"]
@@ -380,7 +380,7 @@ class ChainConsumerTests(unittest.TestCase):
     def test_packet_corruption_never_reports_success(self):
         for fault in ("hidden", "flag-first", "flag-last", "mask", "source-weight", "input-weight", "missing-output",
                       "assist-source", "assist-token", "assist-k", "assist-weight", "assist-role", "assist-count",
-                      "assist-relay", "assist-t", "group-row", "group-slot", "group-weight", "row-order", "counter"):
+                      "assist-relay", "assist-t", "group-row", "group-slot", "group-weight", "row-order", "non-prefix-t"):
             with self.subTest(fault=fault):
                 processes = [self.start(rank, environment={"TEST_PACKET_FAULT": fault}) for rank in range(16)]
                 failures = 0

@@ -51,7 +51,7 @@ struct EpServerDedupCountLayout {
     uint64_t cumsumFlagOffset;
     uint64_t prefixOffset;
     uint64_t prefixStride;
-    uint64_t counterOffset;
+    uint64_t counterOffset; // Retired counter: preserve its reserved layout, never read/write it.
     uint64_t stateBytes;
 };
 

@@ -174,14 +174,8 @@ private:
         const uint32_t rank = uint32_t(args_->rank);
         // Only terminal packets search the tail for this expert's k/weight.
         const uint32_t expert = forwardCount == -1 ? rank * localExperts_ + tasks_.Position(j) / bs_ % localExperts_ : 0U;
-        uint32_t t = 0U;
-        if (forwardCount > 0) {
-            auto *counter = reinterpret_cast<__gm__ uint32_t *>(args_->peerMems[rank] + windowOffset_ +
-                TileXREpServerDedupCountLayout(experts_).counterOffset);
-            profile.Begin(EpDedupDetailMetric::Atomic);
-            t = AtomicAdd(counter, uint32_t(1));
-            profile.End(EpDedupDetailMetric::Atomic);
-        }
+        // First-hop rows are unique on this relay, independent of ready order.
+        const uint32_t t = row;
         BuildServerDedupAssist(meta, tail, forwardCount, expert, rank, t);
         if (forwardCount > 0) {
             BuildServerDedupGroup(group, tail, row, t, k_);

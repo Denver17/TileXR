@@ -36,7 +36,7 @@ CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
 DISPATCH_INVALID_MARKER = "EP_SERVER_DEDUP_DISPATCH_INVALID "
-DISPATCH_ABI = {"launch_bytes": 192, "layout": "r07-single", "kernel_scope": "dispatch"}
+DISPATCH_ABI = {"launch_bytes": 192, "layout": "r07-token-prefix", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
@@ -765,6 +765,7 @@ def validate_relay_links(record, config, rank_size):
     links = record.get("relay_links")
     if not isinstance(links, list):
         raise ValueError("缺少 Dispatch relay_links")
+    capacity_rows = rank_size * config["bs"] * min(config["topk"], config["moe_expert_num"] // rank_size)
     first_hops = terminals = 0
     routes = set()
     for link in links:
@@ -773,7 +774,7 @@ def validate_relay_links(record, config, rank_size):
         source, token, first_k, relay, index, original_k, count = link
         if (not 0 <= source < rank_size or not 0 <= token < config["bs"] or
                 not 0 <= first_k < config["topk"] or not 0 <= original_k < config["topk"] or
-                not 0 <= relay < rank_size or not 0 <= index < 8 * config["bs"] or
+                not 0 <= relay < rank_size or not 0 <= index < capacity_rows or
                 relay // 8 != record["rank"] // 8):
             raise ValueError("relay_links 身份或 t 越界")
         route = (source, token, original_k)
@@ -865,7 +866,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     if any(record.get(key) is not True for key in
                            ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated",
                             "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated",
-                            "group_validated", "flags_cleared", "counter_cleared")):
+                            "group_validated", "flags_cleared", "prefix_indices_validated")):
                         raise Failure("RESULT_FAILED", "Dispatch 数据、metadata、group 或轮末清理缺少完整校验", rank=mapping["rank"])
                     try:
                         measurements.validate_dispatch_traffic(record, chain_config)
@@ -1514,7 +1515,7 @@ def run(config):
         scope = (f"{len(mappings)}P 每 rank 8 GiB communicator（两个 4 GiB window）、"
                   f"{config.chain['warmup']} 轮预热＋{config.chain['loops']} 轮测量（同域连续提交）、"
                   "最后一轮 cnt/cumsum、DIRECT/第一跳/终端完整 route 覆盖、源端输出、"
-                  "最终 hidden/scales/assistEx/group、跨 Rank relay/t 关联及轮末 Flag/counter 清理校验；不包含 Combine。")
+                  "最终 hidden/scales/assistEx/group、跨 Rank relay/t 关联、Token 级 prefix 编号和轮末 Flag 清理校验；不包含 Combine。")
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],

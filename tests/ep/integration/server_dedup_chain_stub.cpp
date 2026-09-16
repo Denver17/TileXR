@@ -262,14 +262,10 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         std::map<GroupKey, uint32_t> groupIndices;
         for (uint32_t relay = 0; relay < shape.ranks; ++relay) {
             const auto relayRows = DispatchRows(shape, relay);
-            uint32_t count = 0;
-            for (const auto &row : relayRows) if (row.FirstHop()) ++count;
-            uint32_t ordinal = 0;
-            for (const auto &row : relayRows) if (row.FirstHop()) {
-                // Deliberately change the valid, nonmonotonic t assignment each
-                // generation; the consumer must validate associations, not order.
-                const uint32_t t = (count - 1U - ordinal++ + uint32_t(calls["launch"])) % (8U * shape.bs);
-                groupIndices[{row.source, row.token, row.packet.members.front().k, relay}] = t;
+            for (uint32_t index = 0; index < relayRows.size(); ++index) {
+                const auto &row = relayRows[index];
+                if (row.FirstHop())
+                    groupIndices[{row.source, row.token, row.packet.members.front().k, relay}] = index;
             }
         }
         std::fill(sourceMask, sourceMask + bs, 0);
@@ -294,6 +290,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
                 if (previousT != UINT32_MAX) t = previousT;
                 previousT = t;
             }
+            if (row.FirstHop() && failure == "non-prefix-t") t = (t + 1U) % uint32_t(outputRows.size());
             auto metadata = DispatchAssist(row, t);
             if (failure == "assist-source") metadata[0] ^= 1U;
             if (failure == "assist-token") metadata[1] ^= 1U;
@@ -302,8 +299,8 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             if (failure == "assist-role") metadata[4] ^= 1U;
             if (failure == "assist-count") metadata[5] ^= 1U;
             if (failure == "assist-relay" && !row.Direct()) metadata[6] ^= 1U;
-            if (failure == "assist-t" && !row.Direct()) metadata[7] = 8U * shape.bs;
-            if (failure == "terminal-t" && !row.Direct() && !row.FirstHop()) metadata[7] = (t + 1U) % (8U * shape.bs);
+            if (failure == "assist-t" && !row.Direct()) metadata[7] = shape.ranks * shape.bs * std::min(shape.k, shape.experts / shape.ranks);
+            if (failure == "terminal-t" && !row.Direct() && !row.FirstHop()) metadata[7] = (t + 1U) % (shape.ranks * shape.bs * std::min(shape.k, shape.experts / shape.ranks));
             if (failure != "missing-output") std::memcpy(assistEx + index * 8U, metadata.data(), 32U);
             if (row.FirstHop()) {
                 auto *groupRow = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(group) + t * groupStride);
@@ -334,9 +331,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         if (failure == "mask") sourceMask[0] ^= 1U;
         if (failure == "input-weight") static_cast<float *>(weights)[0] += 1.0f;
         if (failure == "source-weight") std::fill(weightsOut, weightsOut + bs * topK, 0.0f);
-        if (failure == "counter") packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) +
-            TileXREp::TileXREpServerDedupWindowOffset(int64_t(calls["launch"])) +
-            TileXREp::TileXREpServerDedupCountLayout(shape.experts).counterOffset] = {1U, 0U, 0U, 0U};
         const char *fault = std::getenv("TEST_COUNT_FAULT");
         if (fault && std::strcmp(fault, "unwritten") == 0) return 0;
         std::fill(sendCounts, sendCounts + experts, 0);

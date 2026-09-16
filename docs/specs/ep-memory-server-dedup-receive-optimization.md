@@ -345,3 +345,12 @@ Count/cumsum 保留已有按 recv 核数计算的 GM 布局：两张 `recv×recv
 维护要点：增加 recv 核数后，16 专家等合法小输入会产生没有 Count 记录的接收核。这些核不能执行零长度分配、搬运或归约，也不能退出整个 cumsum 协议；必须发布值为零的贡献、参与 prefix 完成通知并获取完整 prefix，否则其他核可能永久等待。本次将贡献发布抽为共同路径，对空分段跳过记录访问与输出拷贝。
 
 本次基于 `006c529`，使用本地 CPU API 替身分别编译 48/16、40/24、32/32，最后一组将 BS 阈值独立设为 64；layout、counts、source_send/profile、receive_packet/profile 每组 6 项，共 18 项通过。覆盖空 Count 核、阈值两侧的实际 Count IO、全部 prefix 与矩阵清理、两窗保护、收发分区和 8 槽流水；3 项 trace 检查通过。编译配置、日志及源码摘要保留于 `build/server-dedup-core-split-verification/`。blue 连接报 `banner exchange: Connection to UNKNOWN port -1: Connection refused`，未进入真实 CANN 9.1 A5 Host/kernel OFF/ON 编译；未运行 NPU，替身结果不证明设备异步时序或性能收益。
+
+## 12. Token 级 prefix 替代 AtomicAdd（2026-09-16）
+
+用户已确认以第一跳的零基输出 row 作为 forwardTokenIdx，允许稀疏 group 表。本增量执行
+[主设计最新编号契约](ep-memory-server-dedup.md#2026-09-16dispatch-使用-token-级-prefix-编号当前契约)，
+替代前文保留 AtomicAdd 的范围约束；不改变 probe、预取、lane 或 cnt/cumsum 算法。
+删除原子取号和 counter 清零；保留本核完成及全核 SyncAll。Atomic/CounterEnd 事件 ID 不复用，
+新 trace 不生成这些样本，历史 trace 仍可读取。新增 prefix_indices_validated 验收字段并更新
+构建清单的编号契约，避免旧任意 t 的 consumer 被当作新协议验证。Combine 实现及内存优化另行推进。

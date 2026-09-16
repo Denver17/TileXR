@@ -133,7 +133,7 @@ def breakdown_timeline(run):
                                      begin_event_id=total.end_event_id, source_index=total.end_source_index)
             # Role belongs to the capture; the producer's send/recv split can change.
             markers["work_end"] = markers.get("send_data_end") or markers.get("recv_data_end")
-            # No-task receivers return after PrepareEnd; only core 63 resets the counter.
+            # No-task receivers return after PrepareEnd; old captures also have counter reset.
             markers["recv_return_begin"] = markers.get("recv_clear_end")
             prepared, received = markers.get("recv_prepare_end"), markers.get("recv_data_end")
             if (markers["recv_return_begin"] is None and prepared is not None and received is not None
@@ -143,7 +143,7 @@ def breakdown_timeline(run):
                 # Old captures include the removed cross-rank completion handshake.
                 legacy_finish = "finish_publish_end" in markers or "finish_wait_end" in markers
                 markers["finish_return_begin"] = markers.get(
-                    "finish_wait_end" if legacy_finish else "finish_counter_end")
+                    "finish_wait_end" if legacy_finish else "finish_counter_end") or markers.get("finish_sync_end")
             else:
                 markers["finish_return_begin"] = markers.get("finish_sync_end")
             packets = [sample for sample in lane.samples if sample.name == "packet_issue"]

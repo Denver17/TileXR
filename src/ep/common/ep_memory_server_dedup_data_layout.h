@@ -49,6 +49,8 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     layout.dispatchOffset = TileXREpDedupAlign(layout.sourceOffset + layout.sourceBytes, 512U);
     layout.dispatchBytes = uint64_t(experts) * bs * layout.tokenStride;
     layout.relayOffset = TileXREpDedupAlign(layout.dispatchOffset + layout.dispatchBytes, 512U);
+    // Historical Combine reservation, unused by Dispatch. Prefix-index Combine
+    // must resize this to capacityRows*K*returnStride before consuming new t.
     layout.relayBytes = uint64_t(8U) * bs * topK * layout.returnStride;
     layout.requiredBytes = layout.relayOffset + layout.relayBytes;
     return layout;

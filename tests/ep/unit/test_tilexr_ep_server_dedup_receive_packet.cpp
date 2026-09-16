@@ -22,7 +22,7 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
     Check(!events.empty() && events.front() == kEpServerDedupDetailEventBase, "receive begin is retained");
     const auto probes = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase);
     Check(rows == 0U ? probes == 0 : probes > 0, "probe samples reflect actual work");
-    const uint32_t expected[] = {uint32_t(probes), 0U, rows, firstHops, rows, firstHops, 0U,
+    const uint32_t expected[] = {uint32_t(probes), 0U, rows, 0U, rows, firstHops, 0U,
         rows, rows, uint32_t(probes), uint32_t(probes)};
     for (uint32_t op = 0; op < sizeof(expected) / sizeof(expected[0]); ++op) {
         const auto begin = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op);
@@ -200,7 +200,7 @@ void CheckReceiver(int32_t role, int64_t magic)
     std::vector<uint8_t> hidden(hiddenBytes + 64U, 0xcd), scales(data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(24U, 0xcdcdcdcdU);
     const uint32_t groupStride = uint32_t(TileXREpDedupAlign(4U + 8U * (k - 1U), 32U));
-    std::vector<uint32_t> groups((8U * bs * groupStride + 64U) / 4U, 0xcdcdcdcdU);
+    std::vector<uint32_t> groups((world * bs * std::min(k, experts / world) * groupStride + 64U) / 4U, 0xcdcdcdcdU);
     AscendC::testCore = 63U;
     AscendC::TPipe pipe;
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
@@ -232,24 +232,24 @@ void CheckReceiver(int32_t role, int64_t magic)
         "receiver writes MXFP8 scale bytes from their logical payload offset");
     for (uint32_t word = 0; word < 8U; ++word) {
         uint32_t expected = fixture.Word(word);
-        if (role > 0 && word >= 6U) expected = word == 6U ? rank : initialCounter;
+        if (role > 0 && word >= 6U) expected = word == 6U ? rank : 0U;
         if (role == -1 && word == 2U) expected = fixture.Word(18U);
         if (role == -1 && word == 3U) expected = fixture.Word(19U);
         Check(assist[8U + word] == expected, "receiver writes a complete route-specific assist row");
     }
     uint32_t counter;
     std::memcpy(&counter, local.data() + counts.counterOffset, 4U);
-    Check(counter == initialCounter + (role > 0), "only a first-hop owner allocates one group number");
+    Check(counter == initialCounter, "receiver never reads or updates the retired counter");
     if (role > 0) {
-        const uint32_t row = 8U + initialCounter * groupStride / 4U;
+        const uint32_t row = 8U;
         Check(groups[row] == 0U, "group byte stride is converted to uint32 element indexing");
         for (uint32_t i = 0; i < fixture.entries; ++i) {
-            Check(groups[row + 1U + i * 2U] == initialCounter * k + fixture.Word(10U + i * 4U) &&
+            Check(groups[row + 1U + i * 2U] == fixture.Word(10U + i * 4U) &&
                 groups[row + 2U + i * 2U] == fixture.Word(11U + i * 4U), "group contains dense original-k/weight members");
             const uint32_t expert = fixture.Word(8U + i * 4U), q = fixture.Word(9U + i * 4U);
             const auto address = TileXREpServerDedupDispatchOffset(data, 2U, expert / 6U, expert % 6U, q, world, 6U, bs);
             auto expected = fixture;
-            expected.SetWord(4U, UINT32_MAX); expected.SetWord(6U, rank); expected.SetWord(7U, initialCounter); expected.Pack();
+            expected.SetWord(4U, UINT32_MAX); expected.SetWord(6U, rank); expected.SetWord(7U, 0U); expected.Pack();
             Check(std::memcmp((expert / 6U == rank ? local.data() : peer.data()) + address, expected.wire.data(), data.tokenStride) == 0,
                 "local and peer relay slots retain their complete common packet and ready flags");
         }
@@ -316,7 +316,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
     const uint32_t depth = expectedLanes;
     std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(owned * 8U + 16U, 0xcdcdcdcdU);
-    std::vector<uint32_t> groups((8U * bs * groupStride + 64U) / 4U, 0xcdcdcdcdU);
+    std::vector<uint32_t> groups((world * bs * std::min(k, experts / world) * groupStride + 64U) / 4U, 0xcdcdcdcdU);
     AscendC::testCore = kEpServerDedupSendCoreNum;
     AscendC::TPipe pipe;
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
@@ -413,7 +413,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
         const auto *meta = assist.data() + 8U + q * 8U;
         Check(meta[0] == 0U && meta[1] == q && meta[3] == packet.Word(3U), "metadata lanes follow stable rows");
         if (packet.entries) {
-            Check(meta[4] == packet.entries && meta[6] == rank && groupIds.insert(meta[7]).second,
+            Check(meta[4] == packet.entries && meta[6] == rank && meta[7] == q && groupIds.insert(meta[7]).second,
                 "a first hop allocates a unique t and keeps its original role");
             const auto *group = groups.data() + 8U + meta[7] * groupStride / 4U;
             Check(group[0] == q, "group refers to the first-hop output row");
@@ -449,12 +449,98 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes)
     Check(hidden == prior && pipe.bytes == experts * 4U, "empty receive set has no data/probe/lane allocation or output writes");
 }
 
+// Two experts per rank, every source contributes two tokens to both experts.
+// Remote-source first hops land on expert 1 (rows 32..47), then relay to expert 0.
+// Their t exceeds the old 8*BS=16 capacity; reverse core order retires senders first.
+void CheckSparsePrefixReceivers()
+{
+    constexpr uint32_t rank = 8U, world = 16U, experts = 32U, bs = 2U, k = 2U, h = 16U;
+    constexpr uint32_t rows = 64U, stride = 32U;
+    const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, false);
+    const auto counts = TileXREpServerDedupCountLayout(experts);
+    std::vector<uint8_t> local(data.dispatchOffset + data.dispatchBytes, 0U);
+    TileXR::CommArgs args {};
+    args.rank = rank; args.rankSize = world; args.peerMemBytes = kEpServerDedupPeerBytes;
+    args.peerMems[rank] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(rank));
+    ServerDedupTest::SparsePeerMemory memory;
+    // Reuse the same backing for three sequential magic values; no concurrent launches.
+    memory.Add(rank, 0U, local.data(), local.size());
+    memory.Add(rank, 1U, local.data(), local.size());
+    std::vector<uint8_t> hidden(rows * h * 2U, 0xcd);
+    std::vector<uint32_t> assist(rows * 8U, 0xcdcdcdcdU);
+    std::vector<uint32_t> groups((rows * stride + 64U) / 4U, 0xcdcdcdcdU);
+    for (int64_t magic : {1, 2, 3}) {
+        std::fill(local.begin(), local.end(), 0U);
+        std::fill(groups.begin(), groups.end(), 0xcdcdcdcdU);
+        std::fill(local.begin() + counts.counterOffset, local.begin() + counts.stateBytes, 0xa5);
+        for (uint32_t core = 0; core < kEpServerDedupRecvCoreNum; ++core) {
+            auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset +
+                counts.prefixOffset + core * counts.prefixStride);
+            for (uint32_t record = 0; record < experts; ++record) prefix[record] = (record + 1U) * bs;
+        }
+        for (uint32_t e = 0; e < 2U; ++e) for (uint32_t source = 0; source < world; ++source)
+            for (uint32_t q = 0; q < bs; ++q) {
+                if (source < 8U && e == 0U) continue; // Only the first-hop owner publishes this terminal.
+                Packet packet(h, k, false, source < 8U ? 1 : 0);
+                packet.payload[0] = uint8_t(source * bs + q + magic);
+                packet.SetWord(0U, source); packet.SetWord(1U, q);
+                packet.SetWord(2U, e == 1U ? 0U : 1U);
+                if (source < 8U) {
+                    packet.SetWord(8U, rank * 2U); packet.SetWord(9U, q); packet.SetWord(10U, 1U);
+                }
+                packet.Pack();
+                const uint64_t address = TileXREpServerDedupDispatchOffset(data, source, rank, e, q, world, 2U, bs);
+                std::memcpy(local.data() + address, packet.wire.data(), data.tokenStride);
+            }
+        for (uint32_t core = kEpServerDedupCoreNum; core-- > kEpServerDedupSendCoreNum;) {
+            AscendC::testCore = core;
+            AscendC::TPipe pipe;
+            ServerDedupReceiver<uint16_t, false, false> receiver;
+            receiver.Init(&args, hidden.data(), nullptr, reinterpret_cast<uint8_t *>(assist.data()),
+                reinterpret_cast<uint8_t *>(groups.data() + 8U), bs, h, k, experts, &pipe, magic);
+            ServerDedupTest::ProfileCapture capture(args);
+            ServerDedupProfile profile;
+            profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
+            receiver.Process(profile);
+        }
+        for (uint32_t row = 0; row < rows; ++row) {
+            const uint32_t source = row % 32U / bs, q = row % bs;
+            const auto *meta = assist.data() + row * 8U;
+            Check(meta[0] == source && meta[1] == q && hidden[row * h * 2U] == source * bs + q + magic,
+                "all cores preserve prefix output identity across generations");
+            if (source < 8U) {
+                const uint32_t firstHop = 32U + source * bs + q;
+                Check(meta[7] == firstHop && meta[6] == rank,
+                    "terminal inherits high first-hop prefix instead of its own row");
+                Check(meta[4] == (row >= 32U ? 1U : UINT32_MAX), "first-hop and terminal roles remain distinct");
+            } else Check(meta[4] == 0U && meta[7] == UINT32_MAX, "DIRECT rows have no relay index");
+            const auto *group = groups.data() + 8U + row * stride / 4U;
+            if (row >= 32U && row < 48U) {
+                Check(group[0] == row && group[1] == row * k + 1U && group[2] == 0x3f000001U,
+                    "high sparse group stores its row and original-k member slot");
+            } else Check(std::all_of(group, group + stride / 4U, [](uint32_t v) { return v == 0xcdcdcdcdU; }),
+                "non-first-hop group holes stay untouched");
+        }
+        Check(std::all_of(groups.begin(), groups.begin() + 8U, [](uint32_t v) { return v == 0xcdcdcdcdU; }) &&
+            std::all_of(groups.end() - 8U, groups.end(), [](uint32_t v) { return v == 0xcdcdcdcdU; }),
+            "sparse group output stays within the full row capacity");
+        Check(std::all_of(local.begin() + counts.counterOffset, local.begin() + counts.stateBytes,
+            [](uint8_t v) { return v == 0xa5; }), "all receivers leave the retired counter poisoned");
+        for (uint64_t slot = data.dispatchOffset; slot < data.dispatchOffset + data.dispatchBytes; slot += data.tokenStride)
+            for (uint64_t block = 0; block < data.blockCount; ++block)
+                Check(std::all_of(local.begin() + slot + block * 512U + 480U,
+                    local.begin() + slot + (block + 1U) * 512U, [](uint8_t v) { return v == 0U; }),
+                    "all receiver owners clear only their completed packet flags");
+    }
+}
+
 } // namespace
 
 int main()
 {
     try {
         CheckPacket(1U, 1U, false);
+        CheckSparsePrefixReceivers();
         CheckBatchReceiver<false>(7168U, 8U);
         CheckBatchReceiver<true>(7168U, 8U);
         CheckBatchReceiver<false>(20000U, 3U);

@@ -2,7 +2,15 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
-当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理当前窗口的数据 Flag，再参与本卡 SyncAll 和当前窗口 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理当前窗口的数据 Flag，再参与本卡 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+
+2026-09-16 编号契约更新：第一跳 `t=row`，终端继承 relay 的 t；`groupOut` 按
+`C=R*BS*min(K,L)` 行重新分配。原 `t<8*BS` 和任意密排编号不再有效；consumer 验证第一跳
+`t==row`，跨 Rank relay_links 继续验证所有终端关联。工作流要求 `prefix_indices_validated`，
+不再要求已取消的 `counter_cleared`。清单 layout 为 `r07-token-prefix`，旧安装须重新 build/sync。
+新增用例用 `BS=2/R=16/L=2/K=2` 构造第一跳 row 32..47（超过旧上限 16），终端位于 row 0..15，
+覆盖接收核逆序执行、三轮 magic、旧 counter 保持污染值及未写 group 空洞保护。
+当前仍只验收 Dispatch，旧 Combine relay 预留区未扩容；新编号不能直接用于该区。
 
 2026-09-14：用户确认完整 Dispatch 在 **16P、64P 的单轮和多轮功能测试均通过**。按最近交付的 [8bc2348](https://github.com/LingquLab/TileXR/commit/8bc2348471614c97b7d020aed65a70885aa3e263) 登记；本次回传未附原始 summary、kernel SHA 或编译版本，尚未独立核对产物来源。该结果覆盖已运行配置的完整 Dispatch 功能及多轮复用；专家数、BS/H/TopK、dtype/量化格式和具体轮次未回传，不沿用此前 source-send 的量化覆盖，也不据此登记完整安全矩阵、128P、breakdown v5、性能目标或 Combine 通过。
 
@@ -688,3 +696,27 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 若执行在 `test_tilexr_ep_server_dedup_public_abi` 报 `ABI consumer propagates submit result and rejects non-A5`，先核对该测试的模拟 CommArgs 容量。双窗实现要求至少 8 GiB，旧夹具仍填写 4 GiB 会在提交替身之前返回参数错误，使原本检查提交返回值的断言失败；随后的 profiling 报告缺失是流程提前中止的结果。容量夹具应引用 `kEpServerDedupPeerBytes`，通信域契约变化时把公开 ABI consumer 纳入相关回归。
 
 此问题已在当前 Host 目标重编译后复现同一断言失败；只修正夹具容量后重新编译，原用例通过。本次未修改 kernel 或生产 Host，不代表 32P 多轮或 NPU 执行已经验证。
+
+## 2026-09-16 Token prefix 编号验证
+
+源码为 `a77ac87` 加本次修改，第一跳 t=row、groupOut 按 capacityRows 分配，删除原子取号和
+counter 清零，保留完成屏障；Combine 尚未实现。主规格记录新的字段/容量契约及后续返回区预算。
+
+- blue 上真实 CANN compiler `Version=9.1.0`、bisheng clang 15.0.5（2026-05-18），
+  A5 `dav-c310-vec` 的 profiling OFF/ON Server Dedup kernel 及 `tilexr-ep` Host 库均构建成功。
+  已核对最终 501 个生产/依赖文件与编译快照摘要一致。本地未安装 cmake/g++，Host C++ 检查也在 blue 执行。
+- 12 项 `ctest -R server_dedup` 及 2 项 kernel launch CTest 通过。新增高编号场景验证
+  t=32..47 超过旧 8*BS=16 上限、跨接收核关联、同卡终端继承、三轮 magic、group 空洞及污染 counter 保持不变；
+  既有量化/非量化、乱序 ready、跨卡转发和 profiling OFF/ON 替身覆盖继续通过。
+- Python chain/workflow 最终 104 项通过；本地 chain/trace 最终 27 项通过（含重叠 chain 测试）。
+  完整 workflow/chain/trace/build 组合在审查前为 135 项通过；审查后只改动链路编号上界并新增一项边界测试，
+  已刷新受影响 chain/workflow。独立审查发现的汇总层旧 `8*BS` 上界已用失败复现后修正为 C，
+  覆盖 K<L、K>L、合法高 t、C-1 及 C/-1 拒绝。历史 trace 仍可读取，新 trace 不伪造 Atomic/CounterEnd 样本。
+- C++ consumer 集成 21 项中 20 项通过；`test_repeated_calls_reject_wrong_bank_readback` 失败，
+  原始 `a77ac87` 上单独复跑得到相同失败：注入读取 API 返回 92，程序失败退出 1，而测试预期返回 0 并发布 INVALID。
+  这是已有的 API 失败与数值失败预期差异，未作为本次优化修复；不声称 consumer 套件全通过。
+
+源码快照、摘要、diff、工具链及完整日志保存在本地 `build/prefix-index-verification/`（不提交）。
+独立审查及主审已核对 owner、稀疏容量、终端继承和旧 counter/profile 消费者。
+这些验证不证明 A5 多卡异步运行或性能收益；用户侧必须重新 build/sync 后在相同 case 比较完整 Dispatch。
+既有 HCCL 环境基线无需因本次代码改变重复运行。

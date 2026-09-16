@@ -188,6 +188,20 @@ class TraceTests(unittest.TestCase):
         for event in returns:
             self.assertAlmostEqual(event["dur"], 0.1 if event["args"]["core"] == 63 else 0.2)
 
+    def test_prefix_index_finish_has_no_counter_or_atomic_samples(self):
+        rows = {core: [(0, 0x53000001), (100, 0x53000108),
+                      (200, 0x53000109), (300, 0x5300010A),
+                      (500, 0x53000009)] for core in range(64)}
+        path = write_capture(self.root / "prefix.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "prefix")
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        events = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+        self.assertFalse({"finish_counter", "atomic"} & {event["name"] for event in events})
+        returns = [event for event in events if event["name"] == "finish_return"]
+        self.assertEqual(len(returns), 64)
+        for event in returns:
+            self.assertAlmostEqual(event["dur"], 0.2)
+
     def test_old_chrome_display_unit_is_removed_without_changing_events(self):
         source = self.root / "legacy-trace.json"
         trace = dict(displayTimeUnit="us", traceEvents=[dict(name="stage", ph="X", pid=0, tid=0,

@@ -1,10 +1,52 @@
 # EP Memory 服务器级去重设计
 
+## 2026-09-16：Dispatch 使用 Token 级 prefix 编号（当前契约）
+
+本节替代本文及历史 R04/R05/R07 中的 AtomicAdd 取号、密排 t 和 group 表 8*BS 行约定。
+当前只实现 Dispatch；Combine 的数据区扩容、收发、监听和清理留到 Combine 阶段。
+
+对于第一跳包（forwardCount>0），使用接收端已有的零基 Token 级 prefix 行号：
+
+```text
+t = 当前 localExpert/source 段之前的累计条数 + q
+  = tasks.Begin() + j = row
+forwardTokenIdx = t
+C = R * BS * min(K, L)  # 现有 capacityRows，L=moeExpertNum/R
+0 <= t < 本卡 tokenNum <= C
+groupBytes = C * align32(4 + 8*(K-1))
+```
+
+不能使用整段的 inclusive prefix、段内 q、物理 tokenPos 或会变化的 pending 下标取号。
+所有接收 row 在本卡本轮唯一，第一跳是其子集，因此无需 AtomicAdd 或额外 prefix 计算。
+第一跳 owner 写入 assistEx[row]、group[t] 及公共转发包尾；全部终端副本（包括本卡其他
+expert）继承该 owner 的 (relayRank,t)，不以终端自己的 row 重算。DIRECT 保持 -1 引用。
+不同卡允许相同 t，由 relayRank 区分；相同路由重复调用的 t 稳定，但不是跨调用持久 ID。
+
+Group 行可以有空洞，第一跳的 group[t].firstHopRow 等于 t，字段及 32B assistEx ABI 保留。
+只消费有效 assistEx 中 forwardCount>0 引用的 group，且只读取其前 forwardEntryCount 个成员；
+空洞无需初始化或清零。members[i].recvSlot 继续为 t*K+originalK，成员的顺序及真实 weight 不变。
+按 C 预留 groupOut；不能依据实际 group 数或旧 8*BS 上限分配、校验地址。删除原子取号及
+轮末 counter 清零，保留现有本核完成、SyncAll、双窗口和 Dispatch Flag 清理边界。
+原 counter 的 1KiB 布局区和 profiling 事件编号仅作历史保留，不再产生 Atomic/CounterEnd 事件。
+
+当前 Dispatch 不访问 Combine relay 返回区，保留旧通信窗口预留和容量检查以隔离性能变量；
+旧 relayBytes=8*BS*K*returnStride 不满足新编号契约，不代表 Combine 已可用。后续 Combine
+至少按 C*K*returnStride 预算其离散结果区，重新核算整个窗口、框架分配和生命周期。
+不能把新的 recvSlot 直接用于旧 relay 预留区。内存压缩优化留到后续。
+
+本轮验收：编号与独立原始路由参考的第一跳输出行一致；覆盖 t>=8*BS、稀疏空洞、不同接收核、
+乱序 ready、DIRECT/第一跳/终端、本卡和跨卡副本、连续 magic；分配和结果校验同步采用新容量。
+Host 替身证明编号/字节/边界契约，CANN 9.1 A5 编译证明编译；性能差异需要相同 case 的 A5 实测，
+不能从去掉原子指令推断收益。当前调用方必须重新按新 groupBytes 分配，函数签名未变不代表旧分配兼容。
+
+维护要点：从密排计数器改用已有稀疏身份时，容量由最大可寻址索引决定，而不是有效 group 数；
+必须同步调整 caller 分配、元数据检查及独立 oracle，否则正常高 row 会越界或被测试误拒。
+
 ## 设计状态
 
 本文合入第一轮 D01-D11、相关 Combine 讨论及第二轮已经确认的设计，作为后续梳理的基线。
 已同步 R03 的 16B entry、固定 K-1 容量与无效区域不清零，R04-07/R04-08 的 expertScales 复用，
-R05-01 至 R05-03 的固定分核、UB 双表和计数器方案，以及 R05-04 已确认的本卡数据发送流水。
+R05-01 至 R05-03 的固定分核和 UB 双表；计数器方案已由本文开头的 Token 级 prefix 契约替代，以及 R05-04 已确认的本卡数据发送流水。
 Cnt 发送、接收及 cumsum 整体复用 Memory；通信空间按 Server Dedup 独占的三块区域排布。
 源端按两遍扫描执行，R02-01 已确认 serverRouteMask + directMask；R05-04 的源端 UB/Event、R07-01 的单份布局和 R10-01 的权重 ABI 已给出具体实现结论。
 尚未决定的机制集中在[第二轮待确认项 R01-R12](ep-memory-server-dedup-open-topics.md)，
@@ -14,8 +56,8 @@ Cnt 发送、接收及 cumsum 整体复用 Memory；通信空间按 Server Dedup
 kernel 或性能已经实现并验证。后续确认更新本文对应章节，并关闭相应 R 项，不再维护多份重复的设计结论。
 普通 Memory 行为以 [EP Memory 规格](ep-memory.md)为准；本设计使用独立去重入口，不隐式修改原入口。
 
-当前代码增量仅实现 cnt 发送/接收、cumsum、完整前缀的发布/消费/清理及 expertTokenNumsOut。
-数据发送、数据接收/转发和 assistEx/sourceMask/group/expertScalesOut 生成仍未实现；当前入口的非计数输出不能用于后续 expert/Combine。
+当前代码已实现完整 Dispatch 的 cnt/cumsum、源端发送、接收/转发、输出及清理。
+Combine 尚未实现；本次 Token 级 prefix 改动的验证边界见验证指南，不能沿用旧编号的功能/性能结论。
 2026-09-15 更新：每 rank 总通信域为 8 GiB（8188 MiB 数据 + 4 MiB runtime Flag，`peerMemBytes=8589934592`）。两个固定 4 GiB 窗口按 `magic % 2` 选择；每窗前 2 MiB 为控制信息，Token 区上限为窗内 4092 MiB。两窗尾部均保留 4 MiB，实际 runtime Flag 只占整个域的最后 4 MiB。当前仅实现 Dispatch，Combine 后续共用此域。
 开发阶段 1～4 的当前主流程测试固定为 16P、每卡 6 专家、BS=96、TopK=6、balance_shift；优先验证流程和性能，边界条件在最终验收统一覆盖。这是测试基线，不缩窄算子的设计支持范围。
 
@@ -57,7 +99,7 @@ assistEx/group 由后续 recvData 的 Token 接收 owner 生成，不属于源�
 4. 持续监听 receive buffer。根据 Token 尾部识别直发 Token、待转发的第一跳 Token 和已经转发过的终端 Token，分别执行本地整理、展开后续转发或匹配有效 entry 后的终端处理；本阶段的数据转发 UB/Event、公共副本和进度回收另行设计。
 
 `recvData` 的 cumsum 完成是监听表生成的前置条件，但不表示各 Token 已经到达；监听仍按完整 Payload 的 DataAsFlag 逐 Token 判定。
-`sendData` 与 `recvData` 是核角色路径，不是两个可以相互等待的逻辑阶段；两组核在 `process` 中并行推进，只有算子末尾的全核 `SyncAll()` 用于 counter 清零前收敛。
+`sendData` 与 `recvData` 是核角色路径，不是两个可以相互等待的逻辑阶段；两组核在 `process` 中并行推进，只有算子末尾的全核 `SyncAll()` 保留用于完成收敛。
 
 ### Cnt 与 cumsum 的 Memory 复用边界
 
@@ -124,7 +166,7 @@ Host 在整数窄化前核算该预算，超过沿用的 190KiB UB 预算则拒�
 | Top-k | `1<=K<=min(32,moeExpertNum)`，典型为 6、8、16；K 不超过总专家数由有效且互不重复的 route 契约决定 |
 | BS | 所有 Rank 的原始输入 BS 相同，`globalBs=BS*R`，`maxBS=BS` |
 | 输入保证 | 每个 Token 恰有 K 条有效 route；expert ID 在 `[0,moeExpertNum)` 内且互不重复，无空 route 占位 |
-| 初版中转容量 | 安全用例保证每个 relay 的实际 group 数不超过 `8*BS`；初版不生成 X 状态，不做超限校验、报错或超限测试 |
+| Dispatch group 容量 | 按 C=R*BS*min(K,L) 行预留稀疏 group；不发布 X 或额外 group 计数。Combine 容量另行实现 |
 | 数据发送并发 | 每个源端数据发送核按剩余 UB 配置 1 至 8 路；安全输入保证至少容纳一个完整去重 Token，不增加 0 并发校验 |
 | 输入 dtype | 支持 BF16、FP16；对应现有枚举 TILEXR_DATA_TYPE_BFP16 / TILEXR_DATA_TYPE_FP16 |
 | Dispatch 量化 | 支持非量化 quantMode=0 及 MXFP8 quantMode=4；MXFP8 沿用 Memory 的 E4M3/E5M2 选择，其他量化模式不支持 |
@@ -401,7 +443,7 @@ R05-04 按 Memory 收口：两类发送事件均使用 lane 作为显式 ID（0 
 
 源端发送可在当前 MTE3 在途时准备后续包，环回到忙槽位时按上述 WaitFlag 正常等待；
 不要求非阻塞完成查询接口，也不在每包发送后或第一跳/DIRECT 切换时增加 PIPE_ALL、SyncAll 或专门的 MTE3 等待。
-核末正常回收发送资源与全核 counter 清零同步用途不同；后者见[原子取号](#原子取号)。
+核末正常回收发送资源后参与全核完成同步；见[Token 级 prefix 编号](#token-级-prefix-编号)。
 上述流程参考 Memory 的 CalcSendTokenBufNum、TokenToExpert/TokenToExpertInQuant 与 SendToMoeExpert；
 数据转发的多次写出、公共副本和监听前进性保留为 R05-05/R05-06 后续设计，不因复用源端流水而确认。
 
@@ -515,13 +557,13 @@ expert 内部若重排，须在交给 Combine 前还原 Dispatch 行序；不新
 | --- | --- | --- |
 | `assistEx` | `int32/FP32` 位视图 `[tokenNum,8]`，每行 32B，stride 32B，总字节数 `tokenNum*32B` | 描述每个 Combine 输入 Token 行的 source、originalK、角色、weight 和返回引用 |
 | `sourceMask` | `uint32[BS]`，stride 4B，总字节数 `BS*4B` | 描述每个原始 source Token 最终需要消费的 k 槽位 |
-| `group` | `uint32[8*BS,rowStride/4]`，`rowStride=align32(4*(1+2*(K-1)))` | 保存每个 relay group 的 firstHopRow 和前 n 个 `(recvSlot,weight)` member |
+| `group` | `uint32[C,rowStride/4]`，C=R*BS*min(K,L)，`rowStride=align32(4*(1+2*(K-1)))` | 保存每个 relay group 的 firstHopRow 和前 n 个 `(recvSlot,weight)` member |
 
 `group` 的第一维是安全容量上限，不代表实际 group 数；实际有效行通过有效第一跳 `assistEx` 关联，
 在 `[0,tokenNum)` 中以 `forwardCount>0` 识别第一跳，取 `t=assistEx[row].forwardTokenIdx` 访问 `group[t]`，
-且 `group[t].firstHopRow=row=dstPosition`。此关联已由 R04-03 确认，不提供 X，也不扫描未写入的 8*BS 行。
+且 `group[t].firstHopRow=row=dstPosition`。此关联已由 R04-03 确认，不提供 X，也不扫描未写入的 C 行。
 R04-05/R07-02/R07-03 已确认 `recvSlot=uint64(t)*K+originalK`，本卡及跨卡返回共用 `[8*BS,K]` 个结果槽位，来源卡不参与编号。
-`8*BS` 是本 relay 合计 group 容量；`assistEx[tokenNum,8]` 和 `sourceMask[BS]` 的第一维保持各自既有语义。
+`C` 是本 relay 的 group 可寻址行容量；`assistEx[tokenNum,8]` 和 `sourceMask[BS]` 的第一维保持各自既有语义。
 
 R04-04 沿用 Memory 的算子完成语义：Dispatch 所有核完成全部任务及 GM 写入后，Dispatch 算子才结束；
 后续 Combine 据此读取完整的三个 metadata 输出及 Dispatch 输出的 expertScalesOut，不另设元数据发布协议、ready Flag 或额外同步。
@@ -594,12 +636,11 @@ DataAsFlag 在 Payload 分块之间插入 Flag，因此这些 offset 不能直�
 | `forwardCount` | `int32_t` | 4B | 16 | 0 表示 DIRECT；正数 n 表示第一跳有 n 次后续 expert 发送；-1 表示终端包，不再转发。计数包含本卡转发，必须能编码负值 |
 | `forwardEntryCount` | `int32_t` | 4B | 20 | 原始列表的有效条目数 n，范围 `[0,K-1]`；forwardCount 改为 -1 后仍保留 n，使终端只解析有效 entries |
 | `relayRank` | `int32_t` | 4B | 24 | Combine 应返回的中转 Rank；终端包有效范围 `[0,R)`，由第一跳 owner 填本 Rank。本卡转发同样填写；未使用时填 -1 |
-| `forwardTokenIdx` | `int32_t` | 4B | 28 | 第一跳 owner 在本 relay 上通过 AtomicAdd 为本 Token 分配一次的非负编号 t；所有转发副本共用，用于 Combine 定位 group/返回槽位。未分配时填 -1 |
+| `forwardTokenIdx` | `int32_t` | 4B | 28 | 第一跳 owner 的零基 Token prefix 输出行 t=row；所有转发副本共用，用于 Combine 定位 group/返回槽位。未分配时填 -1 |
 | `forwardEntries` | entry 数组，固定 K-1 条容量 | 每条 16B；有效部分 `16*n` B | 32 | 每条对应一次后续 expert 发送；有效范围 `[0,n)`，排除第一跳 route。转发时原列表完整保留，预留容量见下表 |
 
-固定头部合计 `8*4=32B`。初版安全输入保证每个 relay 实际 group 数不超过 `8*BS`，
-因此有效 `forwardTokenIdx` 落在 `[0,8*BS)`；Dispatch/Combine 不生成或传递 X，也不做中转容量超限校验、状态记录或报错。
-`forwardTokenIdx` 是独立编号，不要求与 srcTokenId、q 或原始 k 数值相等，也不能用它们替代。
+固定头部合计 `8*4=32B`。有效 `forwardTokenIdx` 落在 relay 本轮 `[0,tokenNum)`，由 C 容量覆盖；不生成或传递 X。
+`forwardTokenIdx` 等于第一跳输出 row，不能用 srcTokenId、段内 q、原始 k 或终端自己的 row 替代。
 以上范围描述字段语义，不增加已由输入契约排除的逐 Token 安全扫描。
 头部与 assistEx 的 weight 使用 FP32、group 由 relay 执行加权求和均已确认；公共 dtype 契约归 R08，内部计算精度及数值验收归 Combine 文档。
 
@@ -834,7 +875,7 @@ slotAddress(j) = dispatchDataBase[thisRank] + uint64(tokenPos[j]) * T
 先扩为 uint64 再乘完整去重 stride T。pendingIdx 删除不修改 tokenPos，稳定位置表保留到本核 Flag 清理完成。
 一般配置中每核 m 至多为 `ceil(tokenNum/16)`，每张表有效字节为 `4*m`，UB 各自按 32B 对齐申请。
 均衡时每核约 BS*K/16 项；当前预计每核约 1K 项以内，1024 项时单表 4KiB、双表 8KiB。
-这个估算不增加固定 1024 项上限；不能将本例 128 或 Combine 的 8*BS group 上限当作监听表长上限。
+这个估算不增加固定 1024 项上限；不能将本例 128 或旧 8*BS 容量当作监听表长上限。
 
 监听检测使用 MTE2/Vector/Scalar，数据转发及本地 copy 写出使用 MTE3，包含向本卡接收区的转发。
 已确认目标是监听不依赖无关的 MTE3 完成，数据准备和同一 UB 的复用仍须有必要依赖。
@@ -856,43 +897,18 @@ else:
 循环只访问有效范围，换入项继续检查，轮询到末尾后从头继续。
 tokenPos、输出行及 forwardTokenIdx 关联稳定 j，不绑定 pendingIdx 的当前位置。
 核末以 `PipeBarrier<PIPE_ALL>` 等待本核已下发的写入和清理完成；该操作不是跨核或跨 Rank 屏障。
-全部 64 核还须参与算子末尾的 counter 清零同步，即使本核没有 Token 任务，见下节。
+全部 64 核还须参与算子末尾的 SyncAll，即使本核没有 Token 任务；不再清零 counter。
 
 ## 中转编号与持久表
 
-### 原子取号
+### Token 级 prefix 编号
 
-每张 relay 为当前轮次维护跨监听核共享、初值为 0 的计数器。
-对有后续转发的原始 Token，由唯一第一跳 owner 在首次转发前分配一次编号，本卡与跨卡转发使用同一计数器：
-
-```cpp
-uint32_t t = AscendC::AtomicAdd(counterGm, uint32_t{1});
-```
-
-已核对 CANN 9.1 的 Scalar AtomicAdd：头文件为 `basic_api/kernel_operator_atomic_intf.h`，支持 uint32_t 并返回修改前的旧值，
-产品依据限于本设计的 A5/Ascend 950PR/950DT；不减一，不在加一后普通读取 counter。
-成功轮次编号从 0 开始，各目标卡和 expert 共用；它是分配顺序，不是网络到达顺序，也不是对外 group 计数。
-全卡共用 `[0,8*BS)` 的编号容量，不按原始 source 或 Combine 返回发送卡分别取号；不同 group 的 t 唯一，同组全部副本共用 t。
-同卡额外 route 的监听核、部分转发恢复均不再次取号。
-
-在本 Rank 的 cnt/state 通信区保留一块 1KB 专用 counter 区，仅首 4B 使用，剩余 1020B 不使用、不清零。
-初版不做 counter 乒乓；每轮使用同一首 4B，不为每个核、原始 source 或返回发送卡建立独立 counter。
-专用区按 1KB 边界隔离相邻数据，具体 offset 归 R07-01，不能与 cnt/cumsum 等数据重叠。
-首次零值沿用 peer memory 分配初始化；该位置随后只由 AtomicAdd 和指定清零 owner 修改。
-
-| 阶段 | 已确认动作 |
-| --- | --- |
-| Dispatch 执行期间 | 需要创建 group 的第一跳 owner 在同一首 4B 上取号一次，保存返回 t |
-| 算子末尾 | 全部 64 个逻辑核完成自身任务及核内写出收敛后，执行一次 `SyncAll()`；无任务核也参加 |
-| 同步返回后 | 核 63 使用对齐零值 UB，通过 DataCopyPad 只写零首 4B，保持零值 UB 并在退出前确认这笔写出完成 |
-| 下一次 Dispatch | 沿用既有调用顺序及完成边界，继续使用已清零的同一 counter；不在清零后增加第二次 SyncAll |
-
-算子末尾 SyncAll 只用于保证其他核不再取号后再清零，不替代发送 UB 的 Set/Wait 依赖，
-也不插入源端第一跳/DIRECT 之间。Combine 从 assistEx/group 使用已保存的 t，不读取 counter。
-AtomicAdd 绕过 DCache，与 MTE2/MTE3 的 GM 数据依赖须手动同步；不能在原子更新期间写回该区旧脏缓存，
-也不采用每次取号后无条件清理整个 DCache。API/缓存证据见[官方 API 核对](ep-memory-server-dedup-open-topics.md#官方-api-核对)。
-分配编号不表示持久表项已就绪，也不表示数据转发完成；counter 清零不代表旧 group 或通信数据可以覆盖，窗口生命周期仍归 R11。
-仅有本卡转发的 group 同样正常取号并记录信息；不为其另设索引域。
+第一跳 owner 直接使用 `t=row=tasks.Begin()+j`，即本卡零基输出行号；编号在本卡第一跳
+之间唯一，所有副本继承 `(relayRank,t)`。具体范围、稀疏 group 容量和 Combine 遗留见本文开头。
+不再执行 AtomicAdd，也不读取或清零 counter。原 1KiB 区域保留为未使用布局空间。
+全部核仍在各自写出/清理完成后执行现有 SyncAll；无任务核也参加。不新增同步或完成协议。
+编号有效不代表数据已就绪：仍须等待完整包到达，并按原有 MTE/调用边界发布 metadata 和转发数据。
+原子 API 核对及旧决策记录保留在历史 R05 中，不再描述当前生产路径。
 
 ### 元数据与所有权
 
@@ -905,7 +921,7 @@ Dispatch/Combine 只保留三类跨阶段 metadata：`assistEx`、`sourceMask` �
 | 2. `sourceMask` | 原始 source 的数据发送核在 UB 生成，核末一次写出到 sourceMask 输出 GM；source Combine 消费 | 每个原始 Token 独立的 32bit source slot 集合，一个 Token 仅由一个发送核写入 |
 | 3. relay group / 中转监听记录 | 第一跳 owner 生成固定容量、行内密排记录，relay Combine 消费 | 每组保存 firstHopRow 和最多 K-1 条 `(recvSlot,weight)`，实际前 n 条有效；通过本卡槽位监听返回，不重复保存 senderRank/originalK |
 
-第一跳 owner 通过一次 AtomicAdd 分配 `forwardTokenIdx`，随转发副本携带并写入既有字段，关联同一 group 的第一跳、成员和返回槽位。
+第一跳 owner 使用 Token 级 prefix 输出 row 设置 `forwardTokenIdx`，随转发副本携带并写入既有字段，关联同一 group 的第一跳、成员和返回槽位。
 这是内部取号，不是第 4 项输出，不发布 X 或新增计数 metadata。
 
 `assistEx` 按本卡实际接收的 expert 行保存，远端 expert 的行和 weight 位于其所在 Rank 的 `assistEx`。
@@ -951,7 +967,7 @@ Plan 及其引用的路由数据必须存活到对应 Combine 使用结束；不
 2. 在 metaUB 内按下表完成字段转换；所有字段完整后才提交持久写出，不先写一个未分配编号的第一跳行再回填 GM。
 3. 统一将 metaUB 的完整 32B 写到 `assistExBase + uint64(dispatchRow)*32`。
    `dispatchRow=dstPosition=prefixBefore(localExpert*R+srcRank)+q`，沿用 Memory 的输出行计算；首个分区的 prefixBefore 为 0，其余取前一项前缀。
-   它是该 owner 当前处理的 Dispatch expert 输出行，不是 srcTokenId、q 或 forwardTokenIdx。
+   它是该 owner 当前处理的 Dispatch expert 输出行，不是 srcTokenId 或 q。仅第一跳的 row 等于 forwardTokenIdx；终端继承第一跳编号。
    字段转换对 MTE3 可见后才下发写出，metaUB 保持只读到对应写出完成；按正常 UB/Event 依赖复用，不增加逐 Token PIPE_ALL。
 
 | 接收角色 | metaUB 写出前的转换 | 与公共发送副本的关系 |
@@ -1018,7 +1034,7 @@ Dispatch 算子完成包含 expertScalesOut 写出。调用方将该输出传入
 
 已确认每个 group 固定预留 K-1 个 member，实际前 n 项密排，`n=assistEx[firstHopRow[t]].forwardEntryCount`。
 第一跳通过 firstHopRow 关联本卡 expert 输出和 assistEx，不占 member 槽位；本卡额外转发与跨卡转发均各占一项。
-Group 按 `forwardTokenIdx=t` 索引，预留 8*BS 行。Combine 只消费由有效第一跳 `assistEx` 关联到的 group 行，
+Group 按 `forwardTokenIdx=t` 索引，预留 C=R*BS*min(K,L) 行。Combine 只消费由有效第一跳 `assistEx` 关联到的 group 行，
 在 `[0,tokenNum)` 中识别 `assistEx[row].forwardCount>0`，取该行的 t 访问 `group[t]`，且 `group[t].firstHopRow=row`。
 每个实际 group 恰对应一条第一跳行；DIRECT 和终端行不产生 group。不读取未写入行，不需要 X、groupCount、validMask、哨兵或整表初始化。
 各行使用固定 stride，不跨 group 压缩空间，也不增加原子计数或前缀和。
@@ -1211,7 +1227,7 @@ R=128、L=3、BS=256、H=7168、K=6、FP16/BF16 非量化时：
 状态区为 67584B（66KiB），其中 ready 结束至 counter 起点有 512B 对齐空洞；状态区仍置于前 2 MiB 内；每窗实际布局总量为 1774714880B（1692.5MiB）。
 上述预算不包含 metadata/权重/hidden 的普通 GM 输出，也不表示通信分配或 NPU 行为已经验证。
 
-### 中转结果区与本卡返回
+### 中转结果区与本卡返回（历史预算，Combine 实现时替换）
 
 已确认使用一块统一中转结果区，预留 `8*BS` 个 group，每组 K 个槽位；本卡及其他卡的返回共享全部容量。
 早期七分区方案及追加本卡成为八分区的候选已撤回，来源卡不再作为结果区的 shape 维度。

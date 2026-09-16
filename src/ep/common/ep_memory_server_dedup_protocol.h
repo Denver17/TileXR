@@ -19,7 +19,7 @@ struct alignas(32) EpServerDedupAssistEx {
     int32_t forwardCount;
     int32_t forwardEntryCount;
     int32_t relayRank;
-    int32_t forwardTokenIdx;
+    int32_t forwardTokenIdx; // First-hop output row on relayRank; terminals inherit it.
 };
 
 struct EpServerDedupGroupMember {

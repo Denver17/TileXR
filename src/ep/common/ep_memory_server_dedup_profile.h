@@ -13,10 +13,10 @@ constexpr uint32_t kEpServerDedupPacketIssueEvent = 0x53000300U;
 
 enum class EpDedupDetailPoint : uint32_t {
     RecvBegin, PrefixEnd, TasksEnd, PrepareEnd, LoopEnd, DrainEnd, ClearIssueEnd, ClearEnd,
-    FinishBegin, LocalEnd, SyncEnd, CounterEnd, PublishEnd, WaitEnd
+    FinishBegin, LocalEnd, SyncEnd, CounterEnd, PublishEnd, WaitEnd // CounterEnd retired; keep ID.
 };
 enum class EpDedupDetailMetric : uint32_t {
-    Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait,
+    Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait, // Atomic retired; keep ID.
     // Append only: older captures retain their existing event identities.
     LoadIssue, LoadWait, ProbeLoadFlag, ProbeCalSum
 };

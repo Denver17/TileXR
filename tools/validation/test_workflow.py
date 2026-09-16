@@ -815,7 +815,7 @@ record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['
               direct_packets=288, direct_received=288, direct_bytes=288*15872,
               local_data_bytes=24*15872, same_server_data_bytes=504*15872, cross_server_data_bytes=48*15872,
               relay_packets=240, relay_received=240, relay_bytes=240*15872, data_bytes=576*15872,
-              relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, counter_cleared=True,
+              relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, prefix_indices_validated=True,
               first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True)
 previous_relay = rank // 8 * 8 + (rank + 7) % 8
 record['relay_links'] = [[(rank + 8) % rank_size, token * 2, 0, rank, token, 0, 5] for token in range(48)] + [
