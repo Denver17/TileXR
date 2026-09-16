@@ -37,3 +37,15 @@ class RunSummaryTests(unittest.TestCase):
             self.assertIn("bytes=N/A | bandwidth=N/A", line)
             self.assertIn("trace=/run/case/traces", line)
             self.assertEqual(len(line.splitlines()), 1)
+
+    def test_performance_prints_server_max_min_mean_and_selected_sample_count(self):
+        stats = dict(maximum_us=9, minimum_us=1, mean_us=4, median_us=2, samples_per_rank=50)
+        measured = dict(backend="memory", native_status="dispatch", kernel_sha256="b" * 64,
+                        algorithm_communication_bytes=3000, performance=stats,
+                        bandwidth_gbps=dict(maximum=5, minimum=1, mean=3, median=2))
+        line = run_summary.render_result(dict(status="PASS", measurements=measured), "/run/summary.json")
+        self.assertIn("samples/card=50", line)
+        self.assertIn("server_latency(us) max/min/mean=9.000/1.000/4.000", line)
+        self.assertIn("server_bandwidth(GB/s) max/min/mean=5.000/1.000/3.000", line)
+        self.assertNotIn("median", line)
+        self.assertEqual(len(line.splitlines()), 1)

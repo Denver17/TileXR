@@ -84,7 +84,13 @@ bash run.sh -n 2 -e 96 -m 0 -l 3 0
 bash run.sh -n 2 -e 96 -m 1 -l 100 10
 ```
 
-每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本，剔除预热后统计 loops 个样本，并汇总各 rank 样本中位数的 median/min/max。测量范围为完整 Dispatch，包含 cnt/cumsum、源端发送、接收转发、输出、清理和轮末完成等待。有效带宽使用每次调用的第一跳/DIRECT/relay 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，除以完整 kernel 延迟；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留，此值不是纯网络带宽。sendData 细打点仍表示相邻 MTE3 下发间隔；recv_data 包括接收准备、等待、输出、转发与本核 Flag 清理，finish 包括全核及跨 rank 收尾。
+每 rank 检查 msprof 恰好采到 warmup+loops 个目标 kernel 样本；剔除预热后保留全部 loops 个原始样本，模式 1 的最终统计只取每卡最后 `N=min(loops,50)` 个测量样本。每台 server 固定 8 卡，server 代表耗时是这 `8×N` 个样本的算术平均；最终输出各 server 代表耗时的 max/min/mean（单位 us）。例如 `-l 100 50` 采集 150 次，仅最后 50 个测量轮次参与统计，每台 server 共 400 个样本；`-l 20 50` 每台只统计 8×20 个测量样本，不用 warmup 补足 50 轮。
+
+测量范围为完整 Dispatch，包含 cnt/cumsum、源端发送、接收转发、输出、清理和轮末完成等待。有效带宽使用每次调用的第一跳/DIRECT/relay 完整 T（含本卡拷贝）及远端 cnt 记录量，排除 polling 和完成代次元数据，按 server 汇总 8 卡每次调用的字节数，再除以上述 server 平均 kernel 耗时，得到各 server 的有效 GB/s，最终也输出跨 server max/min/mean。该值是 server 聚合吞吐，不能和旧逐卡带宽直接比较；不把流量乘 loops 后除以单次延迟。原始样本和 kernel SHA256 随结果保留，此值不是纯网络带宽。
+
+缩小统计窗口不等于放宽采集完整性：仍验证所有 warmup+loops 样本的数量、合法耗时和唯一开始时间；缺卡、缺轮或损坏的早期样本不能借“只看最后 50 轮”绕过验证。此统计转换由 Host Python 完成，替身回归只证明解析与汇总，不证明 NPU 正确性或性能。
+
+sendData 细打点仍表示相邻 MTE3 下发间隔；recv_data 包括接收准备、等待、输出、转发与本核 Flag 清理，finish 包括全核及跨 rank 收尾。
 
 ## 按需执行 Host/Python 回归
 
@@ -194,7 +200,7 @@ run 在任何 rank 启动前核验所选节点的实际安装包；缺少同步�
 
 - 输入：旧 demo 的 `uniform/random/explicit` 没有选择当前 `balance_shift` 的分支；应共用实际 expert IDs 和 hidden 输入，不能只匹配 shape 或 seed。
 - 通信域与轮次：旧 demo 使用默认 2 GiB、双分区 communicator，性能模式在预热后额外同步/barrier，functional 逐轮同步；当前是固定 4 GiB、预热和测量连续提交、整批末尾同步。普通 Memory 可使用满足其容量下限的 4 GiB 域，但需保持自己的双分区布局并单独验证复用。
-- 测量：旧集群工具取最后 50 次样本，先算每服务器各卡全部样本平均，再汇总服务器平均；当前取最后 loops 次、逐 rank 样本中位数后汇总。应统一样本选择、跨 rank median/min/max、kernel SHA、通信字节和带宽定义。
+- 测量：模式 1 取最后最多 50 个测量样本，先算每服务器 8 卡全部选中样本平均，再汇总服务器均值的 max/min/mean。与旧集群工具比较时仍需统一 warmup、样本选择、kernel SHA、通信字节和带宽定义。
 - 打点：普通 Memory 使用独立的 `TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING` 和 v2 reader；当前 `build_all.sh breakdown=1` 只打开 Server Dedup 打点。性能对照两侧关闭设备诊断打点、保留 msprof；阶段对照使用各自 reader，不能仅替换 kernel 名。
 
 Server Dedup 已接入完整 Dispatch 接收路径，但新设备功能与性能仍须先验收。普通 Memory 对照需要统一输入、4GiB 域和样本口径后接入上述流程；当前尚无可直接使用的 `run.sh impl=memory` 参数，不能把现有单侧结果报告为加速比。
@@ -465,11 +471,11 @@ python3 tools/validation/measurements.py /path/to/run/summary.json --output-dir 
 
 functional、performance、breakdown 均区分执行完成与输出正确性；performance 和 breakdown 允许结果错误的实验继续完成采集。例如将转发 group 的原子分配替换为固定 `t=0` 会破坏 group 唯一性，可能触发 `group firstHopRow mismatch` 或重复 group 检查。仅当整批 kernel 同步、批末 Host barrier 和资源释放均成功时，consumer 将 count/Dispatch 输出不一致记录为 `EP_SERVER_DEDUP_DISPATCH_INVALID`（`status=FAIL`，保留首个错误），同时完成资源收尾；模式 1 的 msprof 完成导出，模式 2 完成标准打点导出。节点运行状态描述执行与采集是否完成，另以 `validation_status` 标记输出正确性；不能将节点进程退出 0 当作算子正确。
 
-此类输出错误不取消其他 rank/节点：所有节点先各自解析，主节点再归集每 rank JSON，最后打印 `VALIDATION_FAIL` 并返回结果校验失败退出码。`traces/index.json` 的每 rank `validation_status`/`validation_error` 与采集完整性 `status` 分开；全部 rank 的计时完整时，即使输出校验失败，也保留 `measurements.performance` 或 `measurements.breakdown` 的跨 rank median/min/max；错误结果或因日志收集失败等原因未完成跨 rank 校验时，通信量为 null、带宽为 N/A，不使用未通过完整校验的流量。缺卡、样本不完整或损坏时不生成部分 rank 的性能汇总。所有模式的算例最终状态仍为 FAIL、退出码非零。设备/API 错误、超时、释放失败以及旧运行身份或损坏 capture 仍属于执行/采集失败，不能通过输出错误标记绕过。
+此类输出错误不取消其他 rank/节点：所有节点先各自解析，主节点再归集每 rank JSON，最后打印 `VALIDATION_FAIL` 并返回结果校验失败退出码。`traces/index.json` 的每 rank `validation_status`/`validation_error` 与采集完整性 `status` 分开；全部 rank 的计时完整时，即使输出校验失败，也保留 `measurements.performance` 的跨 server max/min/mean 或 `measurements.breakdown` 的跨 rank median/min/max；错误结果或因日志收集失败等原因未完成跨 rank 校验时，通信量为 null、带宽为 N/A，不使用未通过完整校验的流量。缺卡、样本不完整或损坏时不生成部分 rank 的性能汇总。所有模式的算例最终状态仍为 FAIL、退出码非零。设备/API 错误、超时、释放失败以及旧运行身份或损坏 capture 仍属于执行/采集失败，不能通过输出错误标记绕过。
 
 维护此流程时，须分别验证“真实 consumer 输出错误后完成导出”和“节点/主节点不因该错误取消同伴”；只验证原始 records 文件存在会漏掉上层提前退出。若把输出不一致直接作为 consumer 执行异常退出，msprof 或调度器可能提前退出/取消同伴，模式 1、2 的完整耗时因此丢失。维护时应保持 INVALID 与执行失败分离，并验证最终 case 仍失败。Host 替身可覆盖上述失败处理和 JSON 归集，不证明 NPU 上固定 `t=0` 实验本身能正常结束或其性能收益。
 
-每次运行在仓库 `run/` 下生成独立目录。`run.sh` 终端只输出一行最终汇总，并保存为 `result.txt`：PASS 携带可用的性能数据或 trace 路径；FAIL 分为“执行阶段失败”“执行卡死（超时）”“结果校验失败”，有完整计时/trace 时一并保留。执行超时不等价于已证明 kernel 死锁。环境详情在 `environment.log`，可选 Host 回归在 `host-validation.log`，调度输出在 `workflow.log`，入口重定向等错误在 `launcher.log`，逐卡日志和结构化结果在汇总指定的 `<run_id>/summary.json` 同级目录；配置错误可能指向 `failure.json`。不再向终端展开各卡错误栈。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。现有 performance average 是各 rank 样本中位数的算术平均，不能误称为全部样本平均。
+每次运行在仓库 `run/` 下生成独立目录。`run.sh` 终端只输出一行最终汇总，并保存为 `result.txt`：PASS 携带可用的性能数据或 trace 路径；FAIL 分为“执行阶段失败”“执行卡死（超时）”“结果校验失败”，有完整计时/trace 时一并保留。执行超时不等价于已证明 kernel 死锁。环境详情在 `environment.log`，可选 Host 回归在 `host-validation.log`，调度输出在 `workflow.log`，入口重定向等错误在 `launcher.log`，逐卡日志和结构化结果在汇总指定的 `<run_id>/summary.json` 同级目录；配置错误可能指向 `failure.json`。不再向终端展开各卡错误栈。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。模式 1 的统计口径写入 `measurements.performance.selection/reduction`，`samples_per_rank`/`samples_per_server` 记录有效样本数，`server_mean_us` 按 hostfile 的 server 顺序记录代表耗时；`mean_us` 是这些 server 均值的算术平均。
 
 同一 stream 连续提交整批，批末才 stream 同步与 Host barrier；删除 Host 计时不改变同步策略。functional 不采集 profiling；performance 使用 msprof；breakdown 读取最后一轮各核的设备记录。
 
@@ -663,7 +669,7 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 
 ### Kernel 计时与关键结果输出
 
-人工测试与提交验收只采集和统计 kernel 耗时，不采集、校验或输出 Host submit/sync/barrier/batch_total 时间。stream 同步与 Host barrier 仍按整批执行，只移除计时。成功/失败与 kernel 统计前后使用空行和 `==========` 分隔；functional 不输出耗时。performance 的现有 mean_us 是各 rank 样本中位数的算术平均，统计口径保持不变。此变更仅需验证结果解析和输出，不重复执行已通过的硬件检查点。
+人工测试与提交验收只采集和统计 kernel 耗时，不采集、校验或输出 Host submit/sync/barrier/batch_total 时间。stream 同步与 Host barrier 仍按整批执行，只移除计时。成功/失败与 kernel 统计前后使用空行和 `==========` 分隔；functional 不输出耗时。当时 performance 的 mean_us 使用各 rank 样本中位数的算术平均；现行模式 1 已改为最后最多 50 轮、按 server 均值汇总，详见前文。此变更仅需验证结果解析和输出，不重复执行已通过的硬件检查点。
 
 关键结果分隔线统一为 32 个 `=`。PASS 或 kernel 性能前先输出两行实际 case 配置：算子/模式/测量与预热轮次，以及 BS/H/TopK/专家数/dtype/卡数/量化模式。信息取自本次 summary，终端与 summary.log 一致；当前明确标注 Dispatch server-dedup 空 kernel，不代表已实现 Combine 或去重数据面。
 

@@ -26,6 +26,8 @@ from uuid import NAMESPACE_URL, UUID, uuid5
 
 KERNEL_NAME = "tilexr_ep_dispatch_memory_server_dedup_kernel"
 RESULT_SEPARATOR = "=" * 32
+PERFORMANCE_SAMPLE_LIMIT = 50
+RANKS_PER_SERVER = 8
 
 
 def render_case_description(report):
@@ -359,7 +361,7 @@ def validate_dispatch_traffic(record, config):
 
 
 def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_valid=True):
-    """跨 rank 汇总：performance 取测量轮 median，breakdown 取最后一轮。"""
+    """performance 汇总各 server 最后最多 50 轮均值；breakdown 取最后一轮。"""
     rank_size = _integer(chain_config["rank_size"], "rank_size", 1)
     if (not isinstance(rank_records, list) or len(rank_records) != rank_size
             or any(not isinstance(row, dict) or type(row.get("rank")) is not int for row in rank_records)
@@ -417,19 +419,30 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                        communication_scope=("first-hop, DIRECT and relay" if dispatch else "first-hop and DIRECT") +
                            " full T including local copies, plus remote cnt records; excludes polling/local prefix/completion epoch traffic")
     if mode == "performance":
-        medians = [row["performance"]["median_us"] for row in ranks]
-        if output_valid and count_scope:
-            summary.update(bandwidth="effective remote-count GB/s",
-                           bandwidth_gbps=_statistics([remote_bytes / (us * 1000) for us in medians]),
-                           route_mode=chain_config["route_mode"], seed=chain_config["seed"])
-        if output_valid and (source_send or dispatch):
-            summary.update(bandwidth=("effective Dispatch with relay" if dispatch else "effective source-send") +
-                               " (including local copies) plus remote-count GB/s over whole kernel",
-                           bandwidth_gbps=_statistics([(sum(row[kind + "_bytes"] for kind in kinds) + remote_bytes) / (us * 1000)
-                                                      for row, us in zip(ranks, medians)]))
-        summary["performance"] = {"unit": "us", "selection": "last_loops_after_warmup",
-                                  "reduction": "statistics_of_rank_sample_medians",
-                                  "rank_median_us": medians, **_statistics(medians, "_us")}
+        if rank_size % RANKS_PER_SERVER:
+            raise ValueError("performance 每个 server 必须包含完整的 8 个 rank")
+        selected = min(chain_config["loops"], PERFORMANCE_SAMPLE_LIMIT)
+        # The workflow validates host_index == rank // 8 before aggregation.
+        servers = [ranks[start:start + RANKS_PER_SERVER]
+                   for start in range(0, rank_size, RANKS_PER_SERVER)]
+        server_means = [math.fsum(sample for row in server
+                                 for sample in row["performance"]["sample_us"][-selected:]) /
+                        (RANKS_PER_SERVER * selected) for server in servers]
+        summary["performance"] = {
+            "unit": "us", "selection": "last_up_to_50_measured_launches",
+            "reduction": "statistics_of_server_sample_means",
+            "samples_per_rank": selected, "samples_per_server": RANKS_PER_SERVER * selected,
+            "ranks_per_server": RANKS_PER_SERVER, "server_count": len(servers),
+            "server_mean_us": server_means, **_statistics(server_means, "_us")}
+        if output_valid and (count_scope or source_send or dispatch):
+            server_bytes = [sum(remote_bytes + (sum(row[kind + "_bytes"] for kind in kinds)
+                                                if source_send or dispatch else 0)
+                                for row in server) for server in servers]
+            bandwidth = [byte_count / (us * 1000) for byte_count, us in zip(server_bytes, server_means)]
+            summary.update(server_bandwidth_gbps=bandwidth, bandwidth_gbps=_statistics(bandwidth),
+                           bandwidth="effective per-server GB/s; sum of 8 rank bytes / server mean kernel latency")
+            if count_scope:
+                summary.update(route_mode=chain_config["route_mode"], seed=chain_config["seed"])
     else:
         if len({row["breakdown"]["capture_id"] for row in ranks}) != 1:
             raise ValueError("rank captures do not share one UUID")
@@ -457,15 +470,18 @@ def render_measurements(summary):
              f"ranks={summary['rank_size']} 算法通信={traffic_text} 带宽={summary['bandwidth']}",
              f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}"]
 
-    def append(label, stats, unit, suffix=""):
-        lines.append(f"{label}：median={stats['median' + suffix]:.3f} {unit} "
-                     f"min={stats['minimum' + suffix]:.3f} {unit} "
-                     f"max={stats['maximum' + suffix]:.3f} {unit}")
+    def append(label, stats, unit, suffix="", server=False):
+        fields = (("max", "maximum"), ("min", "minimum"), ("mean", "mean")) if server else (
+            ("median", "median"), ("min", "minimum"), ("max", "maximum"))
+        lines.append(label + "：" + " ".join(
+            f"{name}={stats[key + suffix]:.3f} {unit}" for name, key in fields))
 
     if "performance" in summary:
-        append("kernel（每 rank 测量轮次 median 的跨 rank 汇总）", summary["performance"], "us", "_us")
+        performance = summary["performance"]
+        append(f"kernel（每 server 8 卡 × 最后 {performance['samples_per_rank']} 轮均值的跨 server 汇总）",
+               performance, "us", "_us", server=True)
     if "bandwidth_gbps" in summary:
-        append("有效通信带宽（字节范围见上文）", summary["bandwidth_gbps"], "GB/s")
+        append("有效通信带宽（每 server；字节范围见上文）", summary["bandwidth_gbps"], "GB/s", server=True)
     if "breakdown" in summary:
         breakdown = summary["breakdown"]
         append("kernel（最后一轮每 rank 最慢核的跨 rank 汇总）", breakdown["kernel_us"], "us")

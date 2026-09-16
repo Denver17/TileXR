@@ -28,15 +28,17 @@ def render_result(report, summary_path):
                      f"kernel={measured['kernel_sha256'][:12]}")
         if "performance" in measured:
             stats, suffix = measured["performance"], "_us"
+            fields, label = ("maximum", "minimum", "mean"), "server_latency(us) max/min/mean="
+            parts.append(f"samples/card={stats['samples_per_rank']}")
         else:
             stats, suffix = measured["breakdown"]["kernel_us"], ""
-        parts.append("latency(us) median/min/max=" + "/".join(
-            f"{stats[key + suffix]:.3f}" for key in ("median", "minimum", "maximum")))
+            fields, label = ("median", "minimum", "maximum"), "latency(us) median/min/max="
+        parts.append(label + "/".join(f"{stats[key + suffix]:.3f}" for key in fields))
         traffic = measured.get("algorithm_communication_bytes")
         parts.append("bytes=" + (str(traffic) if traffic is not None else "N/A"))
         if "bandwidth_gbps" in measured:
-            parts.append("bandwidth(GB/s) median/min/max=" + "/".join(
-                f"{measured['bandwidth_gbps'][key]:.3f}" for key in ("median", "minimum", "maximum")))
+            parts.append("server_bandwidth(GB/s) max/min/mean=" + "/".join(
+                f"{measured['bandwidth_gbps'][key]:.3f}" for key in ("maximum", "minimum", "mean")))
         else:
             parts.append("bandwidth=N/A")
     traces = report.get("traces")

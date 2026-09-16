@@ -18,7 +18,7 @@ class MeasurementTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix="tilexr-measurements-")
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.config = dict(run_mode="performance", rank_size=2, loops=3, warmup=1,
+        self.config = dict(run_mode="performance", rank_size=16, loops=3, warmup=1,
                            bs=256, h=7168, topk=6, moe_expert_num=384, dtype="bf16", block_dim="auto")
 
     def csv_profile(self, durations, kernel=measure.KERNEL_NAME, name="PROF_rank", reverse=False):
@@ -66,9 +66,9 @@ class MeasurementTests(unittest.TestCase):
         result = measure.summarize_measurements(ranks, config, "d" * 64)
         bytes_per_rank = 9 * 15872 + 90 * 32
         self.assertEqual(result["algorithm_communication_bytes"], bytes_per_rank * 16)
-        self.assertAlmostEqual(result["bandwidth_gbps"]["minimum"], bytes_per_rank / 16000)
-        self.assertAlmostEqual(result["bandwidth_gbps"]["maximum"], bytes_per_rank / 1000)
-        self.assertIn("Dispatch with relay", measure.render_measurements(result))
+        self.assertAlmostEqual(result["bandwidth_gbps"]["minimum"], 8 * bytes_per_rank / 12500)
+        self.assertAlmostEqual(result["bandwidth_gbps"]["maximum"], 8 * bytes_per_rank / 4500)
+        self.assertIn("per-server GB/s", measure.render_measurements(result))
         for field, value in (("relay_received", 1), ("relay_bytes", 1), ("data_bytes", 0)):
             changed = copy.deepcopy(ranks)
             changed[0][field] = value
@@ -77,11 +77,11 @@ class MeasurementTests(unittest.TestCase):
 
     def test_invalid_output_keeps_complete_timing_without_trusting_traffic(self):
         config = dict(self.config, kernel_scope="dispatch")
-        ranks = [self.performance_rank(0), self.performance_rank(1)]
+        ranks = [self.performance_rank(rank) for rank in range(16)]
         ranks[0]["validation_status"] = "FAIL"
         summary = measure.summarize_measurements(ranks, config, "d" * 64)
         self.assertEqual(summary["validation_status"], "FAIL")
-        self.assertEqual(summary["performance"]["rank_median_us"], [4, 4])
+        self.assertEqual(summary["performance"]["server_mean_us"], [5, 5])
         self.assertIsNone(summary["algorithm_communication_bytes"])
         self.assertNotIn("rank_traffic", summary)
         self.assertNotIn("bandwidth_gbps", summary)
@@ -104,10 +104,10 @@ class MeasurementTests(unittest.TestCase):
                               performance=measure.performance_record(path.parents[1], 1, 0)))
         summary = measure.summarize_measurements(ranks, config, "a" * 64)
         self.assertEqual(summary["algorithm_communication_bytes"], 16 * 82240)
-        self.assertAlmostEqual(summary["bandwidth_gbps"]["minimum"], 82.24 / 16)
-        self.assertAlmostEqual(summary["bandwidth_gbps"]["maximum"], 82.24)
-        self.assertAlmostEqual(summary["bandwidth_gbps"]["median"], (82.24 / 8 + 82.24 / 9) / 2)
-        self.assertIn("including local copies", measure.render_measurements(summary))
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["minimum"], 8 * 82.24 / 12.5)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["maximum"], 8 * 82.24 / 4.5)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["median"], (8 * 82.24 / 4.5 + 8 * 82.24 / 12.5) / 2)
+        self.assertIn("per-server GB/s", measure.render_measurements(summary))
         self.assertNotIn("不含本卡访问", measure.render_measurements(summary))
 
     def test_performance_sorts_by_start_and_excludes_warmup(self):
@@ -196,30 +196,59 @@ class MeasurementTests(unittest.TestCase):
             with self.subTest(loops=loops, warmup=warmup), self.assertRaises(ValueError):
                 measure.performance_record(self.root, loops, warmup)
 
-    def test_summary_uses_rank_medians_not_pooled_samples_or_means(self):
-        ranks = [self.performance_rank(0, (999, 1, 10, 11)), self.performance_rank(1, (888, 4, 5, 100))]
+    def test_summary_uses_server_sample_means_and_ignores_rank_order(self):
+        ranks = [self.performance_rank(rank, (999, 1, 10, 11) if rank < 8 else (888, 4, 5, 100))
+                 for rank in range(16)]
         summary = measure.summarize_measurements(list(reversed(ranks)), self.config, "a" * 64)
-        self.assertEqual(summary["performance"]["rank_median_us"], [10, 5])
-        self.assertEqual(summary["performance"]["median_us"], 7.5)
-        self.assertEqual(summary["performance"]["minimum_us"], 5)
-        self.assertEqual(summary["performance"]["maximum_us"], 10)
+        self.assertEqual(summary["performance"]["server_mean_us"], [22 / 3, 109 / 3])
+        self.assertAlmostEqual(summary["performance"]["mean_us"], 131 / 6)
+        self.assertEqual(summary["performance"]["minimum_us"], 22 / 3)
+        self.assertEqual(summary["performance"]["maximum_us"], 109 / 3)
+        self.assertEqual(summary["performance"]["samples_per_server"], 24)
         self.assertNotIn("host_batch_us", summary)
         self.assertEqual(summary["algorithm_communication_bytes"], 0)
         self.assertEqual(summary["native_status"], "empty")
         report = measure.render_measurements(summary)
-        self.assertIn("median=7.500 us min=5.000 us max=10.000 us", report)
+        self.assertIn("max=36.333 us min=7.333 us mean=21.833 us", report)
         self.assertNotIn("Host 测量批", report)
         self.assertIn("backend=memory", report)
         self.assertIn("带宽=N/A", report)
         self.assertIn("sha256=" + "a" * 64, report)
 
+    def test_server_window_covers_short_exact_and_long_runs_without_warmup(self):
+        for loops in (1, 49, 50, 51, 100):
+            with self.subTest(loops=loops):
+                selected = min(loops, 50)
+                config = dict(self.config, loops=loops, warmup=2)
+                ranks = []
+                for rank in range(16):
+                    durations = [10000, 20000] + [30000] * (loops - selected) + [rank + 1] * selected
+                    durations[-1] += selected * 10  # Mean differs from median for long windows.
+                    path = self.csv_profile(durations, name=f"PROF_window{loops}_rank{rank}", reverse=True)
+                    ranks.append(dict(rank=rank, performance=measure.performance_record(path.parents[1], loops, 2)))
+                result = measure.summarize_measurements(ranks, config, "c" * 64)["performance"]
+                self.assertEqual(result["samples_per_rank"], selected)
+                self.assertEqual(result["samples_per_server"], 8 * selected)
+                self.assertEqual(result["server_mean_us"], [14.5, 22.5])
+                self.assertEqual((result["maximum_us"], result["minimum_us"], result["mean_us"]), (22.5, 14.5, 18.5))
+                self.assertEqual(len(ranks[0]["performance"]["sample_us"]), loops)
+                # Even a discarded early measurement remains subject to evidence validation.
+                ranks[0]["performance"]["sample_us"][0] = 0
+                with self.assertRaises(ValueError):
+                    measure.summarize_measurements(ranks, config, "c" * 64)
+
+    def test_partial_server_is_not_a_performance_representative(self):
+        ranks = [self.performance_rank(rank) for rank in range(15)]
+        with self.assertRaisesRegex(ValueError, "8 个 rank"):
+            measure.summarize_measurements(ranks, dict(self.config, rank_size=15), "a" * 64)
+
     def test_missing_duplicate_or_foreign_rank_is_rejected(self):
-        ranks = [self.performance_rank(0), self.performance_rank(1)]
-        for invalid in (ranks[:1], [ranks[0], ranks[0]], [ranks[0], dict(ranks[1], rank=2)]):
+        ranks = [self.performance_rank(rank) for rank in range(16)]
+        for invalid in (ranks[:1], [ranks[0], *ranks[:-1]], [*ranks[:-1], dict(ranks[-1], rank=16)]):
             with self.assertRaisesRegex(ValueError, "rank"):
                 measure.summarize_measurements(invalid, self.config, "a" * 64)
 
-    def test_count_scope_reports_remote_record_volume_and_rank_bandwidth(self):
+    def test_count_scope_reports_remote_record_volume_and_server_bandwidth(self):
         config = dict(self.config, rank_size=16, bs=96, moe_expert_num=96,
                       kernel_scope="cnt_cumsum", route_mode="balance_shift", seed=2026)
         ranks = [self.performance_rank(rank, (999, 9, 10, 11)) for rank in range(16)]
@@ -227,11 +256,11 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(summary["native_status"], "cnt_cumsum")
         self.assertEqual(summary["communication_bytes_per_rank"], 2880)
         self.assertEqual(summary["algorithm_communication_bytes"], 46080)
-        self.assertAlmostEqual(summary["bandwidth_gbps"]["median"], 0.288)
+        self.assertAlmostEqual(summary["bandwidth_gbps"]["median"], 2.304)
         report = measure.render_measurements(summary)
         self.assertIn("native=cnt_cumsum", report)
         self.assertIn("46080B", report)
-        self.assertIn("median=10.000 us min=10.000 us max=10.000 us", report)
+        self.assertIn("max=10.000 us min=10.000 us mean=10.000 us", report)
 
     def test_corrupted_performance_evidence_is_rejected(self):
         original = self.performance_rank(0)
@@ -246,7 +275,7 @@ class MeasurementTests(unittest.TestCase):
 
     def test_functional_has_no_measurements_or_report(self):
         config = dict(self.config, run_mode="functional", loops=1, warmup=0)
-        summary = measure.summarize_measurements([{"rank": 0}, {"rank": 1}], config, "a" * 64)
+        summary = measure.summarize_measurements([{"rank": rank} for rank in range(16)], config, "a" * 64)
         self.assertNotIn("performance", summary)
         self.assertNotIn("breakdown", summary)
         self.assertNotIn("host_batch_us", summary)

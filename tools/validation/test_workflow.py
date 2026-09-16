@@ -1051,6 +1051,26 @@ with output.open('w', newline='') as f:
         self.assertEqual(summary["measurements"]["measurement"], "continuous_batch")
         self.assertEqual(summary["measurements"]["submission"], "continuous_batch_then_sync_and_host_barrier")
 
+    def test_dispatch_performance_selects_last_50_and_reports_server_means(self):
+        self.enable_chain(workflow.DISPATCH_CHECKPOINT, "performance")
+        self.enable_msprof()
+        os.environ.update(TILEXR_VALIDATION_LOOPS="100", TILEXR_VALIDATION_WARMUP="50")
+        self.prepare_sync()
+        command = self.invoke("run")
+        self.assert_success(command)
+        summary = self.summary()
+        performance = summary["measurements"]["performance"]
+        self.assertEqual(performance["samples_per_rank"], 50)
+        self.assertEqual(performance["samples_per_server"], 400)
+        self.assertEqual(performance["server_mean_us"], [125.5, 125.5])
+        for node in summary["nodes"]:
+            for rank in node["reported_result"]["ranks"]:
+                self.assertEqual(rank["performance"]["sample_us"], list(range(51, 151)))
+                self.assertEqual(rank["performance"]["matched_samples"], 150)
+        line = (self.config_instance.logs / "result.txt").read_text()
+        self.assertIn("samples/card=50", line)
+        self.assertIn("server_latency(us) max/min/mean=125.500/125.500/125.500", line)
+
     def test_dispatch_performance_missing_profiler_samples_fails(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "performance")
         self.enable_msprof()
@@ -1154,14 +1174,14 @@ with output.open('w', newline='') as f:
         self.assertEqual(summary["completed_ranks"], 16)
         measured = summary["measurements"]
         self.assertEqual(measured["validation_status"], "FAIL")
-        self.assertEqual(len(measured["performance"]["rank_median_us"]), 16)
+        self.assertEqual(len(measured["performance"]["server_mean_us"]), 2)
         self.assertIsNone(measured["algorithm_communication_bytes"])
         self.assertNotIn("bandwidth_gbps", measured)
         self.assertEqual([(error["type"], error["rank"]) for error in summary["errors"]], [("RESULT_FAILED", 8)])
         line = (self.config_instance.logs / "result.txt").read_text()
         self.assertEqual(len(line.splitlines()), 1)
         self.assertIn("VALIDATION_FAIL 结果校验失败", line)
-        self.assertIn("latency(us) median/min/max=", line)
+        self.assertIn("server_latency(us) max/min/mean=", line)
         self.assertIn("bandwidth=N/A", line)
 
     def test_collection_failure_retains_timing_but_cannot_certify_unchecked_links(self):
@@ -1175,7 +1195,7 @@ with output.open('w', newline='') as f:
         self.assertEqual(summary["completed_ranks"], 16)
         self.assertNotIn("relay_links_validated", summary)
         measured = summary["measurements"]
-        self.assertEqual(len(measured["performance"]["rank_median_us"]), 16)
+        self.assertEqual(len(measured["performance"]["server_mean_us"]), 2)
         self.assertEqual(measured["validation_status"], "FAIL")
         self.assertIsNone(measured["algorithm_communication_bytes"])
         self.assertNotIn("bandwidth_gbps", measured)
