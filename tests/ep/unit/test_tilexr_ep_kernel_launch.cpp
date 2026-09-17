@@ -268,7 +268,7 @@ void TestServerDedupRuntimeLaunch()
     ResetCapture();
     gVectorCores = 64;
     Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
-    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 25);
+    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 26);
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
     constexpr uint64_t firstProfilingSlot = 0U;
 #else
@@ -276,8 +276,8 @@ void TestServerDedupRuntimeLaunch()
 #endif
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
         0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
-        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic, firstProfilingSlot, 32};
-    Check(gLaunches[0].args == expected, "all 25 kernel arguments preserve order, widths and values (200B)");
+        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic, firstProfilingSlot, 32, 1};
+    Check(gLaunches[0].args == expected, "all 26 kernel arguments preserve order, widths and values (208B)");
     Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
@@ -285,19 +285,22 @@ void TestServerDedupRuntimeLaunch()
     gVectorCores = 64;
     const int rounds = static_cast<int>(TileXR::PING_PONG_SIZE) + 3;
     for (int round = 0; round < rounds; ++round) {
+        params.enableServerDedup = round % 2 == 0;
         Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
         auto roundArgs = expected;
         roundArgs[22] = kNextMagic + round;
+        roundArgs[25] = params.enableServerDedup ? 1U : 0U;
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
         roundArgs[23] = 0U;
 #endif
         Check(gLaunches.size() == static_cast<std::size_t>(round + 1) &&
             gLaunches.back().args == roundArgs && gLaunches.back().stream == p.stream,
-            "each round forwards its new magic and reuses all pointers and the stream");
+            "each round forwards its mode and new magic and reuses all pointers and the stream");
     }
     Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
         "multiple rounds consume exactly one magic each without reloading the artifact");
 
+    params.enableServerDedup = true;
     for (int64_t sendCoreNum : {16, 24, 32, 40, 48}) {
         ResetCapture();
         gVectorCores = 64;
@@ -307,7 +310,7 @@ void TestServerDedupRuntimeLaunch()
         splitArgs[24] = static_cast<uint64_t>(sendCoreNum);
         Check(gLaunches.size() == 1 && gLaunches[0].args == splitArgs &&
             gLaunches[0].blockDim == 64 && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
-            "runtime split reaches final ABI field while launch remains 64 AIVs");
+            "runtime split reaches its ABI field while launch remains 64 AIVs");
     }
     params.sendCoreNum = 32;
 

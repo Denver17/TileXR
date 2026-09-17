@@ -105,6 +105,7 @@ class ChainConsumerTests(unittest.TestCase):
         self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
         self.environment.pop("TILEXR_VALIDATION_RUN_MODE", None)
         self.environment.pop("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM", None)
+        self.environment.pop("TILEXR_EP_SERVER_DEDUP_ENABLE", None)
 
     def stop(self):
         for process in self.processes:
@@ -239,6 +240,7 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["fp8_format"], format)
                         self.assertEqual(record["loops"], 1)
                         self.assertEqual(record["warmup"], 0)
+                        self.assertIs(record["server_dedup_enabled"], True)
                         self.assertEqual(record["cleanup"], "complete")
                         for key in ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated", "group_validated", "flags_cleared", "prefix_indices_validated"):
                             self.assertIs(record[key], True)
@@ -263,6 +265,54 @@ class ChainConsumerTests(unittest.TestCase):
                     self.assertEqual(sum(r["first_hop_packets"] + r["direct_packets"] + r["relay_packets"] for r in records), 16 * 2 * 3)
                     self.check_relay_links(records)
                     for path in Path(self.trace.name).iterdir(): path.unlink()
+
+    def test_runtime_dedup_switch_repeated_dispatch_preserves_all_routes(self):
+        for enabled, top_k, quant in (("1", 6, "0"), ("0", 6, "0"), ("0", 6, "4"), ("0", 32, "0")):
+            with self.subTest(enabled=enabled, top_k=top_k, quant=quant):
+                env = dict(TILEXR_EP_SERVER_DEDUP_ENABLE=enabled, TILEXR_VALIDATION_BS="3",
+                           TILEXR_VALIDATION_H="225", TILEXR_VALIDATION_TOPK=str(top_k),
+                           TILEXR_VALIDATION_QUANT_MODE=quant, TILEXR_VALIDATION_LOOPS="3",
+                           TILEXR_VALIDATION_WARMUP="2")
+                processes = [self.start(rank, environment=env) for rank in range(16)]
+                records = []
+                for rank, process in enumerate(processes):
+                    output, errors = process.communicate(timeout=20)
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
+                    records.append(record)
+                    self.assertIs(record["server_dedup_enabled"], enabled == "1")
+                    self.assertEqual(record["last_magic"], 5)
+                    self.assertEqual(self.trace_lines(rank).count("launch"), 5)
+                    for key in ("route_coverage_validated", "source_outputs_validated", "weights_unchanged",
+                                "dispatch_outputs_validated", "group_validated", "flags_cleared",
+                                "prefix_indices_validated"):
+                        self.assertIs(record[key], True)
+                    if enabled == "0":
+                        for key in ("first_hop_packets", "first_hop_received", "first_hop_bytes",
+                                    "relay_packets", "relay_received", "relay_bytes"):
+                            self.assertEqual(record[key], 0)
+                        self.assertEqual(record["relay_links"], [])
+                        self.assertEqual(record["direct_packets"], 3 * top_k)
+                        self.assertEqual(record["data_bytes"], 3 * top_k * record["token_stride"])
+                self.assertEqual(sum(r["direct_received"] + r["first_hop_received"] + r["relay_received"]
+                                     for r in records), 16 * 3 * top_k)
+                if enabled == "1":
+                    self.assertGreater(sum(r["first_hop_packets"] for r in records), 0)
+                self.check_relay_links(records)
+                for path in Path(self.trace.name).iterdir(): path.unlink()
+
+    def test_disabled_dedup_still_validates_source_outputs_and_direct_metadata(self):
+        for fault in ("mask", "source-weight", "assist-role", "assist-count"):
+            with self.subTest(fault=fault):
+                processes = [self.start(rank, environment={"TILEXR_EP_SERVER_DEDUP_ENABLE": "0",
+                             "TEST_PACKET_FAULT": fault}) for rank in range(16)]
+                for process in processes:
+                    output, errors = process.communicate(timeout=15)
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
+                    self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")), 1)
+                    self.assertIn("stage=dispatch-read", errors)
+                for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_dispatch_tail_boundary_quantized_scales_and_changed_group_numbers(self):
         for quant, fault in (("0", None), ("4", None), ("4", "scale"), ("0", "duplicate-t")):
@@ -297,6 +347,7 @@ class ChainConsumerTests(unittest.TestCase):
         cases += [{"TILEXR_VALIDATION_CHECKPOINT": value} for value in
                   ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p1-profile", "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send")]
         cases += [{"TILEXR_VALIDATION_QUANT_MODE": "3"}, {"TILEXR_VALIDATION_FP8_FORMAT": "invalid"}]
+        cases += [{"TILEXR_EP_SERVER_DEDUP_ENABLE": value} for value in ("", "2", "-1", "true", "01", " 0")]
         for env in cases:
             with self.subTest(env=env):
                 process = self.start(0, environment=env)

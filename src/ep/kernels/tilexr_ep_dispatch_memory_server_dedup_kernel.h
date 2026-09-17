@@ -15,7 +15,7 @@ public:
         GM_ADDR assistExOut, GM_ADDR sourceMaskOut, GM_ADDR groupOut, GM_ADDR expertScalesOut,
         uint32_t bs, uint32_t h, uint32_t topK,
         uint32_t experts, uint32_t expertTokenNumsType, int64_t magic, uint32_t profilingLaunchSlot, TPipe *pipe,
-        uint32_t sendCoreNum = kEpServerDedupSendCoreNum)
+        uint32_t sendCoreNum = kEpServerDedupSendCoreNum, bool enableServerDedup = true)
     {
         profile_.Init(commArgs, profilingLaunchSlot);
         profile_.Mark(0);
@@ -23,7 +23,7 @@ public:
         core_ = GetBlockIdx(); pipe_ = pipe; sendCoreNum_ = sendCoreNum;
         counts_.Init(commArgs, expertIds, expertTokenNumsOut, sendCountsOut, bs, topK, experts, expertTokenNumsType, magic, pipe, sendCoreNum_);
         if (core_ < sendCoreNum_)
-            sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe, magic, sendCoreNum_);
+            sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe, magic, sendCoreNum_, enableServerDedup);
         else
             receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe, magic, sendCoreNum_);
         profile_.Mark(1);

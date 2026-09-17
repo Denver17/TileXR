@@ -23,7 +23,7 @@ class ChainTests(TemporaryRoot):
         config = self.config()
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
-                                           run_mode="functional", loops=1, warmup=0,
+                                           run_mode="functional", loops=1, warmup=0, server_dedup_enabled=True,
                                            route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0, send_core_num=32, recv_core_num=32))
         original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
@@ -41,6 +41,18 @@ class ChainTests(TemporaryRoot):
                 argv = workflow.remote_argv(config, '192.0.2.2', 'node', 'run', 'build')
                 self.assertIn(f'TILEXR_VALIDATION_SEND_CORE_NUM={send}', argv[-1])
 
+    def test_server_dedup_default_and_explicit_modes_propagate_remotely(self):
+        for value in (None, "1", "0"):
+            with self.subTest(value=value), mock.patch.dict(os.environ):
+                if value is None:
+                    os.environ.pop("TILEXR_EP_SERVER_DEDUP_ENABLE", None)
+                else:
+                    os.environ["TILEXR_EP_SERVER_DEDUP_ENABLE"] = value
+                config = self.config()
+                self.assertIs(config.chain["server_dedup_enabled"], value != "0")
+                argv = workflow.remote_argv(config, "192.0.2.2", "node", "run", "build")
+                self.assertIn(f"TILEXR_EP_SERVER_DEDUP_ENABLE={0 if value == '0' else 1}", argv[-1])
+
     def test_rejects_host_mode_bad_endpoints_and_unsupported_shapes(self):
         for key, values in {
             "TILEXR_VALIDATION_BUILD_MODE": ["host"],
@@ -55,6 +67,7 @@ class ChainTests(TemporaryRoot):
             "TILEXR_VALIDATION_BLOCK_DIM": ["4", "0", "-1", "1.5", str(1 << 32)],
             "TILEXR_VALIDATION_SEND_CORE_NUM": ["", "0", "8", "17", "31", "33", "56", "64", "032", "32.0"],
             "TILEXR_VALIDATION_CASE_ANALYSIS": ["", "2", "01", "true"],
+            "TILEXR_EP_SERVER_DEDUP_ENABLE": ["", "2", "-1", "true", "01", " 0"],
         }.items():
             for value in values:
                 with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {key: value}), \
@@ -89,6 +102,8 @@ class ChainTests(TemporaryRoot):
                                 first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch"))
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "send_core_num", 48), ("chain", "recv_core_num", 16), (None, "completed", 0), (None, "submitted", 2),
+                                   (None, "server_dedup_enabled", False), ("chain", "server_dedup_enabled", False),
+                                   (None, "server_dedup_enabled", None), (None, "server_dedup_enabled", 1),
                                    (None, "cleanup", "failed"), (None, "chain", None),
                                    ("chain", "peer_count", 8), ("chain", "peer_mem_bytes", 0),
                                    ("chain", "peer_mem_bytes", 12 * 1024 ** 2),
@@ -127,7 +142,7 @@ class ChainTests(TemporaryRoot):
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
         mapping = workflow.rank_mapping(config.hosts())[0]
         identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
-                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope", "send_core_num", "recv_core_num")})
+                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope", "send_core_num", "recv_core_num", "server_dedup_enabled")})
         record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
                       submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                       first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,

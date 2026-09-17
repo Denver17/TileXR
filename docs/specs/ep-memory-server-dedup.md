@@ -392,6 +392,33 @@ Source owner 需要确定三类逻辑信息：
 第一阶段向 R8/expert25 发送第一跳并携带 R9/expert28 的 entry；
 第二阶段向 R1/expert4 和 R16/expert50 分别发送 DIRECT；sourceMask 为 `0b1101`，保留 k0/k2/k3。
 
+### 运行时去重开关
+
+`TILEXR_EP_SERVER_DEDUP_ENABLE` 控制原始 source 的发送分类：未设置或 `1` 为开启，
+`0` 为全部 DIRECT；其他值（包括空字符串）在访问 communicator、分配 magic 和提交前返回
+`TILEXR_ERROR_PARA_CHECK_FAIL`。Host 每次调用读取，不缓存进程首次设置；kernel 通过内部
+launch 参数接收布尔值，公开函数签名保持不变。Host 与 kernel 内部 launch ABI 新增末尾
+int64 字段，总长为 208B，须配套重建和安装。
+
+开启时沿用每个发送核先下发全部第一跳、再轮转 DIRECT 的流程。关闭时仍扫描当前 Token 的
+server mask：复用原有 64B `serverBuf_` 构造各 server 的原始 k 位图，将全部位并入
+`directMask`，不生成 first-hop group。各核按原始 Token/k 顺序缓存全部 DIRECT 任务，随后
+从本 server 开始按 `(myServer+step)%serverNum` 发送；同 server 内保持 Token/k 顺序。
+顺序保证属于每个发送核，各核独立推进，不增加阶段或 server 边界屏障。
+
+关闭时每条原始 route 均使用现有 DIRECT 包：`forwardCount=forwardEntryCount=0`，
+`relayRank=forwardTokenIdx=-1`。接收仍按包头消费，因不存在正 forwardCount 而不创建 group
+或发起转发。原始 cnt/cumsum/q、通信槽位和 Token stride、接收与 Flag 清理逻辑保持一致。
+`sourceMaskOut` 的全部有效 k 位置位（K=32 为 `0xffffffff`），`expertScalesOut` 每项为
+原始真实权重；groupOut 仍按既有容量分配，但没有有效 group 行，旧内容不可消费。
+发送任务缓冲区已按每核 count*K 容量分配，不因关闭去重扩容 UB 或 GM。
+
+维护注意：关闭去重必须将每条原始路由作为 DIRECT 完整发送；仅把去重第一跳包的转发数清零
+会遗漏其他 expert 的数据，使原始 cnt 对应的接收槽位永远等不到。保留 server mask 扫描与
+原始 q 编号，使用 DIRECT 的 mask/真实权重输出，并用每 route 恰写一次及跨轮切换验证。
+`SendFirstHop` 打点仍包含分类与 DIRECT 任务准备，关闭时该区间可非零，但第一跳包数应为零。
+Host 替身验证与 A5 交叉编译不证明真实设备的异步正确性或性能。
+
 ### 两遍扫描的分类表（R02-01，已确认）
 
 | 临时值 | UB 字节数 | 使用方法 |

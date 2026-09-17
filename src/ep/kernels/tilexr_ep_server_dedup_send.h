@@ -16,9 +16,11 @@ class ServerDedupSender {
 public:
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, GM_ADDR x, GM_ADDR ids,
         GM_ADDR weights, GM_ADDR sourceMask, GM_ADDR sourceWeights, uint32_t bs, uint32_t h,
-        uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0, uint32_t sendCoreNum = kEpServerDedupSendCoreNum)
+        uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0, uint32_t sendCoreNum = kEpServerDedupSendCoreNum,
+        bool enableServerDedup = true)
     {
         args_ = args; pipe_ = pipe;
+        enableServerDedup_ = enableServerDedup;
         bs_ = bs; h_ = h; k_ = k; localExperts_ = experts / args->rankSize;
         const uint32_t core = GetBlockIdx();
         const uint32_t base = bs / sendCoreNum, remainder = bs % sendCoreNum;
@@ -166,6 +168,20 @@ private:
     }
     __aicore__ inline void Classify(uint32_t token, uint32_t &directMask, uint32_t &groups)
     {
+        if (!enableServerDedup_) {
+            // Reuse the 64B server state as this token's route masks. Keep the
+            // server scan even when every route is DIRECT; q and actual send
+            // order still come from the original routes and cyclic task loop.
+            const uint32_t serverNum = args_->rankSize / 8U;
+            for (uint32_t server = 0; server < serverNum; ++server) serverState_.SetValue(server, 0U);
+            for (uint32_t k = 0; k < k_; ++k) {
+                const uint32_t expert = uint32_t(routeIds_.GetValue((start_ + token) * k_ + k));
+                const uint32_t server = expert / localExperts_ / 8U;
+                serverState_.SetValue(server, serverState_.GetValue(server) | (uint32_t(1) << k));
+            }
+            for (uint32_t server = 0; server < serverNum; ++server) directMask |= serverState_.GetValue(server);
+            return;
+        }
         uint32_t seen = 0, grouped = 0;
         for (uint32_t k = 0; k < k_; ++k) {
             const uint32_t expert = uint32_t(routeIds_.GetValue((start_ + token) * k_ + k));
@@ -289,6 +305,7 @@ private:
     TBufPool<TPosition::VECCALC, 16> *scratch_ = nullptr;
     uint32_t bs_ = 0, h_ = 0, k_ = 0, localExperts_ = 0, start_ = 0, count_ = 0;
     uint32_t usedBytes_ = 0, lanes_ = 0, packets_ = 0, directCount_ = 0;
+    bool enableServerDedup_ = true;
     EpServerDedupDataLayout data_ {};
     GlobalTensor<XType> x_;
     GlobalTensor<int32_t> ids_;

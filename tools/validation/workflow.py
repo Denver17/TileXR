@@ -36,7 +36,7 @@ CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
 DISPATCH_INVALID_MARKER = "EP_SERVER_DEDUP_DISPATCH_INVALID "
-DISPATCH_ABI = {"launch_bytes": 200, "layout": "r08-runtime-core-split", "kernel_scope": "dispatch"}
+DISPATCH_ABI = {"launch_bytes": 208, "layout": "r09-runtime-server-dedup-switch", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
@@ -331,6 +331,9 @@ def source_send_stride(config):
 
 
 def chain_configuration(checkpoint):
+    server_dedup = os.environ.get("TILEXR_EP_SERVER_DEDUP_ENABLE", "1")
+    if server_dedup not in ("0", "1"):
+        raise ValueError("TILEXR_EP_SERVER_DEDUP_ENABLE 必须为 0 或 1")
     send_core_num = os.environ.get("TILEXR_VALIDATION_SEND_CORE_NUM", "32")
     if send_core_num not in ("16", "24", "32", "40", "48"):
         raise ValueError("send_core_num 必须为 16/24/32/40/48")
@@ -391,7 +394,7 @@ def chain_configuration(checkpoint):
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
-                 run_mode=run_mode, loops=loops, warmup=warmup,
+                 run_mode=run_mode, loops=loops, warmup=warmup, server_dedup_enabled=server_dedup == "1",
                  send_core_num=send_core_num, recv_core_num=64 - send_core_num,
                  route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=int(case_analysis))
     if run_mode == "performance":
@@ -500,7 +503,7 @@ def verify_build(config, *, check_run_mode=True):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if config.checkpoint == DISPATCH_CHECKPOINT:
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
-            raise ValueError("需要完整 Dispatch 200B ABI / 动态收发核布局产物，请重新 build_all.sh 和 sync.sh")
+            raise ValueError("需要完整 Dispatch 208B ABI / server 去重运行时开关产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and config.chain is not None and
                                            profiling is not (config.chain["run_mode"] == "breakdown")):
@@ -647,6 +650,7 @@ def remote_argv(config, host, action, *arguments):
                             "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis", "send_core_num"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
+                values["TILEXR_EP_SERVER_DEDUP_ENABLE"] = int(config.chain["server_dedup_enabled"])
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
         exports = "; ".join("export " + key + "=" + shlex.quote(str(value))
                              for key, value in values.items() if value is not None)
@@ -862,6 +866,9 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
             if manifest["checkpoint"] == DISPATCH_CHECKPOINT:
                 if chain_config is None:
                     raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
+                for marker in (record, linked):
+                    if marker.get("server_dedup_enabled") is not chain_config["server_dedup_enabled"]:
+                        raise Failure("RESULT_FAILED", "Dispatch server 去重开关与本次配置不一致", rank=mapping["rank"])
                 for key in ("quant_mode", "fp8_format", "kernel_scope"):
                     if record.get(key) != chain_config[key]:
                         raise Failure("RESULT_FAILED", "Dispatch 实际类型或范围不一致", rank=mapping["rank"], field=key)
@@ -955,6 +962,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 inputs.mkdir(parents=True, exist_ok=True)
                 env["TILEXR_VALIDATION_INPUT_DIR"] = str(inputs)
                 env["TILEXR_COMM_ID"] = config.chain["comm_id"]
+                env["TILEXR_EP_SERVER_DEDUP_ENABLE"] = str(int(config.chain["server_dedup_enabled"]))
                 env["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
                 block_dim = "TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"
                 env.pop(block_dim, None)

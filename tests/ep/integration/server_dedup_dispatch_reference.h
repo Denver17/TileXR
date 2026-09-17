@@ -15,7 +15,7 @@ struct DispatchRow {
 
 // Construct public rows from every original route, in expert/source/q order.
 // The source packet classifier and device prefix/address helpers are not used.
-inline std::vector<DispatchRow> DispatchRows(const Shape &s, uint32_t destination)
+inline std::vector<DispatchRow> DispatchRows(const Shape &s, uint32_t destination, bool enableServerDedup = true)
 {
     const uint32_t local = s.experts / s.ranks;
     std::vector<std::vector<DispatchRow>> byExpert(local);
@@ -32,7 +32,7 @@ inline std::vector<DispatchRow> DispatchRows(const Shape &s, uint32_t destinatio
             for (const auto &route : routes) {
                 if (route.expert / local != destination) continue;
                 Packet packet {token, {}};
-                if (destination / 8U == source / 8U) packet.members.push_back(route);
+                if (!enableServerDedup || destination / 8U == source / 8U) packet.members.push_back(route);
                 else for (const auto &candidate : routes)
                     if (candidate.expert / local / 8U == destination / 8U) packet.members.push_back(candidate);
                 byExpert[route.expert % local].push_back({source, token, route.expert, route.q, route.k,

@@ -28,7 +28,7 @@ class TemporaryRoot(unittest.TestCase):
         self.hostfile = self.root / "hostfile"
         self.hostfile.write_text("127.0.0.1\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith("TILEXR_VALIDATION_")}
+                       if not key.startswith("TILEXR_VALIDATION_") and key != "TILEXR_EP_SERVER_DEDUP_ENABLE"}
         environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
                            TILEXR_VALIDATION_HOSTFILE=str(self.hostfile),
                            TILEXR_VALIDATION_BUILD_MODE="host",
@@ -810,6 +810,7 @@ record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
                for key in ('bs', 'h', 'topk', 'moe_expert_num', 'send_core_num')})
 record['recv_core_num'] = 64 - record['send_core_num']
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
+record['server_dedup_enabled'] = os.environ['TILEXR_EP_SERVER_DEDUP_ENABLE'] == '1'
 record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
               fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='dispatch', native_status='dispatch',
               first_hop_packets=48, first_hop_received=48, first_hop_bytes=48*15872, token_stride=15872,
@@ -821,7 +822,14 @@ record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['
 previous_relay = rank // 8 * 8 + (rank + 7) % 8
 record['relay_links'] = [[(rank + 8) % rank_size, token * 2, 0, rank, token, 0, 5] for token in range(48)] + [
     [(previous_relay + 8) % rank_size, token * 2, 0, previous_relay, token, k, -1] for token in range(48) for k in range(1, 6)]
+if not record['server_dedup_enabled']:
+    record.update(first_hop_packets=0, first_hop_received=0, first_hop_bytes=0,
+                  relay_packets=0, relay_received=0, relay_bytes=0, relay_links=[],
+                  direct_packets=576, direct_received=576, direct_bytes=576*15872,
+                  same_server_data_bytes=264*15872, cross_server_data_bytes=288*15872)
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
+if behavior == 'wrong-dedup-mode':
+    record['server_dedup_enabled'] = not record['server_dedup_enabled']
 # Leave another node in flight when rank 8 reports an invalid output.
 if os.environ.get('CHAIN_TEST_BEHAVIOR') in ('invalid-output', 'late-analysis-input') and rank == 0:
     import time
@@ -871,7 +879,7 @@ if behavior.startswith('invalid-output'):
     record = {key: record[key] for key in (
         'run_id', 'build_id', 'commit', 'checkpoint', 'host', 'host_index', 'local_rank', 'device',
         'rank', 'rank_size', 'pid', 'loops', 'warmup', 'run_mode', 'bs', 'h', 'topk', 'moe_expert_num',
-        'send_core_num', 'recv_core_num',
+        'send_core_num', 'recv_core_num', 'server_dedup_enabled',
         'dtype', 'route_mode', 'seed', 'quant_mode', 'fp8_format', 'kernel_scope', 'native_status', 'token_stride')}
     record.update(status='FAIL', validation_status='FAIL', validation_stage='dispatch-read',
                   validation_error='group firstHopRow mismatch row=0')
@@ -931,6 +939,20 @@ print(prefix + json.dumps(dict(record, submitted=loops,
                     for rank in node['reported_result']['ranks']:
                         self.assertEqual(rank['send_core_num'], send)
                         self.assertEqual(rank['recv_core_num'], 64 - send)
+
+    def test_server_dedup_mode_reaches_local_remote_ranks_and_summary(self):
+        self.enable_chain()
+        self.prepare_sync()
+        for value in ("0", "1"):
+            with self.subTest(value=value):
+                self.assert_success(self.invoke("run", environment={"TILEXR_EP_SERVER_DEDUP_ENABLE": value}))
+                summaries = list(self.config_instance.logs.glob("*/summary.json"))
+                summary = workflow.read_json(max(summaries, key=lambda path: path.stat().st_mtime_ns))
+                self.assertIs(summary["chain_configuration"]["server_dedup_enabled"], value == "1")
+                for node in summary["nodes"]:
+                    for rank in node["reported_result"]["ranks"]:
+                        self.assertIs(rank["server_dedup_enabled"], value == "1")
+                        self.assertIs(rank["chain"]["server_dedup_enabled"], value == "1")
 
     def test_case_analysis_after_all_nodes_and_remote_input_collection(self):
         self.enable_chain()
@@ -993,7 +1015,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.enable_chain()
         for behavior, kind in (("missing-chain", "LOG_PARSE_FAILED"), ("stale-round", "RESULT_FAILED"),
                                ("incomplete-round", "RESULT_FAILED"), ("launch-failure", "EXIT_FAILED"),
-                               ("wrong-shape", "RESULT_FAILED")):
+                               ("wrong-shape", "RESULT_FAILED"), ("wrong-dedup-mode", "RESULT_FAILED")):
             with self.subTest(behavior=behavior):
                 command = self.invoke("node", behavior, self.manifest["build_id"], "10", "", "1",
                                       environment={"CHAIN_TEST_BEHAVIOR": behavior})

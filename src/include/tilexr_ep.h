@@ -52,11 +52,14 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 
 // Server Dedup Dispatch 使用 A5 固定 64 AIV；sendCoreNum 可选 16/24/32/40/48，默认 32。
 // 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
+// TILEXR_EP_SERVER_DEDUP_ENABLE 未设置或为 1 时开启去重；为 0 时按 server 轮转逐 route DIRECT。
+// 每次调用读取该环境变量，其他值返回 PARA_CHECK_FAIL；接收协议和输出容量不随模式改变。
 // sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
 // expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
 // 成功表示异步提交成功。非 A5 返回 NOT_SUPPORT；同一 communicator 须在同一 stream 串行调用。
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
-// expertScalesOut 是独立 FP32[bs,topK] 输出；当前仅 sourceMask 中的第一跳首 k 有效，权重为 1.0。
+// expertScalesOut 是独立 FP32[bs,topK] 输出；sourceMask 有效位中 DIRECT 为真实权重，第一跳首 k 为 1.0。
+// 关闭去重时 sourceMask 的全部 topK 位有效，expertScalesOut 全部保留原始权重。
 // groupOut 按 epWorldSize*bs*min(topK,moeExpertNum/epWorldSize) 行预留；仅第一跳 row 有效。
 // forwardTokenIdx 为 relay 第一跳的零基输出 row；行字节数为 align32(4*(1+2*(topK-1)))。
 // 调用方须按新容量重新分配 groupOut；sourceMaskOut 仍为 bs 个 uint32。

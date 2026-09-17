@@ -199,6 +199,9 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     uint32_t *sourceMask, uint32_t *group, float *weightsOut, TileXR::TileXRDataType dtype,
     TileXR::TileXRDataType outDtype, aclrtStream stream, int64_t sendCoreNum)
 {
+    const char *dedup = std::getenv("TILEXR_EP_SERVER_DEDUP_ENABLE");
+    if (dedup != nullptr && std::strcmp(dedup, "0") != 0 && std::strcmp(dedup, "1") != 0) return 92;
+    const bool enableServerDedup = dedup == nullptr || std::strcmp(dedup, "1") == 0;
     const char *configuredSend = std::getenv("TILEXR_VALIDATION_SEND_CORE_NUM");
     if (sendCoreNum != (configuredSend ? std::strtoll(configuredSend, nullptr, 10) : 32)) return 92;
     if (x == nullptr || ids == nullptr || comm != &args || bs <= 0 || h <= 0 || topK <= 0 || topK > 32 ||
@@ -263,7 +266,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         using GroupKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
         std::map<GroupKey, uint32_t> groupIndices;
         for (uint32_t relay = 0; relay < shape.ranks; ++relay) {
-            const auto relayRows = DispatchRows(shape, relay);
+            const auto relayRows = DispatchRows(shape, relay, enableServerDedup);
             for (uint32_t index = 0; index < relayRows.size(); ++index) {
                 const auto &row = relayRows[index];
                 if (row.FirstHop())
@@ -271,13 +274,14 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             }
         }
         std::fill(sourceMask, sourceMask + bs, 0);
-        const auto sourcePackets = SourcePackets(Ids(shape, rank), Weights(shape, rank), rank, world, experts, topK);
+        const auto sourcePackets = SourcePackets(Ids(shape, rank), Weights(shape, rank), rank, world, experts, topK,
+            enableServerDedup);
         for (const auto &packet : sourcePackets) {
             const auto &first = packet.members.front();
             sourceMask[packet.token] |= uint32_t(1) << first.k;
             weightsOut[packet.token * topK + first.k] = packet.members.size() > 1U ? 1.0f : first.weight;
         }
-        const auto outputRows = DispatchRows(shape, rank);
+        const auto outputRows = DispatchRows(shape, rank, enableServerDedup);
         packets.clear();
         uint32_t previousT = UINT32_MAX;
         for (size_t index = 0; index < outputRows.size(); ++index) {

@@ -368,6 +368,11 @@ def validate_dispatch_traffic(record, config):
     _validate_data_traffic(record, config, kinds)
     if _integer(record.get("data_bytes"), "data_bytes") != sum(record[kind + "_bytes"] for kind in kinds):
         raise ValueError("Dispatch data_bytes 未包含完整 first-hop/DIRECT/relay 流量")
+    if config.get("server_dedup_enabled") is False:
+        if (any(record[kind + suffix] != 0 for kind in ("first_hop", "relay")
+                for suffix in ("_packets", "_received", "_bytes")) or
+                record["direct_packets"] != config["bs"] * config["topk"]):
+            raise ValueError("关闭 server 去重时必须全部 DIRECT，且无 first-hop/relay")
 
 
 def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_valid=True):
@@ -379,6 +384,12 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
         raise ValueError("测量 rank 缺失、重复或越界")
     ranks = sorted(rank_records, key=lambda row: row["rank"])
     for record in ranks:
+        # Retained reports before the runtime switch have no mode provenance.
+        # Current run configurations always include it and require every rank.
+        if "server_dedup_enabled" in chain_config and (
+                type(chain_config["server_dedup_enabled"]) is not bool or
+                record.get("server_dedup_enabled") is not chain_config["server_dedup_enabled"]):
+            raise ValueError("Dispatch server_dedup_enabled 与本次配置不一致")
         validate_rank_measurements(record, chain_config)
     output_valid = output_valid and all(row.get("validation_status") != "FAIL" for row in ranks)
     mode = chain_config["run_mode"]
@@ -398,7 +409,7 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                "configuration": {name: chain_config[name] for name in
                                  ("bs", "h", "topk", "moe_expert_num", "dtype", "block_dim", "loops", "warmup")},
                "host_barrier": "enabled", "submission": "continuous_batch_then_sync_and_host_barrier"}
-    for name in ("send_core_num", "recv_core_num"):
+    for name in ("send_core_num", "recv_core_num", "server_dedup_enabled"):
         if name in chain_config:
             summary["configuration"][name] = chain_config[name]
     if mode == "functional":

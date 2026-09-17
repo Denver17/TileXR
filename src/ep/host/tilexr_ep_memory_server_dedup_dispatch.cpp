@@ -2,6 +2,8 @@
 
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_launch.h"
+#include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -87,5 +89,10 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     params.sourceMaskOut = sourceMaskOut;
     params.groupOut = groupOut;
     params.expertScalesOut = expertScalesOut;
+    const char *enable = std::getenv("TILEXR_EP_SERVER_DEDUP_ENABLE");
+    if (enable != nullptr) {
+        if (std::strcmp(enable, "0") == 0) params.enableServerDedup = false;
+        else if (std::strcmp(enable, "1") != 0) return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     return DispatchServerDedup(params);
 }

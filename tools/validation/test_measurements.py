@@ -92,6 +92,31 @@ class MeasurementTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             measure.summarize_measurements(ranks, config, "d" * 64)
 
+    def test_disabled_dedup_summary_requires_all_direct_traffic_and_matching_mode(self):
+        config = dict(self.config, run_mode="functional", bs=2, topk=3,
+                      kernel_scope="dispatch", server_dedup_enabled=False)
+        ranks = [dict(rank=rank, server_dedup_enabled=False, first_hop_packets=0, first_hop_received=0,
+                      first_hop_bytes=0, relay_packets=0, relay_received=0, relay_bytes=0,
+                      direct_packets=6, direct_received=6, direct_bytes=192, token_stride=32,
+                      data_bytes=192, local_data_bytes=32, same_server_data_bytes=64,
+                      cross_server_data_bytes=96) for rank in range(16)]
+        summary = measure.summarize_measurements(ranks, config, "d" * 64)
+        self.assertIs(summary["configuration"]["server_dedup_enabled"], False)
+        for value in (True, None, 0, "0"):
+            changed = copy.deepcopy(ranks)
+            changed[8]["server_dedup_enabled"] = value
+            for output_valid in (True, False):
+                with self.subTest(value=value, output_valid=output_valid), self.assertRaisesRegex(
+                        ValueError, "server_dedup_enabled"):
+                    measure.summarize_measurements(changed, config, "d" * 64, output_valid=output_valid)
+        for kind in ("first_hop", "relay"):
+            changed = copy.deepcopy(ranks)
+            for row in changed:
+                row.update(direct_packets=5, direct_received=5, direct_bytes=160)
+                row.update({kind + "_packets": 1, kind + "_received": 1, kind + "_bytes": 32})
+            with self.subTest(kind=kind), self.assertRaisesRegex(ValueError, "全部 DIRECT"):
+                measure.summarize_measurements(changed, config, "d" * 64)
+
     def test_source_send_performance_includes_direct_and_local_copy_bytes(self):
         config = dict(self.config, rank_size=16, bs=96, moe_expert_num=96, loops=1, warmup=0,
                       kernel_scope="source_send", route_mode="balance_shift", seed=2026, quant_mode=0, fp8_format="e4m3")
