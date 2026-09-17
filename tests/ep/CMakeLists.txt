@@ -285,7 +285,8 @@ foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_ded
         ${TILEXR_ROOT}/src/ep/kernels)
     target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
     add_test(NAME ${test_target} COMMAND ${test_target})
-    set_tests_properties(${test_target} PROPERTIES TIMEOUT 120)
+    # Five splits now run all-core Count up to BS511 plus the 512/513 boundary.
+    set_tests_properties(${test_target} PROPERTIES TIMEOUT 240)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 target_compile_definitions(test_tilexr_ep_server_dedup_counts_profile PRIVATE TILEXR_ENABLE_PROFILING=1)

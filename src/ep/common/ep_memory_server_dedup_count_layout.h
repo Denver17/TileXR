@@ -6,7 +6,7 @@
 
 // Count participation threshold is independent of the runtime send/receive split.
 #ifndef TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD
-#define TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD 48U
+#define TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD 512U
 #endif
 
 namespace TileXREp {

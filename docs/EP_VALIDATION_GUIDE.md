@@ -11,6 +11,13 @@ receiver 在等待跨核局部和前计算相对前缀，局部和源的等待�
 
 当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
+默认发送/接收核数为 32/32，Count 全核参与阈值为 512：BS<512 时 64 核统计并发送 cnt，
+BS>=512 时仅接收核承担该步骤。阈值是编译期配置，与 `send_core_num` 的运行时配置独立；
+修改后须同时重建并同步 Host 与 kernel，Host UB 预算和核内 Count 分支必须使用相同阈值。
+本次基于 `689d12b` 验证：CANN 9.1/A5 kernel 与 Host 库 OFF/ON 编译通过，7 项 Host 回归通过；
+Count 在五种分核下覆盖 BS511/512/513，实测约 126 秒，测试时限由 120 秒调整为 240 秒。
+日志及源码摘要见 `build/count-threshold-512-verification/`；未运行 NPU，不据此宣称实机性能或正确性。
+
 2026-09-17 运行时分核验证（基于 `fa099d1` 加本次修改）：blue CANN 9.1.0 / Bisheng
 Clang 15.0.5 的 A5 kernel 与 `tilexr-ep` Host 库 profiling OFF/ON 均编译链接通过。
 12 项 C++ 核心回归通过，包括五种分核的 Count、sender、receiver；接收测试扩展到五组后

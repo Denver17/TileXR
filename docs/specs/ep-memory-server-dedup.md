@@ -74,7 +74,8 @@ A5 验证须覆盖连续多轮双窗口复用、空任务核及收发负载不�
 
 Count 的接收分段、两张 cumsum 矩阵、每个接收核的完整 prefix 副本，以及 Token 的
 floor 分区均使用本次 `recv_core_num=64-send_core_num`。源端 Token 划分使用发送核数。
-`BS<48` 时所有 64 核参与 Count 的阈值独立保留，不能随发送核数一起改变。
+`TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD` 默认 512；`BS<512` 时所有
+64 核参与 Count，`BS>=512` 时仅接收核参与 Count。此阈值独立于发送核数。
 所有 Rank 在同一 communicator 生命周期内使用相同且固定的分核值，调用顺序一致，
 并在同一 stream 串行。每次 run.sh 新建 communicator，因此不同运行可切换分核；
 不支持同一 communicator 跨轮改变分核。不同接收核数会移动 Count 控制区，旧 prefix
@@ -120,7 +121,7 @@ Combine 尚未实现；本次 Token 级 prefix 改动的验证边界见验证指
 
 ### `sendData` 内部模块
 
-当 `BS<48` 时，`sendData` 先条件调用 `sendCnt`，完成本核被分配的 cnt 发送；`BS>=48` 时不调用该路径。
+当 `BS<512` 时，`sendData` 先条件调用 `sendCnt`，下发本核被分配的 cnt；`BS>=512` 时不调用该路径。
 随后调用 `all2allDispatch`，由该函数对本核负责的 Token 做第二次任务划分和实际发送：
 
 1. 第一遍扫描本核全部 Token 任务，识别远端 Server 的多 route group，构造第一跳 Payload，并发送需要数据转发的 Token。
@@ -861,23 +862,23 @@ Token 的全部 Payload 块共用 Memory Dispatch 的 DataAsFlag 到达协议，
 
 ## 分核与监听
 
-默认总核数为 64，固定 48 核负责本卡源端数据发送，16 核负责 cnt 接收/cumsum、LocalWindowCopy 和数据转发。
-不单独分出专职转发核；cnt/q 的数值算法沿用 Memory，cumsum 核数使用固定 16 核，不再沿用旧动态公式或旧 8 核限制。
+总核数为 64，默认 32 核负责本卡源端数据发送，另外 32 核负责 cnt 接收/cumsum、LocalWindowCopy 和数据转发。
+发送核数 S 支持 16/24/32/40/48，接收核数为 64−S；不单独分出专职转发核，cnt/q 的数值算法沿用 Memory。
 
-| 核组 | 固定核数 | BS<48 | BS>=48（包含 BS=48） |
+| 核组 | 核数 | BS<512 | BS>=512（包含 BS=512） |
 | --- | --- | --- | --- |
-| 本卡源端数据发送 | 48 | 先完成本核 cnt 发送，再处理本核第一跳/DIRECT 任务 | 不发送 cnt，直接处理本核数据发送任务 |
-| cnt 接收/cumsum/LocalWindowCopy/数据转发 | 16 | 参与全 64 核的 cnt 发送分工，再接收 cnt、计算 cumsum、监听及 copy/转发 | 全部 cnt 发送在这 16 核分配，再接收 cnt、计算 cumsum、监听及 copy/转发 |
+| 本卡源端数据发送 | S（默认 32） | 先下发本核 cnt，再处理本核第一跳/DIRECT 任务 | 不发送 cnt，直接处理本核数据发送任务 |
+| cnt 接收/cumsum/LocalWindowCopy/数据转发 | 64−S（默认 32） | 参与全 64 核的 cnt 发送分工，再接收 cnt、计算 cumsum、监听及 copy/转发 | 全部 cnt 发送在接收核组分配，再接收 cnt、计算 cumsum、监听及 copy/转发 |
 
 Cnt 按目标 expert 范围分配，与源端 Token 任务独立；小 BS 下无源端 Token 的核仍完成分配到的 cnt。
 “先 cnt 后数据”是每核自身顺序，不等待所有核 cnt 完成，不增加核间阶段屏障。
-全核发送 cnt 不意味着全核算 cumsum 或监听数据；状态/Flag 分区和容量须适配固定 16 核，具体布局归 R07-01。
+全核发送 cnt 不意味着全核算 cumsum 或监听数据；状态/Flag 分区和容量须适配本次接收核数，具体布局归 R07-01。
 
-源端 BS 在 48 核采用连续区间、余数优先分配。发送核组内序号 i 的分配为：
+源端 BS 在 S 个发送核采用连续区间、余数优先分配。发送核组内序号 i 的分配为：
 
 ```text
-base = floor(BS / 48)
-remainder = BS % 48
+base = floor(BS / S)
+remainder = BS % S
 count_i = base + (i < remainder ? 1 : 0)
 start_i = i * base + min(i, remainder)
 sourceTokenRange_i = [start_i, start_i + count_i)

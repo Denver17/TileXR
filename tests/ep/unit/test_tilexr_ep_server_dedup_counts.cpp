@@ -371,15 +371,16 @@ int main()
             Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
             Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
             Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
-            Run(64, 384, 48, 6, 4);     // Default threshold boundary, independent of the split.
-            Run(64, 384, 96, 6, 2);     // Reported FP8 failure: threshold 48 bypasses Count, 128 runs Count on senders.
+            Run(64, 384, 48, 6, 4);     // Historical small-BS boundary; now still uses all-core Count.
+            Run(64, 384, 96, 6, 2);     // Senders also participate in Count for the common BS96 case.
             Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology and 63 records/core.
             Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
             Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.
-            if (kEpServerDedupAllCoreCountBsThreshold > 0U && kEpServerDedupAllCoreCountBsThreshold <= 256U) {
+            if (kEpServerDedupAllCoreCountBsThreshold > 0U && kEpServerDedupAllCoreCountBsThreshold <= 1024U) {
                 if (kEpServerDedupAllCoreCountBsThreshold > 1U)
                     Run(16, 64, kEpServerDedupAllCoreCountBsThreshold - 1U, 1, 2);
                 Run(16, 64, kEpServerDedupAllCoreCountBsThreshold, 1, 2);
+                Run(16, 64, kEpServerDedupAllCoreCountBsThreshold + 1U, 1, 2);
             }
         }
     } catch (const std::exception &error) {
