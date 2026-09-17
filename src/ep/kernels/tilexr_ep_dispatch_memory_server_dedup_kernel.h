@@ -47,9 +47,8 @@ public:
         profile_.Mark(EpDedupDetailPoint::FinishBegin);
         counts_.Finish();
         profile_.Mark(EpDedupDetailPoint::LocalEnd);
-        // All 64 cores participate exactly once, after their GM writes complete.
-        SyncAll();
-        profile_.Mark(EpDedupDetailPoint::SyncEnd);
+        // No shared work follows local completion. Same-stream kernel completion
+        // orders the next launch after all cores finish their writes and cleanup.
         profile_.Mark(8);
         profile_.Publish();
     }

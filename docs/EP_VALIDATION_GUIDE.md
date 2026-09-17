@@ -2,7 +2,15 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
-当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末清理当前窗口的数据 Flag，再参与本卡 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+
+2026-09-17 核末 SyncAll 移除：保留本核流水收尾和 Flag 清理，新 trace 不再产生 `finish_sync`，
+旧记录仍可解析。基于 `9f3a1ab` 加本次修改，blue 的 CANN 9.1.0 / Bisheng Clang 15.0.5
+完成 A5 `dav-c310-vec` kernel 的 profiling OFF/ON 编译链接；本地 21 项 trace 回归通过，
+独立并发审查未发现需修正的问题。源码摘要、配置、编译器版本、返回码和日志保存在
+`build/finish-sync-verification/`。本次未运行 A5 多卡测试；连续多轮双窗口复用、空任务核及
+负载倾斜场景仍待设备验证，性能比较应使用 msprof 整个 kernel 时长，不以各核结束打点的
+均值/中位数下降推断整体收益。
 
 2026-09-16 编号契约更新：第一跳 `t=row`，终端继承 relay 的 t；`groupOut` 按
 `C=R*BS*min(K,L)` 行重新分配。原 `t<8*BS` 和任意密排编号不再有效；consumer 验证第一跳

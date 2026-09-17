@@ -146,6 +146,9 @@ def breakdown_timeline(run):
                     "finish_wait_end" if legacy_finish else "finish_counter_end") or markers.get("finish_sync_end")
             else:
                 markers["finish_return_begin"] = markers.get("finish_sync_end")
+            # Current kernels return after local completion, without a final SyncAll.
+            if markers["finish_return_begin"] is None:
+                markers["finish_return_begin"] = markers.get("finish_local_end")
             packets = [sample for sample in lane.samples if sample.name == "packet_issue"]
             markers["first_issue"] = packets[0] if packets else markers.get("send_data_end")
             markers["last_issue"] = packets[-1] if packets else None

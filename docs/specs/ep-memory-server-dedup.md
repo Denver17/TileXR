@@ -26,7 +26,7 @@ Group 行可以有空洞，第一跳的 group[t].firstHopRow 等于 t，字段�
 只消费有效 assistEx 中 forwardCount>0 引用的 group，且只读取其前 forwardEntryCount 个成员；
 空洞无需初始化或清零。members[i].recvSlot 继续为 t*K+originalK，成员的顺序及真实 weight 不变。
 按 C 预留 groupOut；不能依据实际 group 数或旧 8*BS 上限分配、校验地址。删除原子取号及
-轮末 counter 清零，保留现有本核完成、SyncAll、双窗口和 Dispatch Flag 清理边界。
+轮末 counter 清零；当前也移除核末 SyncAll，保留本核完成、双窗口和 Dispatch Flag 清理边界。
 原 counter 的 1KiB 布局区和 profiling 事件编号仅作历史保留，不再产生 Atomic/CounterEnd 事件。
 
 当前 Dispatch 不访问 Combine relay 返回区，保留旧通信窗口预留和容量检查以隔离性能变量；
@@ -41,6 +41,22 @@ Host 替身证明编号/字节/边界契约，CANN 9.1 A5 编译证明编译；�
 
 维护要点：从密排计数器改用已有稀疏身份时，容量由最大可寻址索引决定，而不是有效 group 数；
 必须同步调整 caller 分配、元数据检查及独立 oracle，否则正常高 row 会越界或被测试误拒。
+
+## 2026-09-17：移除 Dispatch 核末 SyncAll（当前契约）
+
+Token 级 prefix 已取消共享 counter 清零，核末本地收尾之后只剩本核 profiling 发布，
+没有消费其他核结果的工作，因此删除末尾 `SyncAll()` 及其 `SyncEnd` 打点。
+保留 `counts_.Finish()` 的 `PipeBarrier<PIPE_ALL>()` 和控制寄存器恢复，以及发送完成等待、
+接收 lane 回收和 Dispatch Flag 清理；不能因删除核间屏障而一并删掉这些本核依赖。
+同一 communicator 的调用仍须在同一 stream 串行执行，并保持所有 Rank 的调用顺序一致；
+kernel 完成要求全部核退出，某个核提前返回不允许下一轮提前复用窗口。
+双窗口和全 Rank Count 发布（含零计数）继续保护跨轮复用；本次不引入跨 Rank 完成握手。
+
+旧 trace 的 `SyncEnd` 事件 ID 和 `finish_sync` 解析保留兼容；新 trace 的 `finish_return`
+从 `LocalEnd` 开始，不生成虚假的 `finish_sync`。各核 `kernel_total` 终点现在允许不同，
+其均值/中位数降低不能直接视为整个 kernel 加速：原同步耗时包含快核等待慢核的时间。
+收益以相同 case 的 msprof 整个 kernel 时长评估；CANN 编译和 trace 回归不能证明设备并发正确性，
+A5 验证须覆盖连续多轮双窗口复用、空任务核及收发负载不均衡，并检查结果和 Flag 清理。
 
 ## 设计状态
 
@@ -99,7 +115,7 @@ assistEx/group 由后续 recvData 的 Token 接收 owner 生成，不属于源�
 4. 持续监听 receive buffer。根据 Token 尾部识别直发 Token、待转发的第一跳 Token 和已经转发过的终端 Token，分别执行本地整理、展开后续转发或匹配有效 entry 后的终端处理；本阶段的数据转发 UB/Event、公共副本和进度回收另行设计。
 
 `recvData` 的 cumsum 完成是监听表生成的前置条件，但不表示各 Token 已经到达；监听仍按完整 Payload 的 DataAsFlag 逐 Token 判定。
-`sendData` 与 `recvData` 是核角色路径，不是两个可以相互等待的逻辑阶段；两组核在 `process` 中并行推进，只有算子末尾的全核 `SyncAll()` 保留用于完成收敛。
+`sendData` 与 `recvData` 是核角色路径，不是两个可以相互等待的逻辑阶段；两组核在 `process` 中并行推进，核末各自完成写出和清理后返回，不再执行全核 `SyncAll()`。
 
 ### Cnt 与 cumsum 的 Memory 复用边界
 
@@ -897,7 +913,7 @@ else:
 循环只访问有效范围，换入项继续检查，轮询到末尾后从头继续。
 tokenPos、输出行及 forwardTokenIdx 关联稳定 j，不绑定 pendingIdx 的当前位置。
 核末以 `PipeBarrier<PIPE_ALL>` 等待本核已下发的写入和清理完成；该操作不是跨核或跨 Rank 屏障。
-全部 64 核还须参与算子末尾的 SyncAll，即使本核没有 Token 任务；不再清零 counter。
+各核（包括无 Token 任务核）完成本核收尾后独立返回；不再参与核末 SyncAll，也不清零 counter。
 
 ## 中转编号与持久表
 
@@ -906,7 +922,7 @@ tokenPos、输出行及 forwardTokenIdx 关联稳定 j，不绑定 pendingIdx �
 第一跳 owner 直接使用 `t=row=tasks.Begin()+j`，即本卡零基输出行号；编号在本卡第一跳
 之间唯一，所有副本继承 `(relayRank,t)`。具体范围、稀疏 group 容量和 Combine 遗留见本文开头。
 不再执行 AtomicAdd，也不读取或清零 counter。原 1KiB 区域保留为未使用布局空间。
-全部核仍在各自写出/清理完成后执行现有 SyncAll；无任务核也参加。不新增同步或完成协议。
+全部核在各自写出/清理完成后独立返回；下一轮依赖同一 stream 的完整 kernel 完成边界。不新增同步或完成协议。
 编号有效不代表数据已就绪：仍须等待完整包到达，并按原有 MTE/调用边界发布 metadata 和转发数据。
 原子 API 核对及旧决策记录保留在历史 R05 中，不再描述当前生产路径。
 

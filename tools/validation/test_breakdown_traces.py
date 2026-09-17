@@ -278,6 +278,25 @@ class TraceTests(unittest.TestCase):
         for event in returns:
             self.assertAlmostEqual(event["dur"], 0.2)
 
+    def test_local_finish_without_sync_preserves_return_for_all_cores(self):
+        rows = {core: [(0, 0x53000001), (100, 0x53000108),
+                      (200, 0x53000109), (500 + core, 0x53000009)]
+                for core in range(64)}
+        path = write_capture(self.root / "local-finish.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID,
+                                               self.root / "local-finish")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["diagnostic_count"], 0)
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        events = [event for event in trace["traceEvents"] if event["ph"] == "X"]
+        names = {event["name"] for event in events}
+        self.assertFalse({"finish_sync", "finish_counter", "finish_publish", "finish_wait"} & names)
+        returns = [event for event in events if event["name"] == "finish_return"]
+        self.assertEqual(len(returns), 64)
+        for event in returns:
+            self.assertAlmostEqual(event["dur"], (300 + event["args"]["core"]) / 1000)
+        self.assertEqual(result["stages_us"]["finish_local"]["sample_count"], 64)
+
     def test_old_chrome_display_unit_is_removed_without_changing_events(self):
         source = self.root / "legacy-trace.json"
         trace = dict(displayTimeUnit="us", traceEvents=[dict(name="stage", ph="X", pid=0, tid=0,
