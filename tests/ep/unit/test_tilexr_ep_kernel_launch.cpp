@@ -24,13 +24,15 @@ struct LaunchCapture {
     uint32_t blockDim = 0;
     rtStream_t stream = nullptr;
     std::vector<uint64_t> args;
+    std::vector<uint8_t> tiling;
+    uint32_t submittedBytes = 0U;
 };
 
 int gFailures = 0;
 int gMagicCalls = 0;
 uint32_t gProfilingCalls = 0U;
 bool gProfilingExhausted = false;
-constexpr int64_t kNextMagic = 0x1234;
+constexpr int64_t kNextMagic = 0x123456781234LL;
 std::string gSocName = "Ascend950PR_9589";
 int gBinaryRegisterCalls = 0;
 int gBinaryUnregisterCalls = 0;
@@ -268,16 +270,29 @@ void TestServerDedupRuntimeLaunch()
     ResetCapture();
     gVectorCores = 64;
     Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
-    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 26);
+    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 15);
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
     constexpr uint64_t firstProfilingSlot = 0U;
 #else
     constexpr uint64_t firstProfilingSlot = UINT32_MAX;
 #endif
+    // Independent wire expectations: thirteen unchanged addresses, patched GM
+    // tiling pointer, then magic. Tiling fields are checked as little-endian bytes.
+    constexpr uint64_t tilingDeviceBase = 0x100008U;
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
         0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
-        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic, firstProfilingSlot, 32, 1};
-    Check(gLaunches[0].args == expected, "all 26 kernel arguments preserve order, widths and values (208B)");
+        tilingDeviceBase + 128U, kNextMagic};
+    std::vector<uint8_t> expectedTiling = {
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, // bs=256, h=7168
+        0, 0, 0, 0, // profiling slot
+        0x80, 0x01, 6, 32, // experts=384, topK=6, send=32
+        1, 4, 11, 16, 1, // count type, quant mode, BF16, E5M2, dedup
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    for (uint32_t byte = 0; byte < 4U; ++byte)
+        expectedTiling[8U + byte] = static_cast<uint8_t>(firstProfilingSlot >> (8U * byte));
+    Check(gLaunches[0].args == expected && gLaunches[0].tiling == expectedTiling,
+        "120B kernel ABI and 32B GM tiling preserve all field values and reserved zeros");
+    Check(gLaunches[0].submittedBytes == 160U, "runtime packet includes tiling and explicit padding");
     Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
@@ -288,15 +303,17 @@ void TestServerDedupRuntimeLaunch()
         params.enableServerDedup = round % 2 == 0;
         Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
         auto roundArgs = expected;
-        roundArgs[22] = kNextMagic + round;
-        roundArgs[25] = params.enableServerDedup ? 1U : 0U;
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
-        roundArgs[23] = 0U;
-#endif
+        roundArgs[13] += static_cast<uint64_t>(round) * 256U;
+        roundArgs[14] = kNextMagic + round;
+        auto roundTiling = expectedTiling;
+        roundTiling[20] = params.enableServerDedup ? 1U : 0U;
         Check(gLaunches.size() == static_cast<std::size_t>(round + 1) &&
-            gLaunches.back().args == roundArgs && gLaunches.back().stream == p.stream,
+            gLaunches.back().args == roundArgs && gLaunches.back().tiling == roundTiling &&
+            gLaunches.back().stream == p.stream,
             "each round forwards its mode and new magic and reuses all pointers and the stream");
     }
+    Check(gLaunches.front().tiling == expectedTiling,
+        "later asynchronous submissions cannot overwrite the first launch tiling snapshot");
     Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
         "multiple rounds consume exactly one magic each without reloading the artifact");
 
@@ -307,23 +324,43 @@ void TestServerDedupRuntimeLaunch()
         params.sendCoreNum = sendCoreNum;
         Check(launch() == TileXR::TILEXR_SUCCESS, "runtime split launches the same kernel artifact");
         auto splitArgs = expected;
-        splitArgs[24] = static_cast<uint64_t>(sendCoreNum);
-        Check(gLaunches.size() == 1 && gLaunches[0].args == splitArgs &&
+        auto splitTiling = expectedTiling;
+        splitTiling[15] = static_cast<uint8_t>(sendCoreNum);
+        Check(gLaunches.size() == 1 && gLaunches[0].args == splitArgs && gLaunches[0].tiling == splitTiling &&
             gLaunches[0].blockDim == 64 && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
             "runtime split reaches its ABI field while launch remains 64 AIVs");
     }
     params.sendCoreNum = 32;
+
+    // Maximum expert/topK encodings and an h that cannot fit in uint16_t.
+    const auto originalParams = params;
+    ResetCapture();
+    gVectorCores = 64;
+    p.bs = 1;
+    p.h = 65537;
+    p.moeExpertNum = 1024;
+    p.topK = 32;
+    p.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_FP8E4M3;
+    Check(launch() == TileXR::TILEXR_SUCCESS, "wide shape and compact enum tiling launch succeeds");
+    auto wideTiling = expectedTiling;
+    wideTiling[0] = 1; wideTiling[1] = 0;
+    wideTiling[4] = 1; wideTiling[5] = 0; wideTiling[6] = 1;
+    wideTiling[12] = 0; wideTiling[13] = 4; wideTiling[14] = 32; wideTiling[19] = 15;
+    Check(gLaunches[0].tiling == wideTiling && gLaunches[0].args[14] == kNextMagic,
+        "uint32 hidden, uint16 experts, uint8 topK/dtype and 64-bit magic survive packing");
+    params = originalParams;
 
     ResetCapture();
     gVectorCores = 96;
     p.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
     p.quantMode = 0;
     p.dynamicScalesOut = nullptr;
-    p.expandXOutDtype = p.dtype;
+    p.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_RESERVED;
     p.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0xc000);
     Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches[0].blockDim == 64 &&
-        gLaunches[0].args[8] == 0xc000 && gLaunches[0].args[21] == static_cast<uint64_t>(p.dtype),
-        "larger devices retain fixed 48/16 partition and explicit FP16 ABI");
+        gLaunches[0].args[8] == 0xc000 && gLaunches[0].tiling[19] == static_cast<uint8_t>(p.dtype) &&
+        gLaunches[0].tiling[17] == 0U && gLaunches[0].tiling[18] == 3U,
+        "larger devices retain the selected split and explicit FP16 tiling");
     ResetCapture();
     gVectorCores = 64;
     gLaunchResult = -1;
@@ -331,13 +368,14 @@ void TestServerDedupRuntimeLaunch()
     Check(gMagicCalls == 1 && gLaunches.size() == 1, "failed submission consumes only its own magic");
     gLaunchResult = RT_ERROR_NONE;
     Check(launch() == TileXR::TILEXR_SUCCESS && gMagicCalls == 2 &&
-        gLaunches.back().args[22] == static_cast<uint64_t>(kNextMagic + 1),
+        gLaunches.back().args[14] == static_cast<uint64_t>(kNextMagic + 1),
         "a later invocation cannot reuse a failed submission's magic");
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
-    Check(gProfilingCalls == 2U && gLaunches.back().args[23] == 0U,
+    Check(gProfilingCalls == 2U && gLaunches.back().tiling[8] == 0U,
         "latest capture reuses its single slot independently of submission magic");
     gProfilingExhausted = true;
-    Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches.back().args[23] == UINT32_MAX,
+    Check(launch() == TileXR::TILEXR_SUCCESS && std::all_of(gLaunches.back().tiling.begin() + 8, gLaunches.back().tiling.begin() + 12,
+            [](uint8_t byte) { return byte == 0xffU; }),
         "unavailable latest capture does not prevent communication launch");
 #endif
 }
@@ -600,7 +638,27 @@ rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim,
     capture.blockDim = blockDim;
     capture.stream = stream;
     if (argsInfo != nullptr && argsInfo->args != nullptr) {
-        const std::size_t fieldCount = argsInfo->argsSize / sizeof(uint64_t);
+        capture.submittedBytes = argsInfo->argsSize;
+        std::size_t fieldCount = argsInfo->argsSize / sizeof(uint64_t);
+        if (argsInfo->hasTiling != 0U) {
+            Check(capture.name == "tilexr_ep_dispatch_memory_server_dedup_kernel",
+                "only server dedup uses the new tiling packet");
+            Check(argsInfo->isNoNeedH2DCopy == 0U && argsInfo->hostInputInfoNum == 0U,
+                "runtime owns the launch argument H2D copy");
+            Check(argsInfo->argsSize == 160U && argsInfo->tilingAddrOffset == 104U &&
+                argsInfo->tilingDataOffset == 128U, "runtime receives the exact tiling relocation offsets");
+            if (argsInfo->argsSize != 160U || argsInfo->tilingAddrOffset != 104U ||
+                argsInfo->tilingDataOffset != 128U) return -1;
+            auto *bytes = static_cast<uint8_t *>(argsInfo->args);
+            // Model CANN's per-launch GM relocation and immediate owned snapshot.
+            // Deliberately only 8B aligned, as allowed by Runtime argument storage.
+            const uint64_t deviceTiling = 0x100008U + gLaunches.size() * 256U + 128U;
+            std::memcpy(bytes + argsInfo->tilingAddrOffset, &deviceTiling, sizeof(deviceTiling));
+            capture.tiling.assign(bytes + 128U, bytes + 160U);
+            Check(std::all_of(bytes + 120U, bytes + 128U, [](uint8_t byte) { return byte == 0U; }),
+                "runtime packet padding is initialized");
+            fieldCount = 15U;
+        }
         const uint64_t *fields = static_cast<const uint64_t *>(argsInfo->args);
         capture.args.assign(fields, fields + fieldCount);
     }

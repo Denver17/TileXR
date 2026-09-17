@@ -157,11 +157,15 @@ int EnsureCombineMemoryKernelRegistered()
 }
 
 int LaunchRegisteredKernel(const void *stub, uint32_t blockDim, aclrtStream stream,
-    void *args, std::size_t argsSize, const char *kernelName)
+    void *args, std::size_t argsSize, const char *kernelName,
+    uint32_t tilingAddrOffset = 0U, uint32_t tilingDataOffset = 0U)
 {
     rtArgsEx_t argsInfo {};
     argsInfo.args = args;
-    argsInfo.argsSize = argsSize;
+    argsInfo.argsSize = static_cast<uint32_t>(argsSize);
+    argsInfo.hasTiling = tilingDataOffset != 0U;
+    argsInfo.tilingAddrOffset = tilingAddrOffset;
+    argsInfo.tilingDataOffset = tilingDataOffset;
     rtTaskCfgInfo_t cfgInfo {};
     const rtError_t rtRet = rtKernelLaunchWithFlagV2(stub, blockDim, &argsInfo, nullptr,
         static_cast<rtStream_t>(stream), 0U, &cfgInfo);
@@ -402,11 +406,25 @@ int TileXREpRegisterDispatchMemoryServerDedupKernel()
         &entry, 1U, &gServerDedupKernelStub);
 }
 
-int TileXREpSubmitDispatchMemoryServerDedupKernel(EpServerDedupKernelArgs &args,
-    uint32_t blockDim, aclrtStream stream)
+int TileXREpSubmitDispatchMemoryServerDedupKernel(const EpServerDedupKernelArgs &args,
+    const EpServerDedupTilingData &tiling, uint32_t blockDim, aclrtStream stream)
 {
+    // CANN copies this launch-owned payload into GM and patches tilingData to
+    // the device address. Keep it writable: Runtime rewrites the pointer slot.
+    // No separately queued H2D, shared mutable tiling slot or allocation is needed.
+    struct LaunchPacket {
+        EpServerDedupKernelArgs args;
+        uint8_t padding[8];
+        EpServerDedupTilingData tiling;
+    };
+    static_assert(offsetof(LaunchPacket, tiling) == 128U, "tiling follows the padded kernel arguments");
+    static_assert(sizeof(LaunchPacket) == 160U, "runtime payload includes the GM tiling block");
+    LaunchPacket packet {};
+    packet.args = args;
+    packet.tiling = tiling;
     return LaunchRegisteredKernel(&gServerDedupKernelStub, blockDim, stream,
-        &args, sizeof(args), kServerDedupKernelName);
+        &packet, sizeof(packet), kServerDedupKernelName,
+        offsetof(EpServerDedupKernelArgs, tilingData), offsetof(LaunchPacket, tiling));
 }
 
 int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpHostLaunchContext &context)

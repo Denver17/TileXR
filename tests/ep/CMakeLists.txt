@@ -127,9 +127,20 @@ typedef struct rtDevBinary {
     const void *data;
     uint64_t length;
 } rtDevBinary_t;
+typedef struct rtHostInputInfo {
+    uint32_t addrOffset;
+    uint32_t dataOffset;
+} rtHostInputInfo_t;
 typedef struct rtArgsEx {
     void *args;
-    size_t argsSize;
+    rtHostInputInfo_t *hostInputInfoPtr;
+    uint32_t argsSize;
+    uint32_t tilingAddrOffset;
+    uint32_t tilingDataOffset;
+    uint16_t hostInputInfoNum;
+    uint8_t hasTiling;
+    uint8_t isNoNeedH2DCopy;
+    uint8_t reserved[4];
 } rtArgsEx_t;
 typedef struct rtSmDesc {
     uint32_t reserved;

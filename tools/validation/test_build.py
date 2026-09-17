@@ -266,17 +266,20 @@ class BuildTests(unittest.TestCase):
                 'TILEXR_COMM_ID': '192.0.2.1:10177'}):
             config = self.config('production')
             manifest, _ = self.build_fixture(config)
-            self.assertEqual(manifest['server_dedup_contract']['launch_bytes'], 208)
+            self.assertEqual(manifest['server_dedup_contract']['launch_bytes'], 120)
+            self.assertEqual(manifest['server_dedup_contract']['tiling_bytes'], 32)
+            self.assertEqual(manifest['server_dedup_contract']['runtime_args_bytes'], 160)
             for previous in (None,
                              dict(launch_bytes=192, layout='r07-token-prefix', kernel_scope='dispatch'),
-                             dict(launch_bytes=200, layout='r08-runtime-core-split', kernel_scope='dispatch')):
+                             dict(launch_bytes=200, layout='r08-runtime-core-split', kernel_scope='dispatch'),
+                             dict(launch_bytes=208, layout='r09-runtime-server-dedup-switch', kernel_scope='dispatch')):
                 if previous is None:
                     manifest.pop('server_dedup_contract')
                 else:
                     manifest['server_dedup_contract'] = previous
                 workflow.write_json(config.install / 'manifest.json', manifest)
                 for check_mode in (True, False):
-                    with self.subTest(previous=previous, check_mode=check_mode), self.assertRaisesRegex(ValueError, '208B ABI'):
+                    with self.subTest(previous=previous, check_mode=check_mode), self.assertRaisesRegex(ValueError, '120B ABI'):
                         workflow.verify_build(config, check_run_mode=check_mode)
 
     def test_baseline_build_disables_breakdown_instrumentation(self):

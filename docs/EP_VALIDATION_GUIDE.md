@@ -864,3 +864,23 @@ counter 清零，保留完成屏障；Combine 尚未实现。主规格记录新�
 独立审查及主审已核对 owner、稀疏容量、终端继承和旧 counter/profile 消费者。
 这些验证不证明 A5 多卡异步运行或性能收益；用户侧必须重新 build/sync 后在相同 case 比较完整 Dispatch。
 既有 HCCL 环境基线无需因本次代码改变重复运行。
+
+## Server Dedup GM tiling 验证边界
+
+当前参数契约为 `r10-gm-tiling`：Kernel 签名 120B，tiling 32B，实际 Runtime 提交包
+160B；magic 独立传参，epHandle 尚未引入。升级时同时重建 owning Host 库和 A5 Kernel，
+并执行 `build_all.sh` / `sync.sh` 更新 manifest；不能混用旧 208B 标量入口。
+
+Host launch 替身按 CANN 的偏移回填和即时快照语义检查打包；覆盖连续提交、量化分支、
+profiling 槽位和 64 位 magic，不能据此声称真实 Runtime GM 搬运已通过。
+编译验证需包括 `test_tilexr_ep_kernel_launch` / `_profile` 和公共 API/Host 校验，
+以及真实 CANN 9.1/A5 Kernel 与 owning Host 库。NPU 验证应保留多轮、不同 shape 和
+profiling OFF/ON，用实际结果验证 GM 参数读取；参数字节减少不等于耗时改善。
+对齐和 Host 包生命周期的版本依据见主规格“GM tiling 参数”章节。
+
+2026-09-17 验证：基于 `777a8c8` 加本次 tiling 修改，blue 的 CANN 9.1.0 / Bisheng
+Clang 15.0.5（2026-05-18）完成 A5 `dav-c310-vec` Kernel 和 `tilexr-ep` Host 库的
+profiling OFF/ON 编译；6 项上述相关 Host CTest、16 项 build Python 回归及 98 项
+workflow Python 回归通过。987 个构建输入文件的最终 SHA256 与 blue 快照一致。
+独立审查未发现待修复缺陷。证据保留于本地 `build/tiling-data-verification/`，
+包含版本匹配的 Runtime 源码依据；未运行 NPU，不宣称设备正确性或性能改善。

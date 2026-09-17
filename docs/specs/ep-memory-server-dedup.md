@@ -1,5 +1,56 @@
 # EP Memory 服务器级去重设计
 
+## 2026-09-17：GM tiling 参数（当前 launch ABI）
+
+本节替代历史按值标量 launch 布局；只迁移 tiling，不引入 epHandle。
+公共 Host API、13 个输入输出/通信地址及其输出语义保持不变；未使用的
+assistInfoForCombineOut 地址仍保留。内部 Kernel 参数顺序为这 13 个地址、
+GM_ADDR tilingData、int64_t magic，共 120B。globalBs 继续在 Host 校验/推导，
+不再传到 Kernel；magic 仍由 Host 每次取得并直接传入，不存入 tiling。
+
+共享 EpServerDedupTilingData 固定 32B，字段如下，均在 Host 校验后窄化：
+
+| Offset | 字段 | 类型 |
+|---|---|---|
+| 0、4、8 | bs、h、profilingLaunchSlot | uint32_t |
+| 12 | moeExpertNum | uint16_t，当前最多 1024 |
+| 14、15 | topK、sendCoreNum | uint8_t，当前最多 32 / 48 |
+| 16～20 | expertTokenNumsType、quantMode、dtype、expandXOutDtype、enableServerDedup | uint8_t |
+| 21～31 | reserved | 11B，Host 全部置零 |
+
+profilingLaunchSlot 的 UINT32_MAX 无效值保留。非量化的 RESERVED 输出 dtype 在
+Host 转成输入 dtype 后打包。核内不新增范围检查，也不缩小地址计算使用的 64 位中间值。
+
+使用现有 rtKernelLaunchWithFlagV2 的原生 tiling 支持：可写 Host 提交包是
+120B Kernel 参数 + 8B 零填充 + 32B tiling，共 160B；hasTiling=1，
+tilingAddrOffset=104，tilingDataOffset=128，isNoNeedH2DCopy=0。
+Runtime 将 tiling 地址槽回填为本次提交的 GM 地址，并搬运整个包。
+**120B 是 Kernel 签名参数大小，160B 才是 Runtime argsSize；不能把两者混为一谈。**
+安装 manifest 同时记录 launch_bytes=120、tiling_bytes=32、runtime_args_bytes=160，
+layout=r10-gm-tiling；旧 208B/200B/192B 产物必须重新构建、同步。
+
+采用 Runtime 自有参数存储，不增加 per-call aclrtMalloc、单独排队的 H2D 或共享可变
+GM tiling 槽。CANN 9.1/A5 的 UB 路径先将 Host 包复制到 Runtime staging；950 的
+PCIe fallback 强制使用同步复制/BAR。因此 Host 局部提交包可在 launch 返回后结束
+生命周期，后续异步提交拥有独立快照；该结论不推广到其他 SoC 的复制策略。
+每个核在入口通过 Scalar 读取配置到局部值，后续不在轮询或 Token 循环中反复读 GM。
+
+对齐维护要点：固定 32B 大小或 offset=128 **不能**证明实际 GM 地址 32B 对齐。
+Runtime 参数池仅保证 8B 对齐，所以共享结构体保持自然 4B 对齐并使用 Scalar 读取，
+不能直接改成需要 32B 对齐的 MTE 读取。另一个维护边界是 Host 包必须可写：Runtime
+会回填 tiling 指针，不能把它定义为 const 存储。
+
+版本证据为官方 Runtime v9.1.0，commit
+`0b4af8a31c75a1f1f43638a8f75b9e3c6182e031`：
+[指针回填及复制](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/core/src/kernel/arg_loader/stars_arg_manager.cc#L165)、
+[UB staging](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/core/src/kernel/arg_loader/arg_manage_ub.cc#L102)、
+[950 同步复制策略](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/config/950/dev_info_reg.cc#L115)、
+[参数地址对齐](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/core/src/kernel/arg_loader/arg_loader_ub.hpp#L43)。
+
+验证要求：Host 检查 wire 字节、Runtime 偏移与回填、连续提交快照、64 位 magic、
+五种核数、量化类型、profiling 无效槽及窄化前拒绝；CANN 9.1/A5 编译实际入口和
+owning Host 库。Host 替身和编译不能证明 NPU GM 读取正确性或性能收益，仍需实机验证。
+
 ## 2026-09-16：Dispatch 使用 Token 级 prefix 编号（当前契约）
 
 本节替代本文及历史 R04/R05/R07 中的 AtomicAdd 取号、密排 t 和 group 表 8*BS 行约定。

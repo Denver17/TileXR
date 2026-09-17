@@ -7,7 +7,7 @@
 namespace TileXREp {
 
 int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParams &params,
-    const EpHostLaunchContext &context, const EpMemoryServerDedupLayout &layout)
+    const EpHostLaunchContext &context, const EpMemoryServerDedupLayout &)
 {
     if (!TileXREpIsA5Soc()) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
@@ -39,16 +39,27 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     TileXRProfilingReserveLatestLaunch(p.comm, kEpServerDedupProfilingRecordsPerLaunch,
         &profilingLaunchSlot);
 #endif
+    // Basic/config validation has already checked every range and supported enum.
+    EpServerDedupTilingData tiling {};
+    tiling.bs = static_cast<uint32_t>(p.bs);
+    tiling.h = static_cast<uint32_t>(p.h);
+    tiling.profilingLaunchSlot = profilingLaunchSlot;
+    tiling.moeExpertNum = static_cast<uint16_t>(p.moeExpertNum);
+    tiling.topK = static_cast<uint8_t>(p.topK);
+    tiling.sendCoreNum = static_cast<uint8_t>(params.sendCoreNum);
+    tiling.expertTokenNumsType = static_cast<uint8_t>(p.expertTokenNumsType);
+    tiling.quantMode = static_cast<uint8_t>(p.quantMode);
+    tiling.dtype = static_cast<uint8_t>(p.dtype);
+    tiling.expandXOutDtype = static_cast<uint8_t>(
+        p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype);
+    tiling.enableServerDedup = params.enableServerDedup ? 1U : 0U;
     EpServerDedupKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.x),
         reinterpret_cast<GM_ADDR>(p.expertIds), static_cast<GM_ADDR>(p.expertScales),
         static_cast<GM_ADDR>(p.expandXOut), static_cast<GM_ADDR>(p.dynamicScalesOut), reinterpret_cast<GM_ADDR>(p.expertTokenNumsOut),
         reinterpret_cast<GM_ADDR>(p.epRecvCountsOut), reinterpret_cast<GM_ADDR>(p.assistInfoForCombineOut),
         reinterpret_cast<GM_ADDR>(params.assistExOut), reinterpret_cast<GM_ADDR>(params.sourceMaskOut),
-        reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), p.bs, p.h, p.topK, p.moeExpertNum,
-        static_cast<int64_t>(layout.globalBs), p.expertTokenNumsType, p.quantMode, static_cast<int64_t>(p.dtype),
-        static_cast<int64_t>(p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype),
-        magic, static_cast<int64_t>(profilingLaunchSlot), params.sendCoreNum, params.enableServerDedup ? 1 : 0};
-    return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);
+        reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), nullptr, magic};
+    return TileXREpSubmitDispatchMemoryServerDedupKernel(args, tiling, kEpServerDedupCoreNum, p.stream);
 }
 
 } // namespace TileXREp

@@ -181,7 +181,7 @@ int main()
             "invalid split is rejected before accessing communicator state");
     }
 
-    for (int test = 0; test < 36; ++test) {
+    for (int test = 0; test < 43; ++test) {
         auto params = valid;
         auto &v = params.dispatch;
         int error = TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -222,6 +222,15 @@ int main()
             case 33: params.expertScalesOut = static_cast<float *>(v.expertScales); break;
             case 34: params.expertScalesOut = static_cast<float *>(v.expertScales) + 1; break;
             case 35: params.expertScalesOut = reinterpret_cast<float *>(UINTPTR_MAX - 3U); break;
+            // Reject values before the launch builder narrows its tiling fields.
+            case 36: v.bs = int64_t(UINT32_MAX) + 1; break;
+            case 37: v.h = int64_t(UINT32_MAX) + 1; break;
+            case 38: v.moeExpertNum = int64_t(UINT16_MAX) + 1; break;
+            case 39: v.topK = 256 + 6; break;
+            case 40: v.expertTokenNumsType = 256 + 1; break;
+            case 41: v.quantMode = 256; error = TILEXR_ERROR_NOT_SUPPORT; break;
+            case 42: v.dtype = static_cast<TileXRDataType>(256 + TILEXR_DATA_TYPE_BFP16);
+                error = TILEXR_ERROR_NOT_SUPPORT; break;
         }
         CheckRejected(params, error);
     }
