@@ -19,7 +19,8 @@ enum class EpDedupDetailMetric : uint32_t {
     Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait, // Atomic retired; keep ID.
     // Append only: older captures retain their existing event identities.
     LoadIssue, LoadWait, ProbeLoadFlag, ProbeCalSum, SendCntFilter, SendCntSend,
-    SendFirstHop, SendDirect, RecvToken
+    SendFirstHop, SendDirect, RecvToken,
+    SendCntIssue // SendCntSend retains the historical wait-inclusive interval.
 };
 } // namespace TileXREp
 #endif

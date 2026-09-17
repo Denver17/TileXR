@@ -253,6 +253,13 @@
       "parent": "kernel_total",
       "begin": 1392509470,
       "end": 1392509471
+    },
+    {
+      "name": "send_cnt_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509472,
+      "end": 1392509473
     }
   ]
 }

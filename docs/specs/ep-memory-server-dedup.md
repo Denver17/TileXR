@@ -145,7 +145,7 @@ Memory 将 expertTokenNumsOut 的生成放在 LocalWindowCopy 准备路径中；
 
 实现位于 `src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h`，Host 固定启动 64 个 AIV，
 设备不足 64 个 AIV 时拒绝；阶段一空入口的任意 blockDim 覆盖及空 kernel 打点已删除。
-`SendCnt` 使用原始 expertIds，保留 Memory 的范围筛选统计/逐 expert reduce 选择，随后完成计数写出并释放计数临时 UB；
+`SendCnt` 使用原始 expertIds，保留 Memory 的范围筛选统计/逐 expert reduce 选择，随后异步下发计数，独立保留发送记录并复用筛选 scratch；
 16 个接收核执行 `RecvCnt -> CalcCumsum -> CompleteCumsum`，核末等待本核 GM 写入完成。
 本增量不访问 hidden/权重，不构建 Token 监听表，也不取号或清零尚未使用的 relay counter。
 
@@ -157,7 +157,8 @@ E=1024 时每份计数状态为 112KiB，两份加 counter 共 225KiB。Host 检
 
 计数发送峰值 UB 为 `4*align256(BS*K*4)+align8(ceil(E/countCores))*36`，`countCores` 按 BS 取 64 或 16。
 Host 在整数窄化前核算该预算，超过沿用的 190KiB UB 预算则拒绝；这是计数资源约束，不是独立的单卡专家数限制，
-也不表示完整数据流水的 shape/容量已验证。接收/前缀 UB 使用计数发送完成后的独立生命周期。
+也不表示完整数据流水的 shape/容量已验证。接收/前缀 UB 与筛选 scratch 共享地址；cnt 记录在发送完成前保持不变，
+局部前缀先于跨核结果等待计算。详见 [cnt 发送掩盖优化方案](ep-memory-server-dedup-count-send-overlap.md)，进入 recvdata 前仍保留完成屏障。
 
 复用时容易遗漏的边界是：消费者从全部核变为接收组后，必须同时修改前缀副本数量、Flag 矩阵、读写下标和清理范围，
 不能只修改 cnt 分核；Scalar 写好的前缀须建立 S→MTE3 依赖后再复制，副本写完后才发布 ready。

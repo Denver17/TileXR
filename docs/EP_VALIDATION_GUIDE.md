@@ -2,6 +2,13 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
+2026-09-17 cnt 发送掩盖方案 A：见 [cnt 发送掩盖优化方案](specs/ep-memory-server-dedup-count-send-overlap.md)。
+cnt 发送源独立保留，筛选 scratch 与 sender/recv-count 共享，SendCnt 不再排空 MTE3 或 Reset。
+receiver 在等待跨核局部和前计算相对前缀，局部和源的等待延后到真正复用位置。
+当前 `recv_cnt` 包含局部前缀，`cumsum` 包含跨核等待和全局偏移修正，比较时使用两者合计及 kernel 总耗时。
+新 `send_cnt_issue`（`0x53000220/21`）只记录依赖发布和下发；旧 `send_cnt_send` 保持历史含等待语义，不能混用两者计算通信提速。
+本次没有运行 NPU；A5 收益和全核 cnt + FP8 正确性仍需设备验证。
+
 当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
 2026-09-17 核末 SyncAll 移除：保留本核流水收尾和 Flag 清理，新 trace 不再产生 `finish_sync`，
@@ -366,7 +373,7 @@ python3 tools/validation/measurements.py /path/to/run/summary.json --records-dir
 
 维护要点：保持事件位置与记录机制分离；新增点位只扩展数字 ID 和 mapping，不重新引入 UB 暂存或算子专属 cache flush。复用槽位必须同时处理有效范围和丢点状态，不能只把 slot 改成 0。跨 Host/kernel/reader 改动需同时校验 launch ABI、固定分配预算、长轮后短轮/空轮、截断状态及安装产物身份。多机 profiling 应在数据所在节点完成解析，再收集成品，避免每卡本地解析后主节点又解析两遍。
 
-2026-09-17：为区分 SendCnt 的统计和通信开销，追加两个区间（旧事件 ID 保持不变）：
+2026-09-17 历史同步版本：为区分 SendCnt 的统计和通信开销，追加两个区间（旧事件 ID 保持不变；异步方案使用上文的新下发事件）：
 
 | 区间 | 事件 ID（begin/end） | 计时范围 |
 | --- | --- | --- |

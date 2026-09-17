@@ -45,7 +45,9 @@ void CheckReceiveTasks(Rank &rank, const std::vector<int32_t> &counts,
 
     uint32_t nextRow = 0;
     for (uint32_t receiver = 0; receiver < kEpServerDedupRecvCoreNum; ++receiver) {
-        auto &pipe = rank.pipes[kEpServerDedupSendCoreNum + receiver];
+        // Production resets the count pipe at the receiver boundary and reloads
+        // the GM prefix. This isolated task test keeps its source alive instead.
+        AscendC::TPipe pipe;
         const uint64_t bytesBefore = pipe.bytes;
         const uint64_t copiesBefore = AscendC::testCopies;
         const uint64_t syncBefore = AscendC::TestSyncOperations();
@@ -142,6 +144,85 @@ void CheckReceiveTaskBoundaries()
     }
 }
 
+// Incoming records are already available, while this core's outgoing MTE3
+// deliberately has made no progress. RecvCnt must compute/publish without
+// forcing that unrelated source buffer to retire.
+void CheckDeferredCountReceive()
+{
+    constexpr uint32_t world = 64U, experts = 384U;
+    const uint32_t receiver = 1U, core = kEpServerDedupSendCoreNum + receiver;
+    const uint32_t countCores = 1U < kEpServerDedupAllCoreCountBsThreshold ? 64U : kEpServerDedupRecvCoreNum;
+    const uint32_t countCore = countCores == 64U ? core : receiver;
+    const uint32_t start = countCore * (experts / countCores) + std::min(countCore, experts % countCores);
+    const uint32_t count = experts / countCores + (countCore < experts % countCores);
+    const uint32_t recvStart = receiver * (experts / kEpServerDedupRecvCoreNum) +
+        std::min(receiver, experts % kEpServerDedupRecvCoreNum);
+    const uint32_t recvCount = experts / kEpServerDedupRecvCoreNum + (receiver < experts % kEpServerDedupRecvCoreNum);
+    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
+    std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
+    TileXR::CommArgs args {};
+    args.rankSize = world;
+    args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
+    ServerDedupTest::SparsePeerMemory memory;
+    for (uint32_t rank = 0; rank < world; ++rank) {
+        memory.Add(rank, 1U, state[rank].data(), state[rank].size() * sizeof(uint32_t));
+        args.peerMems[rank] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(rank));
+    }
+    uint32_t localSum = 0U;
+    for (uint32_t i = 0; i < recvCount; ++i) {
+        state[0][layout.cntOffset / 4U + (recvStart + i) * 8U] = 0x3f800000U;
+        state[0][layout.cntOffset / 4U + (recvStart + i) * 8U + 1U] = i % 5U;
+        localSum += i % 5U;
+    }
+    int32_t route = int32_t(start);
+    std::vector<int32_t> prefix(experts);
+    std::vector<int64_t> expertOutput(experts / world);
+    AscendC::TPipe pipe;
+    ServerDedupCounts counts;
+    AscendC::testCore = core;
+    counts.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(&route),
+        reinterpret_cast<GM_ADDR>(expertOutput.data()), reinterpret_cast<GM_ADDR>(prefix.data()),
+        1U, 1U, experts, 0U, 1, &pipe);
+    ServerDedupTest::ProfileCapture capture(args);
+    TileXREp::ServerDedupProfile profile;
+    profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
+    AscendC::DeferMte3() = true;
+    counts.SendCnt(profile);
+    Check(!AscendC::PendingMte3().empty(), "SendCnt returns while its source is still pending");
+    const auto countWrites = AscendC::PendingMte3().size();
+    uint32_t mte3Waits = 0U;
+    AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID, bool set) {
+        if (!set && (event == AscendC::HardEvent::MTE3_V || event == AscendC::HardEvent::MTE3_S ||
+                event == AscendC::HardEvent::MTE3_MTE2)) ++mte3Waits;
+    };
+    counts.RecvCnt();
+    AscendC::EventObserver() = {};
+    Check(mte3Waits == 0U, "incoming polling, local sum and relative prefix do not wait for outgoing MTE3");
+    Check(AscendC::PendingMte3().size() > countWrites, "local sum and cleanup are issued behind the still-pending cnt");
+    Check(counts.ReservedBytes() == ((count + 7U) / 8U * 8U) * 32U,
+        "only aligned count records remain reserved outside shared scratch");
+    Check(pipe.bytes == 190U * 1024U, "count and receiver views share a single bounded UB reservation");
+    AscendC::CompleteMte3();
+    AscendC::DeferMte3() = false;
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t expert = start + i;
+        const uint32_t index = layout.cntOffset / 4U + expert % (experts / world) * world * 8U;
+        Check(state[expert / (experts / world)][index] == 0x3f800000U &&
+            state[expert / (experts / world)][index + 1U] == (i == 0U ? 1U : 0U),
+            "deferred cnt reads retain every record after receiver scratch overwrites count scratch");
+    }
+    for (uint32_t consumer = 0; consumer < kEpServerDedupRecvCoreNum; ++consumer) {
+        const uint32_t index = (layout.cntOffset + layout.cumsumOffset) / 4U +
+            (receiver * kEpServerDedupRecvCoreNum + consumer) * 8U;
+        Check(state[0][index] == localSum && state[0][index + 1U] == 0x3f800000U,
+            "deferred local sum publication preserves value and readiness");
+    }
+    for (uint32_t i = 0; i < recvCount; ++i)
+        Check(state[0][layout.cntOffset / 4U + (recvStart + i) * 8U] == 0U,
+            "deferred clear retires each consumed incoming ready flag");
+    counts.Finish();
+}
+
 void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rounds)
 {
     TileXR::CommArgs profileArgs {};
@@ -218,8 +299,8 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             const auto events = capture.Events(id % 64);
 #if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING
             if (AscendC::testCopies > before) {
-                Check(events == std::vector<uint32_t>{0x53000216U, 0x53000217U, 0x53000218U, 0x53000219U},
-                    "active Count cores publish paired filter and send intervals in order");
+                Check(events == std::vector<uint32_t>{0x53000216U, 0x53000217U, 0x53000220U, 0x53000221U},
+                    "active Count cores publish paired filter and issue intervals in order");
             } else {
                 Check(events.empty(), "skipped and empty Count cores publish no artificial intervals");
             }
@@ -227,7 +308,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             Check(events.empty(), "profiling OFF records no Count intervals");
 #endif
             Check(AscendC::GetCtrlSpr<60, 60>() == 0,
-                "Count preserves the FP overflow mode for subsequent quantization, including after pipe reset");
+                "Count preserves the FP overflow mode for subsequent quantization, without resetting the pipe");
             if (bs >= kEpServerDedupAllCoreCountBsThreshold && id % 64 < kEpServerDedupSendCoreNum)
                 Check(AscendC::testCopies == before, "BS at/above the independent threshold leaves send cores out of Count");
             if (bs < kEpServerDedupAllCoreCountBsThreshold && experts >= 64U)
@@ -282,13 +363,14 @@ int main()
 {
     try {
         CheckReceiveTaskBoundaries();
+        CheckDeferredCountReceive();
         Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
         Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
         Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
         Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
         Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
         Run(64, 384, 48, 6, 4);     // Default threshold boundary, independent of the split.
-        Run(64, 384, 96, 6, 2);     // Reported FP8 failure: threshold 48 bypasses Count, 128 resets the pipe.
+        Run(64, 384, 96, 6, 2);     // Reported FP8 failure: threshold 48 bypasses Count, 128 runs Count on senders.
         Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology and 63 records/core.
         Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
         Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.

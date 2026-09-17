@@ -33,7 +33,7 @@ public:
         counts_.SendCnt(profile_);
         profile_.Mark(2);
         if (core_ < kEpServerDedupSendCoreNum) {
-            sender_.Process(profile_);
+            sender_.Process(profile_, counts_.ScratchPool(), counts_.ReservedBytes());
             profile_.Mark(3);
         } else {
             counts_.RecvCnt(); profile_.Mark(4);

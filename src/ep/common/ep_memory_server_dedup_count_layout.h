@@ -79,7 +79,8 @@ TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(u
 }
 
 // Peak sendCnt allocation: four route-sized UB buffers plus count records/histogram.
-// Receive/cumsum uses a separate allocation lifetime after the send writes drain.
+// Sender/receive scratch overlays those four buffers and the histogram after
+// filtering; the records remain reserved until the asynchronous writes retire.
 TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupCountSendUbBytes(
     uint64_t routes, uint32_t experts, uint32_t countCores)
 {

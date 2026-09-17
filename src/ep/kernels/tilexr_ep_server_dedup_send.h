@@ -33,20 +33,21 @@ public:
         weightOut_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(sourceWeights));
     }
 
-    __aicore__ inline void Process(ServerDedupProfile &profile)
+    __aicore__ inline void Process(ServerDedupProfile &profile,
+        TBufPool<TPosition::VECCALC, 16> &scratch, uint32_t reservedBytes)
     {
         if (count_ == 0U) return;
+        scratch_ = &scratch;
         TQue<QuePosition::VECIN, 1> input;
-        TBufPool<TPosition::VECIN> inputPool, cleanPool;
+        TBufPool<TPosition::VECIN, 1> cleanPool;
         TBuf<> cleanInput;
         const uint32_t inputBytes = Quantized ? uint32_t(data_.quantCount * sizeof(XType)) : uint32_t(data_.packedPayloadBytes);
-        pipe_->InitBufPool(inputPool, 2U * inputBytes);
-        inputPool.InitBuffer(input, 2U, inputBytes);
-        usedBytes_ = 2U * inputBytes;
+        scratch_->InitBuffer(input, 2U, inputBytes);
+        usedBytes_ = reservedBytes + 2U * inputBytes;
         if constexpr (Quantized) {
             // Alias the two input buffers exactly as Memory does. Quantization
             // reads the compute padding, so initialize it once before CopyIn.
-            pipe_->InitBufPool(cleanPool, 2U * inputBytes, inputPool);
+            pipe_->InitBufPool(cleanPool, 2U * inputBytes, scratch);
             cleanPool.InitBuffer(cleanInput, 2U * inputBytes);
             Duplicate<uint8_t>(cleanInput.Get<uint8_t>(), 0U, 2U * inputBytes);
             Sync<HardEvent::V_MTE2>();
@@ -160,7 +161,7 @@ private:
     }
     __aicore__ inline void Allocate(TBuf<> &buffer, uint32_t bytes)
     {
-        pipe_->InitBuffer(buffer, bytes);
+        scratch_->InitBuffer(buffer, bytes);
         usedBytes_ += bytes;
     }
     __aicore__ inline void Classify(uint32_t token, uint32_t &directMask, uint32_t &groups)
@@ -285,6 +286,7 @@ private:
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
+    TBufPool<TPosition::VECCALC, 16> *scratch_ = nullptr;
     uint32_t bs_ = 0, h_ = 0, k_ = 0, localExperts_ = 0, start_ = 0, count_ = 0;
     uint32_t usedBytes_ = 0, lanes_ = 0, packets_ = 0, directCount_ = 0;
     EpServerDedupDataLayout data_ {};

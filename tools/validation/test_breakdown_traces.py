@@ -198,36 +198,38 @@ class TraceTests(unittest.TestCase):
             self.assertFalse(any(e["name"] == name for e in events))
 
     def test_count_filter_and_send_intervals_on_active_cores(self):
-        for first_core in (0, 48):
-            with self.subTest(first_core=first_core):
-                rows = {}
-                for core in range(64):
-                    row = [(0, 0x53000001), (100, 0x53000002)]
-                    if core >= first_core:
-                        row += [(200, 0x53000216), (400, 0x53000217),
-                                (410, 0x53000218), (700, 0x53000219)]
-                    row += [(800, 0x53000003), (1000, 0x53000009)]
-                    rows[core] = row
-                path = write_capture(self.root / f"count-{first_core}.records.v1", events_by_core=rows)
-                result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID,
-                                                       self.root / f"count-{first_core}")
-                self.assertEqual(result["status"], "complete")
-                self.assertEqual(result["diagnostic_count"], 0)
-                trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
-                for name, duration in (("send_cnt_filter", 0.2), ("send_cnt_send", 0.29)):
-                    self.assertEqual(result["stages_us"][name]["sample_count"], 64 - first_core)
-                    samples = [e for e in trace["traceEvents"] if e["name"] == name]
-                    self.assertEqual({e["args"]["core"] for e in samples}, set(range(first_core, 64)))
-                    self.assertTrue(all(e["ph"] == "X" and e["dur"] == duration for e in samples))
-                    parents = {e["args"]["core"]: e for e in trace["traceEvents"] if e["name"] == "send_cnt"}
-                    for sample in samples:
-                        parent = parents[sample["args"]["core"]]
-                        self.assertLess(parent["args"]["raw_start"], sample["args"]["raw_start"])
-                        self.assertLess(sample["args"]["raw_end"], parent["args"]["raw_end"])
+        for send_name, send_begin in (("send_cnt_send", 0x53000218), ("send_cnt_issue", 0x53000220)):
+            for first_core in (0, 48):
+                with self.subTest(first_core=first_core, send_name=send_name):
+                    rows = {}
+                    for core in range(64):
+                        row = [(0, 0x53000001), (100, 0x53000002)]
+                        if core >= first_core:
+                            row += [(200, 0x53000216), (400, 0x53000217),
+                                    (410, send_begin), (700, send_begin + 1)]
+                        row += [(800, 0x53000003), (1000, 0x53000009)]
+                        rows[core] = row
+                    path = write_capture(self.root / f"count-{send_name}-{first_core}.records.v1", events_by_core=rows)
+                    result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID,
+                                                           self.root / f"count-{send_name}-{first_core}")
+                    self.assertEqual(result["status"], "complete")
+                    self.assertEqual(result["diagnostic_count"], 0)
+                    trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+                    for name, duration in (("send_cnt_filter", 0.2), (send_name, 0.29)):
+                        self.assertEqual(result["stages_us"][name]["sample_count"], 64 - first_core)
+                        samples = [e for e in trace["traceEvents"] if e["name"] == name]
+                        self.assertEqual({e["args"]["core"] for e in samples}, set(range(first_core, 64)))
+                        self.assertTrue(all(e["ph"] == "X" and e["dur"] == duration for e in samples))
+                        parents = {e["args"]["core"]: e for e in trace["traceEvents"] if e["name"] == "send_cnt"}
+                        for sample in samples:
+                            parent = parents[sample["args"]["core"]]
+                            self.assertLess(parent["args"]["raw_start"], sample["args"]["raw_start"])
+                            self.assertLess(sample["args"]["raw_end"], parent["args"]["raw_end"])
         # Older producers have no split records; no synthetic timings are added.
         for row in self.records:
             self.assertNotIn("send_cnt_filter", row["breakdown"]["stages_us"])
             self.assertNotIn("send_cnt_send", row["breakdown"]["stages_us"])
+            self.assertNotIn("send_cnt_issue", row["breakdown"]["stages_us"])
 
     def test_probe_includes_idle_scans_without_substage_records(self):
         # All unsuccessful scans and the successful batch share this interval.

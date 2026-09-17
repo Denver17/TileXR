@@ -3,6 +3,7 @@
 #include <numeric>
 #include <random>
 #include "tilexr_ep_server_dedup_send.h"
+#include "tilexr_ep_server_dedup_counts.h"
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
 #include "server_dedup_test_memory.h"
@@ -40,6 +41,61 @@ void CheckReceiveUnpack(uint32_t h, bool quantized)
     for (uint32_t i = 0; i < 32U; ++i)
         Check(hidden[i] == 0xcd && hidden[32U + expected.size() + i] == 0xcd,
             "receiver unpack respects both output guards");
+}
+
+void CheckDeferredCountSender()
+{
+    if (TileXREp::kEpServerDedupAllCoreCountBsThreshold <= 1U) return;
+    constexpr uint32_t experts = 384U, world = 64U, h = 32U;
+    const auto data = TileXREp::TileXREpServerDedupDataLayout(1U, h, 1U, experts, false);
+    const auto countLayout = TileXREp::TileXREpServerDedupCountLayout(experts);
+    std::vector<uint8_t> window(data.dispatchOffset + data.dispatchBytes + 32U, 0U);
+    TileXR::CommArgs args {};
+    args.rankSize = world;
+    args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
+    args.peerMems[0] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(0));
+    ServerDedupTest::SparsePeerMemory memory;
+    memory.Add(0U, 1U, window.data(), window.size());
+    ServerDedupTest::ProfileCapture capture(args);
+    AscendC::TPipe pipe;
+    AscendC::testCore = 0U;
+    int32_t route = 1, prefix[experts] {};
+    int64_t expertOutput[experts / world] {};
+    uint16_t hidden[h] {};
+    float weight = 0.75f, output = 0.0f;
+    uint32_t mask = 0U;
+    TileXREp::ServerDedupCounts counts;
+    counts.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(&route),
+        reinterpret_cast<GM_ADDR>(expertOutput), reinterpret_cast<GM_ADDR>(prefix),
+        1U, 1U, experts, 0U, 1, &pipe);
+    TileXREp::ServerDedupProfile profile;
+    profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
+    AscendC::DeferMte3() = true;
+    counts.SendCnt(profile);
+    Check(!AscendC::PendingMte3().empty(), "sender starts with count records still pending");
+    bool preparationOverlapped = false;
+    AscendC::GmReadObserver() = [&](const void *source, uint32_t) {
+        if (source == &route) preparationOverlapped = !AscendC::PendingMte3().empty();
+    };
+    TileXREp::ServerDedupSender<uint16_t, false, false> sender;
+    sender.Init(&args, reinterpret_cast<GM_ADDR>(hidden), reinterpret_cast<GM_ADDR>(&route),
+        reinterpret_cast<GM_ADDR>(&weight), reinterpret_cast<GM_ADDR>(&mask), reinterpret_cast<GM_ADDR>(&output),
+        1U, h, 1U, experts, &pipe, 1);
+    sender.Process(profile, counts.ScratchPool(), counts.ReservedBytes());
+    AscendC::GmReadObserver() = {};
+    Check(preparationOverlapped, "sender route preparation advances before count MTE3 completes");
+    Check(AscendC::PendingMte3().empty(), "sender completion retires pending count and payload writes");
+    AscendC::DeferMte3() = false;
+    Check(counts.ReservedBytes() == 256U && pipe.bytes == 190U * 1024U,
+        "sender accounts for the retained 256-byte count records inside its UB budget");
+    for (uint32_t expert = 0; expert < experts / world; ++expert) {
+        uint32_t record[2] {};
+        std::memcpy(record, window.data() + countLayout.cntOffset + expert * world * 32U, sizeof(record));
+        Check(record[0] == 0x3f800000U && record[1] == (expert == 1U ? 1U : 0U),
+            "sender preparation and lane reuse preserve the delayed count source");
+    }
+    Check(mask == 1U && output == weight, "count-to-sender handoff preserves token outputs");
+    counts.Finish();
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
@@ -128,7 +184,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
             profile.Mark(2);
-            sender.Process(profile);
+            AscendC::TBufPool<AscendC::TPosition::VECCALC, 16> scratch;
+            pipe.InitBufPool(scratch, 190U * 1024U);
+            sender.Process(profile, scratch, 0U);
             profile.Mark(3);
             const auto syncBefore = AscendC::TestSyncOperations();
             profile.Publish();
@@ -235,6 +293,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
 int main()
 {
     try {
+        CheckDeferredCountSender();
         CheckReceiveUnpack(32, false);
         CheckReceiveUnpack(240, false); // Exactly one 480B data block.
         CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.

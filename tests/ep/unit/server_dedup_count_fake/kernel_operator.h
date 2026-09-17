@@ -1,6 +1,7 @@
 #pragma once
-// Synchronous CPU substitutes for exercising the production count arithmetic and
-// strided GM protocol. They do not model device events, caches or MTE ordering.
+// CPU substitutes for production count arithmetic and the strided GM protocol.
+// Optional deferred source reads exercise UB ownership; this is not device timing
+// or a cache/coherence model.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -52,6 +53,20 @@ inline uint64_t &TestSyncOperations() { static uint64_t count = 0; return count;
 template<class A, class B> inline uint32_t Ceil(A a, B b) { return uint32_t((a + b - 1) / b); }
 enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S, MTE2_MTE3, MTE3_MTE2 };
 enum Pipeline { PIPE_ALL, PIPE_V, PIPE_MTE3 };
+inline bool &DeferMte3() { static bool defer = false; return defer; }
+inline std::vector<std::function<void()>> &PendingMte3() {
+    static std::vector<std::function<void()>> pending;
+    return pending;
+}
+inline void CompleteMte3() {
+    auto pending = std::move(PendingMte3());
+    PendingMte3().clear();
+    for (const auto &copy : pending) copy();
+}
+inline void IssueMte3(std::function<void()> copy) {
+    if (DeferMte3()) PendingMte3().push_back(std::move(copy));
+    else copy();
+}
 using TEventID = uint32_t;
 inline std::function<void(HardEvent, TEventID, bool)> &EventObserver() {
     static std::function<void(HardEvent, TEventID, bool)> observer;
@@ -72,9 +87,14 @@ template<HardEvent E> void WaitFlag(TEventID id) {
     ++TestSyncOperations();
     if (id >= 8 || !Events<E>()[id]) throw std::runtime_error("waiting on an unpublished event");
     Events<E>()[id] = false;
+    if (E == HardEvent::MTE3_V || E == HardEvent::MTE3_S || E == HardEvent::MTE3_MTE2)
+        CompleteMte3();
     if (EventObserver()) EventObserver()(E, id, false);
 }
-template<Pipeline> void PipeBarrier() { ++TestSyncOperations(); }
+template<Pipeline P> void PipeBarrier() {
+    ++TestSyncOperations();
+    if (P == PIPE_ALL || P == PIPE_MTE3) CompleteMte3();
+}
 inline uint64_t &TestCtrlSpr() { static uint64_t value = UINT64_C(0x1000000000000008); return value; }
 template<int First, int Last> int64_t GetCtrlSpr() {
     return (TestCtrlSpr() >> First) & ((UINT64_C(1) << (Last - First + 1)) - 1U);
@@ -98,8 +118,9 @@ struct Storage { std::vector<uint8_t> bytes; bool alive = true; };
 template<class T> struct LocalTensor {
     std::shared_ptr<Storage> storage;
     std::size_t offset = 0;
+    std::size_t length = SIZE_MAX;
     uint8_t *Data(std::size_t bytes) const {
-        if (!storage || !storage->alive || offset + bytes > storage->bytes.size())
+        if (!storage || !storage->alive || bytes > length || offset + bytes > storage->bytes.size())
             throw std::runtime_error("UB bounds/lifetime violation");
         return storage->bytes.data() + offset;
     }
@@ -107,8 +128,11 @@ template<class T> struct LocalTensor {
     void SetValue(std::size_t i, T value) const { std::memcpy(Data((i + 1) * sizeof(T)) + i * sizeof(T), &value, sizeof(T)); }
     T operator()(std::size_t i) const { return GetValue(i); }
     uint64_t GetPhyAddr() const { return reinterpret_cast<uint64_t>(Data(0)); }
-    LocalTensor operator[](std::size_t i) const { return {storage, offset + i * sizeof(T)}; }
-    template<class U> LocalTensor<U> ReinterpretCast() const { return {storage, offset}; }
+    LocalTensor operator[](std::size_t i) const {
+        if (i * sizeof(T) > length) throw std::runtime_error("UB tensor offset overflow");
+        return {storage, offset + i * sizeof(T), length - i * sizeof(T)};
+    }
+    template<class U> LocalTensor<U> ReinterpretCast() const { return {storage, offset, length}; }
 };
 template<class T> struct GlobalTensor {
     T *pointer = nullptr;
@@ -123,11 +147,16 @@ enum class DcciDst { CACHELINE_OUT };
 template<class T, CacheLine, DcciDst> void DataCacheCleanAndInvalid(GlobalTensor<T>) {}
 template<int = 0> struct TBuf {
     std::shared_ptr<Storage> storage;
-    template<class T> LocalTensor<T> Get() { return {storage, 0}; }
-    template<class T> LocalTensor<T> GetWithOffset(uint32_t, uint32_t offset) { return {storage, offset}; }
+    std::size_t offset = 0, bytes = 0;
+    template<class T> LocalTensor<T> Get() { return {storage, offset, bytes}; }
+    template<class T> LocalTensor<T> GetWithOffset(uint32_t count, uint32_t relativeOffset) {
+        if (relativeOffset + uint64_t(count) * sizeof(T) > bytes)
+            throw std::runtime_error("UB buffer offset overflow");
+        return {storage, offset + relativeOffset, bytes - relativeOffset};
+    }
 };
 enum class QuePosition { VECIN };
-enum class TPosition { VECIN };
+enum class TPosition { VECIN, VECCALC };
 template<QuePosition, int> struct TQue {
     std::vector<LocalTensor<uint8_t>> slots;
     uint32_t next = 0, state = 0;
@@ -148,12 +177,29 @@ template<QuePosition, int> struct TQue {
         state = 0; next = (next + 1) % slots.size();
     }
 };
-template<TPosition> struct TBufPool {
+template<TPosition P, uint32_t N = 4> struct TBufPool {
     std::shared_ptr<Storage> storage;
-    template<QuePosition Q, int N> void InitBuffer(TQue<Q, N> &q, uint32_t count, uint32_t size) {
-        for (uint32_t i = 0; i < count; ++i) q.slots.push_back({storage, uint64_t(i) * size});
+    uint64_t base = 0, capacity = 0, used = 0;
+    uint32_t buffers = 0;
+    uint64_t Allocate(uint32_t size, uint32_t count = 1) {
+        const uint32_t aligned = (size + 31U) / 32U * 32U;
+        if (!size || used + uint64_t(aligned) * count > capacity || buffers + count > N)
+            throw std::runtime_error("UB pool capacity/buffer overflow");
+        const uint64_t offset = base + used;
+        used += uint64_t(aligned) * count;
+        buffers += count;
+        if (storage->bytes.size() < base + used) storage->bytes.resize(base + used, 0xcd);
+        return offset;
     }
-    void InitBuffer(TBuf<> &b, uint32_t) { b.storage = storage; }
+    template<QuePosition Q, int M> void InitBuffer(TQue<Q, M> &q, uint32_t count, uint32_t size) {
+        const uint64_t offset = Allocate(size, count);
+        for (uint32_t i = 0; i < count; ++i)
+            q.slots.push_back({storage, offset + uint64_t(i) * ((size + 31U) / 32U * 32U), size});
+    }
+    void InitBuffer(TBuf<> &b, uint32_t size) {
+        b.offset = Allocate(size); b.bytes = size; b.storage = storage;
+    }
+
 };
 struct TPipe {
     std::vector<std::shared_ptr<Storage>> buffers;
@@ -162,15 +208,27 @@ struct TPipe {
         if (!size || size % 32 || bytes + size > 190 * 1024) throw std::runtime_error("UB allocation overflow/alignment");
         buf.storage = std::make_shared<Storage>();
         buf.storage->bytes.assign(size, 0xcd);
+        buf.offset = 0; buf.bytes = size;
         buffers.push_back(buf.storage);
         bytes += size;
     }
     TEventID FetchEventID(HardEvent) { return 0; }
-    template<TPosition P> void InitBufPool(TBufPool<P> &pool, uint32_t size) {
-        TBuf<> b; InitBuffer(b, size); pool.storage = b.storage;
+    template<TPosition P, uint32_t N> void InitBufPool(TBufPool<P, N> &pool, uint32_t size) {
+        if (!size || size % 32 || bytes + size > 190 * 1024) throw std::runtime_error("UB pool overflow/alignment");
+        pool.storage = std::make_shared<Storage>();
+        // Reserve stable addresses without touching all 190 KiB on thousands of simulated cores.
+        pool.storage->bytes.reserve(size);
+        pool.capacity = size;
+        buffers.push_back(pool.storage);
+        bytes += size;
     }
-    template<TPosition P> void InitBufPool(TBufPool<P> &pool, uint32_t, TBufPool<P> &other) { pool.storage = other.storage; }
+    template<TPosition P, uint32_t N, TPosition Q, uint32_t M>
+    void InitBufPool(TBufPool<P, N> &pool, uint32_t size, TBufPool<Q, M> &other) {
+        if (size > other.capacity || N > M) throw std::runtime_error("invalid UB pool alias");
+        pool.base = other.base; pool.capacity = size; pool.storage = other.storage;
+    }
     void Reset() {
+        CompleteMte3();
         for (auto &b : buffers) b->alive = false;
         buffers.clear(); bytes = 0;
         // CANN 9.1 A5 InitSocStateImpl, also called by TPipe::Reset.
@@ -202,37 +260,47 @@ template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, DataCop
 }
 template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, DataCopyParams p) {
     ++testCopies;
-    for (uint32_t b = 0; b < p.blockCount; ++b) {
-        const auto from = src[uint64_t(b) * (p.blockLen + p.srcStride) * 32 / sizeof(T)];
-        std::memcpy(reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(b) * (p.blockLen + p.dstStride) * 32,
-            from.Data(p.blockLen * 32), p.blockLen * 32);
-    }
+    IssueMte3([=]() {
+        for (uint32_t b = 0; b < p.blockCount; ++b) {
+            const auto from = src[uint64_t(b) * (p.blockLen + p.srcStride) * 32 / sizeof(T)];
+            std::memcpy(reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(b) * (p.blockLen + p.dstStride) * 32,
+                from.Data(p.blockLen * 32), p.blockLen * 32);
+        }
+    });
 }
+
 template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, uint32_t count) {
     if (GmReadObserver()) GmReadObserver()(src.pointer, count * sizeof(T));
     ++testCopies; std::memcpy(dst.Data(count * sizeof(T)), src.pointer, count * sizeof(T));
 }
 template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, uint32_t count) {
-    if (GmWriteObserver()) GmWriteObserver()(dst.pointer, src.Data(count * sizeof(T)), count * sizeof(T));
-    ++testCopies; std::memcpy(dst.pointer, src.Data(count * sizeof(T)), count * sizeof(T));
+    ++testCopies;
+    IssueMte3([=]() {
+        if (GmWriteObserver()) GmWriteObserver()(dst.pointer, src.Data(count * sizeof(T)), count * sizeof(T));
+        std::memcpy(dst.pointer, src.Data(count * sizeof(T)), count * sizeof(T));
+    });
 }
 template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src, DataCopyExtParams p, DataCopyPadExtParams<T>) {
     if (p.blockCount != 1) throw std::runtime_error("unexpected padded block count");
+    if (GmReadObserver()) GmReadObserver()(src.pointer, p.blockLen);
     ++testCopies; std::memcpy(dst.Data(p.blockLen), src.pointer, p.blockLen);
 }
 template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src, DataCopyExtParams p) {
     if (src.offset % 32U) throw std::runtime_error("unaligned UB DataCopyPad source");
     ++testCopies;
-    // CANN 9.1 UB->GM: source stride counts 32B blocks, destination stride bytes.
-    const uint64_t sourceStep = (p.blockLen + 31U) / 32U * 32U + uint64_t(p.srcStride) * 32U;
-    for (uint32_t block = 0; block < p.blockCount; ++block) {
-        if (PaddedWriteObserver()) PaddedWriteObserver()(
-            reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(block) * (p.blockLen + p.dstStride),
-            src.template ReinterpretCast<uint8_t>()[uint64_t(block) * sourceStep].Data(p.blockLen), p.blockLen);
-        std::memcpy(reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(block) * (p.blockLen + p.dstStride),
-            src.template ReinterpretCast<uint8_t>()[uint64_t(block) * sourceStep].Data(p.blockLen), p.blockLen);
-    }
+    IssueMte3([=]() {
+        // CANN 9.1 UB->GM: source stride counts 32B blocks, destination stride bytes.
+        const uint64_t sourceStep = (p.blockLen + 31U) / 32U * 32U + uint64_t(p.srcStride) * 32U;
+        for (uint32_t block = 0; block < p.blockCount; ++block) {
+            if (PaddedWriteObserver()) PaddedWriteObserver()(
+                reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(block) * (p.blockLen + p.dstStride),
+                src.template ReinterpretCast<uint8_t>()[uint64_t(block) * sourceStep].Data(p.blockLen), p.blockLen);
+            std::memcpy(reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(block) * (p.blockLen + p.dstStride),
+                src.template ReinterpretCast<uint8_t>()[uint64_t(block) * sourceStep].Data(p.blockLen), p.blockLen);
+        }
+    });
 }
+
 template<class T> void Duplicate(LocalTensor<T> dst, T value, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) dst.SetValue(i, value);
 }
@@ -278,8 +346,14 @@ inline std::function<void(SumParams)> &SumObserver() {
     return observer;
 }
 template<class T> void Sum(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<uint8_t> tmp, SumParams p) {
+    const auto overlaps = [](const std::shared_ptr<Storage> &a, uint64_t aStart, uint64_t aBytes,
+                             const std::shared_ptr<Storage> &b, uint64_t bStart, uint64_t bBytes) {
+        return a == b && aStart < bStart + bBytes && bStart < aStart + aBytes;
+    };
     if (!p.outter || !p.n || p.n > p.inner || p.inner * sizeof(T) % 32U ||
-        dst.storage == src.storage || dst.storage == tmp.storage || src.storage == tmp.storage)
+        overlaps(dst.storage, dst.offset, dst.length, src.storage, src.offset, src.length) ||
+        overlaps(dst.storage, dst.offset, dst.length, tmp.storage, tmp.offset, tmp.length) ||
+        overlaps(src.storage, src.offset, src.length, tmp.storage, tmp.offset, tmp.length))
         throw std::runtime_error("invalid explicit Sum shape or overlapping storage");
     // Bound the full vector loads in CANN 9.1/A5, even for masked-off elements.
     // This is an access-range model, not a model of device ordering or timing.
