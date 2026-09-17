@@ -262,10 +262,9 @@ public:
             }
             cursor_ = aligned;
         }
-        // Complete payload publication before publishing its occupied range.
-        // No UB scratch or per-marker cache operations are needed.
-        TileXRProfilingFlushGm(timestamps_, cursor_);
-        TileXRProfilingFlushGm(eventIds_, cursor_);
+        // Store publication metadata; consumers read after kernel completion.
+        // Rely on kernel-completion cache maintenance instead of per-line DCCI.
+        // Publish is not a mid-kernel visibility fence.
         if (dropped_ != 0U) {
             // Launches sharing a core stream must execute in order. Preserve
             // overflow from earlier launches, including after repeated Publish.
@@ -278,9 +277,6 @@ public:
         if (recordCount_[0] < launchBase_ + cursor_) {
             recordCount_[0] = launchBase_ + cursor_;
         }
-        // Flush even when zero: InitializeLatest may have reset both counters.
-        TileXRProfilingFlushGm(droppedCount_, 1U);
-        TileXRProfilingFlushGm(recordCount_, 1U);
     }
 
 private:

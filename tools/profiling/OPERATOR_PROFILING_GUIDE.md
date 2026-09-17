@@ -143,6 +143,24 @@ never stop communication or overwrite previous launches. A disabled launch
 slot (`UINT32_MAX`) makes recording a no-op. Standard runtime reservation
 retains capture-level evidence when no launch slot is available.
 
+The direct writer's `Publish()` does not perform explicit cache clean or
+invalidate operations on records or counters. It retains alignment padding,
+occupied-count updates and saturating dropped-count accounting, relying on
+kernel-completion cache maintenance. Consumers must wait for device execution
+to complete before reading the capture; the count is not a live, mid-kernel
+publication signal. This applies to all direct-writer callers, including Server
+Dedup and grouped AllToAll. The deferred `ProfilingRecorder::Flush()` path keeps
+its existing cache operations.
+
+This change supports the Server Dedup profiling-cost experiment reported on
+2026-09-17 (performance about 49us versus breakdown about 370us). The operator's
+total-end marker precedes `Publish()`, so removing its cache-line loop does not
+directly remove time from that same marker interval. Compare complete kernel
+latency as well as the trace, and validate single-launch and repeated-launch
+capture completeness on A5. CPU tests verify stores, bounds, accounting and the
+absence of explicit cache operations; they do not prove kernel-exit visibility
+or a performance improvement. Device confirmation is still pending.
+
 ### Retain Only The Latest Launch
 
 For a long sequential batch where only the final launch is needed, reserve with

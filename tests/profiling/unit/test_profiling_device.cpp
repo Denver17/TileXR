@@ -167,6 +167,8 @@ int main()
     static_assert(sizeof(TileXR::DirectProfilingWriter) == 1U,
         "OFF writer must have no per-core state");
 #endif
+    Check(AscendC::CacheCleanCalls() == 0U,
+        "direct Publish must leave cache maintenance to kernel completion");
     buffers.CheckGuards();
     return failures == 0 ? 0 : 1;
 }

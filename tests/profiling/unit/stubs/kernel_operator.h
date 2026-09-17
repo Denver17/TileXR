@@ -14,6 +14,11 @@ inline uint64_t &CycleReads()
     return reads;
 }
 inline uint64_t GetSystemCycle() { return ++CycleReads(); }
+inline uint64_t &CacheCleanCalls()
+{
+    static uint64_t calls = 0U;
+    return calls;
+}
 inline uint32_t GetBlockIdx() { return 0U; }
 template <typename T> struct GlobalTensor {
     void SetGlobalBuffer(T *, uint32_t) {}
@@ -21,7 +26,7 @@ template <typename T> struct GlobalTensor {
 enum class CacheLine { SINGLE_CACHE_LINE };
 enum class DcciDst { CACHELINE_OUT };
 template <typename T, CacheLine, DcciDst>
-inline void DataCacheCleanAndInvalid(const GlobalTensor<T> &) {}
+inline void DataCacheCleanAndInvalid(const GlobalTensor<T> &) { ++CacheCleanCalls(); }
 }
 
 #endif
