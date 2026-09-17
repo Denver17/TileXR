@@ -41,6 +41,11 @@ def render_result(report, summary_path):
                 f"{measured['bandwidth_gbps'][key]:.3f}" for key in ("maximum", "minimum", "mean")))
         else:
             parts.append("bandwidth=N/A")
+    analysis = report.get("case_analysis")
+    if analysis and analysis.get("status") == "complete":
+        parts.append("dedup(%) min/max/avg=" + "/".join(f"{analysis[key]:.2f}" for key in ("min", "max", "avg")))
+    elif analysis:
+        parts.append("case_analysis=failed")
     traces = report.get("traces")
     if traces:
         parts.append(f"trace={traces['trace_dir']}")

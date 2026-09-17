@@ -24,7 +24,7 @@ class ChainTests(TemporaryRoot):
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
-                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch"))
+                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0))
         original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "64"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
@@ -44,6 +44,7 @@ class ChainTests(TemporaryRoot):
             "TILEXR_VALIDATION_QUANT_MODE": ["3", "1"],
             "TILEXR_VALIDATION_FP8_FORMAT": ["bad"],
             "TILEXR_VALIDATION_BLOCK_DIM": ["4", "0", "-1", "1.5", str(1 << 32)],
+            "TILEXR_VALIDATION_CASE_ANALYSIS": ["", "2", "01", "true"],
         }.items():
             for value in values:
                 with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {key: value}), \

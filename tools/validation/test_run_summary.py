@@ -6,6 +6,15 @@ import run_summary
 
 
 class RunSummaryTests(unittest.TestCase):
+    def test_case_analysis_is_optional_and_prints_percentages(self):
+        report = dict(status="PASS")
+        self.assertNotIn("dedup", run_summary.render_result(report, "/summary.json"))
+        report["case_analysis"] = dict(status="complete", min=0, max=75, avg=12.345)
+        self.assertIn("dedup(%) min/max/avg=0.00/75.00/12.35",
+                      run_summary.render_result(report, "/summary.json"))
+        report["case_analysis"] = dict(status="failed")
+        self.assertIn("case_analysis=failed", run_summary.render_result(report, "/summary.json"))
+
     def test_failure_categories_do_not_confuse_capture_or_cleanup_with_correctness(self):
         invalid = dict(type="RESULT_FAILED", validation_status="FAIL", communication_completed=True)
         timeout = dict(type="EXIT_FAILED", timeout=True)

@@ -8,6 +8,11 @@ EP 服务器验证的统一入口与配置见[EP 七步验证](../docs/EP_VALIDA
 随后手动执行 `bash sync.sh`，再执行 `bash run.sh -n 2 -e 96 -m 2 -l 3 2`；同步无需设置运行模式、服务器数或专家数。hostfile 每行一个 IP；sync 分发全部机器，run 的 `-n` 选择前 N 台，每台固定 8 卡。
 这些入口负责构建、分发和结果汇总；下列模块脚本保留为内部实现及单独开发入口。
 
+`run.sh` 可传 `case_analysis=1`（默认 0），在全部节点 NPU 运行结束并收集输入后，
+按实际专家列表计算每 rank 的跨 server token 去重率 `(A-B)/A`，终端输出 min/max/avg 百分数。
+A 为跨 server 专家路由数，B 为逐 token 按目标 server 合并后的数量；avg 为 rank 算术平均，
+A=0 按 0% 计入。逐 rank 明细保存在 `summary.json.case_analysis`，分析不进入设备计时阶段。
+
 `bash clean_run.sh` 清空 hostfile 全部节点上当前部署路径的 `run/` 内容（包括隐藏文件、
 日志、trace 和同步回执），保留目录本身。可先执行 `bash clean_run.sh --dry-run` 预览，
 或用 `hostfile=PATH` 指定仓库内的其他清单。使用前停止测试；发现节点任务锁会拒绝该节点的清理。

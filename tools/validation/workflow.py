@@ -331,6 +331,11 @@ def source_send_stride(config):
 
 
 def chain_configuration(checkpoint):
+    case_analysis = os.environ.get("TILEXR_VALIDATION_CASE_ANALYSIS", "0")
+    if case_analysis not in ("0", "1"):
+        raise ValueError("case_analysis 必须为 0 或 1")
+    if case_analysis == "1" and checkpoint != DISPATCH_CHECKPOINT:
+        raise ValueError("case_analysis 只支持完整 Dispatch 用例")
     if checkpoint == MEMORY_BOUNDARY_CHECKPOINT and (
             os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional" or
             os.environ.get("TILEXR_VALIDATION_LOOPS", "1") != "1" or
@@ -383,7 +388,7 @@ def chain_configuration(checkpoint):
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode="balance_shift", seed=2026, kernel_scope="dispatch")
+                 route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=int(case_analysis))
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -634,7 +639,7 @@ def remote_argv(config, host, action, *arguments):
                           TILEXR_DIRECT_HOSTS_JSON=json.dumps(config.hosts(), separators=(",", ":")))
             if config.chain:
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format",
-                            "block_dim", "loops", "warmup", "run_mode", "msprof"):
+                            "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
@@ -1577,6 +1582,21 @@ def run(config):
                     primary_error = primary_error or errors[0]
                     report.update(status="FAIL", primary_error=primary_error)
         rank_summary = f"ranks={completed}/{len(mappings)} "
+    # All launch futures and log collection have completed above. Read the
+    # retained real inputs only here, never while another rank is on the NPU.
+    if config.chain and config.chain.get("case_analysis"):
+        try:
+            if config.cleanup_failed:
+                raise ValueError("NPU process cleanup is unconfirmed; case analysis skipped")
+            from case_analysis import analyze_case
+            report["case_analysis"] = analyze_case(log, dict(config.chain, rank_size=len(mappings)),
+                node_profile_records(nodes, run_id, manifest, mappings, config.chain))
+        except (ValueError, TypeError, KeyError, OSError) as error:
+            failure = Failure("RESULT_FAILED", f"case 分析失败：{error}").record()
+            errors.append(failure)
+            primary_error = primary_error or failure
+            report.update(status="FAIL", primary_error=primary_error,
+                          case_analysis=dict(status="failed", error=str(error)))
     write_json(log / "summary.json", report)
     run_summary.write_result(config.logs, report, log / "summary.json")
     print("\n================================", flush=True)

@@ -189,6 +189,7 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 | `-e E` | 总专家数，单卡专家数为 E/(8N) | 必填，1..1024，须被 8N 整除 |
 | `-m M` | 0=functional、1=performance、2=breakdown | 默认 0 |
 | `-l L W` | 测量 L 轮、预热 W 轮 | 默认 1 0；L>=1、W>=0，均为 uint32 |
+| `case_analysis=0\|1` | NPU 阶段结束后分析各 rank 的跨 server token 去重率 | 默认 0，显式传 1 开启 |
 
 `bs=... h=... topk=... dtype=... quant_mode=... fp8_format=... block_dim=...`
 继续作为可选覆盖项，默认 BS96/H7168/TopK6/BF16/非量化/auto。当前 route_mode
@@ -197,6 +198,32 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 相对 hostfile 路径相对于仓库根目录。`-h`/`--help` 不加载 CANN。
 `run_case.sh` 仅兼容转交到 `run.sh`，`run_batch.sh` 统一调用同一入口。
 旧 `run_mode=... loops=... warmup=... moe_expert_num=...` 改用上述短参数。
+
+例如 `bash run.sh -n 2 -e 96 -m 1 -l 100 10 case_analysis=1`。
+此开关适用于完整 Dispatch 的 functional、performance 和 breakdown 模式。
+只有所有节点运行进程退出、结果及输入文件收集完成后，主节点才读取本轮留存的
+`inputs/rank-<rank>-ids.bin`（远端位于 `nodes/<host_index>/inputs/`）进行统计；
+不在 NPU 运行阶段计算，不增加设备打点，也不重建一份假定的 balance_shift 路由。
+
+对每个源 rank，按当前固定 8 rank/server 的映射统计：
+
+- A（`before_tokens`）：每个 token 的 TopK 专家中，属于其他 server 的路由条数之和。
+- B（`after_tokens`）：每个 token 命中的不同远端 server 数之和。同一 token 发往同一远端 server
+  计一次；不同 token 不能合并，本 server 内跨卡发送与转发也不计入 A/B。
+- 去重率（`dedup_percent`）：`100 * (A-B) / A`。A=0 时定义为 0%，仍参与 rank 汇总。
+  若一个 token 的 A 条远端路由合并为 1 条，去重率为 `100 * (1-1/A)`，而 `1/A` 是剩余比例。
+
+终端追加 `dedup(%) min/max/avg=.../.../...`，分别为所有参与 rank 的最小值、最大值和
+算术平均值；avg 不是先汇总全局 A/B 再相除，也不按服务器或测量轮次平均。
+本用例多轮复用相同输入，因此输入路由只统计一次。`summary.json.case_analysis` 保留三个
+百分数、每 rank 的 A/B/去重率、输入文件摘要和零跨 server 流量的 rank 数。
+关闭时不读取专家列表进行分析，也不输出这些统计。
+
+维护要点：分析必须放在所有节点运行及收集完成之后，不能在某个 rank 提前退出时开始，
+以免 CPU 统计与其他卡的 NPU 测量重叠。缺失完整 rank 完成记录、输入缺失/长度错误或专家 ID
+越界时报告分析失败，不用部分 rank 或推算数据填补；已完成的 NPU 测量结果仍保留。
+本次 36 项分析/配置/摘要定向测试及 104 项工作流/环境回归通过，包含较晚结束的 rank、
+远端输入收集和输入缺失场景；使用 Host 与模拟多机流程，未运行真实 NPU。
 
 参数每次从默认值和命令行重新解析，不继承终端遗留的 shape、模式、轮次或机器选择。
 `-l` 缺少第二个值、重复参数、未知参数或非法整数在加载运行环境前报错。

@@ -441,7 +441,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         tool_root = self.root / "tools/validation"
         tool_root.mkdir(parents=True)
-        for name in ("workflow.py", "source.py", "measurements.py", "run_summary.py"):
+        for name in ("workflow.py", "source.py", "measurements.py", "run_summary.py", "case_analysis.py"):
             shutil.copy2(Path(workflow.__file__).with_name(name), tool_root / name)
         profiler_source = Path(workflow.__file__).resolve().parents[1] / "ep/msprof_kernel_stats.py"
         profiler_target = self.root / "tools/ep/msprof_kernel_stats.py"
@@ -822,7 +822,7 @@ record['relay_links'] = [[(rank + 8) % rank_size, token * 2, 0, rank, token, 0, 
     [(previous_relay + 8) % rank_size, token * 2, 0, previous_relay, token, k, -1] for token in range(48) for k in range(1, 6)]
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
 # Leave another node in flight when rank 8 reports an invalid output.
-if os.environ.get('CHAIN_TEST_BEHAVIOR') == 'invalid-output' and rank == 0:
+if os.environ.get('CHAIN_TEST_BEHAVIOR') in ('invalid-output', 'late-analysis-input') and rank == 0:
     import time
     time.sleep(1)
 if behavior == 'wrong-relay-index':
@@ -875,6 +875,15 @@ if behavior.startswith('invalid-output'):
                   validation_error='group firstHopRow mismatch row=0')
     if behavior == 'invalid-output-stale':
         record['run_id'] = 'old-run'
+if os.environ.get('TILEXR_VALIDATION_CASE_ANALYSIS') == '1' and behavior != 'missing-analysis-input':
+    from pathlib import Path
+    import struct
+    # Save at the end to exercise collection before coordinator analysis,
+    # including a rank that is deliberately slower than the others.
+    base = 0 if rank == 0 else (1 - rank // 8) * (record['moe_expert_num'] // 2)
+    ids = list(range(base, base + record['topk'])) * record['bs']
+    path = Path(os.environ['TILEXR_VALIDATION_INPUT_DIR']) / f'rank-{rank}-ids.bin'
+    path.write_bytes(struct.pack(f'<{len(ids)}i', *ids))
 print(prefix + json.dumps(dict(record, submitted=loops,
       completed=loops - 1 if behavior in ('incomplete-round', 'invalid-output-incomplete') else loops,
       warmup_submitted=warmup, warmup_completed=warmup, cleanup='complete')))
@@ -895,6 +904,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
         self.assertEqual(summary["chain_configuration"]["loops"], 1)
         self.assertEqual(summary["chain_configuration"]["dtype"], "bf16")
+        self.assertNotIn("case_analysis", summary)
         self.assertTrue(summary["relay_links_validated"])
         self.assertIn("最后一轮 cnt/cumsum", summary["scope"])
         self.assertNotIn("未执行 NPU launch", summary["scope"])
@@ -904,6 +914,37 @@ print(prefix + json.dumps(dict(record, submitted=loops,
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["chain"]["peer_count"], 16)
                 self.assertEqual(rank["completed"], 1)
+
+    def test_case_analysis_after_all_nodes_and_remote_input_collection(self):
+        self.enable_chain()
+        self.prepare_sync()
+        result = self.invoke("run", environment={"TILEXR_VALIDATION_CASE_ANALYSIS": "1",
+                                                "CHAIN_TEST_BEHAVIOR": "late-analysis-input"})
+        self.assert_success(result)
+        summary = self.summary()
+        self.assertEqual(summary["completed_ranks"], 16)
+        analysis = summary["case_analysis"]
+        self.assertEqual(analysis["status"], "complete")
+        self.assertEqual(analysis["rank_count"], 16)
+        self.assertEqual(analysis["min"], 0)
+        self.assertAlmostEqual(analysis["max"], 100 * 5 / 6)
+        self.assertAlmostEqual(analysis["avg"], 100 * 5 / 6 * 15 / 16)
+        self.assertEqual(analysis["ranks"][8]["before_tokens"], 96 * 6)
+        self.assertEqual(analysis["ranks"][8]["after_tokens"], 96)
+        self.assertIn("dedup(%) min/max/avg=0.00/83.33/78.12",
+                      (self.config_instance.logs / "result.txt").read_text())
+
+    def test_case_analysis_missing_remote_input_fails_without_partial_aggregate(self):
+        self.enable_chain()
+        self.prepare_sync()
+        result = self.invoke("run", environment={"TILEXR_VALIDATION_CASE_ANALYSIS": "1",
+                                                "CHAIN_TEST_BEHAVIOR": "missing-analysis-input"})
+        self.assertNotEqual(result.returncode, 0)
+        summary = self.summary()
+        self.assertEqual(summary["completed_ranks"], 16)
+        self.assertEqual(summary["case_analysis"]["status"], "failed")
+        self.assertNotIn("min", summary["case_analysis"])
+        self.assertIn("rank-8-ids.bin", summary["case_analysis"]["error"])
 
     def test_memory_boundary_sync_run_collects_16_ranks_without_old_tests(self):
         self.enable_chain(workflow.MEMORY_BOUNDARY_CHECKPOINT)
