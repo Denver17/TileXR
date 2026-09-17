@@ -406,10 +406,12 @@ class ChainConsumerTests(unittest.TestCase):
         for rank, process in enumerate(processes):
             output, errors = process.communicate(timeout=15)
             if rank == 1:
-                self.assertEqual(process.returncode, 0, output + errors)
-                self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")), 1)
-                self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
-                self.assertIn("stage=dispatch-read", errors)
+                # The stub reports an API read failure, which is an execution error.
+                self.assertNotEqual(process.returncode, 0, output + errors)
+                self.assertIn("EP_SERVER_DEDUP_FAIL rank=1 stage=dispatch-read", errors)
+                self.assertIn("read consumed dispatch slot ret=92", errors)
+                for marker in ("DISPATCH_PASS", "DISPATCH_INVALID", "BREAKDOWN_PASS"):
+                    self.assertNotIn("EP_SERVER_DEDUP_" + marker, output)
                 self.assertIn("wrong-bank-read", self.trace_lines(rank))
             else:
                 self.assertEqual(process.returncode, 0, errors)

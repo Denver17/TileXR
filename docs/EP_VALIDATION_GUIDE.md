@@ -26,7 +26,7 @@ sender 的 ON/OFF/OFF/ON 复测通过，覆盖两窗分别跨模式复用、K=32
 五种分核下约 118 秒，因此 sender 用例超时调整为 180 秒。166 项 Python workflow/build/
 chain/measurement/runtime-configuration 测试通过，包含远端模式传递及旧 200B manifest 拒绝。
 集成 consumer 为 24/25 通过：`test_repeated_calls_reject_wrong_bank_readback` 在本次及未修改
-`388c33a` 均因读错误 92 返回退出码 1、而测试期待 0 失败，保留为既有问题。
+`388c33a` 均因读错误 92 返回退出码 1、而测试期待 0 失败；该测试断言已在后续修复，见下文维护说明。
 源码摘要、编译参数/版本、退出码及日志保存在 `build/server-dedup-switch-verification/`。
 本次未运行 NPU；真实 A5 异步执行、跨轮切换及性能仍须按上述命令验证。
 
@@ -618,6 +618,16 @@ functional、performance、breakdown 均区分执行完成与输出正确性；p
 维护此流程时，须分别验证“真实 consumer 输出错误后完成导出”和“节点/主节点不因该错误取消同伴”；只验证原始 records 文件存在会漏掉上层提前退出。若把输出不一致直接作为 consumer 执行异常退出，msprof 或调度器可能提前退出/取消同伴，模式 1、2 的完整耗时因此丢失。维护时应保持 INVALID 与执行失败分离，并验证最终 case 仍失败。Host 替身可覆盖上述失败处理和 JSON 归集，不证明 NPU 上固定 `t=0` 实验本身能正常结束或其性能收益。
 
 每次运行在仓库 `run/` 下生成独立目录。`run.sh` 终端只输出一行最终汇总，并保存为 `result.txt`：PASS 携带可用的性能数据或 trace 路径；FAIL 分为“执行阶段失败”“执行卡死（超时）”“结果校验失败”，有完整计时/trace 时一并保留。执行超时不等价于已证明 kernel 死锁。环境详情在 `environment.log`，可选 Host 回归在 `host-validation.log`，调度输出在 `workflow.log`，入口重定向等错误在 `launcher.log`，逐卡日志和结构化结果在汇总指定的 `<run_id>/summary.json` 同级目录；配置错误可能指向 `failure.json`。不再向终端展开各卡错误栈。只统计 kernel 耗时，不采集或汇总 Host submit/sync/barrier/batch_total 时间。模式 1 的统计口径写入 `measurements.performance.selection/reduction`，`samples_per_rank`/`samples_per_server` 记录有效样本数，`server_mean_us` 按 hostfile 的 server 顺序记录代表耗时；`mean_us` 是这些 server 均值的算术平均。
+
+2026-09-17 错误窗口读回用例维护：`ae5bb5bf` 将输出不一致的退出约定推广到所有模式时，
+误将 `test_repeated_calls_reject_wrong_bank_readback` 也改为期待退出 0 和 DISPATCH_INVALID。
+该故障实际由 `aclrtMemcpy` 替身返回 92，属于 API 执行失败；父提交 `88712484` 的用例通过，
+`ae5bb5bf` 的用例失败。修复只恢复非零退出断言，并验证具体读错误及不产生
+DISPATCH_PASS、DISPATCH_INVALID、BREAKDOWN_PASS；保留已有 wrong-bank-read 调用轨迹检查。
+维护故障测试时须按注入发生的边界区分“读取失败”和“读取成功但输出错误”，不能统一改成
+INVALID。这类 Host 替身测试验证错误分类，不证明设备通信窗口或 NPU 异步执行正确性。
+修复后在 blue 重跑 `test_server_dedup_chain.py`，25/25 通过；日志与源码差异保存在
+`build/wrong-bank-fix-verification/`。
 
 同一 stream 连续提交整批，批末才 stream 同步与 Host barrier；删除 Host 计时不改变同步策略。functional 不采集 profiling；performance 使用 msprof；breakdown 读取最后一轮各核的设备记录。
 
