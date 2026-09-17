@@ -30,7 +30,7 @@ public:
 
     __aicore__ inline void Process()
     {
-        counts_.SendCnt();
+        counts_.SendCnt(profile_);
         profile_.Mark(2);
         if (core_ < kEpServerDedupSendCoreNum) {
             sender_.Process(profile_);

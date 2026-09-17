@@ -310,6 +310,17 @@ python3 tools/validation/measurements.py /path/to/run/summary.json --records-dir
 
 维护要点：保持事件位置与记录机制分离；新增点位只扩展数字 ID 和 mapping，不重新引入 UB 暂存或算子专属 cache flush。复用槽位必须同时处理有效范围和丢点状态，不能只把 slot 改成 0。跨 Host/kernel/reader 改动需同时校验 launch ABI、固定分配预算、长轮后短轮/空轮、截断状态及安装产物身份。多机 profiling 应在数据所在节点完成解析，再收集成品，避免每卡本地解析后主节点又解析两遍。
 
+2026-09-17：为区分 SendCnt 的统计和通信开销，追加两个区间（旧事件 ID 保持不变）：
+
+| 区间 | 事件 ID（begin/end） | 计时范围 |
+| --- | --- | --- |
+| `send_cnt_filter` | `0x53000216/17` | `CountByVectorRange` 或逐 expert 统计，包括筛选、histogram/归约及 ready/count 记录构造 |
+| `send_cnt_send` | `0x53000218/19` | 已有 S→MTE3 依赖、`SendExpertCntRange` 下发及已有 `PIPE_ALL` 等待；终点在 TPipe Reset 之前 |
+
+两者都位于原 `send_cnt` 内；UB 分配、expertIds 加载和 Reset 等开销仍只归入外层，因此两项之和不等于整个 `send_cnt`。新增点位是被动 Scalar 观察，不增加同步；MTE2_V 不阻塞 Scalar，加载的剩余等待可能体现于统计区间已有的 V_S 等待，不能把 `send_cnt_filter` 解释为纯 Vector 指令耗时。发送区间包含原有发送排空，不等于远端接收核已消费 cnt。未参与 Count 或 expert 区间为空的核不产生这四条记录；旧 capture 也不补造细分耗时。重新编译 profiling ON kernel 并同步安装的 mapping 后，标准 trace 和 `stages_us` 自动显示这两个名称，无需更改 records 协议或采集容量。
+
+验证：基于 `47563bd` 加本次修改，blue 上 CANN 9.1.0、Bisheng/Clang 15.0.5 的 A5 `dav-c310-vec` kernel OFF/ON 编译链接均成功；Count OFF/ON、profile、source_send OFF/ON 共 5 项 Host 替身回归通过，本地 19 项 trace 测试通过。源码摘要、配置、编译与测试日志保留于 `build/sendcnt-profile-verification/`。未运行 NPU，实际耗时及新增四条记录的采集开销需 A5 实测。
+
 原报错中的 SSH 退出、收集超时和“结果汇总超过总期限”不能证明主节点最终报告生成是首因：该期限检查在最终报告分支前，已有错误时该分支被跳过。此次修复控制 capture、节点报告和归集的数据量，不修改执行期限；是否消除原 A5 超时仍需用户环境运行证据。
 
 ### 单轮覆盖与分布式报告的验证边界（2026-09-14）

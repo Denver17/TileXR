@@ -4,6 +4,7 @@
 #include "kernel_operator.h"
 #include "adv_api/reduce/sum.h"
 #include "ep_memory_server_dedup_count_layout.h"
+#include "tilexr_ep_server_dedup_profile.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -43,7 +44,7 @@ public:
         SetCtrlSpr<60, 60>(0);
     }
 
-    __aicore__ inline void SendCnt();
+    __aicore__ inline void SendCnt(ServerDedupProfile &profile);
     __aicore__ inline void RecvCnt();
     __aicore__ inline void CalcCumsum() { CalRecvAndSetFlag(); }
     __aicore__ inline void CompleteCumsum();
@@ -115,7 +116,7 @@ private:
     TBuf<> prefixBuf_, readyBuf_, cleanBuf_, tokenNumBuf_;
 };
 
-__aicore__ inline void ServerDedupCounts::SendCnt()
+__aicore__ inline void ServerDedupCounts::SendCnt(ServerDedupProfile &profile)
 {
     if (!useAllCoreCount_ && aivId_ < aivUsedAllToAll_) return;
     const uint32_t cores = useAllCoreCount_ ? kEpServerDedupCoreNum : aivUsedCumSum_;
@@ -140,15 +141,19 @@ __aicore__ inline void ServerDedupCounts::SendCnt()
     SyncFunc<HardEvent::MTE2_V>();
 
     const uint32_t maskBytes = Ceil(Ceil(expertIdsCnt_, 8U), UB_ALIGN) * UB_ALIGN;
+    profile.Begin(EpDedupDetailMetric::SendCntFilter);
     if (expertIdsCnt_ >= SIZE_ALIGN_256 / sizeof(int32_t) && 2U * maskBytes <= routeBytes) {
         CountByVectorRange(start, end, maskBytes);
     } else {
         CountByExpert(start, end);
     }
+    profile.End(EpDedupDetailMetric::SendCntFilter);
+    profile.Begin(EpDedupDetailMetric::SendCntSend);
     SyncFunc<HardEvent::S_MTE3>();
     SendExpertCntRange(start, end);
     // All count packets must finish before the sender scratch is reused by recvCnt.
     PipeBarrier<PIPE_ALL>();
+    profile.End(EpDedupDetailMetric::SendCntSend);
     tpipe_->Reset();
     // A5 Reset reinitializes CTRL[60] to 1. Keep Init's overflow mode
     // through the next stage, including MXFP8 casts on all-core Count senders.

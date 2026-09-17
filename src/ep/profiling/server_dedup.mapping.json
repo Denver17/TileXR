@@ -218,6 +218,20 @@
       "category": "issue",
       "parent": "kernel_total",
       "instant": 1392509696
+    },
+    {
+      "name": "send_cnt_filter",
+      "category": "compute",
+      "parent": "kernel_total",
+      "begin": 1392509462,
+      "end": 1392509463
+    },
+    {
+      "name": "send_cnt_send",
+      "category": "copy",
+      "parent": "kernel_total",
+      "begin": 1392509464,
+      "end": 1392509465
     }
   ]
 }

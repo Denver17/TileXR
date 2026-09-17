@@ -278,15 +278,17 @@ endforeach()
 
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
-add_executable(test_tilexr_ep_server_dedup_counts
-    unit/test_tilexr_ep_server_dedup_counts.cpp)
-target_include_directories(test_tilexr_ep_server_dedup_counts PRIVATE
-    unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS}
-    ${TILEXR_ROOT}/src/ep/kernels)
-target_compile_definitions(test_tilexr_ep_server_dedup_counts PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
-add_test(NAME test_tilexr_ep_server_dedup_counts COMMAND test_tilexr_ep_server_dedup_counts)
-set_tests_properties(test_tilexr_ep_server_dedup_counts PROPERTIES TIMEOUT 120)
-install(TARGETS test_tilexr_ep_server_dedup_counts RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile)
+    add_executable(${test_target} unit/test_tilexr_ep_server_dedup_counts.cpp)
+    target_include_directories(${test_target} PRIVATE
+        unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS}
+        ${TILEXR_ROOT}/src/ep/kernels)
+    target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
+    add_test(NAME ${test_target} COMMAND ${test_target})
+    set_tests_properties(${test_target} PROPERTIES TIMEOUT 120)
+    install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endforeach()
+target_compile_definitions(test_tilexr_ep_server_dedup_counts_profile PRIVATE TILEXR_ENABLE_PROFILING=1)
 
 add_executable(test_tilexr_ep_server_dedup_profile unit/test_tilexr_ep_server_dedup_profile.cpp)
 target_include_directories(test_tilexr_ep_server_dedup_profile PRIVATE

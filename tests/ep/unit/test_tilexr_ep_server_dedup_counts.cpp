@@ -6,6 +6,7 @@
 #include "tilexr_ep_server_dedup_receive_tasks.h"
 #include "server_dedup_test_checks.h"
 #include "server_dedup_test_memory.h"
+#include "server_dedup_profile_capture.h"
 
 namespace AscendC {
 uint32_t testCore = 0;
@@ -143,6 +144,8 @@ void CheckReceiveTaskBoundaries()
 
 void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rounds)
 {
+    TileXR::CommArgs profileArgs {};
+    ServerDedupTest::ProfileCapture capture(profileArgs);
     const uint32_t localExperts = experts / world;
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<Rank> ranks(world);
@@ -207,7 +210,22 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             const auto before = AscendC::testCopies;
             // Each simulated core enters with the mode established by Init.
             AscendC::SetCtrlSpr<60, 60>(0);
-            ranks[id / 64].cores[id % 64].SendCnt();
+            AscendC::testCore = id % 64;
+            TileXREp::ServerDedupProfile profile;
+            profile.Init(reinterpret_cast<GM_ADDR>(&profileArgs), 0U);
+            ranks[id / 64].cores[id % 64].SendCnt(profile);
+            profile.Publish();
+            const auto events = capture.Events(id % 64);
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING
+            if (AscendC::testCopies > before) {
+                Check(events == std::vector<uint32_t>{0x53000216U, 0x53000217U, 0x53000218U, 0x53000219U},
+                    "active Count cores publish paired filter and send intervals in order");
+            } else {
+                Check(events.empty(), "skipped and empty Count cores publish no artificial intervals");
+            }
+#else
+            Check(events.empty(), "profiling OFF records no Count intervals");
+#endif
             Check(AscendC::GetCtrlSpr<60, 60>() == 0,
                 "Count preserves the FP overflow mode for subsequent quantization, including after pipe reset");
             if (bs >= kEpServerDedupAllCoreCountBsThreshold && id % 64 < kEpServerDedupSendCoreNum)
