@@ -127,18 +127,17 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
+            profile.Mark(2);
             sender.Process(profile);
+            profile.Mark(3);
             const auto syncBefore = AscendC::TestSyncOperations();
             profile.Publish();
             Check(AscendC::TestSyncOperations() == syncBefore, "standard publication adds no synchronization");
             const auto events = capture.Events(core);
 #if defined(TILEXR_ENABLE_PROFILING)
-            const auto observed = std::count_if(writes.begin(), writes.end(),
-                [core](const Write &write) { return write.core == core; });
-            Check(events.size() == static_cast<size_t>(observed) &&
-                std::all_of(events.begin(), events.end(), [](uint32_t id) {
-                    return id == TileXREp::kEpServerDedupPacketIssueEvent;
-                }), "every physical packet retains exactly one issue timestamp");
+            Check(events == std::vector<uint32_t>({TileXREp::kEpServerDedupMainEventBase + 2U,
+                TileXREp::kEpServerDedupMainEventBase + 3U}),
+                "experiment B retains send boundaries without per-packet records");
 #else
             Check(events.empty(), "OFF builds emit no issue records");
 #endif

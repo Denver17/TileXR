@@ -274,8 +274,8 @@ private:
         destinationGm.SetGlobalBuffer(args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
             data_, args_->rank, destination, expert % localExperts_, q, args_->rankSize, localExperts_, bs_));
         DataCopy(destinationGm, out, uint32_t(data_.tokenStride));
-        // Scalar issue timestamp: the existing MTE3 completion protocol is unchanged.
-        profile.PacketIssue();
+        // Experiment B: omit per-packet profiling stores to isolate send-loop overhead.
+        // Stage boundaries and receiver profiling remain enabled.
         SetFlag<HardEvent::MTE3_V>(lane);
         ++packets_;
     }

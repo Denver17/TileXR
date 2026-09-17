@@ -161,6 +161,21 @@ capture completeness on A5. CPU tests verify stores, bounds, accounting and the
 absence of explicit cache operations; they do not prove kernel-exit visibility
 or a performance improvement. Device confirmation is still pending.
 
+Server Dedup experiment B disables only the sender's `PacketIssue()` call;
+send-stage boundaries, all receiver markers and the common writer remain intact.
+The triggering A5 capture had rank 19 send stages around 22--28us, while rank 45
+send stages took 247--344us. Rank 45's first-packet and inter-packet intervals were
+long, but its final drain/output interval was comparable to rank 19's. This
+localizes the next A/B to the send loop; it does not prove a GM-store root cause.
+Each marker reads the clock before storing its record, so its store overhead can
+appear in the following interval. Compare `send_data`, `recv_data` and
+`kernel_total` with the same build settings, inputs, ranks and iteration counts.
+Without packet markers, `packet_issue_interval` and `send_drain_and_outputs` are
+absent; the exporter's fallback `send_prepare` spans the whole send stage and
+must not be interpreted as first-packet preparation. CPU sender tests check
+packet contents, ordering and retained boundary records; CANN OFF/ON builds
+check compilation. Only the production A5 rerun can establish the timing effect.
+
 ### Retain Only The Latest Launch
 
 For a long sequential batch where only the final launch is needed, reserve with
