@@ -260,6 +260,19 @@ class BuildTests(unittest.TestCase):
             workflow.build(self.config())
         runtime.assert_not_called()
 
+    def test_dispatch_rejects_previous_launch_abi(self):
+        with mock.patch.dict(os.environ, {
+                'TILEXR_VALIDATION_CHECKPOINT': workflow.DISPATCH_CHECKPOINT,
+                'TILEXR_COMM_ID': '192.0.2.1:10177'}):
+            config = self.config('production')
+            manifest, _ = self.build_fixture(config)
+            self.assertEqual(manifest['server_dedup_contract']['launch_bytes'], 200)
+            manifest['server_dedup_contract'] = dict(launch_bytes=192, layout='r07-token-prefix', kernel_scope='dispatch')
+            workflow.write_json(config.install / 'manifest.json', manifest)
+            for check_mode in (True, False):
+                with self.subTest(check_mode=check_mode), self.assertRaisesRegex(ValueError, '200B ABI'):
+                    workflow.verify_build(config, check_run_mode=check_mode)
+
     def test_baseline_build_disables_breakdown_instrumentation(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for mode in ("functional", "performance"):

@@ -4,11 +4,7 @@
 #include "comm_args.h"
 #include "tilexr_types.h"
 
-// Shared build-time defaults: rebuild Host and kernels together after changing
-// either value. Overrides must be identical in every translation unit/rank.
-#ifndef TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM
-#define TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 48U
-#endif
+// Count participation threshold is independent of the runtime send/receive split.
 #ifndef TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD
 #define TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD 48U
 #endif
@@ -16,10 +12,8 @@
 namespace TileXREp {
 
 constexpr uint32_t kEpServerDedupCoreNum = 64U;
-constexpr uint32_t kEpServerDedupSendCoreNum = TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM;
-static_assert(kEpServerDedupSendCoreNum >= 32U && kEpServerDedupSendCoreNum <= 48U &&
-    kEpServerDedupSendCoreNum % 8U == 0U,
-    "Server Dedup requires 32, 40 or 48 send cores out of 64 total cores");
+// Defaults only. Host validates and passes the selected split at each launch.
+constexpr uint32_t kEpServerDedupSendCoreNum = 32U;
 constexpr uint32_t kEpServerDedupRecvCoreNum = kEpServerDedupCoreNum - kEpServerDedupSendCoreNum;
 // BS below this threshold uses all 64 cores for Count; otherwise only receivers.
 constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold =
@@ -55,23 +49,26 @@ struct EpServerDedupCountLayout {
     uint64_t stateBytes;
 };
 
-// All ranks must use the same communicator call order and serialize its kernels
+// Keep the core split fixed for the communicator lifetime: prefix storage is not
+// cleared and can overlap another split's control flags. All ranks must use the
+// same communicator call order and serialize its kernels
 // on one stream. Count publication (including zeros) protects two-call reuse.
 TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupWindowOffset(int64_t magic)
 {
     return (uint64_t(magic) % 2U) * kEpServerDedupWindowBytes;
 }
 
-TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(uint32_t experts)
+TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(
+    uint32_t experts, uint32_t recvCoreNum = kEpServerDedupRecvCoreNum)
 {
     EpServerDedupCountLayout layout {};
-    const uint64_t matrixBytes = uint64_t(kEpServerDedupRecvCoreNum) *
-        kEpServerDedupRecvCoreNum * kEpServerDedupCountRecordBytes;
+    const uint64_t matrixBytes = uint64_t(recvCoreNum) *
+        recvCoreNum * kEpServerDedupCountRecordBytes;
     layout.cntOffset = kEpServerDedupProfileReservedBytes;
     layout.cumsumOffset = uint64_t(experts) * kEpServerDedupCountRecordBytes;
     layout.prefixOffset = layout.cumsumOffset + matrixBytes;
     layout.prefixStride = (uint64_t(experts) * sizeof(int32_t) + 31U) / 32U * 32U;
-    layout.cumsumFlagOffset = layout.prefixOffset + kEpServerDedupRecvCoreNum * layout.prefixStride;
+    layout.cumsumFlagOffset = layout.prefixOffset + recvCoreNum * layout.prefixStride;
     const uint64_t bytes = layout.cntOffset + layout.cumsumFlagOffset + matrixBytes;
     layout.counterOffset = (bytes + 1023U) / 1024U * 1024U;
     layout.stateBytes = layout.counterOffset + 1024U;

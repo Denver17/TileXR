@@ -398,6 +398,9 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                "configuration": {name: chain_config[name] for name in
                                  ("bs", "h", "topk", "moe_expert_num", "dtype", "block_dim", "loops", "warmup")},
                "host_barrier": "enabled", "submission": "continuous_batch_then_sync_and_host_barrier"}
+    for name in ("send_core_num", "recv_core_num"):
+        if name in chain_config:
+            summary["configuration"][name] = chain_config[name]
     if mode == "functional":
         return summary
     summary.update(algorithm_communication_bytes=0 if output_valid else None, bandwidth="N/A")

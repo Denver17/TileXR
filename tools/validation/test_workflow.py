@@ -807,7 +807,8 @@ record = dict(run_id=run, build_id=build, commit=None if commit == 'unknown' els
               rank=rank, rank_size=rank_size, pid=os.getpid(),
               checkpoint=checkpoint, status='PASS', loops=loops, warmup=warmup, run_mode=run_mode)
 record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
-               for key in ('bs', 'h', 'topk', 'moe_expert_num')})
+               for key in ('bs', 'h', 'topk', 'moe_expert_num', 'send_core_num')})
+record['recv_core_num'] = 64 - record['send_core_num']
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
 record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
               fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='dispatch', native_status='dispatch',
@@ -870,6 +871,7 @@ if behavior.startswith('invalid-output'):
     record = {key: record[key] for key in (
         'run_id', 'build_id', 'commit', 'checkpoint', 'host', 'host_index', 'local_rank', 'device',
         'rank', 'rank_size', 'pid', 'loops', 'warmup', 'run_mode', 'bs', 'h', 'topk', 'moe_expert_num',
+        'send_core_num', 'recv_core_num',
         'dtype', 'route_mode', 'seed', 'quant_mode', 'fp8_format', 'kernel_scope', 'native_status', 'token_stride')}
     record.update(status='FAIL', validation_status='FAIL', validation_stage='dispatch-read',
                   validation_error='group firstHopRow mismatch row=0')
@@ -914,6 +916,21 @@ print(prefix + json.dumps(dict(record, submitted=loops,
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["chain"]["peer_count"], 16)
                 self.assertEqual(rank["completed"], 1)
+
+    def test_runtime_core_split_reaches_every_local_and_remote_rank(self):
+        self.enable_chain()
+        self.prepare_sync()
+        for send in (16, 24, 32, 40, 48):
+            with self.subTest(send=send):
+                self.assert_success(self.invoke('run', environment={'TILEXR_VALIDATION_SEND_CORE_NUM': str(send)}))
+                summaries = list(self.config_instance.logs.glob('*/summary.json'))
+                summary = workflow.read_json(max(summaries, key=lambda path: path.stat().st_mtime_ns))
+                self.assertEqual(summary['chain_configuration']['send_core_num'], send)
+                self.assertEqual(summary['chain_configuration']['recv_core_num'], 64 - send)
+                for node in summary['nodes']:
+                    for rank in node['reported_result']['ranks']:
+                        self.assertEqual(rank['send_core_num'], send)
+                        self.assertEqual(rank['recv_core_num'], 64 - send)
 
     def test_case_analysis_after_all_nodes_and_remote_input_collection(self):
         self.enable_chain()

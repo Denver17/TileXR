@@ -65,7 +65,7 @@ int Invoke(const EpMemoryServerDedupParams &params)
         p.sharedExpertNum, p.sharedExpertRankNum, p.quantMode, p.globalBs, p.expertTokenNumsType,
         p.expandXOut, p.dynamicScalesOut, p.assistInfoForCombineOut, p.expertTokenNumsOut,
         p.epRecvCountsOut, p.tpRecvCountsOut, p.expandScalesOut, params.assistExOut,
-        params.sourceMaskOut, params.groupOut, params.expertScalesOut, p.dtype, p.expandXOutDtype, p.stream);
+        params.sourceMaskOut, params.groupOut, params.expertScalesOut, p.dtype, p.expandXOutDtype, p.stream, params.sendCoreNum);
 }
 
 void CheckRejected(const EpMemoryServerDedupParams &params, int expected)
@@ -141,6 +141,24 @@ int main()
     Check(g_context.hostArgs == &g_commArgs && g_context.devArgs == g_devArgs &&
         g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 49152,
         "validated context and bounded output layout forwarded");
+
+    Check(valid.sendCoreNum == 32 && g_submitted.sendCoreNum == 32, "default split has 32 send cores");
+    for (int64_t sendCoreNum : {16, 24, 32, 40, 48}) {
+        auto params = valid;
+        params.sendCoreNum = sendCoreNum;
+        Check(Invoke(params) == TILEXR_SUCCESS && g_submitted.sendCoreNum == sendCoreNum,
+            "all five runtime splits reach submission unchanged");
+    }
+    for (int64_t sendCoreNum : {INT64_MIN, int64_t(-8), int64_t(0), int64_t(8), int64_t(15),
+        int64_t(17), int64_t(31), int64_t(33), int64_t(47), int64_t(49), int64_t(56), int64_t(64), INT64_MAX}) {
+        auto params = valid;
+        params.sendCoreNum = sendCoreNum;
+        const int hostCalls = g_hostCalls;
+        const int devCalls = g_devCalls;
+        CheckRejected(params, TILEXR_ERROR_PARA_CHECK_FAIL);
+        Check(g_hostCalls == hostCalls && g_devCalls == devCalls,
+            "invalid split is rejected before accessing communicator state");
+    }
 
     for (int test = 0; test < 36; ++test) {
         auto params = valid;

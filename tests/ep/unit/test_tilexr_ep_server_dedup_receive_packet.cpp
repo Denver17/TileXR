@@ -8,6 +8,8 @@
 
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
+uint32_t sendCoreNum = 32U;
+uint32_t recvCoreNum = 32U;
 using namespace TileXREp;
 using ServerDedupTest::Check;
 
@@ -171,12 +173,12 @@ void CheckReceiver(int32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     } else if (role == -1) fixture.SetWord(16U, 48U); // Match the final entry, not header k/weight.
     fixture.Pack();
     const auto &data = fixture.layout;
-    const auto counts = TileXREpServerDedupCountLayout(experts);
+    const auto counts = TileXREpServerDedupCountLayout(experts, recvCoreNum);
     std::vector<uint8_t> local(data.dispatchOffset + data.dispatchBytes + 32U, 0);
     std::vector<uint8_t> peer(local.size(), 0);
     const auto slot = TileXREpServerDedupDispatchOffset(data, 2U, rank, 0U, 0U, world, 6U, bs);
     std::memcpy(local.data() + slot, fixture.wire.data(), fixture.wire.size());
-    auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset + (kEpServerDedupRecvCoreNum - 1U) * counts.prefixStride);
+    auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset + (recvCoreNum - 1U) * counts.prefixStride);
     std::fill(prefix + 2U, prefix + experts, 1U); // One row, owned by the final receive core.
     const uint32_t initialCounter = 7U;
     std::memcpy(local.data() + counts.counterOffset, &initialCounter, 4U);
@@ -204,7 +206,7 @@ void CheckReceiver(int32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
     receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,
         reinterpret_cast<uint8_t *>(assist.data() + 8U), reinterpret_cast<uint8_t *>(groups.data() + 8U),
-        bs, h, k, experts, &pipe, magic);
+        bs, h, k, experts, &pipe, magic, sendCoreNum);
     uint32_t sends = 0;
     uint64_t sendSync = 0;
     std::vector<uint8_t> firstCopy;
@@ -301,10 +303,10 @@ template<bool Quantized>
 void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U)
 {
     constexpr uint32_t k = 6U, experts = 96U, world = 16U, rank = 8U;
-    // Choose BS so floor(6*BS/16) gives this receiver exactly owned tasks.
-    const uint32_t bs = (owned * kEpServerDedupRecvCoreNum + 5U) / (experts / world);
+    // Choose BS so floor(6*BS/recvCoreNum) gives this receiver exactly owned tasks.
+    const uint32_t bs = (owned * recvCoreNum + 5U) / (experts / world);
     const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
-    const auto counts = TileXREpServerDedupCountLayout(experts);
+    const auto counts = TileXREpServerDedupCountLayout(experts, recvCoreNum);
     const auto start = TileXREpServerDedupDispatchOffset(data, 0U, rank, 0U, 0U, world, 6U, bs);
     std::vector<uint8_t> local(start + bs * data.tokenStride * 4U + 32U, 0xa5);
     auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset);
@@ -344,12 +346,12 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> assist(owned * 8U + 16U, 0xcdcdcdcdU);
     std::vector<uint32_t> groups((world * bs * std::min(k, experts / world) * groupStride + 64U) / 4U, 0xcdcdcdcdU);
-    AscendC::testCore = kEpServerDedupSendCoreNum;
+    AscendC::testCore = sendCoreNum;
     AscendC::TPipe pipe;
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
     receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,
         reinterpret_cast<uint8_t *>(assist.data() + 8U), reinterpret_cast<uint8_t *>(groups.data() + 8U),
-        bs, h, k, experts, &pipe);
+        bs, h, k, experts, &pipe, 0, sendCoreNum);
     bool released = false, inLane = false;
     uint32_t flagReads = 0U, peak = 0U, currentLane = 0U, loadLane = 0U, peakLoads = 0U;
     uint32_t reducedRows = 0U, sumCalls = 0U;
@@ -492,7 +494,7 @@ void CheckSparsePrefixReceivers()
     constexpr uint32_t rank = 8U, world = 16U, experts = 32U, bs = 2U, k = 2U, h = 16U;
     constexpr uint32_t rows = 64U, stride = 32U;
     const auto data = TileXREpServerDedupDataLayout(bs, h, k, experts, false);
-    const auto counts = TileXREpServerDedupCountLayout(experts);
+    const auto counts = TileXREpServerDedupCountLayout(experts, recvCoreNum);
     std::vector<uint8_t> local(data.dispatchOffset + data.dispatchBytes, 0U);
     TileXR::CommArgs args {};
     args.rank = rank; args.rankSize = world; args.peerMemBytes = kEpServerDedupPeerBytes;
@@ -508,7 +510,7 @@ void CheckSparsePrefixReceivers()
         std::fill(local.begin(), local.end(), 0U);
         std::fill(groups.begin(), groups.end(), 0xcdcdcdcdU);
         std::fill(local.begin() + counts.counterOffset, local.begin() + counts.stateBytes, 0xa5);
-        for (uint32_t core = 0; core < kEpServerDedupRecvCoreNum; ++core) {
+        for (uint32_t core = 0; core < recvCoreNum; ++core) {
             auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset +
                 counts.prefixOffset + core * counts.prefixStride);
             for (uint32_t record = 0; record < experts; ++record) prefix[record] = (record + 1U) * bs;
@@ -527,12 +529,12 @@ void CheckSparsePrefixReceivers()
                 const uint64_t address = TileXREpServerDedupDispatchOffset(data, source, rank, e, q, world, 2U, bs);
                 std::memcpy(local.data() + address, packet.wire.data(), data.tokenStride);
             }
-        for (uint32_t core = kEpServerDedupCoreNum; core-- > kEpServerDedupSendCoreNum;) {
+        for (uint32_t core = kEpServerDedupCoreNum; core-- > sendCoreNum;) {
             AscendC::testCore = core;
             AscendC::TPipe pipe;
             ServerDedupReceiver<uint16_t, false, false> receiver;
             receiver.Init(&args, hidden.data(), nullptr, reinterpret_cast<uint8_t *>(assist.data()),
-                reinterpret_cast<uint8_t *>(groups.data() + 8U), bs, h, k, experts, &pipe, magic);
+                reinterpret_cast<uint8_t *>(groups.data() + 8U), bs, h, k, experts, &pipe, magic, sendCoreNum);
             ServerDedupTest::ProfileCapture capture(args);
             ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
@@ -574,26 +576,30 @@ void CheckSparsePrefixReceivers()
 int main()
 {
     try {
-        CheckPacket(1U, 1U, false);
-        CheckSparsePrefixReceivers();
-        for (uint32_t owned = 17U; owned <= 32U; ++owned)
-            for (uint32_t h : {176U, 1856U, 2096U, 7168U})
-                CheckBatchReceiver<false>(h, 8U, owned);
-        CheckBatchReceiver<true>(7168U, 8U);
-        CheckBatchReceiver<false>(20000U, 3U);
-        CheckBatchReceiver<false>(26000U, 2U);
-        CheckBatchReceiver<false>(42000U, 1U);
-        for (bool quantized : {false, true}) {
-            for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
-            CheckPacket(209U, 32U, quantized);
-            CheckPacket(225U, 32U, quantized);
+        for (uint32_t split : {16U, 24U, 32U, 40U, 48U}) {
+            std::cout << "send_core_num=" << split << std::endl;
+            sendCoreNum = split; recvCoreNum = 64U - split;
+            CheckPacket(1U, 1U, false);
+            CheckSparsePrefixReceivers();
+            for (uint32_t owned = 17U; owned <= 32U; ++owned)
+                for (uint32_t h : {176U, 1856U, 2096U, 7168U})
+                    CheckBatchReceiver<false>(h, 8U, owned);
+            CheckBatchReceiver<true>(7168U, 8U);
+            CheckBatchReceiver<false>(20000U, 3U);
+            CheckBatchReceiver<false>(26000U, 2U);
+            CheckBatchReceiver<false>(42000U, 1U);
+            for (bool quantized : {false, true}) {
+                for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
+                CheckPacket(209U, 32U, quantized);
+                CheckPacket(225U, 32U, quantized);
+            }
+            for (int64_t magic : {1, 2, 3}) for (int32_t role : {0, 1, -1}) {
+                CheckReceiver<false>(role, magic);
+                CheckReceiver<true>(role, magic);
+            }
+            CheckReceiver<false>(1, 1, 128U);
+            CheckReceiver<true>(-1, 2, 128U);
         }
-        for (int64_t magic : {1, 2, 3}) for (int32_t role : {0, 1, -1}) {
-            CheckReceiver<false>(role, magic);
-            CheckReceiver<true>(role, magic);
-        }
-        CheckReceiver<false>(1, 1, 128U);
-        CheckReceiver<true>(-1, 2, 128U);
     } catch (const std::exception &error) {
         AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};
         AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};

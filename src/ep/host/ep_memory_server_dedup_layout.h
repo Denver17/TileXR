@@ -35,8 +35,14 @@ struct EpServerDedupAllocation {
     int32_t deviceId = -1;
 };
 
+// Host-only validation; every device entry receives an already validated split.
+inline bool TileXREpIsServerDedupSendCoreNum(int64_t sendCoreNum)
+{
+    return sendCoreNum >= 16 && sendCoreNum <= 48 && sendCoreNum % 8 == 0;
+}
+
 int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out, bool quantized = false);
+    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out, bool quantized = false, int64_t sendCoreNum = 32);
 int TileXREpValidateServerDedupAllocations(const EpServerDedupAllocation *allocations,
     std::size_t count, int32_t deviceId);
 

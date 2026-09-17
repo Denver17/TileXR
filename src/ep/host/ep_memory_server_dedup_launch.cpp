@@ -47,7 +47,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
         reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), p.bs, p.h, p.topK, p.moeExpertNum,
         static_cast<int64_t>(layout.globalBs), p.expertTokenNumsType, p.quantMode, static_cast<int64_t>(p.dtype),
         static_cast<int64_t>(p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype),
-        magic, static_cast<int64_t>(profilingLaunchSlot)};
+        magic, static_cast<int64_t>(profilingLaunchSlot), params.sendCoreNum};
     return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);
 }
 

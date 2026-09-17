@@ -58,6 +58,36 @@ kernel 完成要求全部核退出，某个核提前返回不允许下一轮提�
 收益以相同 case 的 msprof 整个 kernel 时长评估；CANN 编译和 trace 回归不能证明设备并发正确性，
 A5 验证须覆盖连续多轮双窗口复用、空任务核及收发负载不均衡，并检查结果和 Flag 清理。
 
+## 2026-09-17：运行时发送/接收核分配（当前契约）
+
+总核数固定为 64；`send_core_num` 支持 16/24/32/40/48，默认 32，
+发送核为 `[0, send_core_num)`，接收核为 `[send_core_num, 64)`。
+同一套 kernel 产物支持全部取值，`run.sh ... send_core_num=16` 即选择 16 发/48 收；
+不传参数时每次恢复 32 发/32 收，不继承旧环境或本地配置中的分核值。
+该约定覆盖本文旧版固定 48 发/16 收的说明。
+
+校验只在 Host 执行：脚本、工作流和公开 Dispatch API 拒绝范围外或非 8 倍数取值，
+并检查 Count 和发送 UB 容量；kernel 直接使用经过校验的参数，不增加取值检查分支。
+公开 API 在 stream 后增加默认值为 32 的 `int64_t sendCoreNum`；内部 launch ABI
+在 profilingLaunchSlot 后增加同名 int64 字段，大小从 192B 改为 200B。
+调用方、Host 库和独立 kernel 须一起重新编译部署，旧安装不能混用。
+
+Count 的接收分段、两张 cumsum 矩阵、每个接收核的完整 prefix 副本，以及 Token 的
+floor 分区均使用本次 `recv_core_num=64-send_core_num`。源端 Token 划分使用发送核数。
+`BS<48` 时所有 64 核参与 Count 的阈值独立保留，不能随发送核数一起改变。
+所有 Rank 在同一 communicator 生命周期内使用相同且固定的分核值，调用顺序一致，
+并在同一 stream 串行。每次 run.sh 新建 communicator，因此不同运行可切换分核；
+不支持同一 communicator 跨轮改变分核。不同接收核数会移动 Count 控制区，旧 prefix
+保留内容可能覆盖另一种分核的 ready Flag，不能只靠两轮窗口交替防止误判。
+分核不改变 Token 级 prefix 编号、双窗口、Flag 清理或数据同步契约。
+
+核数泛化不能只修改角色分界：接收矩阵地址、prefix 副本数和任务区间必须使用同一个
+运行时值。发送核减少会增大每核 weights/masks/directTasks 的 UB 用量，Host 须在
+launch 前确认完整 scratch 和至少一个带 Flag 包的空间，不能让核内 unsigned 差值下溢。
+profiling 角色由实际记录中的 send/recv 事件识别，历史 48/16 trace 仍按其自身记录解析。
+Host 行为测试覆盖五种分核的 Count、收发及空分区；真实 CANN 编译仅证明 API/编译边界，
+实际吞吐和异步多卡正确性需要按每种分核进行 A5 功能及连续多轮测试。
+
 ## 设计状态
 
 本文合入第一轮 D01-D11、相关 Combine 讨论及第二轮已经确认的设计，作为后续梳理的基线。
@@ -309,7 +339,7 @@ Combine 将本卡转发所得 expert 行同样作为转发 Token 处理，执行
 
 所有原始 expert cnt 由原始 source 统计并直接发送，包含经 relay 到达的 route。
 Relay 不转发 cnt，不为代理写入另加 cnt；数据位置的 source 身份始终保持原始 srcRank。
-Cnt 统计、发送记录、接收和 cumsum 计算沿用当前 Memory，统计输入仍是完整原始路由；核组固定采用后文的 48/16 分工。
+Cnt 统计、发送记录、接收和 cumsum 计算沿用当前 Memory，统计输入仍是完整原始路由；核组采用本次运行时 send_core_num/recv_core_num 分工（默认 32/32）。
 本版本不使用双 Group。
 原始 source 的 cnt 按既有分核覆盖全部目标 expert，每项发送一次，随后进入原有接收/cumsum 流程。
 源端数据的“先第一跳、后 DIRECT”仅为各核内部的任务顺序。

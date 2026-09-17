@@ -99,6 +99,7 @@ class ChainConsumerTests(unittest.TestCase):
             TILEXR_VALIDATION_TOPK="3", TILEXR_VALIDATION_MOE_EXPERT_NUM="32", TILEXR_VALIDATION_DTYPE="bf16",
             TILEXR_COMM_ID=f"127.0.0.1:{comm}", TILEXR_DEMO_BARRIER_ADDR=f"127.0.0.1:{barrier}",
             TEST_TRACE_DIR=self.trace.name)
+        self.environment.pop("TILEXR_VALIDATION_SEND_CORE_NUM", None)
         self.environment.pop("TILEXR_VALIDATION_CHECKPOINT", None)
         self.environment.pop("TILEXR_VALIDATION_LOOPS", None)
         self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
@@ -361,6 +362,28 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertIn("wrong-bank-read", self.trace_lines(rank))
             else:
                 self.assertEqual(process.returncode, 0, errors)
+
+    def test_runtime_send_core_split_reaches_public_api_and_markers(self):
+        for send in (None, 16, 24, 32, 40, 48):
+            with self.subTest(send=send):
+                env = {} if send is None else dict(TILEXR_VALIDATION_SEND_CORE_NUM=str(send))
+                processes = [self.start(rank, environment=env) for rank in range(16)]
+                for process in processes:
+                    output, errors = process.communicate(timeout=15)
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    records = self.records(output, 'EP_SERVER_DEDUP_DISPATCH_PASS')
+                    self.assertEqual(len(records), 1, output + errors)
+                    self.assertEqual(records[0]['send_core_num'], send or 32)
+                    self.assertEqual(records[0]['recv_core_num'], 64 - (send or 32))
+
+    def test_invalid_send_core_split_is_rejected_before_device_initialization(self):
+        for value in ('', '0', '8', '17', '31', '33', '56', '-1', '32.5'):
+            with self.subTest(value=value):
+                process = self.start(0, environment=dict(TILEXR_VALIDATION_SEND_CORE_NUM=value))
+                output, errors = process.communicate(timeout=5)
+                self.assertNotEqual(process.returncode, 0, output + errors)
+                self.assertIn('stage=config', errors)
+                self.assertEqual(self.trace_lines(0), [])
 
     def test_prelaunch_errors_never_launch_or_pass(self):
         cases = [{"TEST_FAIL_STAGE": stage} for stage in (

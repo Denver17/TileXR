@@ -268,7 +268,7 @@ void TestServerDedupRuntimeLaunch()
     ResetCapture();
     gVectorCores = 64;
     Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
-    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 24);
+    CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 25);
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
     constexpr uint64_t firstProfilingSlot = 0U;
 #else
@@ -276,8 +276,8 @@ void TestServerDedupRuntimeLaunch()
 #endif
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
         0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
-        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic, firstProfilingSlot};
-    Check(gLaunches[0].args == expected, "all 24 kernel arguments preserve order, widths and values (192B)");
+        256, 7168, 6, 384, 64 * 256, 1, 4, static_cast<uint64_t>(p.dtype), static_cast<uint64_t>(p.expandXOutDtype), kNextMagic, firstProfilingSlot, 32};
+    Check(gLaunches[0].args == expected, "all 25 kernel arguments preserve order, widths and values (200B)");
     Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
@@ -297,6 +297,19 @@ void TestServerDedupRuntimeLaunch()
     }
     Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
         "multiple rounds consume exactly one magic each without reloading the artifact");
+
+    for (int64_t sendCoreNum : {16, 24, 32, 40, 48}) {
+        ResetCapture();
+        gVectorCores = 64;
+        params.sendCoreNum = sendCoreNum;
+        Check(launch() == TileXR::TILEXR_SUCCESS, "runtime split launches the same kernel artifact");
+        auto splitArgs = expected;
+        splitArgs[24] = static_cast<uint64_t>(sendCoreNum);
+        Check(gLaunches.size() == 1 && gLaunches[0].args == splitArgs &&
+            gLaunches[0].blockDim == 64 && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
+            "runtime split reaches final ABI field while launch remains 64 AIVs");
+    }
+    params.sendCoreNum = 32;
 
     ResetCapture();
     gVectorCores = 96;

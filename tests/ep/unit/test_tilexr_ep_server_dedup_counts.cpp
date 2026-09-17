@@ -15,8 +15,8 @@ uint64_t testCopies = 0;
 
 namespace {
 using TileXREp::ServerDedupCounts;
-using TileXREp::kEpServerDedupSendCoreNum;
-using TileXREp::kEpServerDedupRecvCoreNum;
+uint32_t sendCoreNum = 32U;
+uint32_t recvCoreNum = 32U;
 using TileXREp::kEpServerDedupAllCoreCountBsThreshold;
 using ServerDedupTest::Check;
 
@@ -44,7 +44,7 @@ void CheckReceiveTasks(Rank &rank, const std::vector<int32_t> &counts,
                     data, source, rank.args.rank, expert, q, world, localExperts, bs));
 
     uint32_t nextRow = 0;
-    for (uint32_t receiver = 0; receiver < kEpServerDedupRecvCoreNum; ++receiver) {
+    for (uint32_t receiver = 0; receiver < recvCoreNum; ++receiver) {
         // Production resets the count pipe at the receiver boundary and reloads
         // the GM prefix. This isolated task test keeps its source alive instead.
         AscendC::TPipe pipe;
@@ -52,9 +52,9 @@ void CheckReceiveTasks(Rank &rank, const std::vector<int32_t> &counts,
         const uint64_t copiesBefore = AscendC::testCopies;
         const uint64_t syncBefore = AscendC::TestSyncOperations();
         TileXREp::ServerDedupReceiveTasks tasks;
-        tasks.Build(rank.cores[kEpServerDedupSendCoreNum + receiver].Prefix(), rank.args.rank,
-            world, experts, bs, receiver, &pipe);
-        const uint32_t end = uint32_t(uint64_t(receiver + 1U) * addresses.size() / kEpServerDedupRecvCoreNum);
+        tasks.Build(rank.cores[sendCoreNum + receiver].Prefix(), rank.args.rank,
+            world, experts, bs, receiver, &pipe, recvCoreNum);
+        const uint32_t end = uint32_t(uint64_t(receiver + 1U) * addresses.size() / recvCoreNum);
         Check(tasks.Begin() == nextRow && tasks.Count() == end - nextRow,
             "receive ranges cover every output row once using floor boundaries");
         Check(pipe.bytes - bytesBefore == 2U * TileXREp::TileXREpDedupAlign(uint64_t(tasks.Count()) * 4U, 32U),
@@ -125,12 +125,12 @@ void CheckReceiveTaskBoundaries()
                             addresses.push_back(TileXREp::TileXREpServerDedupDispatchOffset(
                                 data, source, rank, expert, q, world, localExperts, bs));
                     }
-                for (uint32_t receiver = 0; receiver < kEpServerDedupRecvCoreNum; ++receiver) {
+                for (uint32_t receiver = 0; receiver < recvCoreNum; ++receiver) {
                     AscendC::TPipe pipe;
                     TileXREp::ServerDedupReceiveTasks tasks;
-                    tasks.Build(prefix, rank, world, experts, bs, receiver, &pipe);
-                    const uint32_t begin = uint32_t(receiver * addresses.size() / kEpServerDedupRecvCoreNum);
-                    const uint32_t end = uint32_t((receiver + 1U) * addresses.size() / kEpServerDedupRecvCoreNum);
+                    tasks.Build(prefix, rank, world, experts, bs, receiver, &pipe, recvCoreNum);
+                    const uint32_t begin = uint32_t(receiver * addresses.size() / recvCoreNum);
+                    const uint32_t end = uint32_t((receiver + 1U) * addresses.size() / recvCoreNum);
                     Check(tasks.Begin() == begin && tasks.Count() == end - begin &&
                         tasks.PendingCount() == end - begin, "sparse prefix retains exact floor ownership");
                     for (uint32_t j = 0; j < end - begin; ++j) {
@@ -150,15 +150,15 @@ void CheckReceiveTaskBoundaries()
 void CheckDeferredCountReceive()
 {
     constexpr uint32_t world = 64U, experts = 384U;
-    const uint32_t receiver = 1U, core = kEpServerDedupSendCoreNum + receiver;
-    const uint32_t countCores = 1U < kEpServerDedupAllCoreCountBsThreshold ? 64U : kEpServerDedupRecvCoreNum;
+    const uint32_t receiver = 1U, core = sendCoreNum + receiver;
+    const uint32_t countCores = 1U < kEpServerDedupAllCoreCountBsThreshold ? 64U : recvCoreNum;
     const uint32_t countCore = countCores == 64U ? core : receiver;
     const uint32_t start = countCore * (experts / countCores) + std::min(countCore, experts % countCores);
     const uint32_t count = experts / countCores + (countCore < experts % countCores);
-    const uint32_t recvStart = receiver * (experts / kEpServerDedupRecvCoreNum) +
-        std::min(receiver, experts % kEpServerDedupRecvCoreNum);
-    const uint32_t recvCount = experts / kEpServerDedupRecvCoreNum + (receiver < experts % kEpServerDedupRecvCoreNum);
-    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
+    const uint32_t recvStart = receiver * (experts / recvCoreNum) +
+        std::min(receiver, experts % recvCoreNum);
+    const uint32_t recvCount = experts / recvCoreNum + (receiver < experts % recvCoreNum);
+    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts, recvCoreNum);
     std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
     TileXR::CommArgs args {};
     args.rankSize = world;
@@ -182,7 +182,7 @@ void CheckDeferredCountReceive()
     AscendC::testCore = core;
     counts.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(&route),
         reinterpret_cast<GM_ADDR>(expertOutput.data()), reinterpret_cast<GM_ADDR>(prefix.data()),
-        1U, 1U, experts, 0U, 1, &pipe);
+        1U, 1U, experts, 0U, 1, &pipe, sendCoreNum);
     ServerDedupTest::ProfileCapture capture(args);
     TileXREp::ServerDedupProfile profile;
     profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
@@ -211,9 +211,9 @@ void CheckDeferredCountReceive()
             state[expert / (experts / world)][index + 1U] == (i == 0U ? 1U : 0U),
             "deferred cnt reads retain every record after receiver scratch overwrites count scratch");
     }
-    for (uint32_t consumer = 0; consumer < kEpServerDedupRecvCoreNum; ++consumer) {
+    for (uint32_t consumer = 0; consumer < recvCoreNum; ++consumer) {
         const uint32_t index = (layout.cntOffset + layout.cumsumOffset) / 4U +
-            (receiver * kEpServerDedupRecvCoreNum + consumer) * 8U;
+            (receiver * recvCoreNum + consumer) * 8U;
         Check(state[0][index] == localSum && state[0][index + 1U] == 0x3f800000U,
             "deferred local sum publication preserves value and readiness");
     }
@@ -228,7 +228,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
     TileXR::CommArgs profileArgs {};
     ServerDedupTest::ProfileCapture capture(profileArgs);
     const uint32_t localExperts = experts / world;
-    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
+    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts, recvCoreNum);
     std::vector<Rank> ranks(world);
     ServerDedupTest::SparsePeerMemory memory;
     for (uint32_t r = 0; r < world; ++r) {
@@ -281,7 +281,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                     reinterpret_cast<uint8_t *>(rank.routes.data()),
                     reinterpret_cast<uint8_t *>(rank.expertOutput.data() + 1),
                     reinterpret_cast<uint8_t *>(rank.output.data() + 1),
-                    bs, k, experts, outputType, round, &rank.pipes[core]);
+                    bs, k, experts, outputType, round, &rank.pipes[core], sendCoreNum);
             }
         }
         // Drive the actual production phases with all sends posted before polling.
@@ -309,7 +309,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 #endif
             Check(AscendC::GetCtrlSpr<60, 60>() == 0,
                 "Count preserves the FP overflow mode for subsequent quantization, without resetting the pipe");
-            if (bs >= kEpServerDedupAllCoreCountBsThreshold && id % 64 < kEpServerDedupSendCoreNum)
+            if (bs >= kEpServerDedupAllCoreCountBsThreshold && id % 64 < sendCoreNum)
                 Check(AscendC::testCopies == before, "BS at/above the independent threshold leaves send cores out of Count");
             if (bs < kEpServerDedupAllCoreCountBsThreshold && experts >= 64U)
                 Check(AscendC::testCopies > before, "BS below the independent threshold lets all 64 cores publish Count");
@@ -318,11 +318,11 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             Check(ranks[r].states[bank][offset / 4 + i * 8] == 0x3f800000, "every cnt record, including zero, is notified");
             Check(int32_t(ranks[r].states[bank][offset / 4 + i * 8 + 1]) == expected[r][i], "raw per-expert/source count matches independent route histogram");
         }
-        for (uint32_t id : order) if (id % 64 >= kEpServerDedupSendCoreNum) ranks[id / 64].cores[id % 64].RecvCnt();
+        for (uint32_t id : order) if (id % 64 >= sendCoreNum) ranks[id / 64].cores[id % 64].RecvCnt();
         std::shuffle(order.begin(), order.end(), rng);
-        for (uint32_t id : order) if (id % 64 >= kEpServerDedupSendCoreNum) ranks[id / 64].cores[id % 64].CalcCumsum();
+        for (uint32_t id : order) if (id % 64 >= sendCoreNum) ranks[id / 64].cores[id % 64].CalcCumsum();
         std::shuffle(order.begin(), order.end(), rng);
-        for (uint32_t id : order) if (id % 64 >= kEpServerDedupSendCoreNum) ranks[id / 64].cores[id % 64].CompleteCumsum();
+        for (uint32_t id : order) if (id % 64 >= sendCoreNum) ranks[id / 64].cores[id % 64].CompleteCumsum();
         for (uint32_t r = 0; r < world; ++r)
             CheckReceiveTasks(ranks[r], expected[r], world, experts, bs, k);
         for (auto &rank : ranks) for (auto &core : rank.cores) core.Finish();
@@ -335,7 +335,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                 cumulative += expected[r][i];
                 Check(rank.output[i + 1] == cumulative, "inclusive sendCountsOut follows localExpert/source order");
                 Check(rank.states[bank][offset / 4 + i * 8] == 0, "cnt ready flag cleared by its receiver");
-                for (uint32_t receiver = 0; receiver < kEpServerDedupRecvCoreNum; ++receiver)
+                for (uint32_t receiver = 0; receiver < recvCoreNum; ++receiver)
                     Check(int32_t(rank.states[bank][(offset + layout.prefixOffset) / 4 + receiver * experts + i]) == cumulative,
                         "all receive consumers receive the complete prefix");
                 if ((i + 1) % world == 0) {
@@ -346,7 +346,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             }
             for (uint32_t matrix = 0; matrix < 2; ++matrix) {
                 const uint64_t begin = matrix == 0 ? layout.cumsumOffset : layout.cumsumFlagOffset;
-                for (uint64_t byte = begin; byte < begin + kEpServerDedupRecvCoreNum * kEpServerDedupRecvCoreNum * 32U; byte += 4)
+                for (uint64_t byte = begin; byte < begin + recvCoreNum * recvCoreNum * 32U; byte += 4)
                     Check(rank.states[bank][(offset + byte) / 4] == 0, "segment and full-prefix readiness cleaned");
             }
             Check(rank.output.front() == -777 && rank.output.back() == -777 &&
@@ -362,22 +362,25 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 int main()
 {
     try {
-        CheckReceiveTaskBoundaries();
-        CheckDeferredCountReceive();
-        Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
-        Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
-        Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
-        Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
-        Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
-        Run(64, 384, 48, 6, 4);     // Default threshold boundary, independent of the split.
-        Run(64, 384, 96, 6, 2);     // Reported FP8 failure: threshold 48 bypasses Count, 128 runs Count on senders.
-        Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology and 63 records/core.
-        Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
-        Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.
-        if (kEpServerDedupAllCoreCountBsThreshold > 0U && kEpServerDedupAllCoreCountBsThreshold <= 256U) {
-            if (kEpServerDedupAllCoreCountBsThreshold > 1U)
-                Run(16, 64, kEpServerDedupAllCoreCountBsThreshold - 1U, 1, 2);
-            Run(16, 64, kEpServerDedupAllCoreCountBsThreshold, 1, 2);
+        for (uint32_t split : {16U, 24U, 32U, 40U, 48U}) {
+            sendCoreNum = split; recvCoreNum = 64U - split;
+            CheckReceiveTaskBoundaries();
+            CheckDeferredCountReceive();
+            Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
+            Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
+            Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
+            Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
+            Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
+            Run(64, 384, 48, 6, 4);     // Default threshold boundary, independent of the split.
+            Run(64, 384, 96, 6, 2);     // Reported FP8 failure: threshold 48 bypasses Count, 128 runs Count on senders.
+            Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology and 63 records/core.
+            Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
+            Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.
+            if (kEpServerDedupAllCoreCountBsThreshold > 0U && kEpServerDedupAllCoreCountBsThreshold <= 256U) {
+                if (kEpServerDedupAllCoreCountBsThreshold > 1U)
+                    Run(16, 64, kEpServerDedupAllCoreCountBsThreshold - 1U, 1, 2);
+                Run(16, 64, kEpServerDedupAllCoreCountBsThreshold, 1, 2);
+            }
         }
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';

@@ -13,6 +13,7 @@
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
 using ServerDedupTest::Check;
+uint32_t sendCoreNum = 32U;
 
 void CheckReceiveUnpack(uint32_t h, bool quantized)
 {
@@ -48,7 +49,7 @@ void CheckDeferredCountSender()
     if (TileXREp::kEpServerDedupAllCoreCountBsThreshold <= 1U) return;
     constexpr uint32_t experts = 384U, world = 64U, h = 32U;
     const auto data = TileXREp::TileXREpServerDedupDataLayout(1U, h, 1U, experts, false);
-    const auto countLayout = TileXREp::TileXREpServerDedupCountLayout(experts);
+    const auto countLayout = TileXREp::TileXREpServerDedupCountLayout(experts, 64U - sendCoreNum);
     std::vector<uint8_t> window(data.dispatchOffset + data.dispatchBytes + 32U, 0U);
     TileXR::CommArgs args {};
     args.rankSize = world;
@@ -67,7 +68,7 @@ void CheckDeferredCountSender()
     TileXREp::ServerDedupCounts counts;
     counts.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(&route),
         reinterpret_cast<GM_ADDR>(expertOutput), reinterpret_cast<GM_ADDR>(prefix),
-        1U, 1U, experts, 0U, 1, &pipe);
+        1U, 1U, experts, 0U, 1, &pipe, sendCoreNum);
     TileXREp::ServerDedupProfile profile;
     profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
     AscendC::DeferMte3() = true;
@@ -80,7 +81,7 @@ void CheckDeferredCountSender()
     TileXREp::ServerDedupSender<uint16_t, false, false> sender;
     sender.Init(&args, reinterpret_cast<GM_ADDR>(hidden), reinterpret_cast<GM_ADDR>(&route),
         reinterpret_cast<GM_ADDR>(&weight), reinterpret_cast<GM_ADDR>(&mask), reinterpret_cast<GM_ADDR>(&output),
-        1U, h, 1U, experts, &pipe, 1);
+        1U, h, 1U, experts, &pipe, 1, sendCoreNum);
     sender.Process(profile, counts.ScratchPool(), counts.ReservedBytes());
     AscendC::GmReadObserver() = {};
     Check(preparationOverlapped, "sender route preparation advances before count MTE3 completes");
@@ -170,9 +171,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         writes.clear();
         AscendC::GmWriteObserver() = observeWrite;
         if (round != 0) for (auto &value : hidden) value = uint16_t(value + 0x100U);
-        for (uint32_t core = 0; core < TileXREp::kEpServerDedupSendCoreNum; ++core) {
-            const uint32_t start = core * (bs / TileXREp::kEpServerDedupSendCoreNum) + std::min(core, bs % TileXREp::kEpServerDedupSendCoreNum);
-            const uint32_t count = bs / TileXREp::kEpServerDedupSendCoreNum + (core < bs % TileXREp::kEpServerDedupSendCoreNum);
+        for (uint32_t core = 0; core < sendCoreNum; ++core) {
+            const uint32_t start = core * (bs / sendCoreNum) + std::min(core, bs % sendCoreNum);
+            const uint32_t count = bs / sendCoreNum + (core < bs % sendCoreNum);
             const auto priorMasks = masks;
             const auto priorOutput = output;
             AscendC::testCore = core;
@@ -180,7 +181,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::ServerDedupSender<uint16_t, false, false> sender;
             sender.Init(&args, reinterpret_cast<uint8_t *>(hidden.data()), reinterpret_cast<uint8_t *>(ids.data()),
                 reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
-                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U);
+                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U, sendCoreNum);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
             profile.Mark(2);
@@ -215,14 +216,14 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         }
         AscendC::GmWriteObserver() = {};
         Check(writes.size() == packets.size(), "exactly one send per expected physical packet");
-        for (uint32_t core = 0; core < TileXREp::kEpServerDedupSendCoreNum; ++core) {
+        for (uint32_t core = 0; core < sendCoreNum; ++core) {
             bool directStarted = false;
             uint32_t previousDirect = 0, previousServerStep = 0;
             std::vector<uintptr_t> lanes;
             uint32_t issued = 0;
             for (const auto &write : writes) if (write.core == core) {
-                const uint32_t start = core * (bs / TileXREp::kEpServerDedupSendCoreNum) + std::min(core, bs % TileXREp::kEpServerDedupSendCoreNum);
-                const uint32_t count = bs / TileXREp::kEpServerDedupSendCoreNum + (core < bs % TileXREp::kEpServerDedupSendCoreNum);
+                const uint32_t start = core * (bs / sendCoreNum) + std::min(core, bs % sendCoreNum);
+                const uint32_t count = bs / sendCoreNum + (core < bs % sendCoreNum);
                 Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
@@ -293,36 +294,39 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
 int main()
 {
     try {
-        CheckDeferredCountSender();
-        CheckReceiveUnpack(32, false);
-        CheckReceiveUnpack(240, false); // Exactly one 480B data block.
-        CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
-        CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
-        CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
-        for (uint32_t source : {0U, 24U, 56U}) {
-            const uint32_t local = source / 8U;
-            const auto expert = [local](uint32_t step, uint32_t offset = 0U) {
-                return int32_t((local + step) % 8U * 48U + offset);
-            };
-            // Two rows per core: late local routes (own card and peer card),
-            // interleaved remote servers, and no tasks for relative server 6.
-            Run(64, 384, 96, 64, 6, false, source, 3, {
-                expert(2), expert(7), expert(1), expert(0, 42), expert(5), expert(0),
-                expert(4), expert(1, 1), expert(0, 1), expert(3), expert(7, 1), expert(2, 1)});
-            // First hops and singleton DIRECTs share the ring across the wrap.
-            Run(64, 384, 96, 64, 6, false, source, 3, {
-                expert(2), expert(5), expert(2, 1), expert(1), expert(0, 42), expert(0),
-                expert(7), expert(3), expert(0, 1), expert(4), expert(7, 1), expert(1, 1)});
+        for (uint32_t split : {16U, 24U, 32U, 40U, 48U}) {
+            sendCoreNum = split;
+            CheckDeferredCountSender();
+            CheckReceiveUnpack(32, false);
+            CheckReceiveUnpack(240, false); // Exactly one 480B data block.
+            CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
+            CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
+            CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
+            for (uint32_t source : {0U, 24U, 56U}) {
+                const uint32_t local = source / 8U;
+                const auto expert = [local](uint32_t step, uint32_t offset = 0U) {
+                    return int32_t((local + step) % 8U * 48U + offset);
+                };
+                // Two rows per core: late local routes (own card and peer card),
+                // interleaved remote servers, and no tasks for relative server 6.
+                Run(64, 384, 96, 64, 6, false, source, 3, {
+                    expert(2), expert(7), expert(1), expert(0, 42), expert(5), expert(0),
+                    expert(4), expert(1, 1), expert(0, 1), expert(3), expert(7, 1), expert(2, 1)});
+                // First hops and singleton DIRECTs share the ring across the wrap.
+                Run(64, 384, 96, 64, 6, false, source, 3, {
+                    expert(2), expert(5), expert(2, 1), expert(1), expert(0, 42), expert(0),
+                    expert(7), expert(3), expert(0, 1), expert(4), expert(7, 1), expert(1, 1)});
+            }
+            Run(16, 96, 96, 64, 6, true);
+            Run(16, 96, 96, 64, 6, true, 15); // Cyclic (source+destination)%R slot mapping wraps.
+            Run(24, 72, 256, 224, 6, true); // per-core 5/6 rows; metadata crosses a 480B boundary.
+            Run(128, 128, 129, 32, 32, true); // many first hops per core wrap the shared lane pool.
+            Run(16, 96, 6, 7168, 6, true, 0, 3);
+            Run(16, 96, 1, 33, 1, false);
+            Run(16, 96, 47, 64, 6, false);
+            Run(16, 96, 256, 224, 6, false, 0, 3); // all DIRECT, ring and call reuse.
+            Run(16, 96, 256, 224, 32, false); // k31 is a DIRECT route with its original q.
         }
-        Run(16, 96, 96, 64, 6, true);
-        Run(16, 96, 96, 64, 6, true, 15); // Cyclic (source+destination)%R slot mapping wraps.
-        Run(24, 72, 256, 224, 6, true); // per-core 5/6 rows; metadata crosses a 480B boundary.
-        Run(128, 128, 129, 32, 32, true); // many first hops per core wrap the shared lane pool.
-        Run(16, 96, 6, 7168, 6, true, 0, 3);
-        Run(16, 96, 1, 33, 1, false);
-        Run(16, 96, 47, 64, 6, false);
-        Run(16, 96, 256, 224, 6, false, 0, 3); // all DIRECT, ring and call reuse.
-        Run(16, 96, 256, 224, 32, false); // k31 is a DIRECT route with its original q.
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;
     }

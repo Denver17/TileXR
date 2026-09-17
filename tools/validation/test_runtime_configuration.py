@@ -390,6 +390,33 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((output / 'analysis.txt').read_text(), value or '0')
 
+    def test_send_core_cli_defaults_overrides_and_invalid_values(self):
+        with self.local.open('a') as config:
+            config.write('TILEXR_VALIDATION_SEND_CORE_NUM=48\n')
+        (self.root / 'tools/validation/workflow.py').write_text(
+            "import os\nfrom pathlib import Path\nfrom run_summary import write_result\n"
+            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
+            "(root/'cores.txt').write_text(os.environ['TILEXR_VALIDATION_SEND_CORE_NUM'])\n"
+            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
+        for value in (None, '16', '24', '32', '40', '48'):
+            with self.subTest(value=value):
+                output = self.root / 'run' / str(value)
+                result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96',
+                    *([] if value is None else ['send_core_num=' + value])], cwd=self.root,
+                    env=dict(self.env, TILEXR_VALIDATION_SEND_CORE_NUM='40', TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual((output / 'cores.txt').read_text(), value or '32')
+        self.local.unlink()
+        for values in ([''], ['8'], ['17'], ['31'], ['56'], ['032'], ['32.0'], ['32', '40']):
+            with self.subTest(values=values):
+                result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96',
+                    *['send_core_num=' + value for value in values]], cwd=self.root, env=self.env,
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn('send_core_num', result.stderr)
+                self.assertNotIn('validation.local.sh', result.stderr)
+
     def test_remote_verify_receives_commit_mode_without_editing_remote_config(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n")
         (self.root / "tools/validation/workflow.py").write_text(

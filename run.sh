@@ -11,6 +11,7 @@ Usage: bash run.sh -n SERVERS -e EXPERTS [-m 0|1|2] [-l LOOPS WARMUP] [key=value
   -l  Measurement loops and warmup loops (default: 1 0).
   -h, --help  Show help without loading the runtime environment.
 Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 quant_mode=0 fp8_format=e4m3
+                    send_core_num=16|24|32|40|48 (default: 32)
                     block_dim=auto comm_id=IP:PORT barrier_addr=IP:PORT
                     msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
                     case_analysis=0|1 (default: 0)
@@ -47,13 +48,16 @@ while (( $# )); do
             host_validation=${key#*=}
             [[ $host_validation == 0 || $host_validation == 1 ]] || fail 'host_validation must be 0 or 1'
             seen[host_validation]=1; shift;;
-        bs=*|h=*|topk=*|dtype=*|quant_mode=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*)
+        bs=*|h=*|topk=*|dtype=*|quant_mode=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|send_core_num=*)
             name=${key%%=*}; value=${key#*=}
             [[ -n $value ]] || fail "missing value for $name"
             [[ -z ${seen[$name]+set} ]] || fail "duplicate argument: $name"
             seen[$name]=1
             if [[ $name == case_analysis ]]; then
                 [[ $value == 0 || $value == 1 ]] || fail 'case_analysis must be 0 or 1'
+            fi
+            if [[ $name == send_core_num ]]; then
+                [[ $value =~ ^(16|24|32|40|48)$ ]] || fail 'send_core_num must be 16, 24, 32, 40 or 48'
             fi
             case "$name" in
                 comm_id) variable=TILEXR_COMM_ID;;
@@ -70,7 +74,7 @@ done
 export TILEXR_VALIDATION_BS=96 TILEXR_VALIDATION_H=7168 TILEXR_VALIDATION_TOPK=6
 export TILEXR_VALIDATION_DTYPE=bf16 TILEXR_VALIDATION_QUANT_MODE=0 TILEXR_VALIDATION_FP8_FORMAT=e4m3
 export TILEXR_VALIDATION_BLOCK_DIM=auto TILEXR_VALIDATION_ACTION=run
-export TILEXR_VALIDATION_CASE_ANALYSIS=0
+export TILEXR_VALIDATION_CASE_ANALYSIS=0 TILEXR_VALIDATION_SEND_CORE_NUM=32
 unset TILEXR_DIRECT_HOSTS_JSON TILEXR_DIRECT_RUN
 assignments+=("TILEXR_VALIDATION_SERVERS=$servers" "TILEXR_VALIDATION_MOE_EXPERT_NUM=$experts"
               "TILEXR_VALIDATION_RUN_MODE=$run_mode" "TILEXR_VALIDATION_LOOPS=$loops"

@@ -77,7 +77,7 @@ class TraceTests(unittest.TestCase):
         self.assertEqual(reader.call_count, 1)
 
     def test_timeline_shows_core_work_as_nested_positive_intervals(self):
-        for send_cores in (48, 40, 32):
+        for send_cores in (16, 24, 32, 40, 48):
             with self.subTest(send_cores=send_cores):
                 self.check_timeline_for_split(send_cores)
 

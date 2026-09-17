@@ -13,11 +13,12 @@ using namespace AscendC;
 class ServerDedupReceiveTasks {
 public:
     __aicore__ inline void Build(LocalTensor<int32_t> prefix, uint32_t rank, uint32_t ranks,
-        uint32_t experts, uint32_t bs, uint32_t receiver, TPipe *pipe)
+        uint32_t experts, uint32_t bs, uint32_t receiver, TPipe *pipe,
+        uint32_t recvCoreNum = kEpServerDedupRecvCoreNum)
     {
         const uint32_t total = uint32_t(prefix.GetValue(experts - 1U));
-        begin_ = uint32_t(uint64_t(receiver) * total / kEpServerDedupRecvCoreNum);
-        const uint32_t end = uint32_t(uint64_t(receiver + 1U) * total / kEpServerDedupRecvCoreNum);
+        begin_ = uint32_t(uint64_t(receiver) * total / recvCoreNum);
+        const uint32_t end = uint32_t(uint64_t(receiver + 1U) * total / recvCoreNum);
         count_ = end - begin_;
         pendingCount_ = count_;
         if (count_ == 0U) return;

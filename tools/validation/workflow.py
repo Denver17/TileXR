@@ -36,7 +36,7 @@ CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
 DISPATCH_INVALID_MARKER = "EP_SERVER_DEDUP_DISPATCH_INVALID "
-DISPATCH_ABI = {"launch_bytes": 192, "layout": "r07-token-prefix", "kernel_scope": "dispatch"}
+DISPATCH_ABI = {"launch_bytes": 200, "layout": "r08-runtime-core-split", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
@@ -331,6 +331,10 @@ def source_send_stride(config):
 
 
 def chain_configuration(checkpoint):
+    send_core_num = os.environ.get("TILEXR_VALIDATION_SEND_CORE_NUM", "32")
+    if send_core_num not in ("16", "24", "32", "40", "48"):
+        raise ValueError("send_core_num 必须为 16/24/32/40/48")
+    send_core_num = int(send_core_num)
     case_analysis = os.environ.get("TILEXR_VALIDATION_CASE_ANALYSIS", "0")
     if case_analysis not in ("0", "1"):
         raise ValueError("case_analysis 必须为 0 或 1")
@@ -388,6 +392,7 @@ def chain_configuration(checkpoint):
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup,
+                 send_core_num=send_core_num, recv_core_num=64 - send_core_num,
                  route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=int(case_analysis))
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
@@ -495,7 +500,7 @@ def verify_build(config, *, check_run_mode=True):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if config.checkpoint == DISPATCH_CHECKPOINT:
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
-            raise ValueError("需要完整 Dispatch 192B ABI / 单份布局产物，请重新 build_all.sh 和 sync.sh")
+            raise ValueError("需要完整 Dispatch 200B ABI / 动态收发核布局产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and config.chain is not None and
                                            profiling is not (config.chain["run_mode"] == "breakdown")):
@@ -639,7 +644,7 @@ def remote_argv(config, host, action, *arguments):
                           TILEXR_DIRECT_HOSTS_JSON=json.dumps(config.hosts(), separators=(",", ":")))
             if config.chain:
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format",
-                            "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis"):
+                            "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis", "send_core_num"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
@@ -849,8 +854,8 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
             if type(marker.get("pid")) is not int or marker["pid"] <= 0:
                 raise Failure("LOG_PARSE_FAILED", "rank 缺少有效的进程 PID", rank=mapping["rank"])
             if chain_config is not None and any(marker.get(key) != chain_config[key]
-                    for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed")):
-                raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype 与本次配置不一致", rank=mapping["rank"])
+                    for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed", "send_core_num", "recv_core_num")):
+                raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype/收发核数与本次配置不一致", rank=mapping["rank"])
         if chain:
             linked = record["chain"]
             loops = 1
@@ -944,7 +949,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
                 env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
-                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format", "loops", "warmup", "run_mode"):
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format", "loops", "warmup", "run_mode", "send_core_num"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
                 inputs = log.parent / "inputs"
                 inputs.mkdir(parents=True, exist_ok=True)

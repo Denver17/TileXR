@@ -101,6 +101,7 @@ struct Config {
     uint32_t loops = 1;
     uint32_t warmup = 0;
     int64_t bs, h, topK, experts;
+    int64_t sendCoreNum = 32;
     TileXR::TileXRDataType dtype;
     int64_t quantMode = 0;
     std::string fp8Format = "e4m3";
@@ -161,6 +162,10 @@ Config Parse(int argc, char **argv)
     }
     Require(c.rankSize >= 16 && c.rankSize <= 128 && c.rankSize % 8 == 0 && c.localRank < 8 &&
         c.rank < c.rankSize && c.rank == c.hostIndex * 8 + c.localRank, "invalid 8P/server mapping");
+    if (const char *sendCores = std::getenv("TILEXR_VALIDATION_SEND_CORE_NUM"))
+        c.sendCoreNum = Number(sendCores, "TILEXR_VALIDATION_SEND_CORE_NUM");
+    Require(c.sendCoreNum == 16 || c.sendCoreNum == 24 || c.sendCoreNum == 32 ||
+        c.sendCoreNum == 40 || c.sendCoreNum == 48, "send_core_num must be 16/24/32/40/48");
     c.bs = Number(std::getenv("TILEXR_VALIDATION_BS"), "TILEXR_VALIDATION_BS");
     c.h = Number(std::getenv("TILEXR_VALIDATION_H"), "TILEXR_VALIDATION_H");
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
@@ -220,6 +225,7 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
         << ",\"backend\":\"memory\",\"bs\":" << c.bs << ",\"h\":" << c.h << ",\"topk\":" << c.topK
+        << ",\"send_core_num\":" << c.sendCoreNum << ",\"recv_core_num\":" << (64 - c.sendCoreNum)
         << ",\"route_mode\":\"balance_shift\",\"seed\":2026,\"quant_mode\":" << c.quantMode
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
@@ -382,7 +388,7 @@ int Run(const Config &c)
 #endif
     }
     TileXREp::EpMemoryServerDedupLayout layout {};
-    Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(c.rankSize, c.bs, c.h, c.topK, c.experts, &layout, c.quantMode == 4),
+    Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(c.rankSize, c.bs, c.h, c.topK, c.experts, &layout, c.quantMode == 4, c.sendCoreNum),
         "layout");
     bool initialized = false, deviceSet = false, safeCleanup = true, executionSucceeded = false;
     aclrtStream stream = nullptr;
@@ -488,7 +494,7 @@ int Run(const Config &c)
                 c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
                 buffers[10], nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
                 nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
-                static_cast<uint32_t *>(buffers[7]), static_cast<float *>(buffers[9]), c.dtype, outputDtype, stream),
+                static_cast<uint32_t *>(buffers[7]), static_cast<float *>(buffers[9]), c.dtype, outputDtype, stream, c.sendCoreNum),
                 "TileXRMoeEpDispatchMemoryServerDedup");
             if (warming) ++warmupSubmitted;
             else ++submitted;

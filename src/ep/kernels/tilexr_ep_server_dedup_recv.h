@@ -16,11 +16,12 @@ class ServerDedupReceiver {
 public:
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args,
         GM_ADDR expandX, GM_ADDR dynamicScales, GM_ADDR assistEx, GM_ADDR group,
-        uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0)
+        uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0, uint32_t sendCoreNum = kEpServerDedupSendCoreNum)
     {
         args_ = args; pipe_ = pipe; bs_ = bs; k_ = k; experts_ = experts;
         localExperts_ = experts / uint32_t(args_->rankSize);
-        receiver_ = GetBlockIdx() - kEpServerDedupSendCoreNum;
+        receiver_ = GetBlockIdx() - sendCoreNum;
+        recvCoreNum_ = kEpServerDedupCoreNum - sendCoreNum;
         hiddenBytes_ = Quantized ? h : h * uint32_t(sizeof(XType));
         data_ = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
         windowOffset_ = TileXREpServerDedupWindowOffset(magic);
@@ -42,7 +43,7 @@ public:
         const uint32_t prefixBytes = uint32_t(TileXREpDedupAlign(uint64_t(experts_) * 4U, 32U));
         pipe_->InitBuffer(prefixBuf_, prefixBytes);
         GlobalTensor<int32_t> prefixGlobal;
-        const auto counts = TileXREpServerDedupCountLayout(experts_);
+        const auto counts = TileXREpServerDedupCountLayout(experts_, recvCoreNum_);
         prefixGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
             args_->peerMems[args_->rank] + windowOffset_ + counts.cntOffset + counts.prefixOffset +
             uint64_t(receiver_) * counts.prefixStride));
@@ -50,7 +51,7 @@ public:
         DataCopyPad(prefix, prefixGlobal, {1U, prefixBytes, 0U, 0U, 0U}, {false, 0U, 0U, 0});
         ServerDedupReceiveSync<HardEvent::MTE2_S>();
         profile.Mark(EpDedupDetailPoint::PrefixEnd);
-        tasks_.Build(prefix, uint32_t(args_->rank), uint32_t(args_->rankSize), experts_, bs_, receiver_, pipe_);
+        tasks_.Build(prefix, uint32_t(args_->rank), uint32_t(args_->rankSize), experts_, bs_, receiver_, pipe_, recvCoreNum_);
         profile.Mark(EpDedupDetailPoint::TasksEnd);
         if (tasks_.Count() == 0U) {
             profile.Mark(EpDedupDetailPoint::PrepareEnd);
@@ -226,6 +227,7 @@ private:
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
     uint64_t windowOffset_ = 0;
+    uint32_t recvCoreNum_ = kEpServerDedupRecvCoreNum;
     uint32_t bs_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U, receiver_ = 0U;
     uint32_t hiddenBytes_ = 0U, groupStride_ = 0U, laneStride_ = 0U, lanes_ = 0U;
     EpServerDedupDataLayout data_ {};

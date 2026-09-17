@@ -50,11 +50,11 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
     TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype, aclrtStream stream);
 
-// 当前增量实现 cnt/cumsum 和远端多 route group 的第一跳发送；A5 固定 64 AIV。
+// Server Dedup Dispatch 使用 A5 固定 64 AIV；sendCoreNum 可选 16/24/32/40/48，默认 32。
+// 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
 // sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
 // expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
-// DIRECT、接收/转发及最终 expert 输出尚未实现；成功表示异步提交成功。非 A5 返回 NOT_SUPPORT。
-// 当前仅支持新建 communicator 上的单次调用；数据 Flag 清理和跨调用复用尚未启用。
+// 成功表示异步提交成功。非 A5 返回 NOT_SUPPORT；同一 communicator 须在同一 stream 串行调用。
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
 // expertScalesOut 是独立 FP32[bs,topK] 输出；当前仅 sourceMask 中的第一跳首 k 有效，权重为 1.0。
 // groupOut 按 epWorldSize*bs*min(topK,moeExpertNum/epWorldSize) 行预留；仅第一跳 row 有效。
@@ -68,7 +68,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
     int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
     uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
-    aclrtStream stream);
+    aclrtStream stream, int64_t sendCoreNum = 32);
 
 }
 

@@ -318,7 +318,8 @@ foreach(test_target test_tilexr_ep_server_dedup_receive_packet test_tilexr_ep_se
     target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
     set_target_properties(${test_target} PROPERTIES CXX_STANDARD 17)
     add_test(NAME ${test_target} COMMAND ${test_target})
-    set_tests_properties(${test_target} PROPERTIES TIMEOUT 30)
+    # Each executable now exercises all five runtime core splits.
+    set_tests_properties(${test_target} PROPERTIES TIMEOUT 150)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 target_compile_definitions(test_tilexr_ep_server_dedup_receive_profile PRIVATE __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)

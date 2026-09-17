@@ -9,7 +9,17 @@ receiver 在等待跨核局部和前计算相对前缀，局部和源的等待�
 新 `send_cnt_issue`（`0x53000220/21`）只记录依赖发布和下发；旧 `send_cnt_send` 保持历史含等待语义，不能混用两者计算通信提速。
 本次没有运行 NPU；A5 收益和全核 cnt + FP8 正确性仍需设备验证。
 
-当前检查点为 `ep-sdedup-p2-dispatch`：48 核执行第一跳及循环 DIRECT，16 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+
+2026-09-17 运行时分核验证（基于 `fa099d1` 加本次修改）：blue CANN 9.1.0 / Bisheng
+Clang 15.0.5 的 A5 kernel 与 `tilexr-ep` Host 库 profiling OFF/ON 均编译链接通过。
+12 项 C++ 核心回归通过，包括五种分核的 Count、sender、receiver；接收测试扩展到五组后
+实测约 70 秒，原 30 秒测试时限已调整为 150 秒。92 项针对性 Python 测试和 97 项工作流测试通过。
+集成替身 23 项中 22 项通过；`test_repeated_calls_reject_wrong_bank_readback` 失败：
+注入错误窗口返回读错误 92，用例却期待退出 0 的结果校验失败记录。在未修改的 `fa099d1`
+上单独复现相同失败，因此登记为基线问题，不在本次分核变更中调整。验证快照、编译参数、
+日志及基线对照保存在 `build/runtime-core-split-verification/`。本次没有运行 NPU；
+五种分核的实机异步正确性、连续多轮及性能仍须 A5 验证，不能由 Host 回归或编译推断。
 
 2026-09-17 核末 SyncAll 移除：保留本核流水收尾和 Flag 清理，新 trace 不再产生 `finish_sync`，
 旧记录仍可解析。基于 `9f3a1ab` 加本次修改，blue 的 CANN 9.1.0 / Bisheng Clang 15.0.5
@@ -33,7 +43,7 @@ receiver 在等待跨核局部和前计算相对前缀，局部和源的等待�
 
 每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
 
-接收以完整前缀确定连续输出行，在 16 核按 floor 分区；tokenPos/pendingIdx 均只存 UB。每批独立探测最多 16 个 Token 的全部块、全部 8 个 Flag word，记录稳定索引，按原 pending 位置逆序消费就绪项并末项覆盖删除。整批未就绪时继续扫描；有删除则重查批起点的换入项。
+接收以完整前缀确定连续输出行，在本次接收核组按 floor 分区；tokenPos/pendingIdx 均只存 UB。每批独立探测最多 16 个 Token 的全部块、全部 8 个 Flag word，记录稳定索引，按原 pending 位置逆序消费就绪项并末项覆盖删除。整批未就绪时继续扫描；有删除则重查批起点的换入项。
 
 `recv_tasks` 表构造从每核的首个有效记录开始：对非递减的 inclusive prefix 二分查找首项 `prefix[record] > begin`，随后遍历到本核 `end`。从第 0 项重复扫描会让后部核即使拥有相同任务数也产生准备拖尾。必须使用严格大于跳过零计数平台，并取原始 `prefix[record-1]`（record=0 时为 0）计算 `q=row-previous`；不能以 begin 代替记录起点，否则跨核切分同一 source/expert 时会重用错误槽位。空分区直接返回；UB 双表、pending 稳定下标和核末清理所有权保持原契约。
 
@@ -93,7 +103,7 @@ bash run.sh -n 2 -e 96 -m 0 -l 1 0
 
 构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
 
-`build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 现为 192B（追加 profiling launch slot），R07 单份布局不变；kernel、Host 库、consumer 和 manifest 需一起重新编译和同步。
+`build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 现为 200B（追加 sendCoreNum），布局标识为 `r08-runtime-core-split`；kernel、Host 库、consumer 和 manifest 需一起重新编译和同步。
 
 单轮通过后，用同一产物检查完整 Dispatch 多轮复用：
 
@@ -113,7 +123,7 @@ bash run.sh -n 2 -e 96 -m 1 -l 100 10
 
 缩小统计窗口不等于放宽采集完整性：仍验证所有 warmup+loops 样本的数量、合法耗时和唯一开始时间；缺卡、缺轮或损坏的早期样本不能借“只看最后 50 轮”绕过验证。此统计转换由 Host Python 完成，替身回归只证明解析与汇总，不证明 NPU 正确性或性能。
 
-sendData 细打点仍表示相邻 MTE3 下发间隔；recv_data 包括接收准备、等待、输出、转发与本核 Flag 清理，finish 包括全核及跨 rank 收尾。
+sendData 细打点按当前事件定义解析；recv_data 包括接收准备、等待、输出、转发与本核 Flag 清理，finish 只包含本核收尾，不再包含全核或跨 Rank 屏障。
 
 ## 按需执行 Host/Python 回归
 
@@ -204,6 +214,7 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 | `-e E` | 总专家数，单卡专家数为 E/(8N) | 必填，1..1024，须被 8N 整除 |
 | `-m M` | 0=functional、1=performance、2=breakdown | 默认 0 |
 | `-l L W` | 测量 L 轮、预热 W 轮 | 默认 1 0；L>=1、W>=0，均为 uint32 |
+| `send_core_num=S` | 发送核数；接收核数为 64−S | 默认 32，仅支持 16/24/32/40/48；Host 校验 |
 | `case_analysis=0\|1` | NPU 阶段结束后分析各 rank 的跨 server token 去重率 | 默认 0，显式传 1 开启 |
 
 `bs=... h=... topk=... dtype=... quant_mode=... fp8_format=... block_dim=...`
@@ -213,6 +224,20 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 相对 hostfile 路径相对于仓库根目录。`-h`/`--help` 不加载 CANN。
 `run_case.sh` 仅兼容转交到 `run.sh`，`run_batch.sh` 统一调用同一入口。
 旧 `run_mode=... loops=... warmup=... moe_expert_num=...` 改用上述短参数。
+
+发送核数可直接在运行时切换，无需按每种核数重编译：
+
+```bash
+bash run.sh -n 2 -e 96 -m 0 send_core_num=16  # 16 发 / 48 收
+bash run.sh -n 2 -e 96 -m 1 -l 100 10 send_core_num=24
+bash run.sh -n 2 -e 96 -m 2 send_core_num=48  # 48 发 / 16 收
+```
+
+省略时固定恢复 32 发 / 32 收；参数对所有 Rank 一致传播，结果记录发送/接收核数。
+每次 run.sh 都新建 communicator；同一 communicator 生命周期内必须保持分核值固定。
+本次更新后须先重新 build/sync，旧 192B ABI 产物不兼容新 200B 参数。
+核内不检查枚举值；Host 同时校验 Count 和发送侧 UB 容量，因此合法核数仍可能与过大
+BS/H/TopK 组合不兼容。每种分核应先做 functional 多轮测试，再按同 shape 比较性能。
 
 例如 `bash run.sh -n 2 -e 96 -m 1 -l 100 10 case_analysis=1`。
 此开关适用于完整 Dispatch 的 functional、performance 和 breakdown 模式。

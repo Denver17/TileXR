@@ -15,7 +15,7 @@ bool IsAligned(const void *pointer, uint32_t alignment)
 int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams &params)
 {
     const auto &p = params.dispatch;
-    if (p.comm == nullptr || p.stream == nullptr || p.bs <= 0 || p.h <= 0 ||
+    if (!TileXREpIsServerDedupSendCoreNum(params.sendCoreNum) || p.comm == nullptr || p.stream == nullptr || p.bs <= 0 || p.h <= 0 ||
         p.topK <= 0 || p.topK > kEpServerDedupMaxTopK || p.moeExpertNum <= 0 ||
         !IsAligned(p.x, 2U) || !IsAligned(p.expertIds, 4U) || !IsAligned(p.expandXOut, 2U) ||
         !IsAligned(p.expertTokenNumsOut, 8U) || !IsAligned(p.epRecvCountsOut, 4U) ||
@@ -58,7 +58,7 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     }
     EpMemoryServerDedupLayout next {};
     const int ret = TileXREpBuildMemoryServerDedupLayout(commArgs.rankSize, p.bs, p.h,
-        p.topK, p.moeExpertNum, &next, p.quantMode == 4);
+        p.topK, p.moeExpertNum, &next, p.quantMode == 4, params.sendCoreNum);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
