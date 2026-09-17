@@ -104,7 +104,7 @@ public:
                 while (issued - consumed < depth && nextLoad != 0U) {
                     --nextLoad;
                     if ((ready & (uint32_t(1) << nextLoad)) == 0U) continue;
-                    IssueLoad(snapshot.GetValue(nextLoad), issued % lanes_, profile);
+                    IssueLoad(snapshot.GetValue(nextLoad), issued % lanes_);
                     ++issued;
                 }
                 ConsumeLoaded(snapshot.GetValue(index), consumed % lanes_, profile);
@@ -151,9 +151,8 @@ private:
         return ready;
     }
 
-    __aicore__ inline void IssueLoad(uint32_t j, uint32_t lane, ServerDedupProfile &profile)
+    __aicore__ inline void IssueLoad(uint32_t j, uint32_t lane)
     {
-        profile.Begin(EpDedupDetailMetric::LoadIssue);
         WaitFlag<HardEvent::MTE3_MTE2>(lane);
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
         GlobalTensor<uint8_t> source;
@@ -162,15 +161,13 @@ private:
         SetFlag<HardEvent::MTE2_MTE3>(lane);
         // Publish immediately after this load, before queuing later loads.
         SetFlag<HardEvent::MTE2_S>(lane);
-        profile.End(EpDedupDetailMetric::LoadIssue);
     }
 
     __aicore__ inline void ConsumeLoaded(uint32_t j, uint32_t lane, ServerDedupProfile &profile)
     {
-        profile.Begin(EpDedupDetailMetric::LoadWait);
+        // One interval per consumed token; prefetch issue remains uninstrumented.
+        profile.Begin(EpDedupDetailMetric::RecvToken);
         WaitFlag<HardEvent::MTE2_S>(lane);
-        profile.End(EpDedupDetailMetric::LoadWait);
-        profile.Begin(EpDedupDetailMetric::Metadata);
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
         auto meta = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
         auto group = wire[uint32_t(data_.tokenStride) + 32U].template ReinterpretCast<uint32_t>();
@@ -188,8 +185,6 @@ private:
             PrepareServerDedupForward(tail, rank, t);
         }
         ServerDedupReceiveSync<HardEvent::S_MTE3>();
-        profile.End(EpDedupDetailMetric::Metadata);
-        profile.Begin(EpDedupDetailMetric::OutputIssue);
         WaitFlag<HardEvent::MTE2_MTE3>(lane);
         WriteServerDedupPayloadRange(expandX_[uint64_t(row) * hiddenBytes_], wire, 0U, hiddenBytes_);
         if constexpr (Quantized)
@@ -198,9 +193,7 @@ private:
         DataCopyPad(assistEx_[uint64_t(row) * 8U], meta, {1U, 32U, 0U, 0U, 0U});
         if (forwardCount > 0)
             DataCopyPad(group_[uint64_t(t) * groupStride_ / 4U], group, {1U, groupStride_, 0U, 0U, 0U});
-        profile.End(EpDedupDetailMetric::OutputIssue);
         if (forwardCount > 0) {
-            profile.Begin(EpDedupDetailMetric::RelayIssue);
             const uint32_t sourceRank = tail.Header().GetValue(0U);
             const uint32_t ranks = uint32_t(args_->rankSize);
             for (uint32_t i = 0; i < uint32_t(forwardCount); ++i) {
@@ -213,9 +206,9 @@ private:
                     ranks, localExperts_, bs_));
                 DataCopy(output, wire, uint32_t(data_.tokenStride));
             }
-            profile.End(EpDedupDetailMetric::RelayIssue);
         }
         SetFlag<HardEvent::MTE3_MTE2>(lane);
+        profile.End(EpDedupDetailMetric::RecvToken);
     }
 
     __aicore__ inline void ClearFlags()

@@ -232,6 +232,27 @@
       "parent": "kernel_total",
       "begin": 1392509464,
       "end": 1392509465
+    },
+    {
+      "name": "send_first_hop",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509466,
+      "end": 1392509467
+    },
+    {
+      "name": "send_direct",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509468,
+      "end": 1392509469
+    },
+    {
+      "name": "recv_token",
+      "category": "copy",
+      "parent": "kernel_total",
+      "begin": 1392509470,
+      "end": 1392509471
     }
   ]
 }

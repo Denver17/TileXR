@@ -161,7 +161,7 @@ capture completeness on A5. CPU tests verify stores, bounds, accounting and the
 absence of explicit cache operations; they do not prove kernel-exit visibility
 or a performance improvement. Device confirmation is still pending.
 
-Server Dedup experiment B disables only the sender's `PacketIssue()` call;
+Server Dedup experiment B (`a81768f`) disabled only the sender's `PacketIssue()` call;
 send-stage boundaries, all receiver markers and the common writer remain intact.
 The triggering A5 capture had rank 19 send stages around 22--28us, while rank 45
 send stages took 247--344us. Rank 45's first-packet and inter-packet intervals were
@@ -170,11 +170,30 @@ localizes the next A/B to the send loop; it does not prove a GM-store root cause
 Each marker reads the clock before storing its record, so its store overhead can
 appear in the following interval. Compare `send_data`, `recv_data` and
 `kernel_total` with the same build settings, inputs, ranks and iteration counts.
-Without packet markers, `packet_issue_interval` and `send_drain_and_outputs` are
-absent; the exporter's fallback `send_prepare` spans the whole send stage and
-must not be interpreted as first-packet preparation. CPU sender tests check
-packet contents, ordering and retained boundary records; CANN OFF/ON builds
-check compilation. Only the production A5 rerun can establish the timing effect.
+The production rerun reported no meaningful relief; sender packet markers alone
+did not explain the large gap. In that capture, packet intervals and the send
+tail were absent, and fallback `send_prepare` covered the whole send stage.
+
+The next capture uses two send-loop intervals, `send_first_hop` and `send_direct`,
+with no per-packet markers. The first includes route classification and staging
+the DIRECT task list as well as issuing first-hop packets. The second covers the
+per-server DIRECT scan and issue loop. Neither adds a DMA drain between phases.
+`send_prepare` now ends at the first-hop loop's begin marker, while
+`send_drain_and_outputs` begins at the DIRECT loop's end marker. Idle send cores
+emit neither loop interval; a nonempty token range can still spend time scanning
+a phase that issues zero packets.
+
+Receiver detail is reduced from eight markers per ordinary token (ten with
+relay) to two: `recv_token` brackets `ConsumeLoaded`, from before its MTE2 wait
+through metadata, local output, relay issue and the lane-release instruction.
+Prefetch issue has no markers, and remains outside the token interval because
+multiple loads are queued ahead of consumption. The interval is a Scalar
+observation, not end-to-end DMA latency or proof that MTE3 has finished. Probe
+intervals and stage/drain/clear boundaries remain; old event IDs and mappings are
+retained for reading previous captures. CPU tests check packet contents, lane
+ownership, marker pairing and trace export; CANN OFF/ON builds check compilation.
+Only the production A5 rerun can establish the timing effect. This experiment
+also introduces the two sender phase pairs, so it is not a pure receiver-only A/B.
 
 ### Retain Only The Latest Launch
 

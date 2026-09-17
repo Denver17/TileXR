@@ -12,7 +12,7 @@ using namespace TileXREp;
 using ServerDedupTest::Check;
 
 void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::ProfileCapture &capture,
-    uint32_t rows, uint32_t firstHops)
+    uint32_t rows)
 {
     const auto syncBefore = AscendC::TestSyncOperations();
     profile.Publish();
@@ -22,14 +22,14 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
     Check(!events.empty() && events.front() == kEpServerDedupDetailEventBase, "receive begin is retained");
     const auto probes = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase);
     Check(rows == 0U ? probes == 0 : probes > 0, "probe samples reflect actual work");
-    const uint32_t expected[] = {uint32_t(probes), 0U, rows, 0U, rows, firstHops, 0U,
-        rows, rows, 0U, 0U};
     Check(probes <= rows, "empty retries never add probe intervals");
-    for (uint32_t op = 0; op < sizeof(expected) / sizeof(expected[0]); ++op) {
+    for (uint32_t op = 0; op <= uint32_t(EpDedupDetailMetric::RecvToken); ++op) {
+        const uint32_t expected = op == uint32_t(EpDedupDetailMetric::Probe) ? uint32_t(probes) :
+            (op == uint32_t(EpDedupDetailMetric::RecvToken) ? rows : 0U);
         const auto begin = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op);
         const auto end = std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase + 2U * op + 1U);
         Check(begin == end, "each observed receive operation retains both timestamps");
-        Check(begin == expected[op], "every repeated operation is recorded without collapsing samples");
+        Check(begin == expected, "each token has one interval and retired receive substages emit nothing");
     }
     std::vector<uint32_t> active;
     for (const auto event : events) {
@@ -47,7 +47,7 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
     if (rows == 0U) Check(events.size() == 4U, "empty receive contains only real prefix/task/prepare observations");
     else Check(events.back() == kEpServerDedupDetailEventBase + 7U, "clear completion remains the final receive point");
 #else
-    (void)rows; (void)firstHops;
+    (void)rows;
     Check(events.empty(), "OFF builds emit no profiling data");
 #endif
 }
@@ -238,7 +238,7 @@ void CheckReceiver(int32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     AscendC::GmReadObserver() = {};
     AscendC::GmWriteObserver() = {};
     Check(flagReads == emptyProbes + 1U, "all empty scans run before consuming the packet");
-    CheckReceiveProfile(profile, capture, 1U, role > 0 ? 1U : 0U);
+    CheckReceiveProfile(profile, capture, 1U);
 #if defined(TILEXR_ENABLE_PROFILING)
     const auto events = capture.Events(AscendC::testCore);
     Check(std::count(events.begin(), events.end(), kEpServerDedupOperationEventBase) == 1,
@@ -429,7 +429,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};
     AscendC::SumObserver() = {};
     Check(reducedRows == flagReads && sumCalls >= 3U, "full and tail probes each use one batched Sum");
-    CheckReceiveProfile(profile, capture, owned, (owned + 2U) / 3U);
+    CheckReceiveProfile(profile, capture, owned);
     Check(processed.size() == owned && processed.front() == owned - 1U && processed[owned - 17U] == 16U,
         "scan advances past an unready full batch and consumes a ready tail in reverse order");
     Check(loaded == processed && peakLoads == depth, "every prefetched packet is consumed with the requested depth");
@@ -480,7 +480,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     ServerDedupProfile emptyProfile;
     emptyProfile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
     receiver.Process(emptyProfile);
-    CheckReceiveProfile(emptyProfile, emptyCapture, 0U, 0U);
+    CheckReceiveProfile(emptyProfile, emptyCapture, 0U);
     Check(hidden == prior && pipe.bytes == experts * 4U, "empty receive set has no data/probe/lane allocation or output writes");
 }
 

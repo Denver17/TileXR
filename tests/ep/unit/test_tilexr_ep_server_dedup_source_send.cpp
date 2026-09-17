@@ -135,9 +135,17 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             Check(AscendC::TestSyncOperations() == syncBefore, "standard publication adds no synchronization");
             const auto events = capture.Events(core);
 #if defined(TILEXR_ENABLE_PROFILING)
-            Check(events == std::vector<uint32_t>({TileXREp::kEpServerDedupMainEventBase + 2U,
-                TileXREp::kEpServerDedupMainEventBase + 3U}),
-                "experiment B retains send boundaries without per-packet records");
+            std::vector<uint32_t> expected {TileXREp::kEpServerDedupMainEventBase + 2U};
+            if (count != 0U) {
+                for (const auto operation : {TileXREp::EpDedupDetailMetric::SendFirstHop,
+                        TileXREp::EpDedupDetailMetric::SendDirect}) {
+                    const uint32_t begin = TileXREp::kEpServerDedupOperationEventBase + 2U * uint32_t(operation);
+                    expected.push_back(begin);
+                    expected.push_back(begin + 1U);
+                }
+            }
+            expected.push_back(TileXREp::kEpServerDedupMainEventBase + 3U);
+            Check(events == expected, "send stages retain two loop intervals without per-packet records");
 #else
             Check(events.empty(), "OFF builds emit no issue records");
 #endif

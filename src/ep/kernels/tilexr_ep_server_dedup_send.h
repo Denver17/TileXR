@@ -96,6 +96,7 @@ public:
         }
         PipeBarrier<PIPE_V>();
 
+        profile.Begin(EpDedupDetailMetric::SendFirstHop);
         for (uint32_t token = 0; token < count_; ++token) {
             uint32_t directMask = 0, firstHopCount = 0;
             Classify(token, directMask, firstHopCount);
@@ -121,6 +122,8 @@ public:
                 ++directCount_;
             }
         }
+        profile.End(EpDedupDetailMetric::SendFirstHop);
+        profile.Begin(EpDedupDetailMetric::SendDirect);
         // Stable per-server scans retain the original q and token/k order.
         // Each core advances independently; the packet/lane sequence continues
         // across first hops and server boundaries without an added drain.
@@ -141,6 +144,7 @@ public:
             }
             if (++server == serverNum) server = 0U;
         }
+        profile.End(EpDedupDetailMetric::SendDirect);
         for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
         Sync<HardEvent::S_MTE3>();
         DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
@@ -274,8 +278,7 @@ private:
         destinationGm.SetGlobalBuffer(args_->peerMems[destination] + TileXREpServerDedupDispatchOffset(
             data_, args_->rank, destination, expert % localExperts_, q, args_->rankSize, localExperts_, bs_));
         DataCopy(destinationGm, out, uint32_t(data_.tokenStride));
-        // Experiment B: omit per-packet profiling stores to isolate send-loop overhead.
-        // Stage boundaries and receiver profiling remain enabled.
+        // Profile the first-hop/direct loops, without per-packet GM stores.
         SetFlag<HardEvent::MTE3_V>(lane);
         ++packets_;
     }

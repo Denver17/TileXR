@@ -172,6 +172,31 @@ class TraceTests(unittest.TestCase):
             self.assertLess(child["args"]["raw_end"], parent["args"]["raw_end"])
         self.assertNotIn("acquire_load", result["stages_us"])
 
+    def test_send_loop_and_receive_token_intervals(self):
+        common = [(0, 0x53000001), (100, 0x53000002), (200, 0x53000003)]
+        send = common + [(250, 0x5300021A), (450, 0x5300021B),
+                         (460, 0x5300021C), (750, 0x5300021D), (800, 0x53000004)]
+        recv = common + [(250, 0x53000005), (300, 0x53000006), (350, 0x53000007),
+                         (400, 0x53000200), (500, 0x53000201),
+                         (520, 0x5300021E), (600, 0x5300021F),
+                         (620, 0x5300021E), (750, 0x5300021F), (800, 0x53000008)]
+        rows = {core: (send if core < 32 else recv) + [(1000, 0x53000009)] for core in range(64)}
+        path = write_capture(self.root / "coarse.records.v1", events_by_core=rows)
+        result = measurements.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "coarse")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["diagnostic_count"], 0)
+        trace = json.loads(Path(result["artifacts"]["perfetto_trace.json"]).read_text())
+        events = [e for e in trace["traceEvents"] if e["ph"] == "X"]
+        for core, expected in ((0, {"send_first_hop": [0.2], "send_direct": [0.29],
+                                   "send_prepare": [0.05], "send_drain_and_outputs": [0.05]}),
+                               (32, {"probe": [0.1], "recv_token": [0.08, 0.13]})):
+            lane = [e for e in events if e["args"]["core"] == core]
+            for name, durations in expected.items():
+                self.assertEqual([e["dur"] for e in lane if e["name"] == name], durations)
+        self.assertEqual(result["stages_us"]["recv_token"]["sample_count"], 64)
+        for name in ("packet_issue_interval", "load_issue", "load_wait", "metadata", "output_issue", "relay_issue"):
+            self.assertFalse(any(e["name"] == name for e in events))
+
     def test_count_filter_and_send_intervals_on_active_cores(self):
         for first_core in (0, 48):
             with self.subTest(first_core=first_core):

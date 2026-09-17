@@ -149,6 +149,13 @@ def breakdown_timeline(run):
             packets = [sample for sample in lane.samples if sample.name == "packet_issue"]
             markers["first_issue"] = packets[0] if packets else markers.get("send_data_end")
             markers["last_issue"] = packets[-1] if packets else None
+            first_hop = next((sample for sample in samples if sample.name == "send_first_hop"), None)
+            direct = next((sample for sample in samples if sample.name == "send_direct"), None)
+            if first_hop is not None:
+                markers["first_issue"] = first_hop
+            if direct is not None:
+                markers["last_issue"] = replace(direct, raw_start=direct.raw_end, start_us=direct.end_us,
+                    begin_event_id=direct.end_event_id, source_index=direct.end_source_index)
 
             def append_span(name, begin, end, category, parent, **attributes):
                 if begin is None or end is None:
@@ -173,7 +180,7 @@ def breakdown_timeline(run):
         launches.append(replace(launch, lanes=tuple(lanes)))
     return replace(run, launches=tuple(launches), attributes={**run.attributes,
         "timeline": "per_core_stage_intervals.v1",
-        "packet_timing": "adjacent issue observations; final issue to send_data_end is cleanup",
+        "packet_timing": "send loop boundaries, or legacy packet issues; final boundary to send_data_end is cleanup",
         "omitted_markers": "instant and zero-duration samples; raw records and diagnostics retained"})
 
 
