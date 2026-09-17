@@ -150,6 +150,27 @@ Dispatch 为 8 GiB，独立 memory-boundary 为 4 GiB；同步更新合法记录
 
 ## 整服务器调度与参数归属
 
+需要清除历史日志和 trace 时，在首节点的当前测试目录执行：
+
+```bash
+bash clean_run.sh --dry-run       # 可选：查看各节点目标和顶层条目数
+bash clean_run.sh                 # 清理 hostfile 全部节点，包括本机
+# bash clean_run.sh hostfile=cluster/hosts   # 可选：覆盖清单
+bash sync.sh                     # 清理同步回执后，重新同步再运行测试
+```
+
+清理范围固定为脚本所在部署目录的 `run/` 内容，包括隐藏文件、日志、trace 和
+`run/validation/sync.json`，保留 `run/` 本身，不使用 `TILEXR_VALIDATION_RESULT_ROOT` 扩大范围。
+沿用 `validation.local.sh` 的 hostfile、SSH 用户和本机 Python 配置；各远端路径与首节点相同，
+通过 SSH 标准输入发送清理逻辑，远端只需 Python 3，不要求先同步新脚本或加载 CANN。
+清理按节点报告结果，任一节点失败则返回非零；已经成功清理的节点不会回滚。
+
+使用前停止测试。脚本拒绝非受管理目录（本机 Git checkout 也可使用）、符号链接形式的
+部署路径或 `run/`，并检查 `run/` 内的 `.operation.lock` / `node.lock`；发现锁时保留该节点全部内容。
+目录内的符号链接只解除链接，不删除链接目标。维护时不能用 `run/*` 遗漏隐藏条目，
+也不能解析链接后对外部目录递归删除。任务锁检查不是与启动器共享的原子互斥，不支持边跑边清。
+这些边界由临时部署目录和模拟 SSH 的行为测试覆盖；真实集群清理不作为自动测试执行。
+
 同一 A5 产物同步到 8 台服务器后，可以连续运行 16P/32P/48P/64P 和不同专家数。
 `hostfile` 是分发清单；`sync.sh` 使用完整清单，`run.sh -n N` 只选择前 N 台。
 每台固定使用 0..7 卡，按清单顺序分配连续 rank。未选中节点不执行本次用例。
