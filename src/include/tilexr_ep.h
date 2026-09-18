@@ -53,8 +53,9 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 // Server Dedup Dispatch 使用 A5 固定 64 AIV；发送/接收核数由
 // TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 编译期配置（默认 32/32，支持 16/24/32/40/48）。
 // 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
-// TILEXR_EP_SERVER_DEDUP_ENABLE 未设置或为 1 时开启去重；为 0 时按 server 轮转逐 route DIRECT。
-// 每次调用读取该环境变量，其他值返回 PARA_CHECK_FAIL；接收协议和输出容量不随模式改变。
+// TILEXR_EP_SERVER_DEDUP_ENABLE 在 src/ep/common/ep_memory_server_dedup_count_layout.h 中配置，默认开启；
+// 修改后须重新编译 Host 与 kernel。关闭时按 server 轮转逐 route DIRECT。
+// 接收协议和输出容量不随模式改变。
 // sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
 // expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
 // 成功表示异步提交成功。非 A5 返回 NOT_SUPPORT；同一 communicator 须在同一 stream 串行调用。

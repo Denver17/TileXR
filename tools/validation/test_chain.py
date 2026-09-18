@@ -23,7 +23,7 @@ class ChainTests(TemporaryRoot):
         config = self.config()
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
-                                           run_mode="functional", loops=1, warmup=0, server_dedup_enabled=True,
+                                           run_mode="functional", loops=1, warmup=0,
                                            route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0))
         original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
@@ -32,17 +32,11 @@ class ChainTests(TemporaryRoot):
             with self.subTest(key=key), mock.patch.dict(os.environ, {key: value}):
                 self.assertNotEqual(self.config().chain, original)
 
-    def test_server_dedup_default_and_explicit_modes_propagate_remotely(self):
-        for value in (None, "1", "0"):
-            with self.subTest(value=value), mock.patch.dict(os.environ):
-                if value is None:
-                    os.environ.pop("TILEXR_EP_SERVER_DEDUP_ENABLE", None)
-                else:
-                    os.environ["TILEXR_EP_SERVER_DEDUP_ENABLE"] = value
-                config = self.config()
-                self.assertIs(config.chain["server_dedup_enabled"], value != "0")
-                argv = workflow.remote_argv(config, "192.0.2.2", "node", "run", "build")
-                self.assertIn(f"TILEXR_EP_SERVER_DEDUP_ENABLE={0 if value == '0' else 1}", argv[-1])
+    def test_server_dedup_is_compile_time_and_not_exported(self):
+        config = self.config()
+        self.assertNotIn("server_dedup_enabled", config.chain)
+        argv = workflow.remote_argv(config, "192.0.2.2", "node", "run", "build")
+        self.assertNotIn("TILEXR_EP_SERVER_DEDUP_ENABLE", argv[-1])
 
     def test_rejects_host_mode_bad_endpoints_and_unsupported_shapes(self):
         for key, values in {
@@ -57,7 +51,6 @@ class ChainTests(TemporaryRoot):
             "TILEXR_VALIDATION_FP8_FORMAT": ["bad"],
             "TILEXR_VALIDATION_BLOCK_DIM": ["4", "0", "-1", "1.5", str(1 << 32)],
             "TILEXR_VALIDATION_CASE_ANALYSIS": ["", "2", "01", "true"],
-            "TILEXR_EP_SERVER_DEDUP_ENABLE": ["", "2", "-1", "true", "01", " 0"],
         }.items():
             for value in values:
                 with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {key: value}), \
@@ -80,7 +73,7 @@ class ChainTests(TemporaryRoot):
         mappings = workflow.rank_mapping(self.config().hosts())[:8]
         records = []
         for mapping in mappings:
-            identity = dict(workflow.rank_record(mapping, "run", manifest), pid=mapping["rank"] + 100, **config.chain)
+            identity = dict(workflow.rank_record(mapping, "run", manifest), pid=mapping["rank"] + 100, server_dedup_enabled=True, **config.chain)
             records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
                                 submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                                 first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
@@ -131,8 +124,8 @@ class ChainTests(TemporaryRoot):
         config = self.config()
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
         mapping = workflow.rank_mapping(config.hosts())[0]
-        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
-                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope", "server_dedup_enabled")})
+        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100, server_dedup_enabled=True,
+                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope")})
         record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
                       submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
                       first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
@@ -163,7 +156,7 @@ class ChainTests(TemporaryRoot):
         config = self.config()
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
         mapping = workflow.rank_mapping(config.hosts())[0]
-        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100,
+        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100, server_dedup_enabled=True,
                         **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope")})
         record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
                       peer_mem_bytes=4 * 1024 ** 3, boundary_offset=4 * 1024 ** 3 - 32, probe_bytes=32,

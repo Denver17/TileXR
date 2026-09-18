@@ -29,7 +29,6 @@ class RuntimeConfigurationTests(unittest.TestCase):
         (self.root / "scripts/common_env.sh").write_text("# environment fixture\n")
         self.local = self.root / "validation.local.sh"
         self.local.write_text('TILEXR_COMM_ID=192.0.2.1:10177\n'
-                              'TILEXR_EP_SERVER_DEDUP_ENABLE=obsolete\n'
                               'TILEXR_VALIDATION_RUN_MODE=obsolete\n'
                               'TILEXR_VALIDATION_LOOPS=999\n'
                               'TILEXR_VALIDATION_CHECKPOINT=obsolete\n')
@@ -50,14 +49,13 @@ class RuntimeConfigurationTests(unittest.TestCase):
     def test_environment_preserves_script_values_and_ignores_legacy_case_fields(self):
         command = 'source ./set_env.sh >/dev/null; "$TILEXR_VALIDATION_PYTHON" -c '
         command += "'import os,json; print(json.dumps(dict(os.environ)))'"
-        for overrides in ({}, {"TILEXR_VALIDATION_LOOPS": "7", "TILEXR_VALIDATION_CHECKPOINT": "selected"},
-                          {"TILEXR_EP_SERVER_DEDUP_ENABLE": "0"}, {"TILEXR_EP_SERVER_DEDUP_ENABLE": "1"}):
+        for overrides in ({}, {"TILEXR_VALIDATION_LOOPS": "7", "TILEXR_VALIDATION_CHECKPOINT": "selected"}):
             result = subprocess.run([str(self.bash), "-c", command], cwd=self.root,
                                     env=dict(self.env, **overrides), capture_output=True, text=True, check=True)
             values = json.loads(result.stdout)
             self.assertEqual(values["TILEXR_COMM_ID"], "192.0.2.1:10177")
             self.assertNotIn("TILEXR_VALIDATION_RUN_MODE", values)
-            for key in ("TILEXR_VALIDATION_LOOPS", "TILEXR_VALIDATION_CHECKPOINT", "TILEXR_EP_SERVER_DEDUP_ENABLE"):
+            for key in ("TILEXR_VALIDATION_LOOPS", "TILEXR_VALIDATION_CHECKPOINT"):
                 self.assertEqual(values.get(key), overrides.get(key))
 
     def test_single_case_alias_changes_parameters_without_writing_environment_file(self):
@@ -69,7 +67,7 @@ from run_summary import write_result
 config = dict(run_mode=os.environ.get('TILEXR_VALIDATION_RUN_MODE', 'functional'),
               loops=int(os.environ.get('TILEXR_VALIDATION_LOOPS', '1')), warmup=0,
               bs=int(os.environ.get('TILEXR_VALIDATION_BS', '256')), h=7168, topk=6,
-              moe_expert_num=384, dtype='bf16', server_dedup_enabled=os.environ.get('TILEXR_EP_SERVER_DEDUP_ENABLE', '1') == '1')
+              moe_expert_num=384, dtype='bf16', server_dedup_enabled=True)
 root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])/'fixture'
 root.mkdir(parents=True)
 report = dict(status='PASS', rank_size=16, chain_configuration=config)
@@ -81,17 +79,17 @@ print('Summary: ' + str(root/'summary.json'))
 sys.exit(0 if report['status'] == 'PASS' else 15)
 ''')
         before = self.local.read_bytes()
-        for name, loops, bs, dedup in (("first", 3, 128, "0"), ("second", 7, 512, "1")):
+        for name, loops, bs in (("first", 3, 128), ("second", 7, 512)):
             output = self.root / "run" / name
             result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", "-m", "0",
                                      "-l", str(loops), "0", f"bs={bs}"], cwd=self.root,
-                                    env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output), TILEXR_EP_SERVER_DEDUP_ENABLE=dedup),
+                                    env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
                                     text=True, capture_output=True)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn(f"loops={loops}", result.stdout)
             self.assertIn(f"BS={bs}", result.stdout)
             summary = json.loads((output / "fixture/summary.json").read_text())
-            self.assertIs(summary["chain_configuration"]["server_dedup_enabled"], dedup == "1")
+            self.assertTrue(summary["chain_configuration"]["server_dedup_enabled"])
             self.assertEqual(self.local.read_bytes(), before)
             self.assertFalse(list(output.glob("*.bak")))
 

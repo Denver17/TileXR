@@ -18,7 +18,6 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     const uint32_t moeExpertNum = tiling->moeExpertNum;
     const uint32_t expertTokenNumsType = tiling->expertTokenNumsType;
     const uint32_t profilingLaunchSlot = tiling->profilingLaunchSlot;
-    const bool enableServerDedup = tiling->enableServerDedup != 0;
     const uint8_t quantMode = tiling->quantMode;
     const uint8_t dtype = tiling->dtype;
     const uint8_t expandXOutDtype = tiling->expandXOutDtype;
@@ -28,7 +27,7 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     kernel.Init(commArgs, x, expertIds, expertScales, expandXOut, dynamicScalesOut, \
         expertTokenNumsOut, sendCountsOut, assistExOut, sourceMaskOut, groupOut, expertScalesOut, \
         bs, h, \
-        topK, moeExpertNum, expertTokenNumsType, magic, profilingLaunchSlot, &pipe, enableServerDedup); \
+        topK, moeExpertNum, expertTokenNumsType, magic, profilingLaunchSlot, &pipe); \
     kernel.Process()
     if (dtype == TileXR::TILEXR_DATA_TYPE_FP16) {
         if (quantMode == 0) { TILEXR_RUN_DEDUP(half, false, false); }

@@ -27,6 +27,7 @@
 
 #include "acl/acl.h"
 #include "tilexr_ep.h"
+#include "ep_memory_server_dedup_count_layout.h"
 #include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
 #include "tilexr_profiling.h"
@@ -101,7 +102,6 @@ struct Config {
     uint32_t loops = 1;
     uint32_t warmup = 0;
     int64_t bs, h, topK, experts;
-    bool enableServerDedup = true;
     TileXR::TileXRDataType dtype;
     int64_t quantMode = 0;
     std::string fp8Format = "e4m3";
@@ -129,11 +129,6 @@ Config Parse(int argc, char **argv)
 {
     Require(argc == 10, "expected run build commit host host_index local_rank device rank rank_size");
     Config c {};
-    if (const char *dedup = std::getenv("TILEXR_EP_SERVER_DEDUP_ENABLE")) {
-        Require(std::strcmp(dedup, "0") == 0 || std::strcmp(dedup, "1") == 0,
-            "TILEXR_EP_SERVER_DEDUP_ENABLE must be 0 or 1");
-        c.enableServerDedup = std::strcmp(dedup, "1") == 0;
-    }
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
     c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-dispatch" : checkpoint;
@@ -226,7 +221,7 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
         << ",\"backend\":\"memory\",\"bs\":" << c.bs << ",\"h\":" << c.h << ",\"topk\":" << c.topK
-        << ",\"server_dedup_enabled\":" << (c.enableServerDedup ? "true" : "false")
+        << ",\"server_dedup_enabled\":" << (TileXREp::kEpServerDedupEnable ? "true" : "false")
         << ",\"route_mode\":\"balance_shift\",\"seed\":2026,\"quant_mode\":" << c.quantMode
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"

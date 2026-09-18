@@ -116,7 +116,6 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
 
 int main()
 {
-    unsetenv("TILEXR_EP_SERVER_DEDUP_ENABLE");
     g_commArgs.rankSize = 64;
     g_commArgs.peerMemBytes = kEpServerDedupPeerBytes;
     g_commArgs.rank = 9;
@@ -143,25 +142,6 @@ int main()
     Check(g_context.hostArgs == &g_commArgs && g_context.devArgs == g_devArgs &&
         g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 49152,
         "validated context and bounded output layout forwarded");
-
-    Check(valid.enableServerDedup && g_submitted.enableServerDedup, "unset switch enables dedup by default");
-    for (const char *mode : {"0", "1", "0", "1"}) {
-        setenv("TILEXR_EP_SERVER_DEDUP_ENABLE", mode, 1);
-        Check(Invoke(valid) == TILEXR_SUCCESS && g_submitted.enableServerDedup == (mode[0] == '1'),
-            "each call reads and forwards the current dedup switch");
-        Check(g_layout.capacityRows == 768 && g_layout.groupBytes == 49152,
-            "dedup switch preserves receive and group layout");
-    }
-    for (const char *mode : {"", "2", "-1", "true", "false", "01", " 0", "0 ", "1x"}) {
-        setenv("TILEXR_EP_SERVER_DEDUP_ENABLE", mode, 1);
-        const int hostCalls = g_hostCalls, devCalls = g_devCalls;
-        CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-        Check(g_hostCalls == hostCalls && g_devCalls == devCalls,
-            "invalid switch rejects before communicator access");
-    }
-    unsetenv("TILEXR_EP_SERVER_DEDUP_ENABLE");
-    Check(Invoke(valid) == TILEXR_SUCCESS && g_submitted.enableServerDedup,
-        "removing the switch restores enabled behavior");
 
 
     for (int test = 0; test < 43; ++test) {

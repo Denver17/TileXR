@@ -260,7 +260,7 @@ void TestKernelTilingCache()
     Check(gDeviceTilings.empty(), "destructor releases unpublished allocations too");
 }
 
-void TestServerDedupRuntimeLaunch()
+void TestServerDedupCompileTimeLaunch()
 {
     TileXR::CommArgs commArgs = MakeCommArgs();
     commArgs.rankSize = 64;
@@ -369,8 +369,8 @@ void TestServerDedupRuntimeLaunch()
     std::vector<uint8_t> expectedTiling = {
         0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, // bs=256, h=7168
         0, 0, 0, 0, // profiling slot
-        0x80, 0x01, 6, 32, // experts=384, topK=6, send=32
-        1, 4, 11, 16, 1, // count type, quant mode, BF16, E5M2, dedup
+        0x80, 0x01, 6, 0, // experts=384, topK=6, reserved
+        1, 4, 11, 16, 0, // count type, quant mode, BF16, E5M2, reserved
         0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
     for (uint32_t byte = 0; byte < 4U; ++byte)
         expectedTiling[8U + byte] = static_cast<uint8_t>(firstProfilingSlot >> (8U * byte));
@@ -385,29 +385,25 @@ void TestServerDedupRuntimeLaunch()
     gVectorCores = 64;
     const int rounds = static_cast<int>(TileXR::PING_PONG_SIZE) + 3;
     for (int round = 0; round < rounds; ++round) {
-        params.enableServerDedup = round % 2 == 0;
         Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
         auto roundArgs = expected;
         roundArgs[13] = gLaunches.back().args[13];
         roundArgs[14] = kNextMagic + round;
         auto roundTiling = expectedTiling;
-        roundTiling[20] = params.enableServerDedup ? 1U : 0U;
         Check(gLaunches.size() == static_cast<std::size_t>(round + 1) &&
             gLaunches.back().args == roundArgs && gLaunches.back().tiling == roundTiling &&
             gLaunches.back().stream == p.stream,
-            "each round forwards its mode and new magic and reuses all pointers and the stream");
+            "each round forwards new magic and reuses all pointers and the stream");
     }
     Check(gLaunches.front().tiling == expectedTiling &&
         std::memcmp(reinterpret_cast<const void *>(gLaunches.front().args[13]), expectedTiling.data(), 32U) == 0,
         "later asynchronous submissions cannot overwrite the first GM tiling");
-    Check(gLaunches[0].args[13] != gLaunches[1].args[13] &&
-        gLaunches[0].args[13] == gLaunches[2].args[13] &&
-        gLaunches[1].args[13] == gLaunches[3].args[13] && gTilingAllocations == 2 && gTilingCopies == 2,
-        "two alternating modes reuse two immutable GM entries with no per-round copy");
+    Check(std::all_of(gLaunches.begin(), gLaunches.end(), [&](const LaunchCapture &capture) {
+            return capture.args[13] == gLaunches[0].args[13];
+        }) && gTilingAllocations == 1 && gTilingCopies == 1,
+        "one compile-time mode reuses one immutable GM tiling entry with no per-round copy");
     Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
         "multiple rounds consume exactly one magic each without reloading the artifact");
-
-    params.enableServerDedup = true;
 
     // Maximum expert/topK encodings and an h that cannot fit in uint16_t.
     const auto originalParams = params;
@@ -782,7 +778,7 @@ int main()
     TestDispatchMemoryRuntimeLaunch();
     TestCombineMemoryRuntimeLaunch();
     TestKernelTilingCache();
-    TestServerDedupRuntimeLaunch();
+    TestServerDedupCompileTimeLaunch();
     ResetCapture();
     std::cout << "EP_SERVER_DEDUP_EMPTY_KERNEL_" << (gFailures == 0 ? "PASS" : "FAIL")
               << " test=launch" << std::endl;

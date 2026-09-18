@@ -383,9 +383,11 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
             or {row["rank"] for row in rank_records} != set(range(rank_size))):
         raise ValueError("测量 rank 缺失、重复或越界")
     ranks = sorted(rank_records, key=lambda row: row["rank"])
+    # The consumer reports the compiled mode; no runtime setting selects it.
+    # Retained reports without mode provenance remain readable.
+    if "server_dedup_enabled" not in chain_config and any("server_dedup_enabled" in row for row in ranks):
+        chain_config = dict(chain_config, server_dedup_enabled=ranks[0].get("server_dedup_enabled"))
     for record in ranks:
-        # Retained reports before the runtime switch have no mode provenance.
-        # Current run configurations always include it and require every rank.
         if "server_dedup_enabled" in chain_config and (
                 type(chain_config["server_dedup_enabled"]) is not bool or
                 record.get("server_dedup_enabled") is not chain_config["server_dedup_enabled"]):

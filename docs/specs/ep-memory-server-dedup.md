@@ -15,7 +15,7 @@ GM_ADDR tilingData、int64_t magic，共 120B。globalBs 继续在 Host 校验/�
 | 0、4、8 | bs、h、profilingLaunchSlot | uint32_t |
 | 12 | moeExpertNum | uint16_t，当前最多 1024 |
 | 14、15 | topK、reserved | uint8_t，发送/接收核数由编译期宏配置 |
-| 16～20 | expertTokenNumsType、quantMode、dtype、expandXOutDtype、enableServerDedup | uint8_t |
+| 16～20 | expertTokenNumsType、quantMode、dtype、expandXOutDtype、reserved | uint8_t |
 | 21～31 | reserved | 11B，Host 全部置零 |
 
 profilingLaunchSlot 的 UINT32_MAX 无效值保留。非量化的 RESERVED 输出 dtype 在
@@ -435,13 +435,12 @@ Source owner 需要确定三类逻辑信息：
 第一阶段向 R8/expert25 发送第一跳并携带 R9/expert28 的 entry；
 第二阶段向 R1/expert4 和 R16/expert50 分别发送 DIRECT；sourceMask 为 `0b1101`，保留 k0/k2/k3。
 
-### 运行时去重开关
+### 编译期去重开关
 
-`TILEXR_EP_SERVER_DEDUP_ENABLE` 控制原始 source 的发送分类：未设置或 `1` 为开启，
-`0` 为全部 DIRECT；其他值（包括空字符串）在访问 communicator、分配 magic 和提交前返回
-`TILEXR_ERROR_PARA_CHECK_FAIL`。Host 每次调用读取，不缓存进程首次设置；kernel 通过内部
-launch 参数接收布尔值，公开函数签名保持不变。Host 与 kernel 内部 launch ABI 新增末尾
-int64 字段，总长为 208B，须配套重建和安装。
+`TILEXR_EP_SERVER_DEDUP_ENABLE` 位于 `src/ep/common/ep_memory_server_dedup_count_layout.h`，
+默认值为 `1`。它控制原始 source 的发送分类：`1` 为开启，`0` 为全部 DIRECT。修改后必须
+同时重新编译并安装 Host、kernel 与验证 consumer；开关不再通过环境变量、公开 API、tiling 或内部 launch
+参数传入，内部 launch ABI 保持 120B。
 
 开启时沿用每个发送核先下发全部第一跳、再轮转 DIRECT 的流程。关闭时仍扫描当前 Token 的
 server mask：复用原有 64B `serverBuf_` 构造各 server 的原始 k 位图，将全部位并入
@@ -458,7 +457,7 @@ server mask：复用原有 64B `serverBuf_` 构造各 server 的原始 k 位图�
 
 维护注意：关闭去重必须将每条原始路由作为 DIRECT 完整发送；仅把去重第一跳包的转发数清零
 会遗漏其他 expert 的数据，使原始 cnt 对应的接收槽位永远等不到。保留 server mask 扫描与
-原始 q 编号，使用 DIRECT 的 mask/真实权重输出，并用每 route 恰写一次及跨轮切换验证。
+原始 q 编号，使用 DIRECT 的 mask/真实权重输出，并分别编译两种宏值验证每 route 恰写一次及多轮复用。
 `SendFirstHop` 打点仍包含分类与 DIRECT 任务准备，关闭时该区间可非零，但第一跳包数应为零。
 Host 替身验证与 A5 交叉编译不证明真实设备的异步正确性或性能。
 

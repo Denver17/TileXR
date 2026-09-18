@@ -14,6 +14,7 @@ namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
 using ServerDedupTest::Check;
 constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
+constexpr bool dedup = TileXREp::kEpServerDedupEnable;
 
 void CheckReceiveUnpack(uint32_t h, bool quantized)
 {
@@ -100,8 +101,7 @@ void CheckDeferredCountSender()
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
-    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {},
-    bool enableServerDedup = true, bool alternateMode = false)
+    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {})
 {
     TileXR::CommArgs args {};
     args.rankSize = ranks;
@@ -134,8 +134,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         for (uint32_t i = 0; i < ids.size(); ++i) ids[i] = routePattern[i % routePattern.size()];
     }
     const auto originalWeights = weights;
-    auto packets = ServerDedupReference::SourcePackets(ids, weights, source, ranks, experts, k,
-        alternateMode ? false : enableServerDedup);
+    const auto packets = ServerDedupReference::SourcePackets(ids, weights, source, ranks, experts, k);
     struct Write { uint32_t core, token, k, entries; const void *destination; uintptr_t lane; };
     std::vector<Write> writes;
     AscendC::GmWriteObserver() = [&](const void *destination, const void *payload, uint32_t bytes) {
@@ -167,8 +166,6 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     std::vector<float> output(bs * k + 2U, -777.0f);
     const auto observeWrite = AscendC::GmWriteObserver();
     for (uint32_t round = 0; round < rounds; ++round) {
-        const bool dedup = alternateMode && round % 3U != 0U ? !enableServerDedup : enableServerDedup;
-        packets = ServerDedupReference::SourcePackets(ids, weights, source, ranks, experts, k, dedup);
         const uint32_t bank = (round + 1U) % 2U;
         std::map<uint32_t, std::vector<uint8_t>> inactive;
         for (const auto &window : windows) inactive[window.first] = window.second[1U - bank];
@@ -185,7 +182,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::ServerDedupSender<uint16_t, false, false> sender;
             sender.Init(&args, reinterpret_cast<uint8_t *>(hidden.data()), reinterpret_cast<uint8_t *>(ids.data()),
                 reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
-                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U, dedup);
+                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
             profile.Mark(2);
@@ -329,15 +326,15 @@ int main()
                     expert(2), expert(5), expert(2, 1), expert(1), expert(0, 42), expert(0),
                     expert(7), expert(3), expert(0, 1), expert(4), expert(7, 1), expert(1, 1)});
             }
-            // ON/OFF/OFF/ON reuses each communication window in both modes.
-            // Masks/weights are reused across all four calls.
+            // Reuses each communication window across repeated calls.
+            // Masks/weights are reused across all calls.
             // Source server 7 wraps through zero; server 6 has no routes.
             Run(64, 384, 49, 64, 6, false, 56, 4, {
                 48, 336, 49, 0, 378, 1,
-                0, 144, 337, 192, 2, 48}, true, true);
-            Run(128, 128, 33, 32, 32, true, 120, 3, {}, false);
-            Run(16, 96, 1, 33, 1, false, 15, 3, {}, false);
-            Run(16, 96, 6, 7168, 6, true, 0, 3, {}, false);
+                0, 144, 337, 192, 2, 48});
+            Run(128, 128, 33, 32, 32, true, 120, 3);
+            Run(16, 96, 1, 33, 1, false, 15, 3);
+            Run(16, 96, 6, 7168, 6, true, 0, 3);
             Run(16, 96, 96, 64, 6, true);
             Run(16, 96, 96, 64, 6, true, 15); // Cyclic (source+destination)%R slot mapping wraps.
             Run(24, 72, 256, 224, 6, true); // per-core 5/6 rows; metadata crosses a 480B boundary.

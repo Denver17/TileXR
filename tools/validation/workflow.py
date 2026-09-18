@@ -332,9 +332,6 @@ def source_send_stride(config):
 
 
 def chain_configuration(checkpoint):
-    server_dedup = os.environ.get("TILEXR_EP_SERVER_DEDUP_ENABLE", "1")
-    if server_dedup not in ("0", "1"):
-        raise ValueError("TILEXR_EP_SERVER_DEDUP_ENABLE 必须为 0 或 1")
     case_analysis = os.environ.get("TILEXR_VALIDATION_CASE_ANALYSIS", "0")
     if case_analysis not in ("0", "1"):
         raise ValueError("case_analysis 必须为 0 或 1")
@@ -391,7 +388,7 @@ def chain_configuration(checkpoint):
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
-                 run_mode=run_mode, loops=loops, warmup=warmup, server_dedup_enabled=server_dedup == "1",
+                 run_mode=run_mode, loops=loops, warmup=warmup,
                  route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=int(case_analysis))
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
@@ -646,7 +643,6 @@ def remote_argv(config, host, action, *arguments):
                             "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
-                values["TILEXR_EP_SERVER_DEDUP_ENABLE"] = int(config.chain["server_dedup_enabled"])
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
         exports = "; ".join("export " + key + "=" + shlex.quote(str(value))
                              for key, value in values.items() if value is not None)
@@ -863,8 +859,11 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                 if chain_config is None:
                     raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
                 for marker in (record, linked):
-                    if marker.get("server_dedup_enabled") is not chain_config["server_dedup_enabled"]:
-                        raise Failure("RESULT_FAILED", "Dispatch server 去重开关与本次配置不一致", rank=mapping["rank"])
+                    enabled = marker.get("server_dedup_enabled")
+                    if (type(enabled) is not bool or enabled is not records[0].get("server_dedup_enabled") or
+                            ("server_dedup_enabled" in chain_config and
+                             enabled is not chain_config["server_dedup_enabled"])):
+                        raise Failure("RESULT_FAILED", "Dispatch 编译期去重状态缺失或 Rank 记录不一致", rank=mapping["rank"])
                 for key in ("quant_mode", "fp8_format", "kernel_scope"):
                     if record.get(key) != chain_config[key]:
                         raise Failure("RESULT_FAILED", "Dispatch 实际类型或范围不一致", rank=mapping["rank"], field=key)
@@ -882,7 +881,8 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                             "group_validated", "flags_cleared", "prefix_indices_validated")):
                         raise Failure("RESULT_FAILED", "Dispatch 数据、metadata、group 或轮末清理缺少完整校验", rank=mapping["rank"])
                     try:
-                        measurements.validate_dispatch_traffic(record, chain_config)
+                        measurements.validate_dispatch_traffic(record, dict(chain_config,
+                            server_dedup_enabled=record["server_dedup_enabled"]))
                         validate_relay_links(record, chain_config, mapping["rank_size"])
                     except (ValueError, TypeError, KeyError) as error:
                         raise Failure("RESULT_FAILED", f"Dispatch 流量记录无效：{error}", rank=mapping["rank"]) from error
@@ -958,7 +958,6 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 inputs.mkdir(parents=True, exist_ok=True)
                 env["TILEXR_VALIDATION_INPUT_DIR"] = str(inputs)
                 env["TILEXR_COMM_ID"] = config.chain["comm_id"]
-                env["TILEXR_EP_SERVER_DEDUP_ENABLE"] = str(int(config.chain["server_dedup_enabled"]))
                 env["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
                 block_dim = "TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"
                 env.pop(block_dim, None)
@@ -1564,6 +1563,7 @@ def run(config):
                 try:
                     aggregate = measurements.summarize_measurements(records, full_config, kernel_sha,
                         output_valid=report.get("relay_links_validated", False))
+                    report["chain_configuration"]["server_dedup_enabled"] = aggregate["configuration"]["server_dedup_enabled"]
                     if config.chain["run_mode"] != "functional":
                         report["measurements"] = aggregate
                 except (ValueError, TypeError, KeyError, OSError) as error:

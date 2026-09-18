@@ -52,7 +52,6 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     tiling.dtype = static_cast<uint8_t>(p.dtype);
     tiling.expandXOutDtype = static_cast<uint8_t>(
         p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype);
-    tiling.enableServerDedup = params.enableServerDedup ? 1U : 0U;
     GM_ADDR tilingData = nullptr;
     ret = TileXRCommGetKernelTiling(p.comm, &tiling, sizeof(tiling), &tilingData);
     if (ret != TileXR::TILEXR_SUCCESS) {

@@ -94,7 +94,7 @@ class MeasurementTests(unittest.TestCase):
 
     def test_disabled_dedup_summary_requires_all_direct_traffic_and_matching_mode(self):
         config = dict(self.config, run_mode="functional", bs=2, topk=3,
-                      kernel_scope="dispatch", server_dedup_enabled=False)
+                      kernel_scope="dispatch")
         ranks = [dict(rank=rank, server_dedup_enabled=False, first_hop_packets=0, first_hop_received=0,
                       first_hop_bytes=0, relay_packets=0, relay_received=0, relay_bytes=0,
                       direct_packets=6, direct_received=6, direct_bytes=192, token_stride=32,

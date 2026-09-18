@@ -8,10 +8,15 @@
 #ifndef TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD
 #define TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD 512U
 #endif
+// Edit and rebuild Host plus kernel to change this build-time behavior.
+#define TILEXR_EP_SERVER_DEDUP_ENABLE 1
+static_assert(TILEXR_EP_SERVER_DEDUP_ENABLE == 0 || TILEXR_EP_SERVER_DEDUP_ENABLE == 1,
+    "TILEXR_EP_SERVER_DEDUP_ENABLE must be 0 or 1");
 
 namespace TileXREp {
 
 constexpr uint32_t kEpServerDedupCoreNum = 64U;
+constexpr bool kEpServerDedupEnable = TILEXR_EP_SERVER_DEDUP_ENABLE != 0;
 #ifndef TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM
 #define TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 32U
 #endif

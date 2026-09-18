@@ -8,33 +8,23 @@ overflow 检测代码生成，不改变用户 kernel 参数 ABI；CANN 9.1/A5 �
 Server Dedup kernel 的 true/false 编译均为 120B 用户参数，关闭后主 kernel
 代码段缩短 120B。此项未进行 NPU 性能结论，实际收益仍需在目标卡上对比验证。
 
-2026-09-17 运行时发送去重开关：`TILEXR_EP_SERVER_DEDUP_ENABLE` 未设置/`1` 为开启，`0` 为关闭，
-其他值报参数错误。关闭仍扫描 server mask，每条原始路由均按本 server、后继 server 的轮转顺序
-DIRECT 发送，无第一跳和转发；接收、原始 cnt/q、通信布局与 Flag 清理不变。每个发送核独立
-保证顺序。sourceMask 全部有效 k 位置位，输出保留真实权重；groupOut 沿用容量但没有有效行。
-具体契约见 [运行时去重开关](specs/ep-memory-server-dedup.md#运行时去重开关)。
+2026-09-18 去重开关改为编译期配置：`src/ep/common/ep_memory_server_dedup_count_layout.h`
+中的 `TILEXR_EP_SERVER_DEDUP_ENABLE` 默认值为 1。修改为 0 后必须同时重新编译 Host
+和 kernel，关闭时仍扫描 server mask，并按 server 轮转逐 route DIRECT 发送；不会通过
+run.sh、环境变量或公开 API 传递该值。
 
-使用相同部署比较两个模式，在首节点分别运行（开关由 workflow 显式传到全部 rank）：
+编译状态由 consumer 的头文件宏生成 `server_dedup_enabled`，workflow 在 NPU 执行结束后
+核对各 Rank 的记录并汇总到报告；它是产物状态，不是运行参数。修改宏后须一并重建
+kernel、Host 和 consumer 并同步到全部节点，不能把 workflow 的期望值固定为开启。
 
-```bash
-TILEXR_EP_SERVER_DEDUP_ENABLE=1 bash run.sh -n 2 -e 96 -m 0 -l 3 2
-TILEXR_EP_SERVER_DEDUP_ENABLE=0 bash run.sh -n 2 -e 96 -m 0 -l 3 2
-```
-
-报告中的 `server_dedup_enabled` 必须与本次配置及所有 rank 一致。关闭时各 rank 的
-`direct_packets=BS*TopK`，first-hop/relay 发送与接收包数均为零，所有 expert route 的接收总数
-和结果仍须验证。不要通过清零已有去重包的转发数模拟关闭，否则会缺失原始路由。
-`SendFirstHop` 区间包含分类/任务准备，关闭时耗时非零不代表产生了第一跳包。
-
-验证基于 `388c33a` 加本次开关修改：blue 的 CANN 9.1 / Bisheng Clang 15.0.5 完成 A5
-kernel 与 `tilexr-ep` Host 库的 profiling OFF/ON 编译链接；12 项 Host 回归通过。
-sender 的 ON/OFF/OFF/ON 复测通过，覆盖两窗分别跨模式复用、K=32、空核及 server 环绕；
-五种分核下约 118 秒，因此 sender 用例超时调整为 180 秒。166 项 Python workflow/build/
-chain/measurement/runtime-configuration 测试通过，包含远端模式传递及旧 200B manifest 拒绝。
-集成 consumer 为 24/25 通过：`test_repeated_calls_reject_wrong_bank_readback` 在本次及未修改
-`388c33a` 均因读错误 92 返回退出码 1、而测试期待 0 失败；该测试断言已在后续修复，见下文维护说明。
-源码摘要、编译参数/版本、退出码及日志保存在 `build/server-dedup-switch-verification/`。
-本次未运行 NPU；真实 A5 异步执行、跨轮切换及性能仍须按上述命令验证。
+本次 review 修正了关闭宏后被 workflow 错判的问题，以及 launch 单测仍期待旧发送核数字节的
+断言。launch 单测使用二进制加载/注册替身，负向用例会故意输出 registration failed；
+不能据此认定缺少安装产物，必须检查后续 FAILED 断言及最终退出码。
+验证记录见 `build/server-dedup-compile-switch-review/`：完整 EP CTest 27/27、C++ consumer
+Host 集成 21 项、Python workflow/measurement/chain/runtime/summary/build 共 168 项通过。
+头文件宏为 0 的发送/Host/launch 回归 6/6，通过宏值 1 和 0 的 CANN 9.1/A5 kernel/Host
+编译；411 个生产与验证源码文件的摘要和 blue 默认宏快照一致。未运行 NPU，性能收益须在
+用户 A5 环境实测。
 
 2026-09-17 cnt 发送掩盖方案 A：见 [cnt 发送掩盖优化方案](specs/ep-memory-server-dedup-count-send-overlap.md)。
 cnt 发送源独立保留，筛选 scratch 与 sender/recv-count 共享，SendCnt 不再排空 MTE3 或 Reset。
@@ -143,7 +133,7 @@ bash run.sh -n 2 -e 96 -m 0 -l 1 0
 
 构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
 
-`build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 现为 208B（追加 enableServerDedup），契约标识为 `r09-runtime-server-dedup-switch`；kernel、Host 库、consumer 和 manifest 需一起重新编译和同步。
+`build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 
 单轮通过后，用同一产物检查完整 Dispatch 多轮复用：
 

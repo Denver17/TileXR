@@ -28,7 +28,7 @@ class TemporaryRoot(unittest.TestCase):
         self.hostfile = self.root / "hostfile"
         self.hostfile.write_text("127.0.0.1\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith("TILEXR_VALIDATION_") and key != "TILEXR_EP_SERVER_DEDUP_ENABLE"}
+                       if not key.startswith("TILEXR_VALIDATION_")}
         environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
                            TILEXR_VALIDATION_HOSTFILE=str(self.hostfile),
                            TILEXR_VALIDATION_BUILD_MODE="host",
@@ -809,7 +809,7 @@ record = dict(run_id=run, build_id=build, commit=None if commit == 'unknown' els
 record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
                for key in ('bs', 'h', 'topk', 'moe_expert_num')})
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
-record['server_dedup_enabled'] = os.environ['TILEXR_EP_SERVER_DEDUP_ENABLE'] == '1'
+record['server_dedup_enabled'] = True
 record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
               fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='dispatch', native_status='dispatch',
               first_hop_packets=48, first_hop_received=48, first_hop_bytes=48*15872, token_stride=15872,
@@ -924,19 +924,34 @@ print(prefix + json.dumps(dict(record, submitted=loops,
                 self.assertEqual(rank["chain"]["peer_count"], 16)
                 self.assertEqual(rank["completed"], 1)
 
-    def test_server_dedup_mode_reaches_local_remote_ranks_and_summary(self):
+    def test_server_dedup_compile_time_mode_reaches_local_remote_ranks_and_summary(self):
         self.enable_chain()
         self.prepare_sync()
-        for value in ("0", "1"):
-            with self.subTest(value=value):
-                self.assert_success(self.invoke("run", environment={"TILEXR_EP_SERVER_DEDUP_ENABLE": value}))
-                summaries = list(self.config_instance.logs.glob("*/summary.json"))
-                summary = workflow.read_json(max(summaries, key=lambda path: path.stat().st_mtime_ns))
-                self.assertIs(summary["chain_configuration"]["server_dedup_enabled"], value == "1")
-                for node in summary["nodes"]:
-                    for rank in node["reported_result"]["ranks"]:
-                        self.assertIs(rank["server_dedup_enabled"], value == "1")
-                        self.assertIs(rank["chain"]["server_dedup_enabled"], value == "1")
+        self.assert_success(self.invoke("run"))
+        summaries = list(self.config_instance.logs.glob("*/summary.json"))
+        summary = workflow.read_json(max(summaries, key=lambda path: path.stat().st_mtime_ns))
+        self.assertTrue(summary["chain_configuration"]["server_dedup_enabled"])
+        for node in summary["nodes"]:
+            for rank in node["reported_result"]["ranks"]:
+                self.assertTrue(rank["server_dedup_enabled"])
+                self.assertTrue(rank["chain"]["server_dedup_enabled"])
+
+    def test_compiled_disabled_mode_reaches_summary_without_runtime_switch(self):
+        self.enable_chain()
+        program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
+        program.write_text(program.read_text().replace("record['server_dedup_enabled'] = True",
+                                                     "record['server_dedup_enabled'] = False"))
+        self.manifest["artifacts"]["bin/" + workflow.CHAIN_PROGRAM] = workflow.digest(program)
+        workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
+        self.prepare_sync()
+        self.assert_success(self.invoke("run"))
+        summary = self.summary()
+        self.assertFalse(summary["chain_configuration"]["server_dedup_enabled"])
+        for node in summary["nodes"]:
+            for rank in node["reported_result"]["ranks"]:
+                self.assertFalse(rank["server_dedup_enabled"])
+                self.assertEqual(rank["first_hop_packets"], 0)
+                self.assertEqual(rank["direct_packets"], 576)
 
     def test_case_analysis_after_all_nodes_and_remote_input_collection(self):
         self.enable_chain()

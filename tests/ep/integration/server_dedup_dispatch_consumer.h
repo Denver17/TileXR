@@ -6,7 +6,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
     using namespace ServerDedupReference;
     const auto shape = SourceSendShape(c);
     const uint64_t window = TileXREp::TileXREpServerDedupWindowOffset(magic);
-    const auto rows = DispatchRows(shape, c.rank, c.enableServerDedup);
+    const auto rows = DispatchRows(shape, c.rank);
     Require(rows.size() <= layout.capacityRows, "reference exceeds public row capacity");
     const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);
     const uint64_t scaleStride = layout.data.scaleBytes;
@@ -30,8 +30,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         else if (destination / 8U == uint32_t(c.rank) / 8U) sameServerBytes += layout.data.tokenStride;
         else crossServerBytes += layout.data.tokenStride;
     };
-    const auto packets = SourcePackets(Ids(shape, c.rank), originalWeights, c.rank, shape.ranks, shape.experts, shape.k,
-        c.enableServerDedup);
+    const auto packets = SourcePackets(Ids(shape, c.rank), originalWeights, c.rank, shape.ranks, shape.experts, shape.k);
     for (const auto &packet : packets) {
         const auto &first = packet.members.front();
         const bool direct = packet.members.size() == 1U;
