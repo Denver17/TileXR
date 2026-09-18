@@ -576,7 +576,6 @@ void CheckSparsePrefixReceivers()
 int main()
 {
     try {
-        {
             CheckPacket(1U, 1U, false);
             CheckSparsePrefixReceivers();
             for (uint32_t owned = 17U; owned <= 32U; ++owned)

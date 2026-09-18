@@ -308,7 +308,6 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
 int main()
 {
     try {
-        {
             CheckDeferredCountSender();
             CheckReceiveUnpack(32, false);
             CheckReceiveUnpack(240, false); // Exactly one 480B data block.

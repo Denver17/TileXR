@@ -362,7 +362,6 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 int main()
 {
     try {
-        {
             CheckReceiveTaskBoundaries();
             CheckDeferredCountReceive();
             Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
