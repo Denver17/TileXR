@@ -332,6 +332,18 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                      ['-n', '2', '-e', '96', 'case_analysis=2'],
                      ['-n', '2', '-e', '96', 'case_analysis=01'],
                      ['-n', '2', '-e', '96', 'case_analysis=0', 'case_analysis=1'],
+                     ['-n', '2', '-e', '96', 'route_mode='],
+                     ['-n', '2', '-e', '96', 'route_mode=uniform'],
+                     ['-n', '2', '-e', '96', 'route_mode=balance shift'],
+                     ['-n', '2', '-e', '96', 'route_mode=random', 'route_mode=balance'],
+                     ['-n', '2', '-e', '96', 'seed='],
+                     ['-n', '2', '-e', '96', 'seed=-1'],
+                     ['-n', '2', '-e', '96', 'seed=4294967296'],
+                     ['-n', '2', '-e', '96', 'seed=99999999999999999999999'],
+                     ['-n', '2', '-e', '96', 'seed=01'],
+                     ['-n', '2', '-e', '96', 'seed=+1'],
+                     ['-n', '2', '-e', '96', 'seed=1.5'],
+                     ['-n', '2', '-e', '96', 'seed=0', 'seed=7'],
                      ['-n', '2', '-e', '96', 'bs=96', 'bs=128']):
             with self.subTest(args=args):
                 command = subprocess.run([str(self.bash), 'run.sh', *args], cwd=self.root,
@@ -391,6 +403,30 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertEqual((output / 'analysis.txt').read_text(), value or '0')
+
+    def test_routing_cli_defaults_and_overrides_ignore_stale_configuration(self):
+        with self.local.open('a') as config:
+            config.write('TILEXR_VALIDATION_ROUTE_MODE=obsolete\nTILEXR_VALIDATION_SEED=invalid\n')
+        (self.root / 'tools/validation/workflow.py').write_text(
+            "import json, os\nfrom pathlib import Path\nfrom run_summary import write_result\n"
+            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
+            "(root/'routing.json').write_text(json.dumps([os.environ['TILEXR_VALIDATION_ROUTE_MODE'], "
+            "os.environ['TILEXR_VALIDATION_SEED']]))\n"
+            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
+        cases = [(None, None, 'balance_shift', '2026'), ('random', '0', 'random', '0'),
+                 ('balance', '4294967295', 'balance', '4294967295'),
+                 ('balance_shift', '17', 'balance_shift', '17'), (None, '7', 'balance_shift', '7'),
+                 ('random', None, 'random', '2026')]
+        for index, (mode, seed, expected_mode, expected_seed) in enumerate(cases):
+            with self.subTest(mode=mode, seed=seed):
+                output = self.root / 'run' / str(index)
+                arguments = ([] if mode is None else ['route_mode=' + mode]) + ([] if seed is None else ['seed=' + seed])
+                result = subprocess.run([str(self.bash), 'run.sh', '-n', '16', '-e', '384', *arguments],
+                    cwd=self.root, env=dict(self.env, TILEXR_VALIDATION_ROUTE_MODE='random',
+                        TILEXR_VALIDATION_SEED='999', TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+                    text=True, capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads((output / 'routing.json').read_text()), [expected_mode, expected_seed])
 
     def test_remote_verify_receives_commit_mode_without_editing_remote_config(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n")

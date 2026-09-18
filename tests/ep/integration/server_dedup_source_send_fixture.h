@@ -14,15 +14,22 @@ namespace ServerDedupReference {
 struct Shape {
     uint32_t ranks, experts, bs, h, k;
     bool bf16, quantized, e4m3;
+    TileXREpDemo::RouteMode routeMode = TileXREpDemo::RouteMode::BalanceShift;
+    uint32_t seed = 2026;
 };
 inline std::vector<int32_t> Ids(const Shape &s, uint32_t rank)
 {
-    return TileXREpDemo::BuildBalancedShuffleExpertIds(
-        {s.bs, s.k, s.experts, s.experts / s.ranks, s.ranks, rank, 2026});
+    if (s.ranks == 0 || s.experts % s.ranks != 0)
+        throw std::invalid_argument("total experts must be divisible by rank count");
+    auto ids = TileXREpDemo::BuildExpertIds(
+        {s.bs, s.k, s.experts, s.ranks, s.ranks, rank, s.seed}, s.routeMode);
+    if (ids.size() != uint64_t(s.bs) * s.k)
+        throw std::invalid_argument("invalid route shape or incomplete balance_shift epoch");
+    return ids;
 }
 inline std::vector<float> Weights(const Shape &s, uint32_t rank)
 {
-    std::mt19937 rng(2026U + rank);
+    std::mt19937 rng(s.seed + rank);
     std::uniform_int_distribution<uint32_t> sample(1U, 65535U);
     std::vector<float> result(s.bs * s.k);
     for (uint32_t token = 0; token < s.bs; ++token) {

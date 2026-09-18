@@ -132,6 +132,37 @@ void TestRandomConstraintsAndRankVariation()
 
 }
 
+void TestRouteModesAndSeeds()
+{
+    using namespace TileXREpDemo;
+    ExpertIdsConfig config {256, 6, 384, 128, 128, 0, 2026};
+    const auto baseline = BuildBalancedShuffleExpertIds(config);
+    CheckVector("default shift remains unchanged", BuildExpertIds(config, RouteMode::BalanceShift), baseline);
+    const auto balance = BuildExpertIds(config, RouteMode::Balance);
+    CheckVector("128P three experts per rank interleaving",
+        {balance.begin(), balance.begin() + 6}, {0, 3, 6, 9, 12, 15});
+    for (RouteMode mode : {RouteMode::Random, RouteMode::Balance, RouteMode::BalanceShift}) {
+        const std::string name = RouteModeName(mode);
+        CheckTrue(name + " mode roundtrip", ParseRouteMode(name) == mode);
+        const auto routes = BuildExpertIds(config, mode);
+        CheckRandomConstraints(name, config, routes);
+        CheckTrue(name + " deterministic", routes == BuildExpertIds(config, mode));
+        config.seed = UINT32_MAX;
+        const auto changed = BuildExpertIds(config, mode);
+        CheckRandomConstraints(name + " max seed", config, changed);
+        CheckTrue(name + " seed semantics", (routes == changed) == (mode == RouteMode::Balance));
+        config.seed = 2026;
+    }
+    // Only shift needs complete global epochs; all modes still have unique top-k.
+    config = {1, 3, 32, 16, 16, 0, 0};
+    CheckRandomConstraints("partial random", config, BuildExpertIds(config, RouteMode::Random));
+    CheckRandomConstraints("partial balance", config, BuildExpertIds(config, RouteMode::Balance));
+    CheckTrue("partial shift rejected", BuildExpertIds(config, RouteMode::BalanceShift).empty());
+    bool rejected = false;
+    try { ParseRouteMode("balance shift"); } catch (const std::invalid_argument &) { rejected = true; }
+    CheckTrue("unknown mode rejected", rejected);
+}
+
 void TestRejectsInvalidConfig()
 {
     TileXREpDemo::ExpertIdsConfig config {};
@@ -170,6 +201,7 @@ int main()
     TestBalanced64pDistribution();
     TestRandomConstraintsAndRankVariation();
     TestServerDedupBalancedShiftMainCase();
+    TestRouteModesAndSeeds();
     TestRejectsInvalidConfig();
     return g_failures == 0 ? 0 : 1;
 }

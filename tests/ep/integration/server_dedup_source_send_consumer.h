@@ -2,7 +2,7 @@
 ServerDedupReference::Shape SourceSendShape(const Config &c)
 {
     return {uint32_t(c.rankSize), uint32_t(c.experts), uint32_t(c.bs), uint32_t(c.h), uint32_t(c.topK),
-        c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16, c.quantMode == 4, c.fp8Format == "e4m3"};
+        c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16, c.quantMode == 4, c.fp8Format == "e4m3", c.routeMode, c.seed};
 }
 
 void SaveSourceSendInputs(const Config &c, const std::vector<uint16_t> &x,

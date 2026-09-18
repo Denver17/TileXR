@@ -101,6 +101,8 @@ struct Config {
     int hostIndex, localRank, device, rank, rankSize;
     uint32_t loops = 1;
     uint32_t warmup = 0;
+    TileXREpDemo::RouteMode routeMode = TileXREpDemo::RouteMode::BalanceShift;
+    uint32_t seed = 2026;
     int64_t bs, h, topK, experts;
     TileXR::TileXRDataType dtype;
     int64_t quantMode = 0;
@@ -149,6 +151,15 @@ Config Parse(int argc, char **argv)
     Require(warmup <= UINT32_MAX, "TILEXR_VALIDATION_WARMUP must be in [0, UINT32_MAX]");
     c.loops = static_cast<uint32_t>(loops);
     c.warmup = static_cast<uint32_t>(warmup);
+    if (const char *routeMode = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
+        c.routeMode = TileXREpDemo::ParseRouteMode(routeMode);
+    if (const char *seedText = std::getenv("TILEXR_VALIDATION_SEED")) {
+        Require(std::strlen(seedText) <= 10 && (seedText[0] != '0' || seedText[1] == '\0'),
+            "TILEXR_VALIDATION_SEED must be canonical unsigned decimal");
+        const int64_t seed = Number(seedText, "TILEXR_VALIDATION_SEED");
+        Require(seed <= UINT32_MAX, "TILEXR_VALIDATION_SEED must be in [0, UINT32_MAX]");
+        c.seed = static_cast<uint32_t>(seed);
+    }
     Require(c.checkpoint != "ep-sdedup-p1-memory-boundary" ||
         (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
         "memory-boundary requires functional mode, loops=1, warmup=0");
@@ -166,6 +177,27 @@ Config Parse(int argc, char **argv)
     c.h = Number(std::getenv("TILEXR_VALIDATION_H"), "TILEXR_VALIDATION_H");
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
+    if (c.checkpoint == "ep-sdedup-p2-dispatch") {
+        Require(c.experts > 0 && c.experts % c.rankSize == 0,
+            "total experts must be divisible by rank count");
+        if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
+            int64_t divisor = c.experts;
+            for (int64_t remainder = c.topK; remainder != 0;) {
+                const int64_t next = divisor % remainder;
+                divisor = remainder;
+                remainder = next;
+            }
+            const int64_t epoch = c.experts / divisor;
+            divisor = epoch;
+            for (int64_t remainder = c.rankSize; remainder != 0;) {
+                const int64_t next = divisor % remainder;
+                divisor = remainder;
+                remainder = next;
+            }
+            Require(c.bs % (epoch / divisor) == 0,
+                "balance_shift requires complete global token epochs");
+        }
+    }
     const char *dtype = std::getenv("TILEXR_VALIDATION_DTYPE");
     Require(dtype != nullptr && (std::strcmp(dtype, "bf16") == 0 || std::strcmp(dtype, "fp16") == 0),
         "TILEXR_VALIDATION_DTYPE must be bf16 or fp16");
@@ -222,7 +254,8 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
         << ",\"backend\":\"memory\",\"bs\":" << c.bs << ",\"h\":" << c.h << ",\"topk\":" << c.topK
         << ",\"server_dedup_enabled\":" << (TileXREp::kEpServerDedupEnable ? "true" : "false")
-        << ",\"route_mode\":\"balance_shift\",\"seed\":2026,\"quant_mode\":" << c.quantMode
+        << ",\"route_mode\":" << Json(TileXREpDemo::RouteModeName(c.routeMode))
+        << ",\"seed\":" << c.seed << ",\"quant_mode\":" << c.quantMode
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
         << Json(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16") << details << '}' << std::endl;
@@ -511,9 +544,7 @@ int Run(const Config &c)
             layout.expertTokenNumsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read expertTokenNumsOut");
         const int64_t localExperts = c.experts / c.rankSize;
         for (int source = 0; source < c.rankSize; ++source) {
-            TileXREpDemo::ExpertIdsConfig sourceConfig {c.bs, c.topK, c.experts,
-                localExperts, c.rankSize, source, 2026};
-            for (int32_t expert : TileXREpDemo::BuildBalancedShuffleExpertIds(sourceConfig)) {
+            for (int32_t expert : ServerDedupReference::Ids(shape, source)) {
                 if (expert / localExperts == c.rank)
                     ++referenceCounts[(expert % localExperts) * c.rankSize + source];
             }

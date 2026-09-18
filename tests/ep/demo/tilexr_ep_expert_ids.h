@@ -6,9 +6,31 @@
 #include <cstdint>
 #include <numeric>
 #include <random>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace TileXREpDemo {
+
+enum class RouteMode { Random, Balance, BalanceShift };
+
+inline const char *RouteModeName(RouteMode mode)
+{
+    switch (mode) {
+        case RouteMode::Random: return "random";
+        case RouteMode::Balance: return "balance";
+        case RouteMode::BalanceShift: return "balance_shift";
+    }
+    throw std::invalid_argument("invalid route mode");
+}
+
+inline RouteMode ParseRouteMode(const std::string &mode)
+{
+    if (mode == "random") return RouteMode::Random;
+    if (mode == "balance") return RouteMode::Balance;
+    if (mode == "balance_shift") return RouteMode::BalanceShift;
+    throw std::invalid_argument("TILEXR_VALIDATION_ROUTE_MODE must be random, balance or balance_shift");
+}
 
 struct ExpertIdsConfig {
     int64_t bs = 0;
@@ -111,6 +133,16 @@ inline std::vector<int32_t> BuildBalancedShuffleExpertIds(const ExpertIdsConfig 
     }
     const size_t begin = static_cast<size_t>(config.epRankId * config.bs * config.topK);
     return {all.begin() + begin, all.begin() + begin + static_cast<size_t>(config.bs * config.topK)};
+}
+
+inline std::vector<int32_t> BuildExpertIds(const ExpertIdsConfig &config, RouteMode mode)
+{
+    switch (mode) {
+        case RouteMode::Random: return BuildRandomExpertIds(config);
+        case RouteMode::Balance: return BuildBalancedExpertIds(config);
+        case RouteMode::BalanceShift: return BuildBalancedShuffleExpertIds(config);
+    }
+    throw std::invalid_argument("invalid route mode");
 }
 
 } // namespace TileXREpDemo

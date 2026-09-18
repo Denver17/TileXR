@@ -313,7 +313,7 @@ class Config:
                 if not 0 < experts <= 1024 or experts % ranks or self.chain["topk"] > experts:
                     raise ValueError("chain 检查点要求 0<moe_expert_num<=1024，能被 rank_size 整除，topk<=moe_expert_num")
                 epoch = experts // math.gcd(experts, self.chain["topk"])
-                if self.chain["bs"] * ranks % epoch:
+                if self.chain["route_mode"] == "balance_shift" and self.chain["bs"] * ranks % epoch:
                     raise ValueError("balance_shift 要求全局 Token 数能被 E/gcd(E,TopK) 整除")
             return hosts
         except FileNotFoundError:
@@ -332,6 +332,12 @@ def source_send_stride(config):
 
 
 def chain_configuration(checkpoint):
+    route_mode = os.environ.get("TILEXR_VALIDATION_ROUTE_MODE", "balance_shift")
+    if route_mode not in ("random", "balance", "balance_shift"):
+        raise ValueError("route_mode 必须为 random、balance 或 balance_shift")
+    seed = os.environ.get("TILEXR_VALIDATION_SEED", "2026")
+    if not re.fullmatch(r"0|[1-9][0-9]{0,9}", seed) or int(seed) > (1 << 32) - 1:
+        raise ValueError("seed 必须为 0..4294967295 的整数")
     case_analysis = os.environ.get("TILEXR_VALIDATION_CASE_ANALYSIS", "0")
     if case_analysis not in ("0", "1"):
         raise ValueError("case_analysis 必须为 0 或 1")
@@ -389,7 +395,7 @@ def chain_configuration(checkpoint):
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
                  run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=int(case_analysis))
+                 route_mode=route_mode, seed=int(seed), kernel_scope="dispatch", case_analysis=int(case_analysis))
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -640,7 +646,7 @@ def remote_argv(config, host, action, *arguments):
                           TILEXR_DIRECT_HOSTS_JSON=json.dumps(config.hosts(), separators=(",", ":")))
             if config.chain:
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format",
-                            "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis"):
+                            "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis", "route_mode", "seed"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
@@ -851,7 +857,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                 raise Failure("LOG_PARSE_FAILED", "rank 缺少有效的进程 PID", rank=mapping["rank"])
             if chain_config is not None and any(marker.get(key) != chain_config[key]
                     for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed")):
-                raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype/收发核数与本次配置不一致", rank=mapping["rank"])
+                raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype/route_mode/seed 与本次配置不一致", rank=mapping["rank"])
         if chain:
             linked = record["chain"]
             loops = 1
@@ -952,7 +958,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
                 env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
-                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format", "loops", "warmup", "run_mode"):
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format", "loops", "warmup", "run_mode", "route_mode", "seed"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
                 inputs = log.parent / "inputs"
                 inputs.mkdir(parents=True, exist_ok=True)

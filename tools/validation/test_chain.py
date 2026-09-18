@@ -51,11 +51,42 @@ class ChainTests(TemporaryRoot):
             "TILEXR_VALIDATION_FP8_FORMAT": ["bad"],
             "TILEXR_VALIDATION_BLOCK_DIM": ["4", "0", "-1", "1.5", str(1 << 32)],
             "TILEXR_VALIDATION_CASE_ANALYSIS": ["", "2", "01", "true"],
+            "TILEXR_VALIDATION_ROUTE_MODE": ["", "uniform", "balance shift"],
+            "TILEXR_VALIDATION_SEED": ["", "-1", "4294967296", "1.5", "+1", "01", " 1", "١"],
         }.items():
             for value in values:
                 with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {key: value}), \
                         self.assertRaises(ValueError):
                     self.config().hosts()
+
+    def test_route_modes_preserve_expert_mapping_and_shift_epoch_constraint(self):
+        # 16 tokens do not fill the 64-token shift epoch; other generators allow it.
+        for mode in ("random", "balance", "balance_shift"):
+            with self.subTest(mode=mode), mock.patch.dict(os.environ, {
+                    "TILEXR_VALIDATION_ROUTE_MODE": mode, "TILEXR_VALIDATION_BS": "1",
+                    "TILEXR_VALIDATION_MOE_EXPERT_NUM": "384", "TILEXR_VALIDATION_SEED": "4294967295"}):
+                config = self.config()
+                self.assertEqual((config.chain["route_mode"], config.chain["seed"]), (mode, 4294967295))
+                if mode == "balance_shift":
+                    with self.assertRaisesRegex(ValueError, "balance_shift"):
+                        config.hosts()
+                else:
+                    self.assertEqual(len(config.hosts()), 2)
+                with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_MOE_EXPERT_NUM": "383"}):
+                    with self.assertRaisesRegex(ValueError, "rank_size"):
+                        self.config().hosts()
+
+    def test_requested_128p_shape_supports_all_route_modes_and_seed_boundaries(self):
+        self.hostfile.write_text("\n".join(f"192.0.2.{i + 1}" for i in range(16)) + "\n")
+        for mode in ("random", "balance", "balance_shift"):
+            for seed in (0, 2026, 4294967295):
+                with self.subTest(mode=mode, seed=seed), mock.patch.dict(os.environ, {
+                        "TILEXR_VALIDATION_ROUTE_MODE": mode, "TILEXR_VALIDATION_SEED": str(seed),
+                        "TILEXR_VALIDATION_MOE_EXPERT_NUM": "384", "TILEXR_VALIDATION_BS": "256"}):
+                    config = self.config()
+                    self.assertEqual(len(config.hosts()) * 8, 128)
+                    self.assertEqual(config.chain["moe_expert_num"] // 128, 3)
+                    self.assertEqual(config.chain["seed"], seed)
 
     def test_total_expert_limit_allows_one_and_more_than_32_local_experts(self):
         for ranks, experts in ((16, 16), (16, 528), (16, 1024), (24, 1008), (128, 1024)):
@@ -85,6 +116,8 @@ class ChainTests(TemporaryRoot):
                                 first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch"))
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
+                                   (None, "route_mode", "random"), ("chain", "route_mode", "balance"),
+                                   (None, "seed", 7), ("chain", "seed", 0),
                                    (None, "server_dedup_enabled", False), ("chain", "server_dedup_enabled", False),
                                    (None, "server_dedup_enabled", None), (None, "server_dedup_enabled", 1),
                                    (None, "cleanup", "failed"), (None, "chain", None),

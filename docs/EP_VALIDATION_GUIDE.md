@@ -245,14 +245,49 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 | `-m M` | 0=functional、1=performance、2=breakdown | 默认 0 |
 | `-l L W` | 测量 L 轮、预热 W 轮 | 默认 1 0；L>=1、W>=0，均为 uint32 |
 | `case_analysis=0\|1` | NPU 阶段结束后分析各 rank 的跨 server token 去重率 | 默认 0，显式传 1 开启 |
+| `route_mode=random\|balance\|balance_shift` | 本次输入的专家生成模式 | 默认 balance_shift |
+| `seed=N` | 路由和权重生成的随机种子 | 默认 2026，十进制 uint32（0..4294967295，无前导零） |
 
 `bs=... h=... topk=... dtype=... quant_mode=... fp8_format=... block_dim=...`
-继续作为可选覆盖项，默认 BS96/H7168/TopK6/BF16/非量化/auto。当前 route_mode
-固定 balance_shift，seed=2026，每 rank 通信域固定 4 GiB。
+继续作为可选覆盖项，默认 BS96/H7168/TopK6/BF16/非量化/auto。每 rank 通信域固定
+8 GiB，分为两个 4 GiB 窗口。
 `comm_id=... barrier_addr=... msprof=... hostfile=...` 可覆盖本次部署配置；
 相对 hostfile 路径相对于仓库根目录。`-h`/`--help` 不加载 CANN。
 `run_case.sh` 仅兼容转交到 `run.sh`，`run_batch.sh` 统一调用同一入口。
 旧 `run_mode=... loops=... warmup=... moe_expert_num=...` 改用上述短参数。
+
+三种路由模式都保持 `单卡专家数 × 卡数 = 总专家数`，专家 ID 到目标卡的映射为
+`expert_id / 单卡专家数`，每个 token 的 TopK 专家互不重复：
+
+- `random`：逐 token 随机选取 TopK 个专家，不保证各专家负载相同。
+- `balance`：按目标 rank 交错排列专家并循环分配；完整周期严格均匀，尾部不完整时
+  专家路由数最多相差 1。专家列表不受 seed 影响，路由权重仍使用 seed。
+- `balance_shift`：每个 epoch 打乱专家顺序后均匀分配；要求全局 token 数可被
+  `E/gcd(E,TopK)` 整除。该约束不应用于 random 或 balance。
+
+例如 128P、每卡 BS256、每卡 3 专家（总 E384）、H7168、TopK6、BF16 非量化：
+
+```bash
+bash run.sh -n 16 -e 384 -m 0 -l 1 0 \
+  bs=256 h=7168 topk=6 dtype=bf16 quant_mode=0 route_mode=balance seed=42
+```
+
+将 `route_mode` 改为 `random` 或 `balance_shift` 即可。首次升级须重建并同步包含新参数
+解析的 C++ 测试程序，此后切换模式或种子无需重新编译。seed 同时控制随机路由和权重，
+默认 2026 保持历史输入；多轮使用相同输入。实际 mode/seed 随本地和远端每个 rank
+的 marker、summary 和专家列表导出保存并校验，错误或陈旧的模式/种子不能作为通过结果。
+
+维护要点：生成器的 `moeRankNum` 表示部署专家的卡数，必须传 `rankSize`，不能传
+`E/rankSize`。旧 shuffle 路径没有使用该字段，直接替换生成函数会暴露错误的专家排序。
+输入、Count 参考、Dispatch 参考和 stub 应共用模式选择入口；Count 必须累计实际路由，
+不能以均匀分布假设校验 random。脚本/Host 替身回归不证明 128P A5 数据面正确性。
+仅对 Dispatch 应用专家整除和 epoch 校验；不生成路由的 memory-boundary 检查点保持豁免。
+
+2026-09-18 验证：本地 139 项工作流、参数、环境回归通过；blue 的 C++14 专家生成器测试
+和 25 项 C++ consumer 替身集成回归通过，包括三种模式、seed 两端边界、重复生成、
+每卡三专家、部分 epoch、Count 损坏检测及 memory-boundary 豁免。consumer 另使用真实
+CANN 9.1 头文件完成 Host 对象编译；没有运行 NPU，128P 数据面与性能仍需目标环境验证。
+源码摘要与日志保留在 `build/route-mode-seed-verification/`。
 
 发送/接收核数由 `src/ep/common/ep_memory_server_dedup_count_layout.h` 中的
 `TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM` 编译期宏配置，默认 32（即 32/32），支持

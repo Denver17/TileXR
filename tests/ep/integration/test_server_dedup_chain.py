@@ -99,6 +99,8 @@ class ChainConsumerTests(unittest.TestCase):
             TILEXR_VALIDATION_TOPK="3", TILEXR_VALIDATION_MOE_EXPERT_NUM="32", TILEXR_VALIDATION_DTYPE="bf16",
             TILEXR_COMM_ID=f"127.0.0.1:{comm}", TILEXR_DEMO_BARRIER_ADDR=f"127.0.0.1:{barrier}",
             TEST_TRACE_DIR=self.trace.name)
+        self.environment.pop("TILEXR_VALIDATION_ROUTE_MODE", None)
+        self.environment.pop("TILEXR_VALIDATION_SEED", None)
         self.environment.pop("TILEXR_VALIDATION_CHECKPOINT", None)
         self.environment.pop("TILEXR_VALIDATION_LOOPS", None)
         self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
@@ -171,8 +173,76 @@ class ChainConsumerTests(unittest.TestCase):
                      run.ljust(128, b"\0") + b"build-identity".ljust(128, b"\0"))
         return peer
 
+    def test_route_modes_and_seed_reach_inputs_and_references(self):
+        for mode in ("random", "balance", "balance_shift"):
+            snapshots = []
+            for seed in (0, 4294967295, 0):
+                with self.subTest(mode=mode, seed=seed):
+                    # Three experts per card exercises the preserved expert/rank mapping.
+                    env = dict(TILEXR_VALIDATION_ROUTE_MODE=mode, TILEXR_VALIDATION_SEED=str(seed),
+                               TILEXR_VALIDATION_MOE_EXPERT_NUM="48", TILEXR_VALIDATION_INPUT_DIR=self.trace.name)
+                    processes = [self.start(rank, environment=env) for rank in range(16)]
+                    for rank, process in enumerate(processes):
+                        output, errors = process.communicate(timeout=20)
+                        self.assertEqual(process.returncode, 0, output + errors)
+                        record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
+                        self.assertEqual((record["route_mode"], record["seed"]), (mode, seed))
+                        data = (Path(self.trace.name) / f"rank-{rank}-ids.bin").read_bytes()
+                        ids = struct.unpack("6i", data)
+                        for start in (0, 3):
+                            self.assertEqual(len(set(ids[start:start + 3])), 3)
+                        self.assertTrue(all(0 <= value < 48 for value in ids))
+                        if mode == "balance":
+                            order = [rank * 3 + local for local in range(3) for rank in range(16)]
+                            self.assertEqual(list(ids), [order[(rank * 6 + i) % 48] for i in range(6)])
+                    folder = Path(self.trace.name)
+                    snapshots.append(((folder / "rank-0-ids.bin").read_bytes(),
+                                      (folder / "rank-0-weights.bin").read_bytes()))
+            self.assertEqual(snapshots[0], snapshots[2])
+            self.assertNotEqual(snapshots[0][1], snapshots[1][1])
+            self.assertEqual(snapshots[0][0] == snapshots[1][0], mode == "balance")
+
+    def test_random_and_balance_allow_partial_epoch(self):
+        for mode in ("random", "balance"):
+            processes = [self.start(rank, environment={"TILEXR_VALIDATION_ROUTE_MODE": mode,
+                         "TILEXR_VALIDATION_BS": "1"}) for rank in range(16)]
+            for process in processes:
+                output, errors = process.communicate(timeout=20)
+                self.assertEqual(process.returncode, 0, output + errors)
+                self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")), 1)
+
+    def test_new_modes_detect_count_corruption(self):
+        for mode in ("random", "balance"):
+            with self.subTest(mode=mode):
+                env = {"TILEXR_VALIDATION_ROUTE_MODE": mode, "TILEXR_VALIDATION_SEED": "73",
+                       "TEST_COUNT_FAULT": "prefix"}
+                processes = [self.start(rank, environment=env) for rank in range(16)]
+                for process in processes:
+                    output, errors = process.communicate(timeout=20)
+                    self.assertEqual(process.returncode, 0, output + errors)
+                    record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")
+                    self.assertEqual((record["route_mode"], record["seed"]), (mode, 73))
+                    self.assertIn("sendCountsOut mismatch", record["validation_error"])
+                    self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
+
+    def test_invalid_route_options_fail_before_device_init(self):
+        cases = [("TILEXR_VALIDATION_ROUTE_MODE", value) for value in ("", "unknown", "balance shift")]
+        cases += [("TILEXR_VALIDATION_SEED", value) for value in
+                  ("", "-1", "+1", "01", "1 ", "1.5", "4294967296", "999999999999999999999")]
+        cases += [("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_MOE_EXPERT_NUM", "33")]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                process = self.start(0, environment={key: value})
+                output, errors = process.communicate(timeout=5)
+                self.assertNotEqual(process.returncode, 0, output + errors)
+                self.assertIn("stage=config", errors)
+                self.assertNotIn("_PASS", output)
+                self.assertEqual(self.trace_lines(0), [])
+
     def test_memory_boundary_all_ranks_validate_capacity_and_roundtrip(self):
-        environment = {"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary"}
+        # This probe does not route tokens: Dispatch divisibility/epoch rules do not apply.
+        environment = {"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary",
+                       "TILEXR_VALIDATION_BS": "1", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "33"}
         processes = [self.start(rank, environment=environment) for rank in range(16)]
         for rank, process in enumerate(processes):
             output, errors = process.communicate(timeout=20)
@@ -236,6 +306,8 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["dtype"], dtype)
                         self.assertEqual(record["quant_mode"], int(quant))
                         self.assertEqual(record["fp8_format"], format)
+                        self.assertEqual(record["route_mode"], "balance_shift")
+                        self.assertEqual(record["seed"], 2026)
                         self.assertEqual(record["loops"], 1)
                         self.assertEqual(record["warmup"], 0)
                         self.assertIs(record["server_dedup_enabled"], True)

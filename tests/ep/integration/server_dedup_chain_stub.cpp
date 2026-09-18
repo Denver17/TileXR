@@ -200,7 +200,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     TileXR::TileXRDataType outDtype, aclrtStream stream)
 {
     if (x == nullptr || ids == nullptr || comm != &args || bs <= 0 || h <= 0 || topK <= 0 || topK > 32 ||
-        experts != world * 2 || rank != rankId || tpWorld != 1 || tpRank != 0 || shard != 0 ||
+        experts <= 0 || world <= 0 || experts % world != 0 || rank != rankId || tpWorld != 1 || tpRank != 0 || shard != 0 ||
         shared != 0 || sharedRanks != 0 || (quant != 0 && quant != 4) || globalBs != world * bs || (countType != 0 && countType != 1) ||
         maskType != 0 || scales != nullptr || mask != nullptr || weights == nullptr || (quant == 4 ? dynamic == nullptr : dynamic != nullptr) ||
         assist != nullptr || tpCounts != nullptr || expandScales != nullptr || expandX == nullptr ||
@@ -251,8 +251,12 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             }
         }
         using namespace ServerDedupReference;
-        const Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
+        Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
             dtype == TileXR::TILEXR_DATA_TYPE_BFP16, quant == 4, outDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3};
+        if (const char *mode = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
+            shape.routeMode = TileXREpDemo::ParseRouteMode(mode);
+        if (const char *seed = std::getenv("TILEXR_VALIDATION_SEED"))
+            shape.seed = static_cast<uint32_t>(std::strtoull(seed, nullptr, 10));
         const auto layout = TileXREp::TileXREpServerDedupDataLayout(shape.bs, shape.h, shape.k, shape.experts, shape.quantized);
         const char *packetFault = std::getenv("TEST_PACKET_FAULT");
         const std::string failure = packetFault == nullptr ? "" : packetFault;
@@ -336,8 +340,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         std::fill(sendCounts, sendCounts + experts, 0);
         const int64_t localExperts = experts / world;
         for (int64_t source = 0; source < world; ++source) {
-            TileXREpDemo::ExpertIdsConfig config {bs, topK, experts, localExperts, world, source, 2026};
-            for (int32_t expert : TileXREpDemo::BuildBalancedShuffleExpertIds(config))
+            for (int32_t expert : Ids(shape, source))
                 if (expert / localExperts == rank) ++sendCounts[(expert % localExperts) * world + source];
         }
         int32_t sum = 0, last = 0;

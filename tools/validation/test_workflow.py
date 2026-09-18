@@ -810,7 +810,8 @@ record.update({key: int(os.environ['TILEXR_VALIDATION_' + key.upper()])
                for key in ('bs', 'h', 'topk', 'moe_expert_num')})
 record['dtype'] = os.environ['TILEXR_VALIDATION_DTYPE']
 record['server_dedup_enabled'] = True
-record.update(route_mode='balance_shift', seed=2026, quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
+record.update(route_mode=os.environ['TILEXR_VALIDATION_ROUTE_MODE'], seed=int(os.environ['TILEXR_VALIDATION_SEED']),
+              quant_mode=int(os.environ['TILEXR_VALIDATION_QUANT_MODE']),
               fp8_format=os.environ['TILEXR_VALIDATION_FP8_FORMAT'], kernel_scope='dispatch', native_status='dispatch',
               first_hop_packets=48, first_hop_received=48, first_hop_bytes=48*15872, token_stride=15872,
               direct_packets=288, direct_received=288, direct_bytes=288*15872,
@@ -829,6 +830,10 @@ if not record['server_dedup_enabled']:
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
 if behavior == 'wrong-dedup-mode':
     record['server_dedup_enabled'] = not record['server_dedup_enabled']
+if behavior == 'wrong-route-mode':
+    record['route_mode'] = 'balance'
+if behavior == 'wrong-seed':
+    record['seed'] += 1
 # Leave another node in flight when rank 8 reports an invalid output.
 if os.environ.get('CHAIN_TEST_BEHAVIOR') in ('invalid-output', 'late-analysis-input') and rank == 0:
     import time
@@ -923,6 +928,32 @@ print(prefix + json.dumps(dict(record, submitted=loops,
             for rank in node["reported_result"]["ranks"]:
                 self.assertEqual(rank["chain"]["peer_count"], 16)
                 self.assertEqual(rank["completed"], 1)
+
+    def test_routing_mode_and_seed_reach_local_remote_ranks_and_summary(self):
+        self.enable_chain()
+        self.prepare_sync()
+        for mode, seed in (("random", "0"), ("balance", "17"), ("balance_shift", "4294967295")):
+            with self.subTest(mode=mode, seed=seed):
+                self.assert_success(self.invoke("run", environment={
+                    "TILEXR_VALIDATION_ROUTE_MODE": mode, "TILEXR_VALIDATION_SEED": seed}))
+                summaries = list(self.config_instance.logs.glob("*/summary.json"))
+                summary = workflow.read_json(max(summaries, key=lambda path: path.stat().st_mtime_ns))
+                self.assertEqual(summary["chain_configuration"]["route_mode"], mode)
+                self.assertEqual(summary["chain_configuration"]["seed"], int(seed))
+                for node in summary["nodes"]:
+                    for rank in node["reported_result"]["ranks"]:
+                        for record in (rank, rank["chain"]):
+                            self.assertEqual(record["route_mode"], mode)
+                            self.assertEqual(record["seed"], int(seed))
+
+    def test_remote_routing_provenance_mismatch_is_rejected(self):
+        self.enable_chain()
+        self.prepare_sync()
+        for behavior in ("wrong-route-mode", "wrong-seed"):
+            with self.subTest(behavior=behavior):
+                result = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": behavior,
+                    "TILEXR_VALIDATION_ROUTE_MODE": "random", "TILEXR_VALIDATION_SEED": "17"})
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_server_dedup_compile_time_mode_reaches_local_remote_ranks_and_summary(self):
         self.enable_chain()
