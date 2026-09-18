@@ -1,7 +1,28 @@
-# EP Memory Server Dedup 调试进度
+# EP Memory Server Dedup 进度
 
-记录检查点的服务器通过结果及当前增量状态；完整命令见[人工验证](EP_VALIDATION_GUIDE.md)。
-通过范围按实际配置登记。64P/E384 源端发送的量化/非量化多轮已获用户确认；128P、完整 Dispatch/Combine 与目标 Linux 卡住/HUP 清理演练仍待验证。
+## 当前状态（2026-09-18）
+
+Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
+源码校准基线 `4858ce6`。完整 Dispatch 已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-open-topics.md)；
+Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
+
+| 方向 | 当前实现与验证边界 |
+| --- | --- |
+| Dispatch 数据面 | 原始 cnt/cumsum、第一跳/DIRECT、接收/relay、metadata、双窗与清 Flag 均已实现 |
+| 当前优化 | Count 异步下发/共享 scratch、动态收发 lane、二维 Probe、t=row、核末无 SyncAll、简化打点、独立 GM tiling、编译期核数/去重开关 |
+| 暂缓候选 | 双 Probe、剩余 ≤5 时预探测、ready 认领删除、Vector ready bitmap、metadata 地址缓存 |
+| 已收到的完整设备结果 | 64P/E384、BS96、H7168/K6、quant_mode=4/e4m3、breakdown 100+50 轮，64/64 PASS；run_id=b662f5c701e74ec187fdb7f09cb39bc9、kernel=65f0523c47a6 |
+| 最新产物验收 | 上一行仅覆盖那次产物；之后源码修改不能自动继承该正确性或性能结论，128P 等组合需各自证据 |
+| 未定位故障 | 32P/E384、BS256、performance 100+50 轮报告执行阶段失败、0/32；run_id=d5d6c21f230a496e82ccfa2dc4e0494a，缺原始错误，未确认环境根因 |
+| Combine 前置缺口 | 稀疏 t 的结果区容量、dtype/数值、职责与 H 分块、窗口/plan 生命周期、独立及联合验收 |
+
+以上设备信息依据用户回传，未直接访问生产环境。约 49us 的历史 performance 与约 391us 的
+breakdown 口径和产物不同；移除 PacketIssue 未明显缓解的反馈不能证明根因已经闭合。
+本次文档修订不新增 NPU 通过记录，也不将“优化设计告一段落”解释为所有性能目标验收。
+
+## 历史验证记录
+
+完整命令见[人工验证](EP_VALIDATION_GUIDE.md)。下列“当前/下一步/未开始”指对应记录的提交日期。
 
 ## 阶段 1：Dispatch 公共框架与空算子
 
@@ -109,4 +130,4 @@ Host 替身测试也分别在 profiling OFF/ON 通过，共六项检查。这些
 | source 归约 | 未开始 | — |
 | correctness / 性能验收 | 未开始 | — |
 
-后续阶段按最新设计逐模块推进；当前交付 `ep-sdedup-p2-source-send`，支持第一跳 + DIRECT 的同域连续多轮。默认仍为 16P/L6/BS96/H7168/K6/BF16/balance_shift/seed2026、每 rank 4 GiB、loops=1/warmup=0；64P/E384 的新增通过范围见上文。完整 Dispatch 多轮复用仍待接收清理契约。
+历史 source-send 阶段说明（已由完整 Dispatch 取代）：当时交付 `ep-sdedup-p2-source-send`，支持第一跳 + DIRECT 的同域连续多轮。默认仍为 16P/L6/BS96/H7168/K6/BF16/balance_shift/seed2026、每 rank 4 GiB、loops=1/warmup=0；64P/E384 的新增通过范围见上文。完整 Dispatch 多轮复用仍待接收清理契约。

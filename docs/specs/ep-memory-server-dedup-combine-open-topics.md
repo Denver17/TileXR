@@ -1,45 +1,47 @@
 # EP Memory Server Dedup Combine 待确认项
 
-> 2026-09-16 更新：AtomicAdd/密排 t/group 表 8*BS 行的历史结论已由[主设计的 Token 级 prefix 契约](ep-memory-server-dedup.md#2026-09-16dispatch-使用-token-级-prefix-编号当前契约)替代。Dispatch 第一跳使用 t=row，group 表按 C=R*BS*min(K,L) 预留；终端继承第一跳编号。Combine 返回区按 C*K*returnStride 的扩容及内部实现留到 Combine 阶段，当前旧 relay 预留不能按新编号使用。以下旧编号保留作历史追溯。
-
-
 ## 文档状态
 
-第一轮 Combine 问题已与 Dispatch 共同归并到[主设计](ep-memory-server-dedup.md)及
-[第二轮待确认项 R01-R12](ep-memory-server-dedup-open-topics.md)。
-本文保留 C01-C14 旧编号的定位映射，并承接本轮从 Dispatch 待确认文档迁入的 Combine 内部实现议题。
-Dispatch 细节和 Dispatch/Combine 公共接口仍在[第二轮待确认项 R01-R12](ep-memory-server-dedup-open-topics.md)维护；本文的 C15 之后只讨论 Combine 内部实现和内部验收。
-已确认的公共契约及 R04-07/R04-08 权重复用已同步主设计，source 按 sourceMask 和 Dispatch 输出的 expertScalesOut 统一归约，
-不再保留结果类型/权重载体待定的旧表述；本文继续保留 Combine 内部实现的待确认项。
+2026-09-18：Dispatch 优化设计阶段收口，主规格已按 `4858ce6` 的实际实现校准。
+本文作为下一轮 Combine 设计入口；当前尚无 Server Dedup Combine 实现，不借用普通 Memory
+或 MoonEP Combine 的实现状态。C01–C14 保留历史编号，后续完善 C15–C24。
 
-Server 内逐 expert 返回、公共转发包、本卡/跨卡统一原子取号和密排 recvSlot/weight 成员表，均以主设计的新约定为准。
-专家数量沿用主设计的总数上限 1024，保持 `moeExpertNum=R*L` 均匀分配；不设独立的单卡专家数限制，允许 L=1，128P 下每卡最多 8 个 expert。
-R04-01 已确认 Dispatch 新增 assistEx/sourceMask/group 三个 metadata 输出，Combine 对应新增三个输入；独立权重输出见 R04-08，不引入 X。
-R04-07/R04-08 已确认权重输入输出分离：Dispatch 从只读 FP32 `[BS,K]` expertScales 取真实权重，将 DIRECT 真实值及 returnK=1.0 写入独立 expertScalesOut；Combine 的既有 expertScales 参数接收该输出。
-Source 按 sourceMask 只等待有效 k，统一乘 expertScales 后累加；mask 为 0 的位置不消费、无需清零，不新增 source/sourceWeight/partialMask 或权重快照 tensor。
-Relay 的第一跳 assistEx 与 group members 保留真实权重，relay 对本 Server 内第一跳及全部转发贡献加权求和；终端 expertOut 返回未加权结果。
-Dispatch 输出 expertScalesOut 保持到 Combine 消费完成；原始 expertScales 输入只读，可按调用生命周期复用。首版要求非空 FP32 权重输入，nullptr 直接报错。重复 Combine 规则归 R11-02。
-R08-03 已确认 Dispatch 支持 BF16/FP16 输入、非量化及 MXFP8 E4M3/E5M2，量化计算和 dynamicScalesOut 沿用 Memory；路由 weight 保持 FP32。
-该结论确定的是送给 expert 的 hidden/scale 格式，不自动将 expertOut 或 Combine 的 member/partial 返回设为 FP8；这些公共契约及内部数值分别在 R08-03 剩余部分和 C15/C16 讨论。
-安全用例保证每个 relay 的实际 group 数不超过 8*BS，不做超限校验、状态记录、报错或超限测试；X 记录及超限优化为 R04-06/R07-04 低优先级遗留。
-内部 AtomicAdd 分配 forwardTokenIdx 的逻辑保留，不要求发布计数。R04-03 已确认在有效 assistEx 行中识别 forwardCount>0 的第一跳，取 t 访问固定 stride 的 group[t]，firstHopRow 保存 dstPosition；内部筛选和分核后续在本文讨论。
-R04-02 已确认 ExpertOut/assistEx 保持 Dispatch 的有效行序，首版 `tokenNum=sendCounts[L*R-1]`；expert 内部若重排，须在 Combine 前还原，不增加 public row map。
-R04-04 沿用 Memory 的算子完成语义：所有核完成任务及 GM 写入后 Dispatch 才结束，后续 Combine 可读取完整 metadata 和 Dispatch 输出的 expertScalesOut，不另设发布协议、ready 或额外同步。
-上述转发和 group 归约仅服务于跨 Server 去重；源 Server 内逐 route DIRECT，Combine 直接回 source，R01 已确认关闭。
-R04-05/R07-02/R07-03 已确认统一中转结果区 `[8*BS,K,H]`，group 表预留 8*BS 行；全卡取号 `t`，本卡及其他卡返回共用 `recvSlot=uint64(t)*K+originalK`，不按来源卡分区。
-每组即使 n=1 也预留 K 槽，只监听 members[0:n] 指定的位置；第一跳从 firstHopRow 读取，空洞不使用、不等待。
-已有 assistEx 的 relayRank/t/k 足够返回寻址，无新编号或包字段；assistEx[tokenNum,8] 和 sourceMask[BS] 的 shape 保持不变。
-8*BS 是本 relay 合计 group 的安全容量上限，并非八卡拓扑自然保证的接收上限；单份区域 base/offset/非量化 stride 与预算已由 R07-01 收口，跨调用复用仍归 R11。
-已确认 Server Dedup 独占通信空间，按状态区（cnt/cumsum/counter）、数据接收区、中转 Token 区三块排布；不保留旧 Memory 区域位置。
-R07-01 已采用第二块内 source 返回在前、Dispatch 槽位在后的独立子区；member 使用第三块，当前非量化返回沿用 Memory DataAsFlag。Combine 内部实现不另改公共大区顺序。
-旧单 expert 示例不能代替当前多 route/group 契约；L=1 仍按同一协议处理，不沿用静态全 source/token 结果区或逐 Token credit。
+## Dispatch 交接基线
 
-接口复用清单见 [Dispatch 待确认文档](ep-memory-server-dedup-open-topics.md#同语义接口复核)：sendCounts 提供 tokenNum，sourceMask 提供 source 每 Token 的有效 k 和贡献数，group 的 n 给出转发返回数；这些数量不另增参数。
-量化 dynamicScalesOut 与 route weight 语义不同，旧 bool mask 与 uint32 sourceMask 也不同；普通 Memory 的全 K 等待逻辑必须适配 mask 有效范围，不能因参数复用就整段沿用。
+权威字段与容量见[主规格](ep-memory-server-dedup.md#dispatchcombine-公共接口与-metadata-shape)。
+以下是当前 Dispatch 已提供、Combine 必须消费的契约：
+
+| 输入 / 身份 | 已落地的 Dispatch 契约 |
+| --- | --- |
+| 有效行 | tokenNum=sendCountsOut[E−1]；expertOut 必须恢复成 Dispatch 的行序，与 assistEx 一一对应 |
+| assistEx | 32B/行：source、Token、k、真实 FP32 weight、角色/entry 数、relayRank/t |
+| 第一跳编号 | t=row，稀疏、仅在该 relay 本轮唯一；终端继承该 (relayRank,t)，不重新编号 |
+| group | Crows=R*BS*min(K,L) 行容量；firstHopRow=t；前 n 个 (recvSlot=t*K+originalK, FP32 weight) 有效 |
+| group 枚举 | 在有效 assistEx 中找 forwardCount>0 的第一跳；不扫描所有容量行，不需要 group 数 X |
+| sourceMask | 每 Token uint32；DIRECT 保留原始 k，group 只保留最小 k/returnK |
+| source 权重 | 独立 expertScalesOut[BS,K]：DIRECT 真实权重，returnK=1.0，mask 空洞不消费 |
+| Dispatch 量化 | BF16/FP16→原 dtype 或 MXFP8 E4M3/E5M2；不自动决定 expertOut 或 Combine 通信 dtype |
+| 完成边界 | Host 提交返回是异步的；Dispatch 完整 kernel 完成后 metadata 可消费，调用方持有到 Combine 结束 |
+
+原子的密排 t、8*BS 行 group 上限、核 63 清 counter、核末 SyncAll 均已退出当前 Dispatch。
+**旧 relay 通信区仍只预留 8*BS*K*returnStride，Dispatch 不访问它；不能直接承载当前稀疏 t。**
+沿用 recvSlot 契约的 Combine 至少要核算 Crows*K*memberStride，重新确认单窗总量、Host 布局及
+caller 分配。实际 group 数少不意味着最大 t 小，不能继续使用“group 数≤8*BS”的旧安全上限替代。
+
+已经约定的贡献关系：DIRECT 返回未加权结果，source 应用真实权重；终端返回未加权结果到 relay，
+relay 从第一跳 assistEx 和 group members 取得真实权重、汇总一次后返回 partial；source 对 partial
+乘 1.0。每条 expert 贡献恰好加权一次。第一跳从本地 firstHopRow 取值，其余本卡/跨卡成员共用
+(t,k) 返回寻址，只等待 member 列表中的槽，不等待空洞。归约顺序为第一跳后按原始 k 升序，
+source 按 mask 的 k 升序；两级括号不同，数值验收仍需 C15/C16 明确。
+
+下一轮优先顺序：**dtype/数值与返回容量 → 核职责和 H 分块 → UB/GM 所有权、等待及完成 → 验收**。
+多 stream、多个在途 plan、重复 Combine、失败重试及 Dispatch/Combine magic 配对未由当前 Dispatch
+单 stream 双窗实现自动解决。相应公共契约直接更新主规格，不再将历史 R 文档当作当前事实来源。
+本次只准备交接，不预先选择 Combine kernel 拆分、核数、返回 dtype 或新增窗口方案。
 
 ## 本轮迁入边界
 
-**状态：待后续 Combine 讨论，本轮只迁移问题，不选择内部实现。**
+**状态：下一轮 Combine 设计清单，尚未选择内部实现。**
 C01-C14 继续保留历史入口，迁入内容以 C15-C24 单独定位；原 R 编号保留映射，不因迁移变成已确认。
 
 | 原位置 | 本文位置 | 迁入范围 |
@@ -55,16 +57,18 @@ C01-C14 继续保留历史入口，迁入内容以 C15-C24 单独定位；原 R 
 | R12-02、R12-03/R12-04 的 Combine 部分 | [C23](#c23) | Combine-only、联合数值验证及 Combine/端到端性能验收 |
 | R06-04、R07-01、R11 的内部部分 | [C24](#c24) | Combine Flag 清理、内部 scratch 和资源复用实现 |
 
-R04 的 Dispatch 持久输出与 expertScales 复用、R07 的 recvSlot/公共区域容量、R08 的 weight/接口 dtype、
-R10 的 ABI 和 R11 的对外生命周期仍在主待确认文档维护。内部实现必须消费这些公共契约；
-返回 payload/stride 等跨模块格式发生变化时，应回到对应公共项共同确认，不能仅在本文件修改。
+Dispatch 持久输出、expertScales 复用、recvSlot、公共区域容量、ABI 和对外生命周期以主规格为准；
+R04/R07/R08/R10/R11 仅保留历史来源。Combine 的返回 payload/stride、dtype 或跨调用协议一旦明确，
+同时更新主规格的公共契约与本文内部设计，不能只修改一侧。
 
 ## C15
 
 **议题：Combine 内部 dtype 与量化。来源：R08-03 的内部部分。**
 
 需要明确 expert 输入转为乘法 dtype、group 累加、partial 通信、source 累加和最终输出的各次 cast/量化及 scale 生命周期。
-当前非量化公共返回跨度已由 R07-01 按 Memory 收口；Dispatch 的 BF16/FP16 非量化与 MXFP8 输出格式也已确认。expertOut 及 Combine 各段返回的公共格式仍归 R08-03/R10-03，本项只讨论内部如何实现这些约定。
+当前布局函数中的非量化 returnStride 是历史预留，不是已完成的 Combine 返回格式。
+Dispatch 的 BF16/FP16 非量化与 MXFP8 输出已实现；expertOut、member、partial 和最终输出的
+公共 dtype/stride 与本项内部计算一起明确，并回写主规格，再重新核算完整返回区容量。
 不能因普通 Memory 有某种格式的源码，就认为两级去重归约已适配或通过验证。
 
 ## C16
@@ -122,7 +126,7 @@ Owner 按 group、source Token、H tile 或 batch 分配？H 尾部与有效行�
 Expert 发送、partial 发布、source 输出各何时完成，全部对外责任何时结束？
 某卡 `tokenNum=0` 时仍可能需要接收本卡 BS 个输入的结果；source yOut 完成时也可能仍有对外发送在途。
 关闭时给出每类发送/监听/归约任务的终止条件与安全输入范围内的退出路径。
-对外 event/plan 释放契约归 R11，本项给出满足该契约的内部机制，不添加 X 超限处理。
+对外 event/plan 释放契约须在主规格完善（历史来源 R11），本项给出对应内部机制，不据此新增 X。
 
 ## C23
 
@@ -132,9 +136,9 @@ Expert 发送、partial 发布、source 输出各何时完成，全部对外责�
 - **C23-02：** 如何验证第一跳与全部本卡/跨卡返回恰好一次、仅消费前 n 个 member、交错原始 k 的固定顺序，以及 source 按 mask 统一加权（DIRECT 真实权重、partial 乘 1.0）？需覆盖第一跳/成员保持真实输入权重、独立 expertScalesOut 保存 source 归约权重、mask 空洞不等待且不消费、真实 DIRECT weight 为 0/1 的正常贡献；误差按 C16 落实。
 - **C23-03：** 哪些规模、路由和偏斜属于 Combine/端到端性能目标，允许多大退化，如何与普通 Memory 保持相同输入和数值契约？
 
-安全矩阵保留实际 group 数为 0/BS/8*BS-1/8*BS、group 数不超过 8*BS 且转发结果条数 Y>8*BS、仅本卡转发、不同 source 同 TokenId、`tokenNum=0`、零 group、慢成员和连续轮次；不要求 X 字段或输出断言。
+安全矩阵覆盖零 group、稀疏 group、t>=8*BS、高 row、group 有效数与最大 t 明显不同、仅本卡转发、不同 source 同 TokenId、`tokenNum=0`、慢成员和连续轮次；可寻址上界按 Crows 和实际可达路由构造，不要求 X 字段。
 同时覆盖 group 数大于旧 BS 上限、n=1 仅监听一个返回、本卡/跨卡混合及原始 k 有空洞；可达边界按所选 Rank 数和路由构造，K=1 时无 group。
-不加入重复 top-k、invalid expert、mask 或中转容量超限的非法用例；BS=0 仅在 R10 接纳后才能加入。
+合法数据面用例保持不重复 top-k 和有效 expert/mask；容量校验及错误处理需按新的 Combine Host 契约单独设计。当前 BS>0，不将 BS=0 当作已支持。
 
 性能需统计真实通信字节，包括 expert 返回、加权 partial、Flag、scale、对齐、持久 metadata 和监听/归约成本。
 例如两份 FP16/BF16 结果合成一份 FP32 partial，hidden 字节未必减少，不能仅以 Token 数证明收益。
@@ -150,13 +154,15 @@ Expert 发送、partial 发布、source 输出各何时完成，全部对外责�
 WaitFlag 会阻塞目标流水，ReleaseEventID 只释放 ID；不得将任一操作当作非阻塞完成查询。查询是回收发送 UB/Event 的一种候选，并非已确认的必选接口。该证据供后续实现使用，不在本轮选定以下 Combine 内部方案。
 
 - **C24-01：** member/partial/source 结果的消费 owner 何时清理 Flag，使用哪些 Event/PIPE 顺序，如何保持清零 UB 到完成？公共责任域仍按 R06-04。
-- **C24-02：** 累加器、发送/接收 UB、GM scratch 如何分配和复用，生命周期是否允许重叠？确定后将通信区容量需求交给 R07，不能在此修改 Dispatch recvSlot 编码。
-- **C24-03：** 新 invocation 与旧在途发送/远端消费如何隔离，内部机制如何满足 R11 的完成和公共窗口复用契约？
+- **C24-02：** 累加器、发送/接收 UB、GM scratch 如何分配和复用，生命周期是否允许重叠？确定后回写主规格的通信区预算，不能在此单方面修改 Dispatch recvSlot 编码。
+- **C24-03：** 新 invocation 与旧在途发送/远端消费如何隔离，内部机制如何满足主规格中待完善的完成和公共窗口复用契约（历史来源 R11）？
 
 Magic 选取 ping-pong 窗口不等于旧 Payload Flag 自动失效；必须结合正确清理、调用次序和资源完成条件。
-X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增加超限校验、状态、报错或降级。
+X 和尽力转发不是当前实现；本项须与新的可寻址容量及 Host 校验契约一致，不继承旧 8*BS 预算的免校验结论。
 
 ## 编号映射
+
+下表为历史编号索引，条目状态按当前主规格和本文交接基线解释。
 
 | 原编号 | 原议题 | 归并状态 | 当前讨论位置 |
 | --- | --- | --- | --- |
@@ -168,7 +174,7 @@ X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增�
 | [C06](#c06) | 两段回传格式与 Ready | 公共 stride/地址由 R07/R08 约定；内部发布和清理待确认 | [C15](#c15)、[C21](#c21)、[C24](#c24)、[R07](ep-memory-server-dedup-open-topics.md#r07) |
 | [C07](#c07) | Combine 分核与调度 | 内部安排已迁回本文待讨论 | [C17](#c17) |
 | [C08](#c08) | H 分块、累加驻留与慢成员 | 内部 H tile、累加器与进度状态待确认 | [C18](#c18)、[C19](#c19)、[C20](#c20) |
-| [C09](#c09) | Workspace 容量、Slot 复用与流控 | 统一原子编号、8*BS 个 group 的共享容量及 t*K+k 槽位已确认，无超限校验；单份区域预算已收口，跨轮复用待确认，X 记录及超限优化低优先级遗留 | [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11) |
+| [C09](#c09) | Workspace 容量、Slot 复用与流控 | 历史原子编号和 8*BS 容量已被 t=row/Crows 契约替代；t*K+k 编码保留，返回区扩容和跨轮复用待完善 | [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11) |
 | [C10](#c10) | Plan 代际、执行轮次与并发生命周期 | Plan 与 Combine epoch 的绑定、重复/并发调用和窗口复用待确认 | [R11](ep-memory-server-dedup-open-topics.md#r11) |
 | [C11](#c11) | 去重入口与跨 Rank 契约 | 三个新增输入、有效行序及复用 expertScales 已确认；同语义 Memory 参数优先沿用，无 X 输入或超限校验，具体声明/方向注释和支持矩阵待确认 | [R04](ep-memory-server-dedup-open-topics.md#r04)、[R10](ep-memory-server-dedup-open-topics.md#r10) |
 | [C12](#c12) | 完成边界、错误传播与退出 | 对外完成由 R11 约定，内部完整责任结束待确认；X 超限继续延后 | [C22](#c22)、[C24](#c24)、[R11](ep-memory-server-dedup-open-topics.md#r11) |
@@ -211,7 +217,7 @@ X 超限及尽力转发仅保留为 R07-04 的低优先级备忘，本项不增�
 
 ## C09
 
-**Workspace 容量、Slot 复用与流控。** 统一原子编号、8*BS 个 group 的共享容量及 t*K+k 槽位已确认，无超限校验；单份区域预算已收口，跨轮复用待确认，X 记录及超限优化低优先级遗留。后续见 [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11)。
+**Workspace 容量、Slot 复用与流控。** 历史原子编号和 8*BS 容量已被 t=row/Crows 契约替代；t*K+k 编码保留，返回区扩容和跨轮复用待完善。后续见 [R06](ep-memory-server-dedup-open-topics.md#r06)、[R07](ep-memory-server-dedup-open-topics.md#r07)、[R11](ep-memory-server-dedup-open-topics.md#r11)。
 
 ## C10
 

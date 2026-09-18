@@ -1,10 +1,22 @@
-# Server Dedup 接收优化方案
+# Server Dedup 接收优化记录
 
-状态：**B 预取已扩至全部可用槽位（最多 8，见第 10 节）；Probe 空扫描打点已合并（见第 14 节），第 9 节 metadata Scalar 压缩已实现；A 的二维 Sum 已实现，向量 ready 比较及 C 尚未实现**。原深度 2 实现基于 `7ec8ab1`，metadata 压缩基于 `0a99364`。
-固定考虑 A5 / Ascend 950、CANN 9.1、64 核，沿用 48 个发送核和 16 个接收核。第 1 节保留优化前的证据，第 2 节区分已实现归约和后续向量比较，第 4 节为后续方案。
+状态（2026-09-18）：**Dispatch 优化设计阶段收口，当前实现以[主规格](ep-memory-server-dedup.md)为准。**
+本文保留优化过程和未实施候选，不再作为待执行计划。第 15 节的剩余 ≤5 双 Probe 设计暂缓，
+不能用它覆盖当前 pending/退出/UB 契约。接下来的设计工作转入 [Combine](ep-memory-server-dedup-combine-open-topics.md)。
 
-当前已实施「最多 8 槽的 payload 预取」、Probe 等待区间合并及 metadata 重复读取/计算压缩；Probe 已改为每批一次二维 Sum，保留 Scalar ready 比较；Compares 和 probe 双缓冲留作后续优化。
-目标是减少逐 Token 的归约调用、Scalar 判定和立即等待，让不同包的 MTE2、Scalar 和 MTE3 工作重叠，同时保持现有包格式、输出身份和完成条件。
+当前实现摘要：
+
+- 默认编译期 32/32 分核，Count 阈值 512；旧章节的 48/16、阈值 48/128 属于当时构建。
+- Probe 每批至多 16 包，一次二维 Sum，Scalar 拼 ready 位图；只有一个 Probe 批，消费完后再扫描。
+- ready 不立即移出 pending；完成该 token 全部本地/转发下发后末项替换删除，tokenPos 保持稳定。
+- MTE2/MTE3 共用按剩余 UB 计算的 1..8 槽 wire/assist/group 环，预取深度用满已分配 lane。
+- 第一跳用 t=row，无 AtomicAdd、counter 清零和核末 SyncAll；核末 lane 回收、Flag 清理和本核 PIPE_ALL 保留。
+- 打点为合并空扫描的 probe 与逐 token 的 recv_token；load/metadata/output/relay 子区间已停止生成。
+  recv_token 包围 ConsumeLoaded，不含提前预取下发；Publish 不再执行显式 cache clean/invalidate。
+- Vector ready bitmap、双 Probe、ready 后认领删除、metadata 地址缓存均未实现；不新增整包输入/输出双池。
+
+以下第 1～14 节是历史方案、实验和交付证据，第 15 节是暂缓候选；其中“当前/下一步”均指章节日期，
+不代表 2026-09-18 的默认行为。保留历史 CANN/Host 记录，但不据此宣称当前版本的设备性能已验收。
 
 ## 1. 现状和证据边界
 
@@ -144,8 +156,7 @@ N = min(8, floor((190*1024 - fixedBytes) / laneBytes))
 D = N
 ```
 
-kernel 的资源计算须保证 `fixedBytes < 190*1024` 且至少容纳一个 lane，再做无符号减法和除法，不能依赖无符号下溢后的结果。
-若新预算使边界内的 case 无一路可用，必须在 kernel 验证中判为实现失败并修复；不能以 `N=0` 继续执行、静默跳过任务，或交给 Host 拦截该 case。
+2026-09-17 用户明确：输入保证不超限，扣除固定开销后至少容纳一个 lane；kernel 直接按剩余 UB 计算 N，不新增容量校验、拒绝分支或兜底。N=1 是正常支持的配置。新增 Probe 存储仍须准确计入 fixedBytes，开发阶段核对布局与物理访问边界不等于新增运行时校验。
 不增加按 Token 总数增长的队列，不使用大栈数组，也不为每 lane 复制 Sum scratch。GM 容量充足无法代替 Vector 必需的 UB 工作空间。
 
 ## 3. 增量 B：最多 8 槽的跨包输入预取
@@ -218,7 +229,9 @@ metadata 仍由该核 Scalar 顺序执行，AtomicAdd 竞争和多目的 relay �
 
 用户反馈移除 AtomicAdd 的实验中 load_wait 仍明显暴露，因此将 D 从 min(2,N) 提升到 N。复用已分配槽位，不增加 UB、描述符队列或核角色。性能对比同时观察 load_wait 和整个接收阶段耗时；槽位回压或 MTE2 带宽限制仍需实机区分。
 
-## 4. 第三阶段（可选）：probe 与包处理重叠
+## 4. 历史候选：冻结相邻双批的 probe 重叠
+
+本节保留早期 H/L 成对冻结方案作为取舍依据。2026-09-17 的目标改为第 15.4 节的低水位触发与 ready 认领；不实施本节的紧邻双批扫描，也不将其位置不变证明套用于任意滚动扫描。
 
 前两阶段完成后，若 probe 仍占主要开销，再考虑两组 Flag、snapshot、sums、mask 及独立事件。
 两组 scratch 只有在可能同时在用时才需要复制；复用必须证明前次 Vector 访问结束。全部资源重新计入 fixedBytes，避免减少 N 后反而退化。
@@ -405,3 +418,196 @@ blue 使用真实 CANN 9.1.0、Bisheng/Clang 15.0.5（2026-05-18，clang-5c68a1c
 源码摘要、配置、编译器及日志保留于 `build/probe-profile-verification/`；
 blue 隔离目录为 `/home/d00520898/tilexr-probe-profile-20260916.wpCBu2/`。
 未运行 NPU，未验证异步设备时序或 330us/45us case 的优化幅度。
+
+## 15. 非 atomic 接收流水的三阶段候选（2026-09-17；2026-09-18 暂缓）
+
+### 15.1 基线与本次澄清
+
+基于 `codex/SilentEmotion` 的 `47563bd`，仅修改设计，没有修改 kernel。用户进一步明确：lane 数由剩余 UB 动态计算，输入保证至少一个 lane，不需要 kernel 内新增容量检查。
+
+当前 [接收端](../../src/ep/kernels/tilexr_ep_server_dedup_recv.h) 已实现一批最多 16 项的一次二维 Sum、非 atomic 的 `t=row`、最多 N 包预取，以及 **MTE2 和 MTE3 共用同一组 N 个物理槽的环形协议**。当前主要批间串接是“取得 ready → 完成本批全部下发 → 再 Probe”，不能将其描述为尚无多槽搬运流水。
+
+上一版提出两套独立输入/输出池、中间增加 Vector UB→UB 复制。这是另一种架构，会增加完整包副本和 Vector 工作；用户描述的 MTE2/MTE3 轮转并不需要它。本版撤下该默认方案，也撤下固定 I/O 配比、强制至少两个 lane 及大包分块/兼容路径的待定项。阶段二保留现有环，聚焦 Scalar metadata 和已到达包的下发组织；若没有新的瓶颈证据，不为这一阶段强行增加数据搬运。
+
+| 槽位协议 | 发送端输出包环 | 当前接收端 payload 环 |
+| --- | --- | --- |
+| 生产者 | Vector 封包写入 | MTE2 搬入完整 wire |
+| 消费者 | MTE3 发送 | MTE3 本地输出及全部 relay |
+| 数据可读 | `V_MTE3` | `MTE2_MTE3`，另有 Scalar metadata 的 `S_MTE3` |
+| 下轮可覆盖 | `MTE3_V` | `MTE3_MTE2` |
+| 槽号 | `packets % N` | 加载 `issued % N`，消费 `consumed % N`，相同 FIFO 顺序 |
+
+参考 [SendPacket](../../src/ep/kernels/tilexr_ep_server_dedup_send.h)。两者在环形槽所有权上确实可以对应为“Vector 换成 MTE2”；接收端还必须保留 Scalar 读取包尾、生成 assist/group、修改转发 header 的依赖，不能只替换事件名称就省略这部分工作。
+
+### 15.2 阶段一：Probe reduction/ready 判定与非 atomic metadata
+
+**Probe：保留已落地的二维 Sum，压缩 Scalar ready 判定。** 沿用第 2.1 节完整 Flag 归约和显式 scratch；按第 2.2 节候选方案增加 32B readyBits，使用向量比较、一次 Scalar 位图读取替换最多 16 次 Scalar sum 比较。保留 Sum→比较依赖及有效位屏蔽。本阶段仍同步返回 ready，不同时引入双 Probe；向量比较是否更快需要实机 A/B。
+
+**Metadata：先减少重复 header 读取、地址换算和分支，不新增地址数组。**
+
+- 保留 `t=row=tasks.Begin()+j` 和稀疏 group 表。复用本包的原始 role、entry 数、source/relay 引用等少量 Scalar 值；DIRECT 不承担 terminal 的专家查找，terminal 才计算本地 expert、搜索 route。
+- group 的 `t*K` 循环外计算；每次访问一个 entry 时复用其视图。tail 整体可能跨 Flag，仍逐 entry 做逻辑→wire 地址换算。保持原始正 role 与转发 header 的 -1 区别，以及 weight 的精确位模式。
+- 当前已有上述部分优化，需按现有 helper 核对尚余重复工作，不能把旧版已完成事项再次当作新收益。
+
+**上一版“metadata 地址缓存”的具体含义与取舍：**
+
+当前 wire 的 tail 已保存 route 信息：每个 entry 是 16B，含 expert、q、原始 k 和 weight。group helper 遍历 entry 读取 k/weight；后续 relay 循环再次取得 entry，读取 expert/q，计算目标 rank 和完整 GM 目的地址，随即下发 DataCopy。地址是临时 Scalar 计算结果，**没有独立的目的地址数组；每个 relay 的最终 GM 地址本来就只计算一次**。
+
+上一版建议把 relay 地址计算提前到 group 遍历中，保存最多 `K-1` 个 64 位 GM 目的地址，稍后下发时读取缓存。它主要减少第二次 entry 地址定位/循环，不是消除原本不存在的多次 GM 地址计算。额外 UB 用来保存这些派生地址，而不是 token payload 或已有 assist/group；仅地址本身占 `8*(K-1)` 字节，再按实际分配对齐。上一版的 `D=align32(32+8*(K-1))` 还包含未定稿的 32B 控制描述符，K=6 时 D=96B/槽。
+
+本版将其降为可选实验，默认不增加 D、不建立 per-lane 地址表，继续在 relay 下发时从原 tail 计算目的地址。只有实测表明二次遍历确为瓶颈且缓存收益超过 UB 读写/减少 lane 的代价，再单独讨论。少量 Scalar 公共值复用不等于新增持久 UB 数组；编译后的寄存器/溢出情况仍需核对。
+
+### 15.3 阶段二：沿用动态 N 槽的 MTE2/MTE3 流水
+
+**当前就是用户描述的同一物理环。** 每个槽含 wire、32B assist staging 和 G 字节 group staging，槽大小 `L=T+32+G`，T 为 tokenStride。加载和消费分别按 `0,1,...,N-1,0,...` 轮转：
+
+```text
+槽 i 的一轮：
+等上轮 MTE3 释放 → MTE2 搬入 wire → Scalar 解析/修改 metadata
+              → MTE3 本地输出 + 全部 relay → 发布槽 i 释放事件
+```
+
+`IssueLoad` 在同一 lane 的 `MTE3_MTE2` 上等待，再提交输入 DataCopy，并发布 `MTE2_MTE3` 和 `MTE2_S`。`ConsumeLoaded` 先等 `MTE2_S`，完成 metadata 后建立 `S_MTE3`；MTE3 等 `MTE2_MTE3`，依次读取 wire/meta/group 完成本地输出与 relay。所有下发结束后提交 `SetFlag<MTE3_MTE2>(lane)`，由 MTE3 按序执行到这里才释放槽，不能把 Scalar 已提交 SetFlag 理解为搬运已经结束。
+
+初始化为每槽提供一次可写 credit；绕回槽 0 时只等待槽 0 的上轮 MTE3，不需要全环 drain。同一槽尚未读完时不覆盖，不同槽允许 MTE2 加载后续包与 MTE3 输出前包重叠。多目的 relay 必须全部被释放事件覆盖，不能在本地输出完成后提前释放。
+
+| 依赖 | 作用 |
+| --- | --- |
+| `MTE3_MTE2(lane)` | 保护 wire/meta/group 整槽生命周期，MTE2 再写前消费 |
+| `MTE2_S(lane)` | Scalar 读 tail 前确认本次输入完成；也使新 metadata 写入晚于上轮槽释放 |
+| `MTE2_MTE3(lane)` | MTE3 读取本次 wire 前确认输入完成 |
+| `S_MTE3` | MTE3 读取 Scalar 修改的 header/assist/group 前建立可见性 |
+
+当前预取深度已经等于 N。跨 Probe 批次的 issued/consumed 序号连续，不在每批从槽 0 重新初始化。issued-consumed 计数表示已提交加载但尚未完成消费下发的包数；实际 MTE3 是否完成由事件保护。
+
+本阶段保留这些语义，结合阶段一压缩 metadata；仅在 trace/编译证据支持时调整加载补位与消费的 Scalar 调度。不能把正常槽复用等待当作应删除的同步，也不能先给尚未提交输出的槽排入 MTE2 等待，制造依赖环。N=1 正常顺序运行，N>1 利用多个槽；不强制固定槽数，不复制完整 payload 到第二套池。
+
+### 15.4 阶段三：剩余 ≤5 时启动下一次 Probe
+
+**两个 bank 交替，不做两次紧邻预扫。** 每个 Probe bank 独立持有 flags、sums、scratch、readyBits、snapshot 和完成事件。首版连 scratch 也分开，先使所有权明确；共享 scratch 的省空间方案以后再证明。两个 bank 仍共享该核的 MTE2/Vector，不能解释为两个探测引擎。
+
+拆成两个逻辑接口：
+
+- `StartProbe(bank, scan, count)`：保存稳定 j 快照，提交 Flag 的 MTE2 读取、MTE2→Vector 依赖、Sum、ready 比较和 `V_S` 发布；**不在这里等待 Scalar 结果**。
+- `FinishProbe(bank)`：在需要该批时才消费 `V_S`，读有效 readyBits，并将 ready 项认领为待处理任务。输入/输出搬运期间不做“检查 Probe 是否完成”的 Scalar 忙轮询。
+
+`R` 定义为**当前 ready 批次中，本地输出和全部 relay 尚未完成指令下发的 Token 数**。已经预取的 Token 仍计入 R；R 不是 Probe 检查的 count、全核 pending 数或 MTE3 未完成数。一个 first-hop 的最后一个 relay 提交后才令 R 减一。
+
+触发条件为 `0<R<=5 && nextBank 空闲 && pending 非空`。每个当前批次至多提前启动一次；R 从 6 降到 5 的边界立即检查，位于下一次 payload 补位之前。初始 R 为 1～5 时，在该批 payload 预取前检查一次；R 为 0 时没有搬运可掩盖，直接进入扫描/获取下一批的路径。
+
+```text
+时间向右，示意 Scalar 调度及可异步执行的区间（非实测比例）：
+
+P0: Start → Finish/认领 16 项
+搬运 P0: [下发前 11 项] | [继续下发最后 5 项] | R=0
+P1:                     Start -------------- Finish/认领
+搬运 P1:                                         [处理到 R<=5] ...
+P0:                                                           Start ...
+```
+
+启动 P1 不等待 P0 的 MTE3 drain；P0 的 payload 槽可以继续由 MTE3 写出。P1 的 Flag DMA/归约是否能在最后五包期间执行，取决于已经排队的 MTE2、Vector 工作以及输出回压。调度只能先于**后续**补位插入 Probe，不能越过此前已提交的等待指令；尤其 MTE2 若已阻塞在某槽的 `MTE3_MTE2`，P1 的 Flag 读取也会排在其后。阈值 5 是首版策略，不是保证完全掩盖的时间预算。
+
+**pending / ready 所有权调整——推荐方案，实施前需确认。**
+
+现有 `RemovePending(p)` 要求所有输出已经下发，且依靠同一快照内降序删除。任意提前扫描下一批后继续按旧规则删除，会使其 p 快照失效；第 4 节的固定 H/L 双批方案只能在冻结范围内解决此问题。
+
+建议把 pending 改成“尚未被 ready 队列认领”的集合：
+
+1. `FinishProbe` 先取得 ready mask，将 ready 的稳定 j 保留在该 bank 的 snapshot/ready 队列；随后按原 p 降序从 pending 移除这些 ready 项。未 ready 项仍在 pending。
+2. 认领后只用稳定 j 做 payload 加载、`row=Begin()+j`、metadata 和输出。处理当前批时不再改 pending，也不再按旧 p 删除。
+3. 在 R≤5 处从剩余 pending 启动下一 Probe。当前批的 j 已不在 pending，不会重复探测/加载；下一 Probe 从 Start 到 Finish 期间 pending 保持不变，位置快照有效。
+4. 当前批 R=0 后才 Finish 下一 Probe；新 ready 再按降序认领。发生认领后重扫原 scan 位置，检查 swap-remove 换入的任务；ready=0 才前进 count，尾部回绕。
+
+例如 pending 原为 `[A,B,C,D,E,F]`，Probe 发现 B、D 到达。先在当前 bank 中保存这两个任务的稳定 ID，再按位置降序删除 D、B：
+
+```text
+pending: [A,B,C,D,E,F] → [A,B,C,F,E] → [A,E,C,F]
+当前 ready: D、B（沿用原位置降序处理）
+```
+
+此时 D、B 只是从“以后需要继续扫描的列表”转到“已经确认到达、等待搬运的列表”，其 GM 数据、tokenPos 和输出 row 均未删除/改变。下一 Probe 只扫描 `[A,E,C,F]`；处理 D、B 不再修改这张表，因此下一 Probe 的位置快照稳定。“移出 pending”绝不表示已经搬完，也不释放对应 payload lane。ready 集合可以直接用 bank 的 snapshot 加 mask/游标表示，不必另建队列数组。
+
+此方案只需两份最多 16 项的有界快照/位图，不需要按任务数增加 inverse-position 表或在每次删除时修复另一批快照。`RemovePending` 的接口注释和测试必须同步改成认领语义，宜使用明确的 `ClaimReady` 职责名，不能只在原消费循环外提前调用旧函数。
+
+关键不变量为：`任务总数 = pending数 + 已认领但未完成下发数 + 已完成全部下发数`，每个稳定 j 恰好属于一类；in-flight MTE3 是最后一类任务的物理状态，不能重复计入。`tokenPos` 的清理所有权仍覆盖最初 `Count()` 的所有槽，不能按缩短后的 pending 清理。
+
+**边界和收尾。**
+
+| 场景 | 行为 |
+| --- | --- |
+| 当前批 ready 为 16/6 | 分别完成 11/1 个 Token 的全部下发后触发一次下一 Probe |
+| 当前批 ready 为 5/1 | 认领后即满足条件，可提前启动一次；可掩盖的工作自然较少 |
+| 下一次 Probe 返回 0 | 消费完当前批后获取该空结果，推进 scan；此时没有 payload 可处理，恢复扫描直到出现 ready，不忙扫同一位置 |
+| pending 已空但 R>0 | 继续完成当前批，不启动零长度 Probe，不提前退出 |
+| R=0 且下一 Probe 已在途 | Finish 一次，不能重新 Start 或覆盖其 bank |
+| 最后一批全 ready | 即便认领令 pending=0，也必须消费全部 ready、完成payload 环 drain，随后按原协议清理 Flag |
+| 未就绪项在扫描之后到达 | 保留 pending 并在后续扫描覆盖，禁止以旧的 not-ready 结果永久跳过 |
+
+总循环只有在 pending 空、没有已认领未下发 Token、没有未 Finish 的 Probe 时才退出调度；再完成payload 槽事件回收与最终同步。bank 只有在其 Vector 完成、mask 已读取且该批 j/ready 游标用完后才能重新使用。
+
+### 15.5 动态 lane 数与资源计账
+
+用户已明确输入保证至少容纳一个 lane；**沿用这一前提，不添加 kernel 内容量校验、Host 拒绝或兜底路径**。N 由实际剩余 UB 计算、当前最多 8 个，N=1 是正常配置。开发时准确计入新增 Probe 存储与对齐量，不把剩余空间误算成仍有旧版数量的槽。
+
+令 `a32(x)` 表示按 32 对齐：
+
+```text
+F = a32(E*4) + 2*a32(tasks.Count()*4)
+P = (16*B*32+256) + 512 + (16*a32(ceil(B/8))*4+256) + 64 + 32
+L = T + 32 + G
+fixedBytes = F + banks*P + S
+N = min(8, floor((190*1024 - fixedBytes)/L))
+```
+
+P 包括一份 Flag 矩阵、Sum 结果、scratch、snapshot 和新增候选 readyBits；scratch 的 a32 按 float 元素数对齐，其余按字节。当前源码尚无 readyBits，因此当前单 Probe 使用 `P-32`；阶段一/二如使用 Compares 则 banks=1、每 bank 使用完整 P，阶段三 banks=2。S 为其他实际新增固定存储；默认没有 metadata 地址缓存 D，也没有独立 I/O 双池。ready 队列复用 bank 快照。
+
+以 P64/E384/BS96/H7168/K6、48/16 核、本核 36 个任务为算例（非生产运行时 lane 采样），F=1856B、G=64B：
+
+| 包类型 | B / T | 当前 fixedBytes | 当前 N | 双 Probe fixedBytes（S=0） | 双 Probe N |
+| --- | --- | --- | --- | --- | --- |
+| MXFP8 | 16 / 8192B | 13184B | 8 | 24576B | 8 |
+| 非量化 BF16 | 31 / 15872B | 20864B | 8 | 39936B | 8 |
+
+这说明原文 4 输入+8 输出超预算的问题来自新增的双池方案，不能用来说明当前共享环缺少容量。实际 N 仍取决于每核任务表与具体 shape，不能把算例的 8 当作所有输入的常数。
+
+事件按类型和生命周期分配。payload 环继续使用各 lane 的 `MTE2_MTE3`、`MTE2_S`、`MTE3_MTE2`；两个 Probe 使用各自 `MTE2_V`、`V_S`，与 payload 事件类型不同。不能沿用上一版“双池输入与 Probe 共占 MTE2_V，因而 I+2 受限”的推导。初始化/清理的临时事件仍需与在途事件避让，同一类型的同一 ID 再次 Set 前先消费上轮 Wait；具体映射在目标 CANN/A5 编译实现中核对。
+
+### 15.6 实施范围与验证顺序
+
+| 阶段 | 修改范围 | 前置条件与产出 | 必须取得的证据 |
+| --- | --- | --- | --- |
+| 一 | recv 的 Probe；receive_packet 的 metadata helper；相关替身 | 维持当前同步 Probe/共享 lane；产出 ready mask 与非 atomic metadata 契约 | 稀疏 ready、count=1..16、跨 Flag 长 tail、K=1/32、精确 weight bits、两种量化格式与非量化；目标 CANN 编译及 A/B |
+| 二 | recv 的 payload 环调度；packet helper 的 Scalar 工作 | 保留当前动态 N 与事件协议；阶段一结果作为基线，无收益证据不强行改动 | N=1/2/3/8、延迟 MTE3、多目的 relay、同槽覆盖保护、预取深度 N、跨批环绕及不足 N 的尾批 |
+| 三 | recv 的 Start/FinishProbe；receive_tasks 的认领语义；profile/trace reader 如需新事件 | 在共享 payload 环上采用双 bank 与 R≤5；产出扫描/认领/终止状态机 | 16/6/5/1/0 ready、P1 全空/部分/全 ready、swap-remove 换入项、pending 提前为空、反复回绕及每个 j 恰好处理一次 |
+
+将阶段三的认领/调度覆盖加入现有行为替身测试，不用源代码文本匹配验证。负向用例应能发现复用旧 p、重复认领、pending 空即退出、槽覆盖早于 tail 最后读取、槽回收早于最后一个 relay 等故障；CPU 替身只能证明逻辑/受模拟的依赖，不能代替真实引擎时序。
+
+后续实施时按 [验证指南](../EP_VALIDATION_GUIDE.md) 初始化现有 Host 测试工程，再聚焦运行：
+
+```bash
+cmake -S tests/ep -B build/server-dedup-host
+cmake --build build/server-dedup-host --target test_tilexr_ep_server_dedup_receive_packet test_tilexr_ep_server_dedup_receive_profile -j8
+ctest --test-dir build/server-dedup-host --output-on-failure -R '^test_tilexr_ep_server_dedup_receive_(packet|profile)$'
+```
+
+真实 CANN 9.1/A5 分别编译 profiling OFF/ON，保留源码/二进制来源和编译日志。设备验证从单轮正确性到多轮复用，覆盖用户已暴露问题的 `BS96/H7168/K6/E384/P64/quant_mode=4/fp8_format=e4m3` 及非量化对照；用同一输入、核划分、Flag 协议、打点配置分别比较基线、一、二、三阶段。本文尚未执行这些实现验收。
+
+性能验证同时关注 recv 总耗时、完整 Dispatch、剩余 load_wait、payload 槽回压、Probe 的暴露等待以及实际引擎重叠。模式 1 沿用最后 `min(50,N)` 个有效测量轮次：每 server 对其全部卡×保留轮次先平均，再报 server 代表值的 min/max/mean；N 不包含 warmup。breakdown 用于解释流水，不能将其带打点耗时与无同等打点的 performance 数字直接相减归因。
+
+当前 Probe 等待打点已经按第 14 节合并：从首次扫描前 Begin，到发现非空 ready 后 End，所有空重试都位于同一区间，不产生逐次记录；当前 payload 消费在这个区间之后。这里不再安排一次“合并 Probe”等价改造。
+
+双 Probe 后，Start→Finish 是包含 payload 处理的生命周期，不能继续称作独占 Probe 成本并与 metadata/output/relay 相加。建议分别展示 **Probe 在途区间** 与 **当前 ready 耗尽后获取下一 ready 的暴露等待**；前者允许重叠，后者合并空扫描直到成功。必要时给 trace 增加新 ID，保留历史映射，不改变旧 ID 的含义。不恢复每次空扫描多对事件；最终指标及界面名称在第 15.7 节确认。
+
+维护要点：双缓冲改造同时改变资源生命周期和任务所有权。稳定 j 解决身份问题，但不会自动保证可变 p 快照有效；提前认领必须连同退出条件一起修改。共享环的 MTE3→MTE2 槽复用依赖本来就是正确的保护；增加 Probe 并行时应保持它，不能把提前认领与提前释放物理槽混为一谈。验证必须同时覆盖逻辑队列、字节预算、事件资源和实机异步时序。
+
+### 15.7 已明确项与剩余讨论
+
+已明确：基于非 atomic 的 t=row；沿用 MTE2/MTE3 共用 payload 环；N 按剩余 UB 动态计算、当前最多 8，输入保证至少 1，不新增内部容量检查；当前 Probe 空扫描打点已经合并。上一版的固定 I/O 配比、强制双池、强制新增地址缓存均不作为默认方案。
+
+| 剩余讨论 | 建议 | 需要确认的含义 |
+| --- | --- | --- |
+| pending 是否改为未认领集合 | 检测 ready 后保存稳定 j，并降序移出 pending | 只是转入当前 ready 集合，不是宣告搬运完成；调整 RemovePending 契约与退出条件，例子见第 15.4 节 |
+| metadata 地址表是否值得实验 | 默认不加，只压缩少量 Scalar 公共值和重复解码 | 原 tail 已保存 route，relay GM 地址本来只计算一次；若测得重复遍历有明显成本，再讨论 UB 地址表 |
+| 双 Probe 后 trace 如何命名 | 生命周期与暴露等待分别显示，保留已合并空扫描 | 当前合并无需重做；新生命周期会和 payload 重叠，不能继续按串行区间相加，需确定 trace reader 的展示 |
+
+阶段三首版每批只提前启动一次 Probe；短批（≤5）立即满足条件，空扫描恢复顺序轮询。后续若实测需要按时间、relay 数或包大小调节阈值，作为独立调优，不在本轮替换剩余 Token 计数。

@@ -1,38 +1,19 @@
-# EP Memory Server Dedup 第二轮待确认项
-
-> 2026-09-16 更新：AtomicAdd/密排 t/group 表 8*BS 行的历史结论已由[主设计的 Token 级 prefix 契约](ep-memory-server-dedup.md#2026-09-16dispatch-使用-token-级-prefix-编号当前契约)替代。Dispatch 第一跳使用 t=row，group 表按 C=R*BS*min(K,L) 预留；终端继承第一跳编号。Combine 返回区按 C*K*returnStride 的扩容及内部实现留到 Combine 阶段，当前旧 relay 预留不能按新编号使用。以下旧编号保留作历史追溯。
-
+# EP Memory Server Dedup 第二轮讨论归档
 
 ## 使用方式
 
-第一轮已经确认的约束已合入[主设计](ep-memory-server-dedup.md)。
-本文集中记录 Dispatch 仍有歧义、设计不完整或需要目标 API 证据的事项，以及 Dispatch/Combine 之间的接口和公共内存契约。
-Combine 内部的核分工、H 分块、归约状态、数值实现和内部验收项迁移到[Combine 待确认文档](ep-memory-server-dedup-combine-open-topics.md)，本文只保留其对 Dispatch 可见的接口要求。
-第二轮使用 R01-R12；旧 D/C 编号保留映射，讨论时优先引用 R 编号。
-[Combine 旧议题](ep-memory-server-dedup-combine-open-topics.md)保留旧 C01-C14 索引，并承接本轮迁入的 Combine 内部议题；公共接口仍在本文维护。
+2026-09-18：Dispatch 优化设计阶段收口。**当前实现以[主规格](ep-memory-server-dedup.md)为准，
+本文 R01–R12 与 D/C 编号只作历史讨论和决策追溯，不是待执行计划。**
+Combine 后续问题在 [C15–C24](ep-memory-server-dedup-combine-open-topics.md)完善，公共字段变化回写主规格。
 
-各待确认点使用 `Rxx-01`、`Rxx-02` 等子项编号，每个 Rxx 独立从 01 开始，不跨议题连续。
-子项确认后保留编号并更新状态；后续新增点接续本议题编号，不重排既有编号。关联议题引用同一问题时标明对应子项。
-R01 已关闭；R02-01 已确认采用 serverRouteMask + directMask，两遍扫描的分类、路由顺序和 Memory 复用结论均已收口。低优先级遗留同样编号，但明确标记延后，不计入初版关闭条件。
-R04 输入清单中的第 1-3 项是信息类别，与 `R04-xx` 待确认子项编号分开使用；原第 4 项 X 已移入超限优化遗留。
-R03、R04 已确认内容及 R05 最新结论已同步[主设计](ep-memory-server-dedup.md)：
-R03 的 16B entry、固定 K-1 容量和无效区域不清零；R04-07/R04-08 的权重输入/输出分离及 Combine 参数复用；
-R05-01/R05-02 的固定 64 核、48/16 分工、DataCopyPad 写回和 UB 相对槽位双表；
-R05-03 的一份 1KB counter、首 4B 取号及算子末尾 SyncAll 后核 63 清零。
-R05-04 的本卡源端数据发送已按 Memory 流水合入主设计，Token 尺寸使用去重版 T，并发数按剩余 UB 计算为 1 至 8 路，安全输入保证至少 1 路，无需校验。
-R05-04 已按 Memory 收口：lane 显式 ID、独立输出 UB、核末 S_MTE3/DataCopyPad/MTE3_S；数据转发的监听/UB/Event/在途进度保留 R05-05/R05-06 后续设计，不套用源端发送流水。
-Cnt 发送/接收/cumsum 整体复用 Memory，适配固定 48/16 核组；零 cnt/零 tokenNum 的既有行为已确认。
-本轮确认 recvData 前两部分包括完整前缀就绪等待、读取和 Flag 清理；expertTokenNumsOut 由接收组内核 0（物理核 48）沿用 Memory 计算写出。
-完整前缀仅由 16 核消费，发布副本、就绪 Flag 和清理均使用接收组内索引 0..15；源端 48 核不消费。
-R07-01 已按 Memory 记录格式给出三块区域的完整单份布局；第二块沿用 source 返回在前、Dispatch 槽位在后的独立子区，第三块为 relay 返回。
-R08-02 已确认首版要求非空 FP32 `expertScales[BS,K]`，nullptr 直接报错；其他库的 nullptr 语义不纳入首版。
-R08-03 的 Dispatch 部分已确认 BF16/FP16 非量化及 MXFP8 E4M3/E5M2，量化计算、scale 布局和输出沿用 Memory；R10-01 同步补齐已有量化参数的 launch 传递，待代码接入。
-专家数量约束更新为总数 `0<moeExpertNum<=1024`、`moeExpertNum=R*L`；不设独立的单卡专家数限制，允许 L=1，128P 下 L 至多为 8。
-基础 API 依据见[官方 API 核对](#官方-api-核对)，设计确认与目标设备验证状态分别记录。
+已被实际实现替代的旧结论包括：固定 48/16 分核、持久 directMask 后重扫原 Token、原子密排 t、
+8*BS 行 group 表、核末 SyncAll/counter 清零、接收 UB/Event 尚待设计和 184B 按值标量 launch。
+当前默认编译期 32/32、Count 阈值 512，DIRECT 使用缓存任务并按 Server 轮转；t=row，
+group 容量为 Crows=R*BS*min(K,L)，接收为单 Probe 加动态 lane，launch 为 120B 加独立 32B GM tiling。
+Count 已异步下发并共享 scratch。双 Probe 等后续候选暂缓，不作为 Combine 的已实现基础。
 
-“待确认”表示需选择具体机制；“实现核对”表示逻辑方向已经确定，但 API/资源/可见性尚无足够证据。
-各项候选建议只作为讨论起点。关闭议题时应将明确的输入、输出、所有权与完成条件合入主设计，
-不能把“文档有候选”当作机制已经闭合，也不能把设计确认当作硬件验证通过。
+历史章节的“已确认/待确认/当前”按当时日期理解；其中 8*BS relay 预留仍存在于布局函数，
+但不满足新的稀疏编号，Combine 不得直接用它寻址。旧 API 研究与编译/设备证据也只覆盖当时版本。
 
 ## 遗留信息导致的过设计复核
 
