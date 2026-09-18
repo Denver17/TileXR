@@ -195,12 +195,7 @@ start_i=i*base+min(i,remainder)
 seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远端 Server 时暂列 DIRECT，
 第二次遇到时生成 group 并移出 DIRECT，随后扩充该 group 位图。
 每个 Token 的第一跳立即发送；DIRECT 记录 `(token,k,expert,q)` 写入 16B 的 directTasks。
-第二遍从本 Server 开始，按相对环形顺序的双半区交替扫描该任务表：
-`half=(serverNum+1)/2`（整数除法），目标为
-`(myServer+step/2+(step%2)*half)%serverNum`，`step=0..serverNum-1`。
-8 Server 的 s2 顺序为 `2,6,3,7,4,0,5,1`；7 Server 的 s0 为 `0,4,1,5,2,6,3`，
-奇数时最后补第一半区剩余项，确保每个 Server 恰好访问一次。空目标跳过，
-同 Server 内保持 Token/k 顺序和原始 q，跨 Server 继续共用 lane 环且不增加等待。
+第二遍从本 Server 开始按 `(myServer+step)%serverNum` 扫描该任务表，同 Server 内保持 Token/k 顺序。
 
 | 源端 UB | 大小/职责 |
 | --- | --- |
