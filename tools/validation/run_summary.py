@@ -20,8 +20,6 @@ def render_result(report, summary_path):
     config = report.get("chain_configuration", {})
     if config:
         parts.append(f"mode={config['run_mode']} BS={config['bs']} loops={config['loops']} warmup={config['warmup']}")
-        if "send_core_num" in config:
-            parts.append(f"send/recv={config['send_core_num']}/{config['recv_core_num']}")
     if "rank_size" in report:
         parts.append(f"ranks={report.get('completed_ranks', 0)}/{report['rank_size']}")
     measured = report.get("measurements", {})

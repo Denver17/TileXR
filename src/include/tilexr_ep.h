@@ -50,7 +50,8 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
     TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype, aclrtStream stream);
 
-// Server Dedup Dispatch 使用 A5 固定 64 AIV；sendCoreNum 可选 16/24/32/40/48，默认 32。
+// Server Dedup Dispatch 使用 A5 固定 64 AIV；发送/接收核数由
+// TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 编译期配置（默认 32/32，支持 16/24/32/40/48）。
 // 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
 // TILEXR_EP_SERVER_DEDUP_ENABLE 未设置或为 1 时开启去重；为 0 时按 server 轮转逐 route DIRECT。
 // 每次调用读取该环境变量，其他值返回 PARA_CHECK_FAIL；接收协议和输出容量不随模式改变。
@@ -71,7 +72,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
     int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
     uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
-    aclrtStream stream, int64_t sendCoreNum = 32);
+    aclrtStream stream);
 
 }
 

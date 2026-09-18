@@ -56,30 +56,13 @@ int main()
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 1, 1, 32, nullptr) == TILEXR_ERROR_PARA_CHECK_FAIL,
         "null layout rejected");
 
-    for (int64_t sendCoreNum : {16, 24, 32, 40, 48}) {
-        const uint64_t receivers = 64U - sendCoreNum;
-        Check(TileXREpBuildMemoryServerDedupLayout(128, 128, 7168, 8, 1024, &layout, false,
-            sendCoreNum) == TILEXR_SUCCESS, "all five runtime splits build a valid layout");
-        const auto split = TileXREpServerDedupCountLayout(1024, receivers);
-        Check(split.prefixOffset == split.cumsumOffset + receivers * receivers * 32U &&
-            split.cumsumFlagOffset == split.prefixOffset + receivers * 4096U &&
-            layout.countStateBytes == split.stateBytes && split.stateBytes <= kEpServerDedupControlBytes,
-            "Host layout reserves both runtime receiver matrices and every receiver prefix");
-        for (bool quantized : {false, true}) {
-            // The per-sender metadata grows as fewer send cores share 341 tokens.
-            // Count scratch fits all splits, but 16 senders cannot fit one packet lane.
-            const int expected = sendCoreNum == 16 ? TILEXR_ERROR_PARA_CHECK_FAIL : TILEXR_SUCCESS;
-            Check(TileXREpBuildMemoryServerDedupLayout(128, 341, 1, 32, 1024, &layout, quantized,
-                sendCoreNum) == expected, "Host rejects sender UB overflow before device lane selection");
-        }
-    }
-    for (int64_t sendCoreNum : {INT64_MIN, int64_t(-8), int64_t(0), int64_t(8), int64_t(15),
-        int64_t(17), int64_t(31), int64_t(33), int64_t(47), int64_t(49), int64_t(56), int64_t(64), INT64_MAX}) {
-        layout.countStateBytes = 123;
-        Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout, false,
-            sendCoreNum) == TILEXR_ERROR_PARA_CHECK_FAIL && layout.countStateBytes == 0,
-            "layout rejects invalid splits without narrowing or retaining stale state");
-    }
+    Check(TileXREpBuildMemoryServerDedupLayout(128, 128, 7168, 8, 1024, &layout, false) == TILEXR_SUCCESS,
+        "compile-time core split builds a valid layout");
+    const auto split = TileXREpServerDedupCountLayout(1024);
+    Check(split.prefixOffset == split.cumsumOffset + uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * 32U &&
+        split.cumsumFlagOffset == split.prefixOffset + uint64_t(kEpServerDedupRecvCoreNum) * 4096U &&
+        layout.countStateBytes == split.stateBytes && split.stateBytes <= kEpServerDedupControlBytes,
+        "Host layout reserves the compile-time receiver matrices and prefixes");
 
     // cnt uses bounded UB even though this increment does not allocate hidden buffers.
     Check(TileXREpBuildMemoryServerDedupLayout(128, 4096, 1, 32, 1024, &layout) ==

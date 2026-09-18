@@ -15,8 +15,8 @@ uint64_t testCopies = 0;
 
 namespace {
 using TileXREp::ServerDedupCounts;
-uint32_t sendCoreNum = 32U;
-uint32_t recvCoreNum = 32U;
+constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
+constexpr uint32_t recvCoreNum = TileXREp::kEpServerDedupRecvCoreNum;
 using TileXREp::kEpServerDedupAllCoreCountBsThreshold;
 using ServerDedupTest::Check;
 
@@ -53,7 +53,7 @@ void CheckReceiveTasks(Rank &rank, const std::vector<int32_t> &counts,
         const uint64_t syncBefore = AscendC::TestSyncOperations();
         TileXREp::ServerDedupReceiveTasks tasks;
         tasks.Build(rank.cores[sendCoreNum + receiver].Prefix(), rank.args.rank,
-            world, experts, bs, receiver, &pipe, recvCoreNum);
+            world, experts, bs, receiver, &pipe);
         const uint32_t end = uint32_t(uint64_t(receiver + 1U) * addresses.size() / recvCoreNum);
         Check(tasks.Begin() == nextRow && tasks.Count() == end - nextRow,
             "receive ranges cover every output row once using floor boundaries");
@@ -128,7 +128,7 @@ void CheckReceiveTaskBoundaries()
                 for (uint32_t receiver = 0; receiver < recvCoreNum; ++receiver) {
                     AscendC::TPipe pipe;
                     TileXREp::ServerDedupReceiveTasks tasks;
-                    tasks.Build(prefix, rank, world, experts, bs, receiver, &pipe, recvCoreNum);
+                    tasks.Build(prefix, rank, world, experts, bs, receiver, &pipe);
                     const uint32_t begin = uint32_t(receiver * addresses.size() / recvCoreNum);
                     const uint32_t end = uint32_t((receiver + 1U) * addresses.size() / recvCoreNum);
                     Check(tasks.Begin() == begin && tasks.Count() == end - begin &&
@@ -158,7 +158,7 @@ void CheckDeferredCountReceive()
     const uint32_t recvStart = receiver * (experts / recvCoreNum) +
         std::min(receiver, experts % recvCoreNum);
     const uint32_t recvCount = experts / recvCoreNum + (receiver < experts % recvCoreNum);
-    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts, recvCoreNum);
+    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
     TileXR::CommArgs args {};
     args.rankSize = world;
@@ -182,7 +182,7 @@ void CheckDeferredCountReceive()
     AscendC::testCore = core;
     counts.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(&route),
         reinterpret_cast<GM_ADDR>(expertOutput.data()), reinterpret_cast<GM_ADDR>(prefix.data()),
-        1U, 1U, experts, 0U, 1, &pipe, sendCoreNum);
+        1U, 1U, experts, 0U, 1, &pipe);
     ServerDedupTest::ProfileCapture capture(args);
     TileXREp::ServerDedupProfile profile;
     profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
@@ -228,7 +228,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
     TileXR::CommArgs profileArgs {};
     ServerDedupTest::ProfileCapture capture(profileArgs);
     const uint32_t localExperts = experts / world;
-    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts, recvCoreNum);
+    const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<Rank> ranks(world);
     ServerDedupTest::SparsePeerMemory memory;
     for (uint32_t r = 0; r < world; ++r) {
@@ -281,7 +281,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                     reinterpret_cast<uint8_t *>(rank.routes.data()),
                     reinterpret_cast<uint8_t *>(rank.expertOutput.data() + 1),
                     reinterpret_cast<uint8_t *>(rank.output.data() + 1),
-                    bs, k, experts, outputType, round, &rank.pipes[core], sendCoreNum);
+                    bs, k, experts, outputType, round, &rank.pipes[core]);
             }
         }
         // Drive the actual production phases with all sends posted before polling.
@@ -362,8 +362,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 int main()
 {
     try {
-        for (uint32_t split : {16U, 24U, 32U, 40U, 48U}) {
-            sendCoreNum = split; recvCoreNum = 64U - split;
+        {
             CheckReceiveTaskBoundaries();
             CheckDeferredCountReceive();
             Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
@@ -382,7 +381,6 @@ int main()
                 Run(16, 64, kEpServerDedupAllCoreCountBsThreshold, 1, 2);
                 Run(16, 64, kEpServerDedupAllCoreCountBsThreshold + 1U, 1, 2);
             }
-        }
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

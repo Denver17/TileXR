@@ -47,7 +47,6 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     tiling.profilingLaunchSlot = profilingLaunchSlot;
     tiling.moeExpertNum = static_cast<uint16_t>(p.moeExpertNum);
     tiling.topK = static_cast<uint8_t>(p.topK);
-    tiling.sendCoreNum = static_cast<uint8_t>(params.sendCoreNum);
     tiling.expertTokenNumsType = static_cast<uint8_t>(p.expertTokenNumsType);
     tiling.quantMode = static_cast<uint8_t>(p.quantMode);
     tiling.dtype = static_cast<uint8_t>(p.dtype);

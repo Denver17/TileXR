@@ -49,7 +49,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
     int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
     uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
-    aclrtStream stream, int64_t sendCoreNum)
+    aclrtStream stream)
 {
     TileXREp::EpMemoryServerDedupParams params {};
     auto &p = params.dispatch;
@@ -84,7 +84,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     p.dtype = dtype;
     p.expandXOutDtype = expandXOutDtype;
     p.stream = stream;
-    params.sendCoreNum = sendCoreNum;
     params.assistExOut = assistExOut;
     params.sourceMaskOut = sourceMaskOut;
     params.groupOut = groupOut;

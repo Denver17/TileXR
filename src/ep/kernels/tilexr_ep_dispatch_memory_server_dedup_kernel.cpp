@@ -2,7 +2,7 @@
 #include "tilexr_types.h"
 #include "ep_memory_server_dedup_tiling.h"
 
-// One production entry and one 64-core process with a Host-validated runtime send/recv split.
+// One production entry and one 64-core process with a compile-time send/recv split.
 extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_server_dedup_kernel(
     GM_ADDR commArgs, GM_ADDR x, GM_ADDR expertIds, GM_ADDR expertScales,
     GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
@@ -18,7 +18,6 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     const uint32_t moeExpertNum = tiling->moeExpertNum;
     const uint32_t expertTokenNumsType = tiling->expertTokenNumsType;
     const uint32_t profilingLaunchSlot = tiling->profilingLaunchSlot;
-    const uint32_t sendCoreNum = tiling->sendCoreNum;
     const bool enableServerDedup = tiling->enableServerDedup != 0;
     const uint8_t quantMode = tiling->quantMode;
     const uint8_t dtype = tiling->dtype;
@@ -29,7 +28,7 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     kernel.Init(commArgs, x, expertIds, expertScales, expandXOut, dynamicScalesOut, \
         expertTokenNumsOut, sendCountsOut, assistExOut, sourceMaskOut, groupOut, expertScalesOut, \
         bs, h, \
-        topK, moeExpertNum, expertTokenNumsType, magic, profilingLaunchSlot, &pipe, sendCoreNum, enableServerDedup); \
+        topK, moeExpertNum, expertTokenNumsType, magic, profilingLaunchSlot, &pipe, enableServerDedup); \
     kernel.Process()
     if (dtype == TileXR::TILEXR_DATA_TYPE_FP16) {
         if (quantMode == 0) { TILEXR_RUN_DEDUP(half, false, false); }

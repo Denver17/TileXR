@@ -197,13 +197,11 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     int64_t countType, void *expandX, void *dynamic, int32_t *assist, int64_t *counts,
     int32_t *sendCounts, int32_t *tpCounts, void *expandScales, uint32_t *assistEx,
     uint32_t *sourceMask, uint32_t *group, float *weightsOut, TileXR::TileXRDataType dtype,
-    TileXR::TileXRDataType outDtype, aclrtStream stream, int64_t sendCoreNum)
+    TileXR::TileXRDataType outDtype, aclrtStream stream)
 {
     const char *dedup = std::getenv("TILEXR_EP_SERVER_DEDUP_ENABLE");
     if (dedup != nullptr && std::strcmp(dedup, "0") != 0 && std::strcmp(dedup, "1") != 0) return 92;
     const bool enableServerDedup = dedup == nullptr || std::strcmp(dedup, "1") == 0;
-    const char *configuredSend = std::getenv("TILEXR_VALIDATION_SEND_CORE_NUM");
-    if (sendCoreNum != (configuredSend ? std::strtoll(configuredSend, nullptr, 10) : 32)) return 92;
     if (x == nullptr || ids == nullptr || comm != &args || bs <= 0 || h <= 0 || topK <= 0 || topK > 32 ||
         experts != world * 2 || rank != rankId || tpWorld != 1 || tpRank != 0 || shard != 0 ||
         shared != 0 || sharedRanks != 0 || (quant != 0 && quant != 4) || globalBs != world * bs || (countType != 0 && countType != 1) ||

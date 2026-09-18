@@ -13,7 +13,7 @@
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
 using ServerDedupTest::Check;
-uint32_t sendCoreNum = 32U;
+constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
 
 void CheckReceiveUnpack(uint32_t h, bool quantized)
 {
@@ -49,7 +49,7 @@ void CheckDeferredCountSender()
     if (TileXREp::kEpServerDedupAllCoreCountBsThreshold <= 1U) return;
     constexpr uint32_t experts = 384U, world = 64U, h = 32U;
     const auto data = TileXREp::TileXREpServerDedupDataLayout(1U, h, 1U, experts, false);
-    const auto countLayout = TileXREp::TileXREpServerDedupCountLayout(experts, 64U - sendCoreNum);
+    const auto countLayout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<uint8_t> window(data.dispatchOffset + data.dispatchBytes + 32U, 0U);
     TileXR::CommArgs args {};
     args.rankSize = world;
@@ -68,7 +68,7 @@ void CheckDeferredCountSender()
     TileXREp::ServerDedupCounts counts;
     counts.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(&route),
         reinterpret_cast<GM_ADDR>(expertOutput), reinterpret_cast<GM_ADDR>(prefix),
-        1U, 1U, experts, 0U, 1, &pipe, sendCoreNum);
+        1U, 1U, experts, 0U, 1, &pipe);
     TileXREp::ServerDedupProfile profile;
     profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
     AscendC::DeferMte3() = true;
@@ -81,7 +81,7 @@ void CheckDeferredCountSender()
     TileXREp::ServerDedupSender<uint16_t, false, false> sender;
     sender.Init(&args, reinterpret_cast<GM_ADDR>(hidden), reinterpret_cast<GM_ADDR>(&route),
         reinterpret_cast<GM_ADDR>(&weight), reinterpret_cast<GM_ADDR>(&mask), reinterpret_cast<GM_ADDR>(&output),
-        1U, h, 1U, experts, &pipe, 1, sendCoreNum);
+        1U, h, 1U, experts, &pipe, 1);
     sender.Process(profile, counts.ScratchPool(), counts.ReservedBytes());
     AscendC::GmReadObserver() = {};
     Check(preparationOverlapped, "sender route preparation advances before count MTE3 completes");
@@ -185,7 +185,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             TileXREp::ServerDedupSender<uint16_t, false, false> sender;
             sender.Init(&args, reinterpret_cast<uint8_t *>(hidden.data()), reinterpret_cast<uint8_t *>(ids.data()),
                 reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
-                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U, sendCoreNum, dedup);
+                reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U, dedup);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
             profile.Mark(2);
@@ -308,8 +308,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
 int main()
 {
     try {
-        for (uint32_t split : {16U, 24U, 32U, 40U, 48U}) {
-            sendCoreNum = split;
+        {
             CheckDeferredCountSender();
             CheckReceiveUnpack(32, false);
             CheckReceiveUnpack(240, false); // Exactly one 480B data block.
@@ -349,7 +348,6 @@ int main()
             Run(16, 96, 47, 64, 6, false);
             Run(16, 96, 256, 224, 6, false, 0, 3); // all DIRECT, ring and call reuse.
             Run(16, 96, 256, 224, 32, false); // k31 is a DIRECT route with its original q.
-        }
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n'; return 1;
     }

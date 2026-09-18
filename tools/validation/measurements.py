@@ -409,7 +409,7 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                "configuration": {name: chain_config[name] for name in
                                  ("bs", "h", "topk", "moe_expert_num", "dtype", "block_dim", "loops", "warmup")},
                "host_barrier": "enabled", "submission": "continuous_batch_then_sync_and_host_barrier"}
-    for name in ("send_core_num", "recv_core_num", "server_dedup_enabled"):
+    for name in ("server_dedup_enabled",):
         if name in chain_config:
             summary["configuration"][name] = chain_config[name]
     if mode == "functional":

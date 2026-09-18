@@ -14,7 +14,7 @@ struct EpServerDedupTilingData {
     uint32_t profilingLaunchSlot;
     uint16_t moeExpertNum;
     uint8_t topK;
-    uint8_t sendCoreNum;
+    uint8_t reservedSendCoreNum;
     uint8_t expertTokenNumsType;
     uint8_t quantMode;
     uint8_t dtype;
@@ -29,7 +29,7 @@ static_assert(alignof(EpServerDedupTilingData) == 4U, "tiling uses natural scala
 static_assert(offsetof(EpServerDedupTilingData, profilingLaunchSlot) == 8U, "profiling slot offset");
 static_assert(offsetof(EpServerDedupTilingData, moeExpertNum) == 12U, "expert count offset");
 static_assert(offsetof(EpServerDedupTilingData, topK) == 14U, "topK offset");
-static_assert(offsetof(EpServerDedupTilingData, sendCoreNum) == 15U, "send core offset");
+static_assert(offsetof(EpServerDedupTilingData, reservedSendCoreNum) == 15U, "reserved offset");
 static_assert(offsetof(EpServerDedupTilingData, enableServerDedup) == 20U, "dedup switch offset");
 
 } // namespace TileXREp

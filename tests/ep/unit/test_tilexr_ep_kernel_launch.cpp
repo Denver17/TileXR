@@ -408,20 +408,6 @@ void TestServerDedupRuntimeLaunch()
         "multiple rounds consume exactly one magic each without reloading the artifact");
 
     params.enableServerDedup = true;
-    for (int64_t sendCoreNum : {16, 24, 32, 40, 48}) {
-        ResetCapture();
-        gVectorCores = 64;
-        params.sendCoreNum = sendCoreNum;
-        Check(launch() == TileXR::TILEXR_SUCCESS, "runtime split launches the same kernel artifact");
-        auto splitArgs = expected;
-        splitArgs[13] = gLaunches[0].args[13];
-        auto splitTiling = expectedTiling;
-        splitTiling[15] = static_cast<uint8_t>(sendCoreNum);
-        Check(gLaunches.size() == 1 && gLaunches[0].args == splitArgs && gLaunches[0].tiling == splitTiling &&
-            gLaunches[0].blockDim == 64 && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
-            "runtime split reaches its ABI field while launch remains 64 AIVs");
-    }
-    params.sendCoreNum = 32;
 
     // Maximum expert/topK encodings and an h that cannot fit in uint16_t.
     const auto originalParams = params;

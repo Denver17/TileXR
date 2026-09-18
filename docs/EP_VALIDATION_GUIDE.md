@@ -46,16 +46,15 @@ receiver 在等待跨核局部和前计算相对前缀，局部和源的等待�
 当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
 默认发送/接收核数为 32/32，Count 全核参与阈值为 512：BS<512 时 64 核统计并发送 cnt，
-BS>=512 时仅接收核承担该步骤。阈值是编译期配置，与 `send_core_num` 的运行时配置独立；
+BS>=512 时仅接收核承担该步骤。阈值和收发核比例均为编译期配置；
 修改后须同时重建并同步 Host 与 kernel，Host UB 预算和核内 Count 分支必须使用相同阈值。
 本次基于 `689d12b` 验证：CANN 9.1/A5 kernel 与 Host 库 OFF/ON 编译通过，7 项 Host 回归通过；
 Count 在五种分核下覆盖 BS511/512/513，实测约 126 秒，测试时限由 120 秒调整为 240 秒。
 日志及源码摘要见 `build/count-threshold-512-verification/`；未运行 NPU，不据此宣称实机性能或正确性。
 
-2026-09-17 运行时分核验证（基于 `fa099d1` 加本次修改）：blue CANN 9.1.0 / Bisheng
+2026-09-17 运行时分核验证记录（历史实现，现已回退为编译期配置）：blue CANN 9.1.0 / Bisheng
 Clang 15.0.5 的 A5 kernel 与 `tilexr-ep` Host 库 profiling OFF/ON 均编译链接通过。
-12 项 C++ 核心回归通过，包括五种分核的 Count、sender、receiver；接收测试扩展到五组后
-实测约 70 秒，原 30 秒测试时限已调整为 150 秒。92 项针对性 Python 测试和 97 项工作流测试通过。
+该记录仅用于追溯运行时分核版本，不代表当前接口。
 集成替身 23 项中 22 项通过；`test_repeated_calls_reject_wrong_bank_readback` 失败：
 注入错误窗口返回读错误 92，用例却期待退出 0 的结果校验失败记录。在未修改的 `fa099d1`
 上单独复现相同失败，因此登记为基线问题，不在本次分核变更中调整。验证快照、编译参数、
@@ -255,7 +254,6 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 | `-e E` | 总专家数，单卡专家数为 E/(8N) | 必填，1..1024，须被 8N 整除 |
 | `-m M` | 0=functional、1=performance、2=breakdown | 默认 0 |
 | `-l L W` | 测量 L 轮、预热 W 轮 | 默认 1 0；L>=1、W>=0，均为 uint32 |
-| `send_core_num=S` | 发送核数；接收核数为 64−S | 默认 32，仅支持 16/24/32/40/48；Host 校验 |
 | `case_analysis=0\|1` | NPU 阶段结束后分析各 rank 的跨 server token 去重率 | 默认 0，显式传 1 开启 |
 
 `bs=... h=... topk=... dtype=... quant_mode=... fp8_format=... block_dim=...`
@@ -266,18 +264,10 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 `run_case.sh` 仅兼容转交到 `run.sh`，`run_batch.sh` 统一调用同一入口。
 旧 `run_mode=... loops=... warmup=... moe_expert_num=...` 改用上述短参数。
 
-发送核数可直接在运行时切换，无需按每种核数重编译：
-
-```bash
-bash run.sh -n 2 -e 96 -m 0 send_core_num=16  # 16 发 / 48 收
-bash run.sh -n 2 -e 96 -m 1 -l 100 10 send_core_num=24
-bash run.sh -n 2 -e 96 -m 2 send_core_num=48  # 48 发 / 16 收
-```
-
-省略时固定恢复 32 发 / 32 收；参数对所有 Rank 一致传播，结果记录发送/接收核数。
-每次 run.sh 都新建 communicator；同一 communicator 生命周期内必须保持分核值固定。
-当前须先重新 build/sync，旧 192B/200B ABI 产物不兼容新 208B 参数；通信布局和容量不因开关改变。
-核内不检查枚举值；Host 同时校验 Count 和发送侧 UB 容量，因此合法核数仍可能与过大
+发送/接收核数由 `src/ep/common/ep_memory_server_dedup_count_layout.h` 中的
+`TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM` 编译期宏配置，默认 32（即 32/32），支持
+16/24/32/40/48。修改后须同时重建并同步 Host 与 kernel；通信布局和容量按该宏生成。
+核内直接使用编译期常量，不保留运行时分支或外部参数。
 BS/H/TopK 组合不兼容。每种分核应先做 functional 多轮测试，再按同 shape 比较性能。
 
 例如 `bash run.sh -n 2 -e 96 -m 1 -l 100 10 case_analysis=1`。

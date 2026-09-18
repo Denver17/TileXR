@@ -16,11 +16,9 @@ public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertIds,
         GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut, uint32_t bs,
         uint32_t topK, uint32_t experts, uint32_t expertTokenNumsType,
-        int64_t magic, TPipe *pipe, uint32_t sendCoreNum = kEpServerDedupSendCoreNum)
+        int64_t magic, TPipe *pipe)
     {
         tpipe_ = pipe;
-        aivUsedAllToAll_ = sendCoreNum;
-        aivUsedCumSum_ = kEpServerDedupCoreNum - sendCoreNum;
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         epRankId_ = args_->rank;
         epWorldSize_ = args_->rankSize;
@@ -32,7 +30,7 @@ public:
         moeExpertNumPerRank_ = experts / epWorldSize_;
         expertTokenNumsType_ = expertTokenNumsType;
         useAllCoreCount_ = bs < kEpServerDedupAllCoreCountBsThreshold;
-        layout_ = TileXREpServerDedupCountLayout(experts, aivUsedCumSum_);
+        layout_ = TileXREpServerDedupCountLayout(experts);
         stateOffset_ = TileXREpServerDedupWindowOffset(magic) + layout_.cntOffset;
         GM_ADDR localState = args_->peerMems[epRankId_] + stateOffset_;
         windowInstatusFp32Tensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));
@@ -65,8 +63,8 @@ private:
     static constexpr uint32_t UB_ALIGN_DATA_COUNT = 8U;
     static constexpr uint32_t SIZE_ALIGN_256 = 256U;
     static constexpr uint32_t STATE_OFFSET = 32U;
-    uint32_t aivUsedAllToAll_ = kEpServerDedupSendCoreNum;
-    uint32_t aivUsedCumSum_ = kEpServerDedupRecvCoreNum;
+    static constexpr uint32_t aivUsedAllToAll_ = kEpServerDedupSendCoreNum;
+    static constexpr uint32_t aivUsedCumSum_ = kEpServerDedupRecvCoreNum;
 
     template <HardEvent event>
     __aicore__ inline void SyncFunc()

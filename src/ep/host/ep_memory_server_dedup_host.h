@@ -8,7 +8,6 @@ namespace TileXREp {
 
 struct EpMemoryServerDedupParams {
     EpDispatchParams dispatch {};
-    int64_t sendCoreNum = 32;
     bool enableServerDedup = true;
     uint32_t *assistExOut = nullptr;
     uint32_t *sourceMaskOut = nullptr;

@@ -11,7 +11,7 @@ using DispatchMemory = int (*)(void *, int32_t *, void *, bool *, int64_t, void 
 using DispatchServerDedup = int (*)(void *, int32_t *, void *, bool *, int64_t, void *, TileXRCommPtr,
     int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t, int64_t,
     int64_t, int64_t, int64_t, int64_t, void *, void *, int32_t *, int64_t *, int32_t *, int32_t *,
-    void *, uint32_t *, uint32_t *, uint32_t *, float *, TileXR::TileXRDataType, TileXR::TileXRDataType, aclrtStream, int64_t);
+    void *, uint32_t *, uint32_t *, uint32_t *, float *, TileXR::TileXRDataType, TileXR::TileXRDataType, aclrtStream);
 static_assert(std::is_same<decltype(&TileXRMoeEpDispatchMemory), DispatchMemory>::value, "Old Memory ABI unchanged");
 static_assert(std::is_same<decltype(&TileXRMoeEpDispatchMemoryServerDedup), DispatchServerDedup>::value,
     "Independent ABI has metadata outputs, separate source weights and runtime send core count");
@@ -20,7 +20,6 @@ namespace {
 TileXR::CommArgs g_args {};
 bool g_a5 = true;
 int g_magicCalls = 0;
-int64_t g_sendCoreNum = 0;
 }
 namespace TileXREp {
 bool TileXREpIsA5Soc() { return g_a5; }
@@ -28,7 +27,6 @@ bool TileXREpIsA5Soc() { return g_a5; }
 int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParams &params,
     const EpHostLaunchContext &, const EpMemoryServerDedupLayout &)
 {
-    g_sendCoreNum = params.sendCoreNum;
     return TileXR::TILEXR_ERROR_NOT_SUPPORT;
 }
 }
@@ -71,17 +69,16 @@ int main()
             reinterpret_cast<TileXRCommPtr>(0x1000), 1, 1, 1, 32, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0,
             output, nullptr, nullptr, expertCounts, counts, nullptr, nullptr, assist, mask, group, sourceWeight,
             TileXR::TILEXR_DATA_TYPE_FP16, TileXR::TILEXR_DATA_TYPE_RESERVED,
-            reinterpret_cast<aclrtStream>(0x2000), 24) == TileXR::TILEXR_ERROR_NOT_SUPPORT,
+            reinterpret_cast<aclrtStream>(0x2000)) == TileXR::TILEXR_ERROR_NOT_SUPPORT,
             "ABI consumer propagates submit result and rejects non-A5");
     }
-    Check(g_sendCoreNum == 24, "function pointer caller forwards explicit runtime split");
     g_a5 = true;
     Check(TileXRMoeEpDispatchMemoryServerDedup(x, expertId, nullptr, nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE,
         expertScale, reinterpret_cast<TileXRCommPtr>(0x1000), 1, 1, 1, 32, 16, 0, 1, 0, 0, 0, 0, 0, 16, 0,
         output, nullptr, nullptr, expertCounts, counts, nullptr, nullptr, assist, mask, group, sourceWeight,
         TileXR::TILEXR_DATA_TYPE_FP16, TileXR::TILEXR_DATA_TYPE_RESERVED,
-        reinterpret_cast<aclrtStream>(0x2000)) == TileXR::TILEXR_ERROR_NOT_SUPPORT && g_sendCoreNum == 32,
-        "source callers omitting the optional parameter use 32 send cores");
+        reinterpret_cast<aclrtStream>(0x2000)) == TileXR::TILEXR_ERROR_NOT_SUPPORT,
+        "source callers use the compile-time core split");
     Check(output[0] == 456 && assist[0] == 789 && mask[0] == 321 && group[0] == 654 &&
         expertCounts[0] == 987 && counts[0] == 741 && x[0] == 123, "ABI consumer preserves outputs");
     Check(g_magicCalls == 0, "ABI consumer does not consume magic outside submit");

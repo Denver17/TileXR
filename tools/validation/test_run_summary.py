@@ -6,11 +6,6 @@ import run_summary
 
 
 class RunSummaryTests(unittest.TestCase):
-    def test_runtime_core_split_is_reported(self):
-        report = dict(status='PASS', chain_configuration=dict(run_mode='functional', bs=96,
-            loops=1, warmup=0, send_core_num=24, recv_core_num=40))
-        self.assertIn('send/recv=24/40', run_summary.render_result(report, '/summary.json'))
-
     def test_case_analysis_is_optional_and_prints_percentages(self):
         report = dict(status="PASS")
         self.assertNotIn("dedup", run_summary.render_result(report, "/summary.json"))
