@@ -34,8 +34,8 @@ static_assert(offsetof(EpServerDedupKernelArgs, magic) == 112, "communication ma
 
 // 内部注册入口也供安装包测试调用；不需要创建 communicator。
 int TileXREpRegisterDispatchMemoryServerDedupKernel();
-int TileXREpSubmitDispatchMemoryServerDedupKernel(const EpServerDedupKernelArgs &args,
-    const EpServerDedupTilingData &tiling, uint32_t blockDim, aclrtStream stream);
+int TileXREpSubmitDispatchMemoryServerDedupKernel(EpServerDedupKernelArgs &args,
+    uint32_t blockDim, aclrtStream stream);
 
 int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParams &params,
     const EpHostLaunchContext &context, const EpMemoryServerDedupLayout &layout);

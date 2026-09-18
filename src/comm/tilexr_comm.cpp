@@ -8,6 +8,7 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "tilexr_comm.h"
+#include "tilexr_kernel_tiling_cache.h"
 #include "tilexr_internal.h"
 #include "tilexr_profiling.h"
 #include "ccu/tilexr_ccu_backend.h"
@@ -1570,7 +1571,8 @@ TileXRComm::~TileXRComm()
     ResetSDMAState();
 }
 
-TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)
+TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize),
+    kernelTilings_(new KernelTilingCache())
 {
 }
 
@@ -1578,12 +1580,12 @@ TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize,
     bool sharedQpDomain, bool memoryOnlyDomain)
     : rank_(rank), rankSize_(rankSize), commDomain_(commDomain),
       bufferSize_(bufferSize), sharedQpDomain_(sharedQpDomain),
-      memoryOnlyDomain_(memoryOnlyDomain)
+      memoryOnlyDomain_(memoryOnlyDomain), kernelTilings_(new KernelTilingCache())
 {
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize, TileXRUniqueId commId)
-    : rank_(rank), rankSize_(rankSize), commId_(commId)
+    : rank_(rank), rankSize_(rankSize), commId_(commId), kernelTilings_(new KernelTilingCache())
 {
 }
 
@@ -1620,6 +1622,16 @@ CommArgs* TileXRComm::GetCommArgs()
 int64_t TileXRComm::NextMagic()
 {
     return magic_.fetch_add(1);
+}
+
+int TileXRComm::GetKernelTiling(const void *data, uint32_t bytes, GM_ADDR *deviceData)
+{
+    return kernelTilings_->Get(data, bytes, deviceData);
+}
+
+int TileXRComm::FinalizeKernelTilings()
+{
+    return kernelTilings_->Clear();
 }
 
 int TileXRComm::GetInternalResource(void **resource) const

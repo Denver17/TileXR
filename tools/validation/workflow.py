@@ -36,8 +36,8 @@ CHAIN_MULTI_CHECKPOINT = "ep-sdedup-p1-chain-multi"
 DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
 DISPATCH_INVALID_MARKER = "EP_SERVER_DEDUP_DISPATCH_INVALID "
-DISPATCH_ABI = {"launch_bytes": 120, "tiling_bytes": 32, "runtime_args_bytes": 160,
-                "layout": "r10-gm-tiling", "kernel_scope": "dispatch"}
+DISPATCH_ABI = {"launch_bytes": 120, "tiling_bytes": 32, "runtime_args_bytes": 120,
+                "layout": "r11-independent-gm-tiling", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
@@ -504,7 +504,7 @@ def verify_build(config, *, check_run_mode=True):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if config.checkpoint == DISPATCH_CHECKPOINT:
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
-            raise ValueError("需要完整 Dispatch 120B ABI / 32B GM tiling 产物，请重新 build_all.sh 和 sync.sh")
+            raise ValueError("需要完整 Dispatch 120B ABI / 独立 GM tiling 产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
         if type(profiling) is not bool or (check_run_mode and config.chain is not None and
                                            profiling is not (config.chain["run_mode"] == "breakdown")):

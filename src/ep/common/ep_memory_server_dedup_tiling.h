@@ -23,8 +23,8 @@ struct EpServerDedupTilingData {
     uint8_t reserved[11];
 };
 static_assert(sizeof(EpServerDedupTilingData) == 32U, "tiling occupies one 32B block");
-// Runtime argument storage is only guaranteed 8B aligned. Scalar GM loads
-// require no stronger alignment than the widest field in this wire structure.
+// Keep the wire structure naturally aligned. Kernel reads use scalar GM
+// accesses, not an implicit vector/MTE load of the entire block.
 static_assert(alignof(EpServerDedupTilingData) == 4U, "tiling uses natural scalar alignment");
 static_assert(offsetof(EpServerDedupTilingData, profilingLaunchSlot) == 8U, "profiling slot offset");
 static_assert(offsetof(EpServerDedupTilingData, moeExpertNum) == 12U, "expert count offset");

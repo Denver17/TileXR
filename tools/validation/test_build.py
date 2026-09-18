@@ -268,11 +268,13 @@ class BuildTests(unittest.TestCase):
             manifest, _ = self.build_fixture(config)
             self.assertEqual(manifest['server_dedup_contract']['launch_bytes'], 120)
             self.assertEqual(manifest['server_dedup_contract']['tiling_bytes'], 32)
-            self.assertEqual(manifest['server_dedup_contract']['runtime_args_bytes'], 160)
+            self.assertEqual(manifest['server_dedup_contract']['runtime_args_bytes'], 120)
             for previous in (None,
                              dict(launch_bytes=192, layout='r07-token-prefix', kernel_scope='dispatch'),
                              dict(launch_bytes=200, layout='r08-runtime-core-split', kernel_scope='dispatch'),
-                             dict(launch_bytes=208, layout='r09-runtime-server-dedup-switch', kernel_scope='dispatch')):
+                             dict(launch_bytes=208, layout='r09-runtime-server-dedup-switch', kernel_scope='dispatch'),
+                             dict(launch_bytes=120, tiling_bytes=32, runtime_args_bytes=160,
+                                  layout='r10-gm-tiling', kernel_scope='dispatch')):
                 if previous is None:
                     manifest.pop('server_dedup_contract')
                 else:

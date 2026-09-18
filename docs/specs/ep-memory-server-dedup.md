@@ -1,6 +1,6 @@
 # EP Memory 服务器级去重设计
 
-## 2026-09-17：GM tiling 参数（当前 launch ABI）
+## 2026-09-18：独立 GM tiling 参数（当前 launch ABI）
 
 本节替代历史按值标量 launch 布局；只迁移 tiling，不引入 epHandle。
 公共 Host API、13 个输入输出/通信地址及其输出语义保持不变；未使用的
@@ -21,35 +21,39 @@ GM_ADDR tilingData、int64_t magic，共 120B。globalBs 继续在 Host 校验/�
 profilingLaunchSlot 的 UINT32_MAX 无效值保留。非量化的 RESERVED 输出 dtype 在
 Host 转成输入 dtype 后打包。核内不新增范围检查，也不缩小地址计算使用的 64 位中间值。
 
-使用现有 rtKernelLaunchWithFlagV2 的原生 tiling 支持：可写 Host 提交包是
-120B Kernel 参数 + 8B 零填充 + 32B tiling，共 160B；hasTiling=1，
-tilingAddrOffset=104，tilingDataOffset=128，isNoNeedH2DCopy=0。
-Runtime 将 tiling 地址槽回填为本次提交的 GM 地址，并搬运整个包。
-**120B 是 Kernel 签名参数大小，160B 才是 Runtime argsSize；不能把两者混为一谈。**
-安装 manifest 同时记录 launch_bytes=120、tiling_bytes=32、runtime_args_bytes=160，
-layout=r10-gm-tiling；旧 208B/200B/192B 产物必须重新构建、同步。
+Host 通过 communicator 管理的 KernelTilingCache 初始化独立的 32B Device GM，
+在 aclrtMemcpy(HOST_TO_DEVICE) 同步返回成功之后取得真实 tilingData 地址。
+Kernel 直接从该地址读取字段；入口读到局部值后，轮询和 Token 循环不重复读取 tiling。
+rtKernelLaunchWithFlagV2 的 argsSize 恰为 **120B**，hasTiling=0、两个 tiling offset=0，
+不附带 tiling 内容，不使用 Runtime 的占位地址回填。32B 数据单独初始化，不计入 launch 包。
 
-采用 Runtime 自有参数存储，不增加 per-call aclrtMalloc、单独排队的 H2D 或共享可变
-GM tiling 槽。CANN 9.1/A5 的 UB 路径先将 Host 包复制到 Runtime staging；950 的
-PCIe fallback 强制使用同步复制/BAR。因此 Host 局部提交包可在 launch 返回后结束
-生命周期，后续异步提交拥有独立快照；该结论不推广到其他 SoC 的复制策略。
-每个核在入口通过 Scalar 读取配置到局部值，后续不在轮询或 Token 循环中反复读 GM。
+缓存以完整且零填充的 32B 配置为 key；相同配置直接复用 GM 地址，不再次分配或复制。
+不同配置（包括 profilingLaunchSlot 的变化）拥有不同的不可变 GM，旧配置一直保留，
+因此后续提交不会覆盖尚未执行完成的 Kernel 参数。magic 不在缓存 key 内，逐轮递增
+不会创建新条目。每种不同配置占一份 32B 逻辑 GM（实际分配按 Runtime 粒度取整），
+生命周期内缓存随不同配置数增长；communicator 销毁时统一释放，不按 magic 淘汰。
 
-对齐维护要点：固定 32B 大小或 offset=128 **不能**证明实际 GM 地址 32B 对齐。
-Runtime 参数池仅保证 8B 对齐，所以共享结构体保持自然 4B 对齐并使用 Scalar 读取，
-不能直接改成需要 32B 对齐的 MTE 读取。另一个维护边界是 Host 包必须可写：Runtime
-会回填 tiling 指针，不能把它定义为 const 存储。
+缓存有互斥保护，不占用 collective 的单槽 InternalResource。Host 容器先建立所有权记录，
+再分配/复制；分配或复制失败不向 launch 发布地址，返回错误，未完成初始化的分配仍由
+缓存持有以供重试或销毁。释放失败保留对应所有权；跨进程清理状态并入已有的 Rank 状态一致性检查，
+参与交换的 Rank 一起返回错误后可重试销毁，避免其他 Rank 已删除通信域时单卡重试状态交换。
+销毁前须停止提交并等待所有依赖该 communicator 的工作完成，与现有 peer memory 生命周期一致。
+CANN 9.1 的 aclrtMemcpy 是同步接口，故初始化使用的 Host 局部结构可在返回后释放；
+不另设 pinned 缓冲区、异步 H2D 源生命周期或每轮同步等待。
 
-版本证据为官方 Runtime v9.1.0，commit
-`0b4af8a31c75a1f1f43638a8f75b9e3c6182e031`：
-[指针回填及复制](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/core/src/kernel/arg_loader/stars_arg_manager.cc#L165)、
-[UB staging](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/core/src/kernel/arg_loader/arg_manage_ub.cc#L102)、
-[950 同步复制策略](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/config/950/dev_info_reg.cc#L115)、
-[参数地址对齐](https://github.com/hicann/runtime/blob/0b4af8a31c75a1f1f43638a8f75b9e3c6182e031/src/runtime/core/src/kernel/arg_loader/arg_loader_ub.hpp#L43)。
+维护要点：**传入指针并不等于只提交指针**。验证须检查实际 Runtime argsSize=120、
+hasTiling=0，同时确认地址指向独立初始化的 GM；不能只检查 Kernel 签名大小。
+单槽按配置直接覆写会破坏连续异步调用的旧参数，不可通过删除附带内容后随意复用可变缓冲区。
 
-验证要求：Host 检查 wire 字节、Runtime 偏移与回填、连续提交快照、64 位 magic、
-五种核数、量化类型、profiling 无效槽及窄化前拒绝；CANN 9.1/A5 编译实际入口和
-owning Host 库。Host 替身和编译不能证明 NPU GM 读取正确性或性能收益，仍需实机验证。
+安装 manifest 记录 launch_bytes=120、tiling_bytes=32、runtime_args_bytes=120，
+layout=r11-independent-gm-tiling。虽然 Kernel 签名未变，旧 r10/160B 随 launch 搬运产物
+仍须重新构建/同步；本次需匹配 libtile-comm、owning Host 库和 Kernel。
+公共 Host 接口及 epHandle 范围不变。
+
+验证要求：Host 检查独立分配、同步复制、真实 GM 地址解析、120B 提交、配置命中不复制、
+连续配置切换的旧内容保持、通信域隔离、分配/复制失败及释放重试。保留字段字节、
+64 位 magic、五种核数、量化类型、profiling 无效槽及窄化前拒绝检查；编译实际
+CANN 9.1/A5 入口、owning Host 库及通信库。Host 替身和编译不能证明 NPU 正确性或性能收益。
 
 ## 2026-09-16：Dispatch 使用 Token 级 prefix 编号（当前契约）
 

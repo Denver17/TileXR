@@ -94,6 +94,7 @@ typedef enum aclrtDevAttr {
     ACL_DEV_ATTR_VECTOR_CORE_NUM = 0,
     ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE = 1
 } aclrtDevAttr;
+typedef enum aclrtMemMallocPolicy { ACL_MEM_MALLOC_NORMAL_ONLY = 2 } aclrtMemMallocPolicy;
 typedef enum aclrtMemcpyKind {
     ACL_MEMCPY_HOST_TO_DEVICE = 1,
     ACL_MEMCPY_DEVICE_TO_HOST = 2,
@@ -106,6 +107,8 @@ aclError aclrtGetDevice(int32_t *deviceId);
 aclError aclrtGetDeviceInfo(uint32_t deviceId, aclrtDevAttr attr, int64_t *value);
 const char *aclrtGetSocName(void);
 aclError aclrtSynchronizeStream(aclrtStream stream);
+aclError aclrtMalloc(void **devPtr, size_t size, aclrtMemMallocPolicy policy);
+aclError aclrtFree(void *devPtr);
 aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
     size_t count, aclrtMemcpyKind kind);
 #ifdef __cplusplus

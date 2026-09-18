@@ -1,6 +1,7 @@
 #include "ep_memory_server_dedup_launch.h"
 #include "acl/acl_rt.h"
 #include "ep_kernel_launch.h"
+#include "../../comm/tilexr_internal.h"
 #include "ep_memory_server_dedup_count_layout.h"
 #include "ep_memory_server_dedup_profile.h"
 
@@ -53,13 +54,18 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     tiling.expandXOutDtype = static_cast<uint8_t>(
         p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? p.dtype : p.expandXOutDtype);
     tiling.enableServerDedup = params.enableServerDedup ? 1U : 0U;
+    GM_ADDR tilingData = nullptr;
+    ret = TileXRCommGetKernelTiling(p.comm, &tiling, sizeof(tiling), &tilingData);
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
     EpServerDedupKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.x),
         reinterpret_cast<GM_ADDR>(p.expertIds), static_cast<GM_ADDR>(p.expertScales),
         static_cast<GM_ADDR>(p.expandXOut), static_cast<GM_ADDR>(p.dynamicScalesOut), reinterpret_cast<GM_ADDR>(p.expertTokenNumsOut),
         reinterpret_cast<GM_ADDR>(p.epRecvCountsOut), reinterpret_cast<GM_ADDR>(p.assistInfoForCombineOut),
         reinterpret_cast<GM_ADDR>(params.assistExOut), reinterpret_cast<GM_ADDR>(params.sourceMaskOut),
-        reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), nullptr, magic};
-    return TileXREpSubmitDispatchMemoryServerDedupKernel(args, tiling, kEpServerDedupCoreNum, p.stream);
+        reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), tilingData, magic};
+    return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);
 }
 
 } // namespace TileXREp

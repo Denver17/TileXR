@@ -16,6 +16,12 @@
 
 using TileXRInternalResourceDestroyFn = int (*)(TileXRCommPtr, void*);
 
+// Returns an immutable device snapshot, initialized before return and owned by
+// the communicator. Same contents reuse storage; pending launches may keep old
+// addresses until all work completes and the communicator is destroyed.
+int TileXRCommGetKernelTiling(TileXRCommPtr comm, const void *data,
+    uint32_t bytes, GM_ADDR *deviceData);
+
 int TileXRCommGetInternalResource(TileXRCommPtr comm, void **resource);
 int TileXRCommAttachInternalResource(TileXRCommPtr comm, void *resource,
     TileXRInternalResourceDestroyFn destroy);

@@ -26,6 +26,7 @@
 #include "tilexr_internal.h"
 
 namespace TileXR {
+class KernelTilingCache;
 constexpr int IPC_NAME_SIZE = 65;
 constexpr int64_t TILEXR_MIB_BYTES = 1024LL * 1024;
 constexpr uint64_t TILEXR_MEMORY_DOMAIN_EXTRA_ALLOC_BYTES = 1024ULL * 1024ULL;
@@ -86,6 +87,8 @@ public:
     int FinalizeProfiling();
     int ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
     int ReserveLatestProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
+    int GetKernelTiling(const void *data, uint32_t bytes, GM_ADDR *deviceData);
+    int FinalizeKernelTilings();
     int GetInternalResource(void **resource) const;
     int AttachInternalResource(void *resource,
         TileXRInternalResourceDestroyFn destroy);
@@ -173,6 +176,7 @@ private:
     GM_ADDR profilingDroppedCountsDev_ = nullptr;
     bool profilingFinalized_ = false;
     void *internalResource_ = nullptr;
+    std::unique_ptr<KernelTilingCache> kernelTilings_;
     TileXRInternalResourceDestroyFn internalResourceDestroy_ = nullptr;
     std::mutex internalResourceMutex_;
 };

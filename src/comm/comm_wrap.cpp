@@ -461,9 +461,15 @@ int TileXRCommDestroy(TileXRCommPtr comm)
     if (resourceRet != TILEXR_SUCCESS) {
         return resourceRet;
     }
-    const int profilingRet = c->AgreeInternalStatus(c->FinalizeProfiling());
-    if (profilingRet != TILEXR_SUCCESS) {
-        return profilingRet;
+    int finalizeRet = c->FinalizeProfiling();
+    if (finalizeRet == TILEXR_SUCCESS) {
+        finalizeRet = c->FinalizeKernelTilings();
+    }
+    // Reuse the existing rank agreement so a failed tiling release cannot leave
+    // one rank retrying destruction after its peers have deleted their comms.
+    finalizeRet = c->AgreeInternalStatus(finalizeRet);
+    if (finalizeRet != TILEXR_SUCCESS) {
+        return finalizeRet;
     }
     const int udmaRet = c->FinalizeUDMA();
     if (udmaRet != TILEXR_SUCCESS) {
@@ -471,6 +477,14 @@ int TileXRCommDestroy(TileXRCommPtr comm)
     }
     delete c;
     return TILEXR_SUCCESS;
+}
+
+int TileXRCommGetKernelTiling(TileXRCommPtr comm, const void *data,
+    uint32_t bytes, GM_ADDR *deviceData)
+{
+    if (deviceData != nullptr) *deviceData = nullptr;
+    if (comm == nullptr) return TILEXR_ERROR_PARA_CHECK_FAIL;
+    return static_cast<TileXRComm *>(comm)->GetKernelTiling(data, bytes, deviceData);
 }
 
 int TileXRCommGetInternalResource(TileXRCommPtr comm, void **resource)

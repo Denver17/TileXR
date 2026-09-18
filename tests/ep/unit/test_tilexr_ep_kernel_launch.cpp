@@ -5,6 +5,7 @@
 #include <cstring>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,7 @@
 #include "tilexr_api.h"
 #include "tilexr_kernel_binary_loader.h"
 #include "tilexr_types.h"
+#include "../../../src/comm/tilexr_kernel_tiling_cache.h"
 
 namespace {
 
@@ -47,6 +49,15 @@ std::vector<std::string> gLoadedFiles;
 std::vector<std::string> gRegisteredEntries;
 std::map<const void *, std::string> gSignatureNames;
 std::vector<LaunchCapture> gLaunches;
+int gTilingAllocations = 0;
+int gTilingCopies = 0;
+int gTilingFrees = 0;
+aclError gTilingMallocResult = ACL_SUCCESS;
+aclError gTilingCopyResult = ACL_SUCCESS;
+aclError gTilingFreeResult = ACL_SUCCESS;
+std::map<void *, size_t> gDeviceTilings;
+std::map<TileXRCommPtr, std::unique_ptr<TileXR::KernelTilingCache>> gTilingCaches;
+
 
 void Check(bool condition, const char *message)
 {
@@ -58,6 +69,11 @@ void Check(bool condition, const char *message)
 
 void ResetCapture()
 {
+    gTilingFreeResult = ACL_SUCCESS;
+    gTilingCaches.clear();
+    Check(gDeviceTilings.empty(), "communicator cache teardown releases every GM allocation");
+    gTilingAllocations = gTilingCopies = gTilingFrees = 0;
+    gTilingMallocResult = gTilingCopyResult = ACL_SUCCESS;
     gMagicCalls = 0;
     gProfilingCalls = 0U;
     gProfilingExhausted = false;
@@ -188,6 +204,62 @@ void TestUnsupportedSocRejectsAllKernels()
     gSocName = "Ascend950PR_9589";
 }
 
+void TestKernelTilingCache()
+{
+    ResetCapture();
+    uint8_t first[32] = {1U};
+    uint8_t second[32] = {2U};
+    GM_ADDR firstDevice = nullptr;
+    GM_ADDR secondDevice = nullptr;
+    {
+        TileXR::KernelTilingCache cache;
+        Check(cache.Get(nullptr, 32, &firstDevice) == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL &&
+            cache.Get(first, 0, &firstDevice) == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL &&
+            cache.Get(first, 32, nullptr) == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL,
+            "invalid cache requests do not allocate");
+        gTilingMallocResult = 1;
+        Check(cache.Get(first, 32, &firstDevice) == TileXR::TILEXR_ERROR_INTERNAL && firstDevice == nullptr,
+            "allocation failure publishes no device address");
+        gTilingMallocResult = ACL_SUCCESS;
+        gTilingCopyResult = 1;
+        Check(cache.Get(first, 32, &firstDevice) == TileXR::TILEXR_ERROR_INTERNAL && firstDevice == nullptr,
+            "copy failure publishes no device address");
+        Check(gDeviceTilings.size() == 1U, "failed initialization remains owned for retry and cleanup");
+        gTilingCopyResult = ACL_SUCCESS;
+        Check(cache.Get(first, 32, &firstDevice) == TileXR::TILEXR_SUCCESS && firstDevice[0] == 1U,
+            "failed initialization can retry without using partial data");
+        const int allocations = gTilingAllocations;
+        const int copies = gTilingCopies;
+        GM_ADDR reused = nullptr;
+        Check(cache.Get(first, 32, &reused) == TileXR::TILEXR_SUCCESS && reused == firstDevice &&
+            gTilingAllocations == allocations && gTilingCopies == copies,
+            "cache hit performs no allocation or H2D copy");
+        Check(cache.Get(second, 32, &secondDevice) == TileXR::TILEXR_SUCCESS &&
+            secondDevice != firstDevice && firstDevice[0] == 1U && secondDevice[0] == 2U,
+            "changed configuration preserves previously submitted GM contents");
+        first[0] = 7U;
+        Check(firstDevice[0] == 1U, "Host source lifetime is independent after synchronous initialization");
+        {
+            TileXR::KernelTilingCache otherCommunicator;
+            GM_ADDR otherDevice = nullptr;
+            Check(otherCommunicator.Get(second, 32, &otherDevice) == TileXR::TILEXR_SUCCESS &&
+                otherDevice != secondDevice, "separate communicators own separate device allocations");
+        }
+        Check(gDeviceTilings.size() == 2U, "destroying another cache preserves this communicator's data");
+        gTilingFreeResult = 1;
+        Check(cache.Clear() == TileXR::TILEXR_ERROR_INTERNAL && gDeviceTilings.size() == 2U,
+            "failed teardown retains ownership for retry");
+        gTilingFreeResult = ACL_SUCCESS;
+        Check(cache.Clear() == TileXR::TILEXR_SUCCESS && gDeviceTilings.empty(),
+            "teardown retry releases all cached configurations");
+        gTilingCopyResult = 1;
+        Check(cache.Get(first, 32, &firstDevice) == TileXR::TILEXR_ERROR_INTERNAL,
+            "leave an unpublished failed copy for destructor cleanup");
+        gTilingCopyResult = ACL_SUCCESS;
+    }
+    Check(gDeviceTilings.empty(), "destructor releases unpublished allocations too");
+}
+
 void TestServerDedupRuntimeLaunch()
 {
     TileXR::CommArgs commArgs = MakeCommArgs();
@@ -269,6 +341,19 @@ void TestServerDedupRuntimeLaunch()
 
     ResetCapture();
     gVectorCores = 64;
+    gTilingMallocResult = 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL && gLaunches.empty(),
+        "GM allocation failure prevents kernel submission");
+    gTilingMallocResult = ACL_SUCCESS;
+    gTilingCopyResult = 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL && gLaunches.empty(),
+        "GM initialization failure prevents kernel submission");
+    gTilingCopyResult = ACL_SUCCESS;
+    Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches.size() == 1U,
+        "launch can retry after GM initialization failure");
+
+    ResetCapture();
+    gVectorCores = 64;
     Check(launch() == TileXR::TILEXR_SUCCESS, "count server dedup launch succeeds");
     CheckLaunch(0, "tilexr_ep_dispatch_memory_server_dedup_kernel", 15);
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING)
@@ -276,12 +361,11 @@ void TestServerDedupRuntimeLaunch()
 #else
     constexpr uint64_t firstProfilingSlot = UINT32_MAX;
 #endif
-    // Independent wire expectations: thirteen unchanged addresses, patched GM
-    // tiling pointer, then magic. Tiling fields are checked as little-endian bytes.
-    constexpr uint64_t tilingDeviceBase = 0x100008U;
+    // Independent wire expectations: thirteen unchanged addresses, real GM
+    // tiling pointer, then magic. Read tiling separately from its device allocation.
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
         0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
-        tilingDeviceBase + 128U, kNextMagic};
+        gLaunches[0].args[13], kNextMagic};
     std::vector<uint8_t> expectedTiling = {
         0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, // bs=256, h=7168
         0, 0, 0, 0, // profiling slot
@@ -292,7 +376,8 @@ void TestServerDedupRuntimeLaunch()
         expectedTiling[8U + byte] = static_cast<uint8_t>(firstProfilingSlot >> (8U * byte));
     Check(gLaunches[0].args == expected && gLaunches[0].tiling == expectedTiling,
         "120B kernel ABI and 32B GM tiling preserve all field values and reserved zeros");
-    Check(gLaunches[0].submittedBytes == 160U, "runtime packet includes tiling and explicit padding");
+    Check(gLaunches[0].submittedBytes == 120U, "runtime receives no inline tiling contents or padding");
+    Check(gTilingAllocations == 1 && gTilingCopies == 1, "first configuration is initialized once before launch");
     Check(gLaunches[0].blockDim == 64 && gLaunches[0].stream == p.stream, "uses fixed 64 AIVs and caller stream");
     Check(gBinaryRegisterCalls == 0 && gMagicCalls == 1, "registered binary reused with exactly one magic per launch");
 
@@ -303,7 +388,7 @@ void TestServerDedupRuntimeLaunch()
         params.enableServerDedup = round % 2 == 0;
         Check(launch() == TileXR::TILEXR_SUCCESS, "reused server dedup launch succeeds");
         auto roundArgs = expected;
-        roundArgs[13] += static_cast<uint64_t>(round) * 256U;
+        roundArgs[13] = gLaunches.back().args[13];
         roundArgs[14] = kNextMagic + round;
         auto roundTiling = expectedTiling;
         roundTiling[20] = params.enableServerDedup ? 1U : 0U;
@@ -312,8 +397,13 @@ void TestServerDedupRuntimeLaunch()
             gLaunches.back().stream == p.stream,
             "each round forwards its mode and new magic and reuses all pointers and the stream");
     }
-    Check(gLaunches.front().tiling == expectedTiling,
-        "later asynchronous submissions cannot overwrite the first launch tiling snapshot");
+    Check(gLaunches.front().tiling == expectedTiling &&
+        std::memcmp(reinterpret_cast<const void *>(gLaunches.front().args[13]), expectedTiling.data(), 32U) == 0,
+        "later asynchronous submissions cannot overwrite the first GM tiling");
+    Check(gLaunches[0].args[13] != gLaunches[1].args[13] &&
+        gLaunches[0].args[13] == gLaunches[2].args[13] &&
+        gLaunches[1].args[13] == gLaunches[3].args[13] && gTilingAllocations == 2 && gTilingCopies == 2,
+        "two alternating modes reuse two immutable GM entries with no per-round copy");
     Check(gMagicCalls == rounds && gBinaryRegisterCalls == 0 && gLoadedFiles.empty(),
         "multiple rounds consume exactly one magic each without reloading the artifact");
 
@@ -324,6 +414,7 @@ void TestServerDedupRuntimeLaunch()
         params.sendCoreNum = sendCoreNum;
         Check(launch() == TileXR::TILEXR_SUCCESS, "runtime split launches the same kernel artifact");
         auto splitArgs = expected;
+        splitArgs[13] = gLaunches[0].args[13];
         auto splitTiling = expectedTiling;
         splitTiling[15] = static_cast<uint8_t>(sendCoreNum);
         Check(gLaunches.size() == 1 && gLaunches[0].args == splitArgs && gLaunches[0].tiling == splitTiling &&
@@ -540,6 +631,14 @@ bool LoadKernelBinary(const void *, const char *fileName, KernelBinaryView *bina
 
 } // namespace TileXR
 
+int TileXRCommGetKernelTiling(TileXRCommPtr comm, const void *data, uint32_t bytes, GM_ADDR *device)
+{
+    if (comm == nullptr) return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    auto &cache = gTilingCaches[comm];
+    if (!cache) cache.reset(new TileXR::KernelTilingCache());
+    return cache->Get(data, bytes, device);
+}
+
 extern "C" {
 
 int TileXRProfilingReserveLatestLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
@@ -595,10 +694,37 @@ aclError aclrtSynchronizeStream(aclrtStream)
     return ACL_SUCCESS;
 }
 
-aclError aclrtMemcpy(void *dst, std::size_t destMax, const void *,
-    std::size_t count, aclrtMemcpyKind)
+aclError aclrtMalloc(void **device, size_t bytes, aclrtMemMallocPolicy policy)
 {
-    if (dst != nullptr && count <= destMax) {
+    ++gTilingAllocations;
+    Check(policy == ACL_MEM_MALLOC_NORMAL_ONLY, "small tiling uses ordinary device allocation");
+    if (gTilingMallocResult != ACL_SUCCESS) return gTilingMallocResult;
+    *device = std::malloc(bytes);
+    if (*device == nullptr) return 1;
+    std::memset(*device, 0xa5, bytes);
+    gDeviceTilings[*device] = bytes;
+    return ACL_SUCCESS;
+}
+
+aclError aclrtFree(void *device)
+{
+    ++gTilingFrees;
+    if (gTilingFreeResult != ACL_SUCCESS) return gTilingFreeResult;
+    Check(gDeviceTilings.erase(device) == 1U, "free matches a live tiling allocation");
+    std::free(device);
+    return ACL_SUCCESS;
+}
+
+aclError aclrtMemcpy(void *dst, std::size_t destMax, const void *src,
+    std::size_t count, aclrtMemcpyKind kind)
+{
+    if (kind == ACL_MEMCPY_HOST_TO_DEVICE) {
+        ++gTilingCopies;
+        if (gTilingCopyResult != ACL_SUCCESS) return gTilingCopyResult;
+        Check(gDeviceTilings.count(dst) == 1U && gDeviceTilings[dst] >= count && count <= destMax,
+            "tiling initialization writes within its allocation");
+        std::memcpy(dst, src, count);
+    } else if (dst != nullptr && count <= destMax) {
         std::memset(dst, 0, count);
     }
     return ACL_SUCCESS;
@@ -640,24 +766,18 @@ rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim,
     if (argsInfo != nullptr && argsInfo->args != nullptr) {
         capture.submittedBytes = argsInfo->argsSize;
         std::size_t fieldCount = argsInfo->argsSize / sizeof(uint64_t);
-        if (argsInfo->hasTiling != 0U) {
-            Check(capture.name == "tilexr_ep_dispatch_memory_server_dedup_kernel",
-                "only server dedup uses the new tiling packet");
-            Check(argsInfo->isNoNeedH2DCopy == 0U && argsInfo->hostInputInfoNum == 0U,
-                "runtime owns the launch argument H2D copy");
-            Check(argsInfo->argsSize == 160U && argsInfo->tilingAddrOffset == 104U &&
-                argsInfo->tilingDataOffset == 128U, "runtime receives the exact tiling relocation offsets");
-            if (argsInfo->argsSize != 160U || argsInfo->tilingAddrOffset != 104U ||
-                argsInfo->tilingDataOffset != 128U) return -1;
-            auto *bytes = static_cast<uint8_t *>(argsInfo->args);
-            // Model CANN's per-launch GM relocation and immediate owned snapshot.
-            // Deliberately only 8B aligned, as allowed by Runtime argument storage.
-            const uint64_t deviceTiling = 0x100008U + gLaunches.size() * 256U + 128U;
-            std::memcpy(bytes + argsInfo->tilingAddrOffset, &deviceTiling, sizeof(deviceTiling));
-            capture.tiling.assign(bytes + 128U, bytes + 160U);
-            Check(std::all_of(bytes + 120U, bytes + 128U, [](uint8_t byte) { return byte == 0U; }),
-                "runtime packet padding is initialized");
-            fieldCount = 15U;
+        Check(argsInfo->hasTiling == 0U && argsInfo->hostInputInfoNum == 0U &&
+            argsInfo->tilingAddrOffset == 0U && argsInfo->tilingDataOffset == 0U,
+            "launch never requests inline tiling relocation");
+        if (capture.name == "tilexr_ep_dispatch_memory_server_dedup_kernel") {
+            Check(argsInfo->argsSize == 120U, "only the 120B kernel arguments are submitted");
+            if (argsInfo->argsSize != 120U) return -1;
+            const auto *fields = static_cast<const uint64_t *>(argsInfo->args);
+            auto *deviceTiling = reinterpret_cast<uint8_t *>(fields[13]);
+            Check(gDeviceTilings.count(deviceTiling) == 1U && gDeviceTilings[deviceTiling] == 32U,
+                "tiling pointer resolves to a separately allocated 32B GM buffer");
+            if (gDeviceTilings.count(deviceTiling) == 0U) return -1;
+            capture.tiling.assign(deviceTiling, deviceTiling + 32U);
         }
         const uint64_t *fields = static_cast<const uint64_t *>(argsInfo->args);
         capture.args.assign(fields, fields + fieldCount);
@@ -675,7 +795,9 @@ int main()
     TestOrdinaryCombineRuntimeLaunch();
     TestDispatchMemoryRuntimeLaunch();
     TestCombineMemoryRuntimeLaunch();
+    TestKernelTilingCache();
     TestServerDedupRuntimeLaunch();
+    ResetCapture();
     std::cout << "EP_SERVER_DEDUP_EMPTY_KERNEL_" << (gFailures == 0 ? "PASS" : "FAIL")
               << " test=launch" << std::endl;
     return gFailures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

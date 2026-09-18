@@ -867,20 +867,23 @@ counter 清零，保留完成屏障；Combine 尚未实现。主规格记录新�
 
 ## Server Dedup GM tiling 验证边界
 
-当前参数契约为 `r10-gm-tiling`：Kernel 签名 120B，tiling 32B，实际 Runtime 提交包
-160B；magic 独立传参，epHandle 尚未引入。升级时同时重建 owning Host 库和 A5 Kernel，
-并执行 `build_all.sh` / `sync.sh` 更新 manifest；不能混用旧 208B 标量入口。
+当前参数契约为 `r11-independent-gm-tiling`：Kernel 签名和实际 Runtime argsSize
+均为 120B。32B tiling 由 communicator 在独立 GM 初始化/缓存；magic 独立传参，
+epHandle 尚未引入。必须同时更新 libtile-comm、owning Host 库及 A5 Kernel，执行
+`build_all.sh` / `sync.sh` 更新 manifest；旧 r10/160B 提交包不满足当前契约。
 
-Host launch 替身按 CANN 的偏移回填和即时快照语义检查打包；覆盖连续提交、量化分支、
-profiling 槽位和 64 位 magic，不能据此声称真实 Runtime GM 搬运已通过。
+Host launch 替身检查 hasTiling=0、无附带内容、指针指向独立 GM，并通过真实缓存类
+验证首次同步初始化、重复配置无复制、旧配置内容不被覆盖、不同通信域隔离及失败清理。
+保留量化、profiling 槽位、窄化前拒绝和 64 位 magic 检查。缓存保留所有不同配置直到
+communicator 销毁，不能用此 Host 证据声称 NPU 搬运或性能已通过。
 编译验证需包括 `test_tilexr_ep_kernel_launch` / `_profile` 和公共 API/Host 校验，
-以及真实 CANN 9.1/A5 Kernel 与 owning Host 库。NPU 验证应保留多轮、不同 shape 和
-profiling OFF/ON，用实际结果验证 GM 参数读取；参数字节减少不等于耗时改善。
-对齐和 Host 包生命周期的版本依据见主规格“GM tiling 参数”章节。
+以及真实 CANN 9.1/A5 Kernel、owning Host 库和通信库。NPU 验证应保留多轮、不同 shape
+和 profiling OFF/ON，用实际结果验证 GM 参数读取；参数字节减少不等于耗时改善。
 
-2026-09-17 验证：基于 `777a8c8` 加本次 tiling 修改，blue 的 CANN 9.1.0 / Bisheng
-Clang 15.0.5（2026-05-18）完成 A5 `dav-c310-vec` Kernel 和 `tilexr-ep` Host 库的
-profiling OFF/ON 编译；6 项上述相关 Host CTest、16 项 build Python 回归及 98 项
-workflow Python 回归通过。987 个构建输入文件的最终 SHA256 与 blue 快照一致。
-独立审查未发现待修复缺陷。证据保留于本地 `build/tiling-data-verification/`，
-包含版本匹配的 Runtime 源码依据；未运行 NPU，不宣称设备正确性或性能改善。
+2026-09-18 验证：基于 `83208c8` 加本次独立 GM 修正，blue 的 CANN 9.1.0 / Bisheng
+Clang 15.0.5（2026-05-18）完成 A5 `dav-c310-vec` Kernel、`tilexr-ep` 及
+`tile-comm` 的 profiling OFF/ON 编译，最终清理状态调整也已重编。6 项相关 Host CTest
+（包含生产缓存类和失败路径）、16 项 build Python 回归、98 项 workflow Python 回归通过。
+988 个构建输入的 SHA256 与最终 blue 快照一致，独立审查未发现待修复缺陷。
+证据保留在本地 `build/independent-tiling-verification/`。未运行 NPU；多 Rank 释放失败
+一致性仅经调用链审查，不声称已完成实机故障注入或性能验证。
