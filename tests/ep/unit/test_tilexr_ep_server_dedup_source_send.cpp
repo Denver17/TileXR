@@ -101,7 +101,8 @@ void CheckDeferredCountSender()
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
-    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {})
+    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {},
+    const std::vector<uint32_t> &expectedDirectServers = {})
 {
     TileXR::CommArgs args {};
     args.rankSize = ranks;
@@ -230,6 +231,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         for (uint32_t core = 0; core < sendCoreNum; ++core) {
             bool directStarted = false;
             uint32_t previousDirect = 0, previousServerStep = 0;
+            std::vector<uint32_t> directServers;
             std::vector<uintptr_t> lanes;
             uint32_t issued = 0;
             for (const auto &write : writes) if (write.core == core) {
@@ -239,17 +241,22 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
                     const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
-                    const uint32_t serverStep = (server + ranks / 8U - source / 8U) % (ranks / 8U);
+                    const uint32_t offset = (server + ranks / 8U - source / 8U) % (ranks / 8U);
+                    const uint32_t half = (ranks / 8U + 1U) / 2U;
+                    const uint32_t serverStep = offset < half ? 2U * offset : 2U * (offset - half) + 1U;
                     Check(!directStarted || serverStep >= previousServerStep,
-                        "DIRECT visits servers cyclically starting at the source server");
+                        "DIRECT interleaves both halves of the source-relative server ring");
                     Check(!directStarted || serverStep != previousServerStep || index > previousDirect,
                         "DIRECT preserves token/k order within each destination server");
+                    if (!directStarted || serverStep != previousServerStep) directServers.push_back(server);
                     directStarted = true; previousDirect = index; previousServerStep = serverStep;
                 } else Check(!directStarted, "all first hops on a core precede its DIRECT sends");
                 if (std::find(lanes.begin(), lanes.end(), write.lane) == lanes.end()) lanes.push_back(write.lane);
                 Check(lanes.size() <= 8U && write.lane == lanes[issued % lanes.size()], "both stages share a continuous lane sequence");
                 ++issued;
             }
+            if (!expectedDirectServers.empty())
+                Check(directServers == expectedDirectServers, "DIRECT issues the exact expected server sequence");
         }
         std::vector<uint32_t> expectedMasks(bs, 0U);
         for (const auto &packet : packets) {
@@ -311,6 +318,20 @@ int main()
             CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
             CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
             CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
+            // One route per server keeps every packet DIRECT. Every core owns
+            // two tokens, so the sequence also checks stable per-server batching.
+            Run(64, 64, sendCoreNum * 2U, 32, 8, false, 0, 2,
+                {0, 8, 16, 24, 32, 40, 48, 56}, {0, 4, 1, 5, 2, 6, 3, 7});
+            Run(64, 64, sendCoreNum * 2U, 32, 8, false, 16, 2,
+                {0, 8, 16, 24, 32, 40, 48, 56}, {2, 6, 3, 7, 4, 0, 5, 1});
+            Run(64, 64, sendCoreNum * 2U, 32, 8, false, 56, 2,
+                {0, 8, 16, 24, 32, 40, 48, 56}, {7, 3, 0, 4, 1, 5, 2, 6});
+            Run(56, 56, sendCoreNum * 2U, 32, 7, false, 0, 2,
+                {0, 8, 16, 24, 32, 40, 48}, {0, 4, 1, 5, 2, 6, 3});
+            Run(56, 56, sendCoreNum * 2U, 32, 7, false, 16, 2,
+                {0, 8, 16, 24, 32, 40, 48}, {2, 6, 3, 0, 4, 1, 5});
+            Run(56, 56, sendCoreNum * 2U, 32, 7, false, 48, 2,
+                {0, 8, 16, 24, 32, 40, 48}, {6, 3, 0, 4, 1, 5, 2});
             for (uint32_t source : {0U, 24U, 56U}) {
                 const uint32_t local = source / 8U;
                 const auto expert = [local](uint32_t step, uint32_t offset = 0U) {

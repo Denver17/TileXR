@@ -71,7 +71,9 @@ Clang 15.0.5 的 A5 kernel 与 `tilexr-ep` Host 库 profiling OFF/ON 均编译�
 
 固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 申请 **8 GiB 通信域**（8188 MiB 数据 + 4 MiB runtime Flag），底层另有 1 MiB 地址偏移余量。两个固定 4 GiB 窗口由 `magic % 2` 选择；每窗前 2 MiB 是 cnt/cumsum/prefix/counter，后续 4090 MiB 可用于 Token 区，最后 4 MiB 保留。第一窗尾部空置，第二窗尾部归 runtime；任何 shape 均不得改变窗跨度或越过单窗上限。总专家数 `0<E<=1024` 且能被 rank 数整除。
 
-每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
+每个发送核先发第一跳，再按源 server 相对的双半区顺序发送 DIRECT。设 `N=rankSize/8`、`half=(N+1)/2`（整数除法），第 `step` 项目标为 `(sourceServer + step/2 + (step%2)*half)%N`，`step=0..N-1`。8 server 的 s2 顺序为 `2→6→3→7→4→0→5→1`；7 server 的 s0 为 `0→4→1→5→2→6→3`。奇数时第一半区多一项，最后自然补齐；不能用向下取整的半区大小套用此公式，否则重复一个目标并遗漏另一个。空目标跳过，同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。顺序回归须观察实际发包，同时检查每个原始 q 槽恰好发送一次；Host 替身检查不证明设备性能收益。
+
+2026-09-18 双半区调度验证：基于 `3cc3265` 加本次修改，blue 上 CANN 9.1.0 / Bisheng Clang 15.0.5 的 A5 `dav-c310-vec` kernel（profiling OFF、去重开启）编译链接成功；source_send 的普通/打点两个 Host 替身测试在去重开启和关闭下共 4 项通过。关闭去重通过编辑隔离源码副本的头文件宏验证。新增 7/8 server、源 s0/s2/末 server 的实际发包顺序及双轮检查，保留原 q 槽唯一性、第一跳优先及连续 lane 复用验证。源码摘要、配置和日志保留于 `build/dual-half-verification/`；未运行 NPU，不登记性能收益。
 
 接收以完整前缀确定连续输出行，在本次接收核组按 floor 分区；tokenPos/pendingIdx 均只存 UB。每批独立探测最多 16 个 Token 的全部块、全部 8 个 Flag word，记录稳定索引，按原 pending 位置逆序消费就绪项并末项覆盖删除。整批未就绪时继续扫描；有删除则重查批起点的换入项。
 

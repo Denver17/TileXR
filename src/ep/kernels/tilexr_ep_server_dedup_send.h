@@ -130,8 +130,13 @@ public:
         // across first hops and server boundaries without an added drain.
         const uint32_t serverNum = args_->rankSize / 8U;
         const uint32_t expertsPerServer = localExperts_ * 8U;
-        uint32_t server = args_->rank / 8U;
+        const uint32_t sourceServer = args_->rank / 8U;
+        const uint32_t half = (serverNum + 1U) / 2U;
         for (uint32_t step = 0; step < serverNum; ++step) {
+            // Interleave the two halves of the source-relative server ring.
+            // With odd server counts, the final step uses the longer first half.
+            uint32_t server = sourceServer + step / 2U + (step % 2U) * half;
+            if (server >= serverNum) server -= serverNum;
             const uint32_t firstExpert = server * expertsPerServer;
             for (uint32_t task = 0; task < directCount_; ++task) {
                 const uint32_t expert = directTasks_.GetValue(task * 4U + 2U);
@@ -143,7 +148,6 @@ public:
                 sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << k));
                 sourceWeights_.SetValue(token * k_ + k, routeWeights_.GetValue(token * k_ + k));
             }
-            if (++server == serverNum) server = 0U;
         }
         profile.End(EpDedupDetailMetric::SendDirect);
         for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
