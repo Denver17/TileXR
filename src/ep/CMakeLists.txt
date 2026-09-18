@@ -52,7 +52,7 @@ function(tilexr_add_ep_aicore_kernel target source output)
         -Wno-deprecated-declarations
         "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
         "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
-        "SHELL:-mllvm -cce-aicore-record-overflow=true"
+        "SHELL:-mllvm -cce-aicore-record-overflow=false"
         "SHELL:-mllvm -cce-aicore-addr-transform"
         "SHELL:-mllvm -cce-aicore-dcci-insert-for-scalar=false"
         ${TILEXR_EP_AICORE_ARCH}

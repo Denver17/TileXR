@@ -2,6 +2,12 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
+2026-09-18 编译开关调整：EP AICore kernel 将
+`-mllvm -cce-aicore-record-overflow` 设为 `false`。该选项仅控制 AICore
+overflow 检测代码生成，不改变用户 kernel 参数 ABI；CANN 9.1/A5 对当前
+Server Dedup kernel 的 true/false 编译均为 120B 用户参数，关闭后主 kernel
+代码段缩短 120B。此项未进行 NPU 性能结论，实际收益仍需在目标卡上对比验证。
+
 2026-09-17 运行时发送去重开关：`TILEXR_EP_SERVER_DEDUP_ENABLE` 未设置/`1` 为开启，`0` 为关闭，
 其他值报参数错误。关闭仍扫描 server mask，每条原始路由均按本 server、后继 server 的轮转顺序
 DIRECT 发送，无第一跳和转发；接收、原始 cnt/q、通信布局与 Flag 清理不变。每个发送核独立
