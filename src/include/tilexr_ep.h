@@ -34,7 +34,7 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream);
 
 // Server Dedup Combine: A5 only, FP16/BFP16, quantMode=0, fixed 64 AIV.
-// Phase one submits an empty kernel; success means asynchronous submission,
+// Phase one submits an empty kernel with a 50us per-core wait; success means asynchronous submission,
 // not a numerical result. It leaves all tensors and communication buffers unchanged.
 // C=R*bs*min(topK,moeExpertNum/R); expertOut[C,h], assistInfoForCombine[C,3],
 // tokenType[C], relayReadIndex[C,topK,2] (raw 32-bit pairs), sourceMask[bs],

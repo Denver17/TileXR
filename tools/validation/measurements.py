@@ -38,8 +38,10 @@ def render_case_description(report):
     config = report.get("chain_configuration")
     if not config:
         return "checkpoint=" + report.get("checkpoint", "unknown")
+    operator = config.get("operator_mode", "dispatch")
+    title = "Dispatch" if operator == "dispatch" else "Combine" if operator == "combine" else "Dispatch+Combine"
     return (
-        f"Dispatch server-dedup scope={config.get('kernel_scope', 'unknown')} mode={config['run_mode']} "
+        f"{title} server-dedup scope={config.get('kernel_scope', 'unknown')} mode={config['run_mode']} "
         f"loops={config['loops']} warmup={config['warmup']}\n"
         f"BS={config['bs']} H={config['h']} TopK={config['topk']} "
         f"experts={config['moe_expert_num']} dtype={config['dtype']} "

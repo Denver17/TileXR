@@ -4,7 +4,7 @@
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；当前交付 C3 配置/dry-run，等待外部验收。
+Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；当前交付 C4 单轮接线，等待外部验收。
 下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
@@ -18,10 +18,17 @@ C2 交付 commit 为 `3b2706281e450df7c6263dc112a753fbece21493`；2026-09-20 用
 按用户回传登记通过；范围为 C1 回归、生产 launch 替身和本机 A5 空 kernel 安装/注册/64 核提交/同步，
 不包含通信或业务数据验证。
 
-当前点 `ep-sdedup-combine-p1-dry-run`；用户入口仍为 `bash run_commit_validation.sh`。
-C3 在同一 consumer/脚本接入 dispatch/combine/both 配置、独立量化开关和共享 dtype/格式；
-Host dry-run 检查 rank 映射、参数及后续输入来源，不初始化 ACL、不分配设备通信域、不 launch。
-**C3 外部验收待回传，C4 未开始。**
+C3 交付 commit 为 `b68b56e02e1f49975549515f2d7f805ee4e1e0c8`；用户回传：
+`COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-dry-run`。
+报告路径：`/home/h00580772/TileXR-git-check/run/validation/commit-7fdca463600a4770aca68a6ef620ad67/summary.json`。
+按用户回传登记通过，未取得 summary 内容，实际运行 SHA/工具链未独立核对；报告目录不是 Git SHA。
+范围为 C1 回归、同一 consumer 三种算子模式、独立量化开关和 rank 映射；
+没有 CANN/SSH/设备分配/communicator/launch 证据。
+
+当前点 `ep-sdedup-combine-p1-chain-single`；入口仍为 `bash run_commit_validation.sh`。
+C4 接入单轮 Combine 独立和真实 Dispatch→空 Combine，验证输入原指针、容量和生命周期，
+不验证 Combine 数值输出。按用户追加要求，空 Combine 各核等待 50μs，仍不读写业务/通信数据。
+**C4 外部验收待回传，C5 未开始。**
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
@@ -198,7 +205,8 @@ Host 替身测试也分别在 profiling OFF/ON 通过，共六项检查。这些
 | --- | --- | --- |
 | 公共 API / Host / layout | C1 用户回传 COMMIT_VALIDATION_PASS；外部详细环境未提供 | 交付 `01c9b1d` |
 | 空 kernel / 注册 / launch | C2 用户回传 COMMIT_VALIDATION_PASS；报告路径见上文 | 交付 `3b27062` |
-| 三模式配置 / dry-run | C3 已实现，用户外部验收待回传 | 待验收后登记 |
+| 三模式配置 / dry-run | C3 用户回传 COMMIT_VALIDATION_PASS；报告路径见上文 | 交付 `b68b56e` |
+| 单轮接线 | C4 已实现，用户外部验收待回传 | 待验收后登记 |
 | 单轮 / 多轮框架 | 未开始 | — |
 
 ## 阶段 4：Combine 算子逻辑

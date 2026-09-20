@@ -212,7 +212,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
                 self.assertEqual(len(result.stdout.splitlines()), 1)
 
-    def test_commit_entry_selects_c3_host_without_cann_or_hostfile(self):
+    def test_commit_entry_selects_c4_production_before_workflow_preflight(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json,sys; print(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n")
         cann = self.root / "cann-env.sh"
@@ -226,8 +226,8 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(values["action"], "commit-validate")
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_DRY_RUN_CHECKPOINT)
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "host")
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_CHAIN_CHECKPOINT)
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "production")
         self.assertEqual(values["env"]["TILEXR_VALIDATION_ACTION"], "commit-validate")
         self.assertNotIn("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", values["env"])
         self.assertFalse((self.root / "hostfile").exists())
@@ -260,9 +260,9 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             self.assertEqual(config["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_DRY_RUN_CHECKPOINT)
             self.assertNotIn("unexpected-cann-load", (output / "environment.log").read_text())
 
-    def test_combine_cli_rejects_conflicts_and_real_execution_without_loading_environment(self):
+    def test_combine_cli_rejects_conflicts_and_later_stages_without_loading_environment(self):
         self.local.unlink()
-        for arguments in (["operator_mode=both"], ["operator_mode=combine"],
+        for arguments in (["operator_mode=both", "-l", "2"], ["operator_mode=combine", "-m", "1"],
                           ["dry_run=1", "quant_mode=4", "dispatch_quant_mode=0"],
                           ["dry_run=1", "combine_quant_mode=4"], ["dry_run=2"],
                           ["operator_mode=other"], ["dispatch_quant_mode=1"]):

@@ -1,4 +1,4 @@
-// 链接真实 consumer 的 Host 生命周期/C3 dry-run 测试；不链接生产 Host 库。
+// 链接真实 consumer 的 Host 生命周期/C3 dry-run/C4 串联测试；不链接生产 Host 库。
 #include <cstdlib>
 #include <array>
 #include <chrono>
@@ -11,6 +11,7 @@
 #include <tuple>
 #include "acl/acl.h"
 #include "tilexr_ep.h"
+#include "ep_memory_server_dedup_combine_host.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
 #include "tilexr_profiling_runtime.h"
@@ -21,6 +22,7 @@ int deviceId = 0;
 int rankId = -1;
 TileXR::CommArgs args;
 std::map<void *, void *> allocations;
+std::map<const void *, size_t> allocationBytes;
 std::map<std::string, uint64_t> calls;
 std::vector<void *> firstBuffers;
 std::map<uintptr_t, std::vector<uint8_t>> packets;
@@ -87,9 +89,10 @@ aclError aclrtMalloc(void **data, size_t bytes, aclrtMemMallocPolicy)
     if (raw == nullptr) { return 93; }
     *data = reinterpret_cast<void *>((reinterpret_cast<uintptr_t>(raw) + 31) & ~uintptr_t(31));
     allocations[*data] = raw;
+    allocationBytes[*data] = bytes;
     return 0;
 }
-aclError aclrtFree(void *data) { std::free(allocations.at(data)); allocations.erase(data); return Call("free"); }
+aclError aclrtFree(void *data) { std::free(allocations.at(data)); allocations.erase(data); allocationBytes.erase(data); return Call("free"); }
 aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 {
     if (bytes > size) return 92;
@@ -211,7 +214,10 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     std::vector<void *> current {x, ids, expandX, counts, sendCounts, tokenType, destinationIndex, relayReadIndex, sourceMask, weights, weightsOut};
     if (dynamic) current.push_back(dynamic);
     if (calls["launch"] == 0) { firstBuffers = current; }
-    if (current != firstBuffers || allocations.size() != current.size() || calls["comm-init"] != 1 ||
+    const char *mode = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE");
+    const bool both = mode && std::strcmp(mode, "both") == 0;
+    const size_t extraBuffers = both ? (quant == 4 ? 2U : 1U) : 0U;
+    if (current != firstBuffers || allocations.size() != current.size() + extraBuffers || calls["comm-init"] != 1 ||
         calls["create-stream"] != 1 || calls["sync"] != 0) { return 92; }
     for (auto buffer : current) { if (allocations.count(buffer) != 1) { return 92; } }
     const auto *routeWeights = static_cast<const float *>(weights);
@@ -336,6 +342,93 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         if (fault && std::strcmp(fault, "expert") == 0) ++counts[0];
     }
     return result;
+}
+
+int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_t *sendCounts,
+    float *weights, bool *mask, int64_t maskType, void *sharedX, TileXRCommPtr comm,
+    int64_t bs, int64_t h, int64_t topK, int64_t experts, int64_t world, int64_t rank,
+    int64_t tpWorld, int64_t tpRank, int64_t shard, int64_t shared, int64_t sharedRanks,
+    int64_t quant, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream,
+    const uint32_t *tokenType, const void *relay, const uint32_t *sourceMask)
+{
+    const char *mode = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE");
+    const bool both = mode && std::strcmp(mode, "both") == 0;
+    if ((!both && (!mode || std::strcmp(mode, "combine") != 0)) || comm != &args || rank != rankId ||
+        stream != reinterpret_cast<void *>(0x20) || tpWorld != 1 || tpRank != 0 || shard != 0 ||
+        shared != 0 || sharedRanks != 0 || quant != 0 || globalBs != world * bs ||
+        mask || maskType != 0 || sharedX || (dtype != TileXR::TILEXR_DATA_TYPE_BFP16 &&
+        dtype != TileXR::TILEXR_DATA_TYPE_FP16) || calls["comm-init"] != 1 || calls["create-stream"] != 1 ||
+        calls["launch"] != (both ? 1U : 0U) || calls["sync"] != (both ? 1U : 0U) ||
+        calls["combine-launch"] != 0) return 92;
+    const char *configuredDtype = std::getenv("TILEXR_VALIDATION_DTYPE");
+    if (!configuredDtype || (dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ?
+            std::strcmp(configuredDtype, "bf16") != 0 : std::strcmp(configuredDtype, "fp16") != 0)) return 92;
+    TileXREp::EpMemoryServerDedupCombineLayout layout;
+    if (TileXREp::TileXREpBuildMemoryServerDedupCombineLayout(world, bs, h, topK, experts, &layout) != 0) return 92;
+    const std::pair<const void *, uint64_t> buffers[] = {
+        {expertOut, layout.expertOutBytes}, {assist, layout.assistInfoBytes},
+        {sendCounts, layout.sendCountsBytes}, {weights, layout.expertScalesBytes},
+        {tokenType, layout.tokenTypeBytes}, {relay, layout.relayReadIndexBytes},
+        {sourceMask, layout.sourceMaskBytes}, {yOut, layout.yOutBytes}};
+    for (const auto &buffer : buffers) {
+        const auto found = allocationBytes.find(buffer.first);
+        if (found == allocationBytes.end() || found->second < buffer.second) return 92;
+    }
+    for (size_t i = 0; i < sizeof(buffers) / sizeof(buffers[0]); ++i)
+        for (size_t j = i + 1; j < sizeof(buffers) / sizeof(buffers[0]); ++j)
+            if (buffers[i].first == buffers[j].first) return 92;
+    int32_t previous = 0;
+    for (int64_t index = 0; index < experts; ++index) {
+        if (sendCounts[index] < previous || uint64_t(sendCounts[index]) > layout.capacityRows) return 92;
+        previous = sendCounts[index];
+    }
+    if (both) {
+        const bool dispatchQuantized = firstBuffers.size() == 12U;
+        if (assist != firstBuffers[6] || sendCounts != firstBuffers[4] || weights != firstBuffers[10] ||
+            tokenType != firstBuffers[5] || relay != firstBuffers[7] || sourceMask != firstBuffers[8] ||
+            (dispatchQuantized ? expertOut == firstBuffers[2] : expertOut != firstBuffers[2])) return 92;
+        for (const auto *data : firstBuffers) {
+            if (allocationBytes.count(data) != 1 || yOut == data ||
+                (dispatchQuantized && expertOut == data)) return 92;
+        }
+        if (allocations.size() != firstBuffers.size() + (dispatchQuantized ? 2U : 1U)) return 92;
+    } else if (allocations.size() != 8U) return 92;
+    {
+        using namespace ServerDedupReference;
+        Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
+            dtype == TileXR::TILEXR_DATA_TYPE_BFP16, false, true};
+        if (const char *route = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
+            shape.routeMode = TileXREpDemo::ParseRouteMode(route);
+        if (!both) shape.routeMode = TileXREpDemo::RouteMode::Balance;
+        if (const char *seed = std::getenv("TILEXR_VALIDATION_SEED"))
+            shape.seed = static_cast<uint32_t>(std::strtoull(seed, nullptr, 10));
+        std::vector<int32_t> counts(experts, 0);
+        const int64_t localExperts = experts / world;
+        for (int64_t source = 0; source < world; ++source)
+            for (int32_t expert : Ids(shape, source))
+                if (expert / localExperts == rank) ++counts[(expert % localExperts) * world + source];
+        int32_t prefix = 0;
+        for (int64_t index = 0; index < experts; ++index) {
+            prefix += counts[index];
+            if (sendCounts[index] != prefix) return 92;
+        }
+    }
+    const int result = Call("combine-launch");
+    if (result != 0) return result;
+    const char *fault = std::getenv("TEST_COMBINE_FAULT");
+    if (fault) {
+        const std::pair<const char *, const void *> targets[] = {
+            {"y_out", yOut}, {"expert_out", expertOut}, {"send_counts", sendCounts}, {"assist", assist},
+            {"token_type", tokenType}, {"relay", relay}, {"source_mask", sourceMask}, {"weights", weights}};
+        for (const auto &target : targets) {
+            const bool tail = std::string(fault) == std::string(target.first) + "_tail";
+            if (std::strcmp(fault, target.first) == 0 || tail) {
+                const size_t offset = tail ? allocationBytes.at(target.second) - 1U : 0U;
+                static_cast<uint8_t *>(const_cast<void *>(target.second))[offset] ^= 1U;
+            }
+        }
+    }
+    return 0;
 }
 }
 

@@ -47,7 +47,7 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 | --- | --- | --- |
 | C1 | `abi-host` | 27 参数 ABI、独立 Host 参数/配置校验、五表/tensor 容量及固定控制区/双窗边界；错误不提交、不消耗 magic。用户回传通过，交付 `01c9b1d` |
 | C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 16B GM tiling/88B launch ABI、固定 64 核空入口；不读写业务数据。用户回传通过，交付 `3b27062` |
-| C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域 |
+| C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域。用户回传通过，交付 `b68b56e` |
 | C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值 |
 | C5 | `chain-multi` | warmup/多轮、各自 magic/选窗、同步与生命周期；联合模式 D/C 固定使用不同窗口符合预期 |
 | C6 | `profile` | functional/performance/breakdown 共用 consumer；分离记录 base/counter/latest，两算子独立 trace；空算子算法字节 0、算法带宽 N/A |
@@ -106,10 +106,10 @@ C2 设备 consumer 使用内部 Register/Submit 入口及独立 GM 哨兵；不�
 Host 替身冒充生产注册成功。GM tiling 必须在异步任务结束前保持不可变；不同算子/shape 使用
 不同缓存键，不能仅复用一个“最新 tiling”槽。失败或超时保留本次 commit、产物哈希和首个失败阶段。
 
-### C3 当前交付：共享 consumer 的三模式 dry-run
+### C3 历史交付：共享 consumer 的三模式 dry-run
 
 C2 已按用户回传登记，报告路径及证据边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
-本次只交付 C3；`bash run_commit_validation.sh` 默认 `ep-sdedup-combine-p1-dry-run`，
+C3 交付时 `bash run_commit_validation.sh` 默认 `ep-sdedup-combine-p1-dry-run`，
 独立构建 `build/validation-combine-c3` 并安装到 `install/validation-combine-c3`，不覆盖 C2/Dispatch 安装包。
 需要 Python 3.9+、CMake、Make、g++；无需 CANN、NPU、hostfile 或 SSH。
 准备/总运行/单项期限为 900/180/120 秒；必须通过 C1 三项和配置 integration driver 共四项。
@@ -134,6 +134,44 @@ breakdown 此处只验证配置，双记录区及双 trace 文件仍归 C6。
 维护经验：增加联合模式时，必须在同一个 consumer 的所有设备副作用之前设置 dry-run 边界，
 并用可观测 runtime 调用记录证明未进入设备路径；仅输出“未分配”字段不能替代此检查。
 停用算子的配置不应触发其业务路由约束，但保留的量化枚举仍须合法，避免把未支持的 Combine 量化带入后续执行。
+
+### C4 当前交付：单轮接线和输入生命周期
+
+C3 已按用户回传登记通过，本次只推进 C4。生产接口仍是既有 27 参数 API、16B tiling 和 88B launch ABI。
+复用 `run.sh`、workflow、同一 C++ consumer；C4 要求 functional、loops=1、warmup=0，
+不把多轮、performance 或 breakdown 提前纳入本点。
+
+实现及验收顺序：
+
+1. 构建独立 C4 生产安装包；运行 C1 三项、C3 dry-run、C4 Host 生命周期与 kernel 等待行为测试。
+2. Combine 单跑自行分配合法参考五表及完整 inclusive prefix，使用支持不完整 epoch 的独立 balance fixture，
+   不运行 Dispatch route_mode 对应的生成器；专家输出固定为所选 dtype 的有限值，
+   不调用 Dispatch；所有 tensor 按生产 Combine layout 容量分配并保留到同步完成。
+3. 联合模式直接传 Dispatch 输出的 DestinationIndex、TokenType、RelayReadIndex、sourceMask、
+   expertScalesOut 以及完整 sendCountsOut 原指针；D0 的 expertOut 直接取 expandXOut，
+   D4 则新分配 BF16/FP16 expertOut，不传 FP8 数据或 dynamicScales 给非量化 Combine。
+4. C4 在 Dispatch 同步/barrier 和完整输出校验后，保存 Combine 七个输入及 yOut 的全容量快照；
+   空 Combine 完成同步/barrier 后逐字节比较。此同步是 C4 可观测生命周期检查，
+   不作为后续连续多轮或性能路径的调度方案。Dispatch 不通过时不能把空 Combine 成功当作联合通过。
+5. 每个进程只创建一个 comm/stream，记录各算子提交/完成以及各自 magic/window；
+   新 comm 单 C 为 magic=1，D→C 为 1/2，不额外取 magic 观察。未确认完成时不提前释放输入或销毁 comm。
+6. 一键入口沿已有 hostfile/sync/run 路径执行 16P 六组：独立 Combine BF16/FP16，
+   both+D0 BF16/FP16，both+D4 BF16/E4M3 与 FP16/E5M2。缺任一 rank、唯一 marker、输入不变或真实 Dispatch 判据均失败。
+
+用户追加的 50μs 等待在空 Combine 每个 AIV 内统一执行，单跑也生效，不增加 ABI 或测试模式参数。
+`uint64_t(GetSystemCycle()) - start >= 50000` 结束等待；A5/Ascend950 SYS_CNT 为 1GHz，
+不能套用 A2/A3 的 50MHz。核对依据为安装 CANN 9.1.0 的
+`asc/impl/basic_api/dav_3510/kernel_operator_sys_var_impl.h`（设备读取 SYS_CNT，CPU 仿真实现为纳秒），
+以及官方 [GetSystemCycle 文档](https://gitcode.com/cann/asc-devkit/blob/master/docs/zh/api/SIMD-API/%E5%9F%BA%E7%A1%80API/%E5%B7%A5%E5%85%B7%E6%8E%A5%E5%8F%A3/%E7%B3%BB%E7%BB%9F%E8%B5%84%E6%BA%90%E4%B8%8E%E5%8F%98%E9%87%8F/GetSystemCycle%28ISASI%29.md)；
+在线版本为当前 master，9.1.0 过滤检索无结果，实际兼容性以已安装头文件和 A5 编译为证。
+Host 受控时钟测试覆盖 49999/50000 阈值和溢出；不能把它当作实测 50μs。
+等待不替代跨 rank 同步，也不证明任意进度偏差下的多轮复用安全，后续 C5 仍需单独验收。
+
+维护经验：空算子不产生可比数值，必须验证真实调用、原指针关联、完整输入及输出保持不变，
+并注入首/末字节破坏及提交/同步失败确认判据有效。量化 Dispatch 的输入分离发生在调用方，
+不能为接线方便改变 Combine 的固定 BF16/FP16 契约。
+单算子 fixture 也必须隔离停用算子的约束：BS=1/E32/K3 的 Combine 单跑不能因 Dispatch balance_shift epoch 不完整而失败。
+每组用例采用独立结果目录时，远端取消操作必须收到相同 RESULT_ROOT，才能定位当前 PID 并保留清理失败状态。
 
 ### consumer 的职责
 

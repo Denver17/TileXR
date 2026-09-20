@@ -246,7 +246,7 @@ class BuildTests(unittest.TestCase):
 
     def test_chain_build_installs_native_consumer_without_adding_per_host_test(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
-        for checkpoint in workflow.CHAIN_CHECKPOINTS:
+        for checkpoint in (workflow.DISPATCH_CHECKPOINT, workflow.MEMORY_BOUNDARY_CHECKPOINT):
             with self.subTest(checkpoint=checkpoint), mock.patch.dict(os.environ, {
                     "TILEXR_VALIDATION_CHECKPOINT": checkpoint, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
                 config = self.config("production")

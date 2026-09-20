@@ -20,6 +20,14 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_ser
     const uint8_t dtype = tiling->dtype;
     const uint8_t quantMode = tiling->quantMode;
     (void)bs; (void)h; (void)experts; (void)topK; (void)dtype; (void)quantMode;
+
+    // A5 / Ascend950 SYS_CNT runs at 1 GHz: 50 us is 50,000 ticks.
+    // Keep every core in the empty operator for this interval before the next
+    // Dispatch round. This delay is not a cross-rank synchronization barrier.
+    constexpr uint64_t kEmptyCombineDelayTicks = 50U * 1000U;
+    const uint64_t begin = static_cast<uint64_t>(AscendC::GetSystemCycle());
+    while (static_cast<uint64_t>(AscendC::GetSystemCycle()) - begin < kEmptyCombineDelayTicks) {}
+
     (void)commArgs; (void)expertOut; (void)assistInfoForCombine; (void)sendCounts;
     (void)expertScales; (void)tokenType; (void)relayReadIndex; (void)sourceMask;
     (void)yOut; (void)magic;

@@ -144,15 +144,17 @@ Config Parse(int argc, char **argv)
     c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-dispatch" : checkpoint;
     Require(c.checkpoint == "ep-sdedup-p2-dispatch" ||
         c.checkpoint == "ep-sdedup-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p1-dry-run",
+        c.checkpoint == "ep-sdedup-combine-p1-dry-run" ||
+        c.checkpoint == "ep-sdedup-combine-p1-chain-single",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     Require(c.checkpoint != "ep-sdedup-combine-p1-dry-run" || c.dryRun,
         "Combine C3 requires --dry-run");
     if (const char *op = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE")) c.operatorMode = op;
     Require(c.operatorMode == "dispatch" || c.operatorMode == "combine" || c.operatorMode == "both",
         "operator_mode must be dispatch/combine/both");
-    Require(c.dryRun || c.operatorMode == "dispatch",
-        "Combine and joint device execution require C4; use --dry-run for C3");
+    Require(c.dryRun || c.operatorMode == "dispatch" ||
+        c.checkpoint == "ep-sdedup-combine-p1-chain-single",
+        "Combine and joint device execution require C4 checkpoint");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
     Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
@@ -167,6 +169,9 @@ Config Parse(int argc, char **argv)
     Require(warmup <= UINT32_MAX, "TILEXR_VALIDATION_WARMUP must be in [0, UINT32_MAX]");
     c.loops = static_cast<uint32_t>(loops);
     c.warmup = static_cast<uint32_t>(warmup);
+    Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-single" ||
+        (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
+        "C4 requires functional mode, loops=1, warmup=0");
     if (const char *routeMode = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
         c.routeMode = TileXREpDemo::ParseRouteMode(routeMode);
     if (const char *seedText = std::getenv("TILEXR_VALIDATION_SEED")) {
@@ -194,7 +199,7 @@ Config Parse(int argc, char **argv)
     c.h = Number(std::getenv("TILEXR_VALIDATION_H"), "TILEXR_VALIDATION_H");
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
-    if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.dryRun) && c.operatorMode != "combine") {
+    if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.checkpoint == "ep-sdedup-combine-p1-chain-single" || c.dryRun) && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
         if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
@@ -436,6 +441,7 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 
 #include "server_dedup_source_send_consumer.h"
 #include "server_dedup_dispatch_consumer.h"
+#include "server_dedup_combine_consumer.h"
 
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_consumer.h"
@@ -482,16 +488,22 @@ int Run(const Config &c)
         throw std::runtime_error("memory-boundary test kernel was not built");
 #endif
     }
+    const bool runDispatch = c.operatorMode != "combine";
+    const bool runCombine = c.operatorMode != "dispatch";
     TileXREp::EpMemoryServerDedupLayout layout {};
-    Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(c.rankSize, c.bs, c.h, c.topK, c.experts, &layout, c.quantMode == 4),
-        "layout");
+    TileXREp::EpMemoryServerDedupCombineLayout combineLayout {};
+    if (runDispatch) Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(
+        c.rankSize, c.bs, c.h, c.topK, c.experts, &layout, c.quantMode == 4), "layout");
+    if (runCombine) Check(TileXREp::TileXREpBuildMemoryServerDedupCombineLayout(
+        c.rankSize, c.bs, c.h, c.topK, c.experts, &combineLayout), "combine layout");
     bool initialized = false, deviceSet = false, safeCleanup = true, executionSucceeded = false;
     aclrtStream stream = nullptr;
     TileXRCommPtr comm = nullptr;
     std::vector<void *> buffers;
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
     std::string stage = "acl-init", batch = "initialization", dispatch;
-    std::string validationError, validationStage;
+    std::string validationError, validationStage, combineDetails;
+    uint64_t combineSubmitted = 0, combineCompleted = 0;
     const std::string profilePath = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
         stage = name;
@@ -531,13 +543,27 @@ int Run(const Config &c)
             Require(host->peerMems[rank] == deviceArgs.peerMems[rank], "device peer mapping differs from Host");
         }
         enterStage("allocation");
-        const uint64_t sizes[] = {layout.xBytes, layout.expertIdsBytes, layout.expandXBytes,
-            layout.expertTokenNumsBytes, layout.sendCountsBytes, layout.tokenTypeBytes,
-            layout.destinationIndexBytes, layout.relayReadIndexBytes, layout.sourceMaskBytes,
-            layout.weightBytes, layout.weightBytes, layout.dynamicScalesBytes};
-        const uint32_t alignments[] = {2, 4, 2, 8, 4, 4, 4, 8, 4, 4, 4, 1};
+        std::array<uint64_t, 14> sizes {};
+        if (runDispatch) {
+            sizes = {{layout.xBytes, layout.expertIdsBytes, layout.expandXBytes,
+                layout.expertTokenNumsBytes, layout.sendCountsBytes, layout.tokenTypeBytes,
+                layout.destinationIndexBytes, layout.relayReadIndexBytes, layout.sourceMaskBytes,
+                layout.weightBytes, layout.weightBytes, layout.dynamicScalesBytes, 0, 0}};
+        } else {
+            sizes[4] = combineLayout.sendCountsBytes;
+            sizes[5] = combineLayout.tokenTypeBytes;
+            sizes[6] = combineLayout.assistInfoBytes;
+            sizes[7] = combineLayout.relayReadIndexBytes;
+            sizes[8] = combineLayout.sourceMaskBytes;
+            sizes[10] = combineLayout.expertScalesBytes;
+        }
+        if (runCombine) {
+            sizes[12] = !runDispatch || c.quantMode != 0 ? combineLayout.expertOutBytes : 0;
+            sizes[13] = combineLayout.yOutBytes;
+        }
+        const uint32_t alignments[] = {2, 4, 2, 8, 4, 4, 4, 8, 4, 4, 4, 1, 2, 2};
         std::vector<TileXREp::EpServerDedupAllocation> allocations;
-        for (std::size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
+        for (std::size_t i = 0; i < sizes.size(); ++i) {
             if (sizes[i] == 0) { buffers.push_back(nullptr); continue; }
             void *data = nullptr;
             Require(sizes[i] > 0 && sizes[i] <= SIZE_MAX, "allocation size overflow");
@@ -548,22 +574,31 @@ int Run(const Config &c)
             allocations.push_back({data, sizes[i], sizes[i], alignments[i], device});
         }
         const auto shape = SourceSendShape(c);
-        const auto xHost = ServerDedupReference::Hidden(shape, c.rank);
-        const auto idsHost = ServerDedupReference::Ids(shape, c.rank);
-        const auto weightsHost = ServerDedupReference::Weights(shape, c.rank);
-        SaveSourceSendInputs(c, xHost, idsHost, weightsHost);
-        Check(aclrtMemcpy(buffers[0], layout.xBytes, xHost.data(), layout.xBytes, ACL_MEMCPY_HOST_TO_DEVICE), "copy x");
-        Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
-        Check(aclrtMemcpy(buffers[9], layout.weightBytes, weightsHost.data(),
-            weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
-        Check(aclrtMemset(buffers[8], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
-        Check(aclrtMemset(buffers[10], layout.weightBytes, 0xff, layout.weightBytes), "initialize source weights");
-        for (const uint32_t index : {2U, 5U, 6U, 7U, 11U})
-            if (sizes[index]) Check(aclrtMemset(buffers[index], sizes[index], 0xa5, sizes[index]), "initialize dispatch output");
-        // Valid count/prefix outputs are nonnegative. Preserve a distinct value
-        // when a successful launch fails to write an output element.
-        Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0xff, layout.expertTokenNumsBytes), "initialize token counts");
-        Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0xff, layout.sendCountsBytes), "initialize send counts");
+        std::vector<float> weightsHost;
+        if (runDispatch) {
+            const auto xHost = ServerDedupReference::Hidden(shape, c.rank);
+            const auto idsHost = ServerDedupReference::Ids(shape, c.rank);
+            weightsHost = ServerDedupReference::Weights(shape, c.rank);
+            SaveSourceSendInputs(c, xHost, idsHost, weightsHost);
+            Check(aclrtMemcpy(buffers[0], layout.xBytes, xHost.data(), layout.xBytes, ACL_MEMCPY_HOST_TO_DEVICE), "copy x");
+            Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
+            Check(aclrtMemcpy(buffers[9], layout.weightBytes, weightsHost.data(),
+                weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
+            Check(aclrtMemset(buffers[8], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
+            Check(aclrtMemset(buffers[10], layout.weightBytes, 0xff, layout.weightBytes), "initialize source weights");
+            for (const uint32_t index : {2U, 5U, 6U, 7U, 11U})
+                if (sizes[index]) Check(aclrtMemset(buffers[index], sizes[index], 0xa5, sizes[index]), "initialize dispatch output");
+            // Valid count/prefix outputs are nonnegative. Preserve a distinct value
+            // when a successful launch fails to write an output element.
+            Check(aclrtMemset(buffers[3], layout.expertTokenNumsBytes, 0xff, layout.expertTokenNumsBytes), "initialize token counts");
+            Check(aclrtMemset(buffers[4], layout.sendCountsBytes, 0xff, layout.sendCountsBytes), "initialize send counts");
+        } else {
+            InitializeStandaloneCombine(c, combineLayout, buffers);
+        }
+        if (runCombine) {
+            if (sizes[12]) InitializeCombineExpert(c, buffers[12], sizes[12]);
+            Check(aclrtMemset(buffers[13], sizes[13], 0xa5, sizes[13]), "initialize combine yOut");
+        }
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
             "caller allocation validation");
         enterStage("chain-barrier");
@@ -573,11 +608,10 @@ int Run(const Config &c)
             ",\"peer_mem_bytes\":" + std::to_string(host->peerMemBytes));
         const auto outputDtype = c.quantMode == 0 ? TileXR::TILEXR_DATA_TYPE_RESERVED :
             (c.fp8Format == "e4m3" ? TileXR::TILEXR_DATA_TYPE_FP8E4M3 : TileXR::TILEXR_DATA_TYPE_FP8E5M2);
-        // One communicator, stream and buffer set for the entire continuous
-        // batch. Alternating windows and the existing all-rank count dependency
-        // protect reuse; there is no per-launch completion handshake.
+        // Dispatch-only retains its continuous batch. C4 uses one Dispatch,
+        // then a synchronized snapshot boundary before the empty Combine.
         const uint64_t calls = uint64_t(c.warmup) + c.loops;
-        for (uint64_t call = 0; call < calls; ++call) {
+        for (uint64_t call = 0; runDispatch && call < calls; ++call) {
             const bool warming = call < c.warmup;
             batch = warming ? "warmup" : "measurement";
             submission = warming ? call + 1U : call - c.warmup + 1U;
@@ -595,43 +629,69 @@ int Run(const Config &c)
             if (warming) ++warmupSubmitted;
             else ++submitted;
         }
-        enterStage("stream-sync");
-        Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
-        enterStage("batch-barrier");
-        barrier.Run(2);
-        completed = submitted;
-        warmupCompleted = warmupSubmitted;
-        safeCleanup = true;
-        enterStage("count-read");
-        std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
-        std::vector<int64_t> actualExperts(c.experts / c.rankSize);
-        Check(aclrtMemcpy(actualPrefix.data(), layout.sendCountsBytes, buffers[4],
-            layout.sendCountsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read sendCountsOut");
-        Check(aclrtMemcpy(actualExperts.data(), layout.expertTokenNumsBytes, buffers[3],
-            layout.expertTokenNumsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read expertTokenNumsOut");
-        const int64_t localExperts = c.experts / c.rankSize;
-        for (int source = 0; source < c.rankSize; ++source) {
-            for (int32_t expert : ServerDedupReference::Ids(shape, source)) {
-                if (expert / localExperts == c.rank)
-                    ++referenceCounts[(expert % localExperts) * c.rankSize + source];
+        if (runDispatch) {
+            enterStage("stream-sync");
+            Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
+            enterStage("batch-barrier");
+            barrier.Run(2);
+            completed = submitted;
+            warmupCompleted = warmupSubmitted;
+            safeCleanup = true;
+            enterStage("count-read");
+            std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
+            std::vector<int64_t> actualExperts(c.experts / c.rankSize);
+            Check(aclrtMemcpy(actualPrefix.data(), layout.sendCountsBytes, buffers[4],
+                layout.sendCountsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read sendCountsOut");
+            Check(aclrtMemcpy(actualExperts.data(), layout.expertTokenNumsBytes, buffers[3],
+                layout.expertTokenNumsBytes, ACL_MEMCPY_DEVICE_TO_HOST), "read expertTokenNumsOut");
+            const int64_t localExperts = c.experts / c.rankSize;
+            for (int source = 0; source < c.rankSize; ++source) {
+                for (int32_t expert : ServerDedupReference::Ids(shape, source)) {
+                    if (expert / localExperts == c.rank)
+                        ++referenceCounts[(expert % localExperts) * c.rankSize + source];
+                }
             }
-        }
-        int64_t cumulative = 0, previousExpert = 0;
-        for (int64_t index = 0; index < c.experts; ++index) {
-            cumulative += referenceCounts[index];
-            const int64_t globalExpert = c.rank * localExperts + index / c.rankSize;
-            CheckCountValue("sendCountsOut", actualPrefix, static_cast<size_t>(index),
-                cumulative, globalExpert, static_cast<int>(index % c.rankSize));
-            if ((index + 1) % c.rankSize == 0) {
-                const int64_t expected = cumulative - previousExpert;
-                CheckCountValue("expertTokenNumsOut", actualExperts, static_cast<size_t>(index / c.rankSize),
-                    expected, globalExpert);
-                previousExpert = cumulative;
+            int64_t cumulative = 0, previousExpert = 0;
+            for (int64_t index = 0; index < c.experts; ++index) {
+                cumulative += referenceCounts[index];
+                const int64_t globalExpert = c.rank * localExperts + index / c.rankSize;
+                CheckCountValue("sendCountsOut", actualPrefix, static_cast<size_t>(index),
+                    cumulative, globalExpert, static_cast<int>(index % c.rankSize));
+                if ((index + 1) % c.rankSize == 0) {
+                    const int64_t expected = cumulative - previousExpert;
+                    CheckCountValue("expertTokenNumsOut", actualExperts, static_cast<size_t>(index / c.rankSize),
+                        expected, globalExpert);
+                    previousExpert = cumulative;
+                }
             }
+            enterStage("dispatch-read");
+            // This fresh communicator's Dispatch-only sequence starts at magic 1.
+            dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, int64_t(calls));
         }
-        enterStage("dispatch-read");
-        // This fresh communicator's Dispatch-only sequence starts at magic 1.
-        dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, int64_t(calls));
+        if (runCombine) {
+            enterStage("combine-snapshot");
+            const auto snapshots = CaptureCombineTensors(c, combineLayout, buffers);
+            enterStage("combine-launch");
+            safeCleanup = false;
+            void *expertOut = runDispatch && c.quantMode == 0 ? buffers[2] : buffers[12];
+            Check(TileXRMoeEpCombineMemoryServerDedup(expertOut,
+                static_cast<int32_t *>(buffers[6]), static_cast<int32_t *>(buffers[4]),
+                static_cast<float *>(buffers[10]), nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE,
+                nullptr, comm, c.bs, c.h, c.topK, c.experts, c.rankSize, c.rank, 1, 0, 0, 0, 0,
+                c.combineQuantMode, static_cast<int64_t>(combineLayout.globalBs), buffers[13],
+                c.dtype, stream, static_cast<const uint32_t *>(buffers[5]), buffers[7],
+                static_cast<const uint32_t *>(buffers[8])), "TileXRMoeEpCombineMemoryServerDedup");
+            combineSubmitted = 1;
+            enterStage("combine-sync");
+            Check(aclrtSynchronizeStream(stream), "combine aclrtSynchronizeStream");
+            enterStage("combine-barrier");
+            barrier.Run(3);
+            combineCompleted = 1;
+            safeCleanup = true;
+            enterStage("combine-read");
+            ValidateCombineTensors(snapshots);
+            combineDetails = CombineSingleDetails(c, host->peerMemBytes);
+        }
         executionSucceeded = true;
     } catch (const OutputValidationFailure &error) {
         validationError = error.what();
@@ -647,6 +707,7 @@ int Run(const Config &c)
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
             << " submission=" << submission << " submitted=" << submitted << " completed=" << completed
             << " warmup_submitted=" << warmupSubmitted << " warmup_completed=" << warmupCompleted
+            << " combine_submitted=" << combineSubmitted << " combine_completed=" << combineCompleted
             << " " << error.what() << std::endl;
     }
     if (!safeCleanup) {
@@ -679,7 +740,14 @@ int Run(const Config &c)
             ",\"capture_mode\":\"latest_launch\",\"captured_launches\":1,\"captured_launch\":" +
             std::to_string(uint64_t(c.warmup) + c.loops - 1U));
         if (validationError.empty()) {
-            Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
+            if (runDispatch) Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
+            if (runCombine) Marker(c, "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS",
+                ",\"submitted\":1,\"completed\":1,\"warmup_submitted\":0,\"warmup_completed\":0,\"cleanup\":\"complete\"" +
+                combineDetails);
+        } else if (runCombine) {
+            Marker(c, "EP_SERVER_DEDUP_COMBINE_CHAIN_INVALID",
+                ",\"validation_stage\":" + Json(validationStage) +
+                ",\"validation_error\":" + Json(validationError) + ",\"cleanup\":\"complete\"", "FAIL");
         } else {
             Marker(c, "EP_SERVER_DEDUP_DISPATCH_INVALID", details +
                 ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"token_stride\":" +
@@ -687,7 +755,7 @@ int Run(const Config &c)
                 Json(validationStage) + ",\"validation_error\":" + Json(validationError), "FAIL");
         }
     }
-    return executionSucceeded ? 0 : 1;
+    return executionSucceeded && (!runCombine || validationError.empty()) ? 0 : 1;
 }
 } // namespace
 

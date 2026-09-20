@@ -1,18 +1,65 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C3：当前交付
+## Combine 第一阶段 C4：当前交付
 
-C1/C2 已收到用户通过确认；C2 报告路径和登记范围见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+已登记 C3 用户回传通过（交付 `b68b56e`），报告路径见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+拉取本次提交后仍只需执行：
+
+```bash
+bash run_commit_validation.sh
+```
+
+当前 checkpoint 为 `ep-sdedup-combine-p1-chain-single`。本次恢复真实设备验证，需要已配置的
+CANN 9.1、driver、A5 设备、SSH/rsync 及 hostfile；使用清单前两台、每台设备 0..7。
+本机先构建安装 `install/validation-combine-c4`，完成六项 Host 回归，然后沿既有同步/运行流程
+执行六个 16P 单轮用例：Combine BF16/FP16，both+D0 BF16/FP16，both+D4 BF16/E4M3、FP16/E5M2。
+固定 BS=96/H=7168/K=6/E=96、functional、loops=1、warmup=0，每 rank 8GiB 通信域。
+构建总期限 900 秒，Host 总期限 180 秒、单项 120 秒；每个设备用例使用现有 180 秒运行期限。
+不会跳过缺少配置、依赖、设备、rank 或判据的场景；首次失败停止矩阵并保留已有 case 日志。
+总报告为终端打印的 `run/validation/commit-*/summary.json`，其中链接 Host 和每组设备报告。
+
+非量化联合模式直接使用 Dispatch 五表、完整 sendCounts 和 expandXOut；量化 Dispatch 的
+Combine expertOut 独立分配为共享 dtype 的 BF16/FP16，Combine quant 始终为 0。
+本点同步后比较 Combine 七个输入和 yOut 全容量快照，空算子应完全不改写；不检查 yOut 业务数值。
+空 Combine 每个 AIV 通过 `GetSystemCycle()` 等待 50000 ticks（A5 上约 50μs），单跑和连跑统一生效。
+真实 Dispatch 仍执行完整输出和对应窗口 Flag 校验；不将 Combine 窗口交给 Dispatch 包解析器。
+C4 仅支持单轮 functional，连续多轮与双 trace 分区分别留 C5/C6，六组全部通过后再推进 C5。
+
+手动 `run.sh` 保持现有三模式参数；Combine/both 的实际运行从 C4 安装包读取 checkpoint，
+不能使用旧 Dispatch 包冒充。`dry_run=1` 仍使用 C3 独立安装包（需先保留/构建该包）。
+详见[验收流程 C4](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c4-当前交付单轮接线和输入生命周期)。
+
+2026-09-20 C4 开发验证：基于 `b68b56e02e1f49975549515f2d7f805ee4e1e0c8` 加本次改动，
+blue（CANN 9.1.0 / ccec clang 15.0.5、A5 `dav-c310-vec`、profiling OFF）完成正式 workflow 的
+C4 production build、安装与 Host 验证六项全部通过，包含已安装生产 consumer 的编译链接、ELF/导出/RPATH 检查。
+共享 consumer 的 C4 生命周期/故障注入 9 项通过，C3 dry-run 7 项和原 Dispatch Host 生命周期 25 项通过；
+受控时钟下的 50μs 阈值/溢出/无写测试通过。工具回归运行 287 项，286 通过、1 项因缺少
+Windows PowerShell/MSYS transport harness 跳过。
+审查修正单 C 的不完整 Dispatch epoch 限制，并补充同 C4 安装包的 Dispatch 单跑解析回归。
+这些是 Host 替身与交叉编译证据；本次没有执行真实 NPU 或六组 16P 矩阵，也未实测 kernel 时长。
+外部 C4 `COMMIT_VALIDATION_PASS` 仍待用户回传，不以 `HOST_VALIDATION_PASS` 代替。
+blue 使用无 `.git` 的源码快照，报告 commit 为 null；源码 SHA256 与本次合入代码逐文件一致。
+manifest、工具链版本、构建/Host 日志及摘要保存在开发工作区 `build/combine-c4-verification/`。
+
+使用同一 C4 安装包手动跑 Dispatch 单轮时，可显式选择检查点（其他参数沿用 `run.sh`）：
+
+```bash
+TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-chain-single bash run.sh -n 2 -e 96 operator_mode=dispatch
+```
+
+## Combine C3 历史交付与验收
+
+C1/C2/C3 已收到用户通过确认；报告路径和登记范围见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 拉取本次提交后继续执行：
 
 ```bash
 bash run_commit_validation.sh
 ```
 
-本次 checkpoint 为 `ep-sdedup-combine-p1-dry-run`。脚本重新构建独立 Host 安装包
+C3 交付时 checkpoint 为 `ep-sdedup-combine-p1-dry-run`。脚本重新构建独立 Host 安装包
 `install/validation-combine-c3`，执行 C1 三项回归和真实共享 C++ consumer 的 dry-run 配置测试。
 需要 Python 3.9+、CMake、Make、g++；不需要 CANN/NPU/hostfile/SSH。
-四项全部通过才输出 `COMMIT_VALIDATION_PASS`；回传终端结论及 `summary.json`，通过后才开发 C4。
+C3 四项全部通过才输出 `COMMIT_VALIDATION_PASS`；用户已回传通过，本页当前入口已推进 C4。
 不会执行 C2 设备测试，不把本次结果当作通信或业务数据验证。
 
 现有手动 `run.sh` 增加 `operator_mode=dispatch|combine|both`（默认 dispatch）、
@@ -27,7 +74,7 @@ bash run.sh -n 2 -e 96 -m 0 -l 1 0 operator_mode=both dispatch_quant_mode=4 comb
 该手动入口逐 rank 调用同一源码编译的 C3 consumer，仅读 hostfile，不 SSH、不加载 CANN、不分配设备内存。
 一键验收自带 rank fixture，无需准备 hostfile。真实 Combine/both 执行 C4 前拒绝；
 C3 的输入来源字段仅为配置计划，五表原指针接线、量化 Dispatch 的独立 BF16/FP16 输入归 C4。
-完整范围见[验收流程 C3](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c3-当前交付共享-consumer-的三模式-dry-run)。
+完整范围见[验收流程 C3](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c3-历史交付共享-consumer-的三模式-dry-run)。
 
 2026-09-20 C3 开发验证：基于 `3c39e9902957ade9b802da5284e0559eb8b1fe35` 加本次改动，
 blue 源码快照完成一键 Host 构建、安装和四项验收，输出 `COMMIT_VALIDATION_PASS`；
@@ -278,7 +325,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 0 -l 1 0
 ```
 
-构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C3 三模式 dry-run，不代替这里的 Dispatch 多卡流程。
+构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C4 单轮接线，不代替这里的 Dispatch 多卡流程。
 
 `build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 
