@@ -1,6 +1,54 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C4：当前交付
+## Combine 第一阶段 C5：当前交付
+
+已登记 C4 用户回传通过（交付 `c86e1ef`）；报告与验证边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+拉取本次提交后执行：
+
+```bash
+bash run_commit_validation.sh
+```
+
+当前 checkpoint 为 `ep-sdedup-combine-p1-chain-multi`，使用独立
+`build/validation-combine-c5` / `install/validation-combine-c5`。
+脚本先构建并执行 Host 回归，再在 hostfile 前两台固定 8P 运行 **8 个串行设备用例**，
+每组均为 BS96/H7168/K6/E96、functional、loops=5、warmup=2：
+
+| 用例 | 输入 | Dispatch quant | Combine quant |
+| --- | --- | --- | --- |
+| Dispatch 单跑（2组） | BF16、FP16 | 0 | 未启用 |
+| Combine 单跑（2组） | BF16、FP16 | 未启用 | 0 |
+| 联合非量化（2组） | BF16、FP16 | 0 | 0 |
+| 联合量化 Dispatch（2组） | BF16/E4M3、FP16/E5M2 | 4 | 0 |
+
+终端显示 `[i/8]` 和当前配置/结果路径；重复拉起进程是串行执行不同用例。
+构建期限 900 秒，Host 总期限 180 秒/单项 120 秒，每个设备用例 180 秒；首个失败即停止。
+全部用例与 Host 判据通过后才输出
+`COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-chain-multi`，总报告链接各组结果。
+
+同一 stream 连续提交全部 warmup/正式轮次，每轮 both 为 D→C，仅批末一次同步和 Host barrier。
+单算子轮换两窗；both 的 D magic 为 1/3/.../13，C 为 2/4/.../14，各占一窗符合预期。
+统计分别记录预热/正式提交完成数；magic 由成功公开调用序列推导，不额外递增来观察。
+Combine 单跑比较七输入和 yOut 全容量快照；both 校验最后 Dispatch 输出与其窗口 Flag，
+并比较 yOut 及独立 BF16/FP16 expertOut（D4）。共享五表由 Dispatch 每轮重写，
+报告明确标记最终参考校验，不宣称逐轮输入快照保持；C4 Host 回归继续覆盖完整空行为。
+空 Combine 的 50μs 等待保持；本点不验证 Combine 通信或 yOut 业务数值，不输出性能结论。
+双算子 profiling 分区与 trace 留给 C6，需 C5 用户回传通过后再开始。
+详见[验收流程 C5](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c5-当前交付连续批次各算子-magic-和生命周期)。
+
+2026-09-20 C5 开发验证：基于 `c86e1efe8fd598119112074df420fc1cce7ee4aa` 加本次改动，
+blue 的 CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5 `dav-c310-vec`、profiling OFF
+通过正式 C5 production workflow 构建、安装、真实 consumer 编译链接及 ELF/导出/依赖检查。
+`build_id=365c2125c0d44f2f9ba5bb3ec6568070`，构建退出码 0；安装包 Host 验收七项全部通过，
+报告 `host-7b8582024df04b14b9a89b55cafe49f4/summary.json`。
+共享 consumer 的 C5 连续批次/故障注入 8 组、C4 生命周期 9 组及既有 Dispatch 25 组通过；
+控制脚本回归执行 294 项，293 通过，1 项因缺少 Windows PowerShell/MSYS transport harness 跳过。
+独立审查未发现需修正的具体缺陷，Shell 语法及 diff 检查通过。
+blue 使用无 `.git` 的源码快照，manifest 不冒认 commit；全部变更 C++/CMake 与已编译源码 SHA256 一致。
+编译配置、工具链、构建/Host 日志与 manifest 保留在开发工作区 `build/combine-c5-verification/`。
+这些仅为 Host 和编译证据；本次未执行八组真实 16P 多轮矩阵，C5 仍等待用户设备验收。
+
+## Combine C4 历史交付与验收
 
 已登记 C3 用户回传通过（交付 `b68b56e`），报告路径见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 拉取本次提交后仍只需执行：
@@ -27,7 +75,7 @@ C4 仅支持单轮 functional，连续多轮与双 trace 分区分别留 C5/C6�
 
 手动 `run.sh` 保持现有三模式参数；Combine/both 的实际运行从 C4 安装包读取 checkpoint，
 不能使用旧 Dispatch 包冒充。`dry_run=1` 仍使用 C3 独立安装包（需先保留/构建该包）。
-详见[验收流程 C4](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c4-当前交付单轮接线和输入生命周期)。
+详见[验收流程 C4](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c4-历史交付单轮接线和输入生命周期)。
 
 2026-09-20 C4 开发验证：基于 `b68b56e02e1f49975549515f2d7f805ee4e1e0c8` 加本次改动，
 blue（CANN 9.1.0 / ccec clang 15.0.5、A5 `dav-c310-vec`、profiling OFF）完成正式 workflow 的
@@ -37,7 +85,7 @@ C4 production build、安装与 Host 验证六项全部通过，包含已安装�
 Windows PowerShell/MSYS transport harness 跳过。
 审查修正单 C 的不完整 Dispatch epoch 限制，并补充同 C4 安装包的 Dispatch 单跑解析回归。
 这些是 Host 替身与交叉编译证据；本次没有执行真实 NPU 或六组 16P 矩阵，也未实测 kernel 时长。
-外部 C4 `COMMIT_VALIDATION_PASS` 仍待用户回传，不以 `HOST_VALIDATION_PASS` 代替。
+之后用户已回传外部 C4 `COMMIT_VALIDATION_PASS`，按报告范围登记，不扩展为多轮通过。
 blue 使用无 `.git` 的源码快照，报告 commit 为 null；源码 SHA256 与本次合入代码逐文件一致。
 manifest、工具链版本、构建/Host 日志及摘要保存在开发工作区 `build/combine-c4-verification/`。
 
@@ -59,7 +107,7 @@ bash run_commit_validation.sh
 C3 交付时 checkpoint 为 `ep-sdedup-combine-p1-dry-run`。脚本重新构建独立 Host 安装包
 `install/validation-combine-c3`，执行 C1 三项回归和真实共享 C++ consumer 的 dry-run 配置测试。
 需要 Python 3.9+、CMake、Make、g++；不需要 CANN/NPU/hostfile/SSH。
-C3 四项全部通过才输出 `COMMIT_VALIDATION_PASS`；用户已回传通过，本页当前入口已推进 C4。
+C3 四项全部通过才输出 `COMMIT_VALIDATION_PASS`；用户已回传通过，本页当前入口已推进 C5。
 不会执行 C2 设备测试，不把本次结果当作通信或业务数据验证。
 
 现有手动 `run.sh` 增加 `operator_mode=dispatch|combine|both`（默认 dispatch）、
@@ -325,7 +373,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 0 -l 1 0
 ```
 
-构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C4 单轮接线，不代替这里的 Dispatch 多卡流程。
+构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C5 连续多轮，不代替这里的 Dispatch 多卡流程。
 
 `build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 

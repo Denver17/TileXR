@@ -1,4 +1,4 @@
-// 链接真实 consumer 的 Host 生命周期/C3 dry-run/C4 串联测试；不链接生产 Host 库。
+// 链接真实 consumer 的 Host 生命周期/C3 dry-run/C4/C5 串联测试；不链接生产 Host 库。
 #include <cstdlib>
 #include <array>
 #include <chrono>
@@ -25,6 +25,18 @@ std::map<void *, void *> allocations;
 std::map<const void *, size_t> allocationBytes;
 std::map<std::string, uint64_t> calls;
 std::vector<void *> firstBuffers;
+std::vector<const void *> firstCombineBuffers;
+uint64_t sharedMagic = 0;
+uint64_t lastDispatchMagic = 0;
+bool IsMultiBatch()
+{
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0;
+}
+bool BatchPending()
+{
+    return IsMultiBatch() && sharedMagic != 0 && calls["sync"] == 0;
+}
 std::map<uintptr_t, std::vector<uint8_t>> packets;
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
@@ -79,10 +91,22 @@ aclError aclrtDestroyStream(aclrtStream) { return Call("destroy-stream"); }
 aclError aclrtSynchronizeStream(aclrtStream stream)
 {
     if (stream != reinterpret_cast<void *>(0x20)) { return 92; }
+    if (IsMultiBatch()) {
+        const char *mode = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE");
+        const bool dispatch = mode == nullptr || std::strcmp(mode, "combine") != 0;
+        const bool combine = mode != nullptr && std::strcmp(mode, "dispatch") != 0;
+        const char *loops = std::getenv("TILEXR_VALIDATION_LOOPS");
+        const char *warmup = std::getenv("TILEXR_VALIDATION_WARMUP");
+        const uint64_t total = (loops ? std::strtoull(loops, nullptr, 10) : 1U) +
+            (warmup ? std::strtoull(warmup, nullptr, 10) : 0U);
+        if (calls["sync"] != 0 || calls["launch"] != (dispatch ? total : 0U) ||
+            calls["combine-launch"] != (combine ? total : 0U)) return 92;
+    }
     return Call("sync");
 }
 aclError aclrtMalloc(void **data, size_t bytes, aclrtMemMallocPolicy)
 {
+    if (BatchPending()) return Call("mid-batch-allocation") == 0 ? 92 : 91;
     const int result = Call("malloc");
     if (result != 0) { return result; }
     void *raw = std::malloc(bytes + 31);
@@ -95,12 +119,14 @@ aclError aclrtMalloc(void **data, size_t bytes, aclrtMemMallocPolicy)
 aclError aclrtFree(void *data) { std::free(allocations.at(data)); allocations.erase(data); allocationBytes.erase(data); return Call("free"); }
 aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 {
+    if (BatchPending()) return Call("mid-batch-memset") == 0 ? 92 : 91;
     if (bytes > size) return 92;
     std::memset(data, value, bytes);
     return Call("memset");
 }
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
+    if (BatchPending()) return Call("mid-batch-transfer") == 0 ? 92 : 91;
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
         return Call("boundary-host-read");
@@ -109,7 +135,7 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
     const uintptr_t peer = rankId < 0 ? 0 : reinterpret_cast<uintptr_t>(args.peerMems[rankId]);
     if (peer && address >= peer && address - peer < args.peerMemBytes) {
         if (!boundaryMode) {
-            const uint64_t bank = calls["launch"] % 2U;
+            const uint64_t bank = lastDispatchMagic % 2U;
             const uint64_t expectedBank = std::getenv("TEST_WINDOW_FAULT") ? 1U - bank : bank;
             if ((address - peer) / (args.peerMemBytes / 2U) != expectedBank)
                 return Call("wrong-bank-read") == 0 ? 92 : 91;
@@ -216,6 +242,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     if (calls["launch"] == 0) { firstBuffers = current; }
     const char *mode = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE");
     const bool both = mode && std::strcmp(mode, "both") == 0;
+    if (IsMultiBatch() && both && calls["launch"] != calls["combine-launch"]) return 92;
     const size_t extraBuffers = both ? (quant == 4 ? 2U : 1U) : 0U;
     if (current != firstBuffers || allocations.size() != current.size() + extraBuffers || calls["comm-init"] != 1 ||
         calls["create-stream"] != 1 || calls["sync"] != 0) { return 92; }
@@ -232,6 +259,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     }
     const int result = Call("launch");
     if (result == 0) {
+        lastDispatchMagic = ++sharedMagic;
         if (profileConfig.enabled) {
             const uint64_t launch = calls["launch"] - 1U;
             const uint64_t origin = (launch + 1U) * 100000U;
@@ -314,7 +342,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             if (failure == "flag-first") wire[480U] = 1U;
             if (failure == "flag-last") wire[wire.size() - 1U] = 1U;
             packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) +
-                TileXREp::TileXREpServerDedupWindowOffset(int64_t(calls["launch"]), args.peerMemBytes) + DispatchSlot(shape, rank, row, layout)] = wire;
+                TileXREp::TileXREpServerDedupWindowOffset(int64_t(lastDispatchMagic), args.peerMemBytes) + DispatchSlot(shape, rank, row, layout)] = wire;
         }
         if (!outputRows.empty()) {
             if (failure == "hidden") static_cast<uint8_t *>(expandX)[0] ^= 1U;
@@ -357,9 +385,11 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
         stream != reinterpret_cast<void *>(0x20) || tpWorld != 1 || tpRank != 0 || shard != 0 ||
         shared != 0 || sharedRanks != 0 || quant != 0 || globalBs != world * bs ||
         mask || maskType != 0 || sharedX || (dtype != TileXR::TILEXR_DATA_TYPE_BFP16 &&
-        dtype != TileXR::TILEXR_DATA_TYPE_FP16) || calls["comm-init"] != 1 || calls["create-stream"] != 1 ||
-        calls["launch"] != (both ? 1U : 0U) || calls["sync"] != (both ? 1U : 0U) ||
-        calls["combine-launch"] != 0) return 92;
+        dtype != TileXR::TILEXR_DATA_TYPE_FP16) || calls["comm-init"] != 1 || calls["create-stream"] != 1) return 92;
+    if (IsMultiBatch()) {
+        if (calls["launch"] != (both ? calls["combine-launch"] + 1U : 0U) || calls["sync"] != 0) return 92;
+    } else if (calls["launch"] != (both ? 1U : 0U) || calls["sync"] != (both ? 1U : 0U) ||
+               calls["combine-launch"] != 0) return 92;
     const char *configuredDtype = std::getenv("TILEXR_VALIDATION_DTYPE");
     if (!configuredDtype || (dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ?
             std::strcmp(configuredDtype, "bf16") != 0 : std::strcmp(configuredDtype, "fp16") != 0)) return 92;
@@ -370,6 +400,10 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
         {sendCounts, layout.sendCountsBytes}, {weights, layout.expertScalesBytes},
         {tokenType, layout.tokenTypeBytes}, {relay, layout.relayReadIndexBytes},
         {sourceMask, layout.sourceMaskBytes}, {yOut, layout.yOutBytes}};
+    std::vector<const void *> current;
+    for (const auto &buffer : buffers) current.push_back(buffer.first);
+    if (calls["combine-launch"] == 0) firstCombineBuffers = current;
+    if (current != firstCombineBuffers) return 92;
     for (const auto &buffer : buffers) {
         const auto found = allocationBytes.find(buffer.first);
         if (found == allocationBytes.end() || found->second < buffer.second) return 92;
@@ -415,8 +449,10 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
     }
     const int result = Call("combine-launch");
     if (result != 0) return result;
+    ++sharedMagic;
     const char *fault = std::getenv("TEST_COMBINE_FAULT");
-    if (fault) {
+    const char *faultCall = std::getenv("TEST_COMBINE_FAULT_CALL");
+    if (fault && (!faultCall || calls["combine-launch"] == std::strtoull(faultCall, nullptr, 10))) {
         const std::pair<const char *, const void *> targets[] = {
             {"y_out", yOut}, {"expert_out", expertOut}, {"send_counts", sendCounts}, {"assist", assist},
             {"token_type", tokenType}, {"relay", relay}, {"source_mask", sourceMask}, {"weights", weights}};

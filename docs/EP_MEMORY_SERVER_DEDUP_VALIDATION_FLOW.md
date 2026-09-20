@@ -135,9 +135,9 @@ breakdown 此处只验证配置，双记录区及双 trace 文件仍归 C6。
 并用可观测 runtime 调用记录证明未进入设备路径；仅输出“未分配”字段不能替代此检查。
 停用算子的配置不应触发其业务路由约束，但保留的量化枚举仍须合法，避免把未支持的 Combine 量化带入后续执行。
 
-### C4 当前交付：单轮接线和输入生命周期
+### C4 历史交付：单轮接线和输入生命周期
 
-C3 已按用户回传登记通过，本次只推进 C4。生产接口仍是既有 27 参数 API、16B tiling 和 88B launch ABI。
+C3/C4 已按用户回传登记通过。生产接口仍是既有 27 参数 API、16B tiling 和 88B launch ABI。
 复用 `run.sh`、workflow、同一 C++ consumer；C4 要求 functional、loops=1、warmup=0，
 不把多轮、performance 或 breakdown 提前纳入本点。
 
@@ -172,6 +172,40 @@ Host 受控时钟测试覆盖 49999/50000 阈值和溢出；不能把它当作�
 不能为接线方便改变 Combine 的固定 BF16/FP16 契约。
 单算子 fixture 也必须隔离停用算子的约束：BS=1/E32/K3 的 Combine 单跑不能因 Dispatch balance_shift epoch 不完整而失败。
 每组用例采用独立结果目录时，远端取消操作必须收到相同 RESULT_ROOT，才能定位当前 PID 并保留清理失败状态。
+
+### C5 当前交付：连续批次、各算子 magic 和生命周期
+
+C4 已获用户 `COMMIT_VALIDATION_PASS` 回传，交付 commit `c86e1ef`，报告见进度文档。
+本次只实现 `ep-sdedup-combine-p1-chain-multi`，保留 C4 单轮快照回归；C6/C7 不提前实现。
+
+1. 同一 consumer 保留三种算子模式；C5 只接受 functional。同一 comm/stream/tensor
+   连续提交 warmup 和正式轮次，both 每轮为 D→C；仅批末一次 stream 同步和 Host barrier，
+   不在轮间清零、读回、重新分配或额外取 magic。空 Combine 的 50μs 等待保持。
+2. 每个成功提交按公开入口消费一次 magic 的契约累计轮次，分别记录 D/C 的正式及预热提交/完成数、
+   first/last magic、实际计算的 window mask 和最后窗口 offset；此为调用方推导，非设备侧 magic 采样。
+   单算子 magic=1..N；both D=1,3..2N-1、C=2,4..2N，D/C 各固定一窗符合预期。
+3. C-only 在批前保存全部七输入和 yOut，批后全容量比较；both 由 Dispatch 合法重写共享输入，
+   批前只保存独立 expertOut（D4）及 yOut，批后验证它们保持，并按最后 D magic 检查真实
+   Dispatch 全部输出/五表/count/通信 Flag。明确标注 `combine_input_check=dispatch-final-reference`，
+   不宣称每轮共享输入均有全容量不变快照；该空行为由 C4 独立回归补充。
+4. 同步和 barrier 成功后才读回及释放；中途提交/同步失败不得提前 free/destroy。
+   统计正式轮次与 warmup 分开，缺任何 rank/唯一 marker/最终 Dispatch 正确性均失败。
+5. 一键入口构建独立 C5 安装包，先执行 C1/C3/C4/C5 Host 回归与 50μs 行为检查，再按前两台
+   固定 8P 执行 8 个串行设备用例：D-only BF16/FP16 D0；C-only BF16/FP16；
+   both BF16/FP16 D0；both BF16 D4/E4M3 和 FP16 D4/E5M2。每例 loops=5、warmup=2。
+   控制端显式显示 `[i/8]`、算子/dtype/量化/轮次和结果路径；首个失败立即停止并保留已完成结果。
+
+实现分工：共享 consumer/快照与本文由主任务负责；workflow、run.sh、run_commit_validation.sh
+及 workflow 行为测试可独立实现；Host runtime 替身、C5 集成 driver 和 CMake 接线独立实现。
+契约由同一 checkpoint、marker 和上述计数语义连接。验证先检查配置和故障注入，再执行共享
+consumer Host 回归、既有 Dispatch 回归、CANN 9.1 A5 生产库与真实 consumer 编译；
+开发侧编译/替身通过不作为 C5 A5 多轮通过，提交后等待用户外部验收。
+
+维护经验：连续连跑中的 Dispatch magic 必须计入穿插的 Combine 调用，不能直接使用循环数；
+以偶数总轮次的 both 替身回归检查最后 D 窗口，避免奇数轮次碰巧选对掩盖错误。
+将 C4 的逐轮快照读回移入连续批次会引入额外同步并改变调度，必须把不变 tensor 快照放在批前/批后，
+共享输出采用最终参考检查，并在报告中写明该边界。固定时长等待不等价于跨 rank barrier，
+Host 替身通过不证明设备进度偏差下的复用安全，需用户执行 C5 矩阵验收。
 
 ### consumer 的职责
 

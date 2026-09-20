@@ -1,4 +1,4 @@
-// Included by the shared integration consumer. C4 tests wiring and empty behavior.
+// Included by the shared integration consumer. C4/C5 test wiring and empty behavior.
 // This fixture is not a Combine numerical reference or an expert computation.
 void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes)
 {
@@ -66,7 +66,8 @@ struct CombineTensorSnapshot {
 };
 
 std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
-    const TileXREp::EpMemoryServerDedupCombineLayout &layout, const std::vector<void *> &buffers)
+    const TileXREp::EpMemoryServerDedupCombineLayout &layout, const std::vector<void *> &buffers,
+    bool dispatchBatch = false)
 {
     const bool aliasDispatch = c.operatorMode == "both" && c.quantMode == 0;
     const size_t indices[] = {aliasDispatch ? 2U : 12U, 6U, 4U, 10U, 5U, 7U, 8U, 13U};
@@ -77,6 +78,9 @@ std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
         "relayReadIndex", "sourceMask", "yOut"};
     std::vector<CombineTensorSnapshot> snapshots;
     for (size_t i = 0; i < 8U; ++i) {
+        // A continuous Dispatch batch legitimately rewrites its output tensors.
+        // Only independent expertOut and yOut are invariant across that batch.
+        if (dispatchBatch && indices[i] != 12U && indices[i] != 13U) continue;
         snapshots.push_back({names[i], buffers[indices[i]], std::vector<uint8_t>(sizes[i])});
         auto &snapshot = snapshots.back();
         Check(aclrtMemcpy(snapshot.bytes.data(), sizes[i], snapshot.device, sizes[i],
@@ -106,7 +110,7 @@ std::string CombineSingleDetails(const Config &c, uint64_t peerBytes)
     const int64_t dispatchMagic = both ? 1 : 0;
     const int64_t combineMagic = both ? 2 : 1;
     // Fresh communicator, one successful launch per active operator. Never take
-    // an extra magic to observe the value; C5 will generalize this sequence.
+    // an extra magic to observe the value.
     std::ostringstream out;
     out << ",\"dispatch_submitted\":" << (both ? 1 : 0)
         << ",\"dispatch_completed\":" << (both ? 1 : 0)
@@ -117,6 +121,61 @@ std::string CombineSingleDetails(const Config &c, uint64_t peerBytes)
         << ",\"kernel_scope\":" << Json(both ? "dispatch-combine-empty" : "combine-empty")
         << ",\"native_status\":\"combine-empty\",\"combine_empty\":true,\"combine_delay_us\":50"
         << ",\"combine_inputs_unchanged\":true,\"y_out_unchanged\":true"
+        << ",\"five_tables_linked\":" << (both ? "true" : "false")
+        << ",\"send_counts_linked\":" << (both ? "true" : "false")
+        << ",\"expert_out_source\":" << Json(!both ? "standalone_expert_out" :
+            c.quantMode == 0 ? "dispatch_expand_x" : "separate_expert_out");
+    return out.str();
+}
+
+// Caller-derived sequence: each successful public operator call consumes one
+// magic on a fresh communicator. This is not device-side magic telemetry.
+struct OperatorProgress {
+    uint64_t submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
+    int64_t firstMagic = 0, lastMagic = 0;
+    uint32_t windowMask = 0;
+
+    void Submit(bool warming, int64_t magic)
+    {
+        if (warming) ++warmupSubmitted;
+        else ++submitted;
+        if (firstMagic == 0) firstMagic = magic;
+        lastMagic = magic;
+        windowMask |= uint32_t(1) << (magic % 2);
+    }
+    void Complete()
+    {
+        completed = submitted;
+        warmupCompleted = warmupSubmitted;
+    }
+    std::string Details(const char *name, uint64_t peerBytes) const
+    {
+        const std::string prefix = std::string(",\"") + name;
+        return prefix + "_submitted\":" + std::to_string(submitted) +
+            prefix + "_completed\":" + std::to_string(completed) +
+            prefix + "_warmup_submitted\":" + std::to_string(warmupSubmitted) +
+            prefix + "_warmup_completed\":" + std::to_string(warmupCompleted) +
+            prefix + "_first_magic\":" + std::to_string(firstMagic) +
+            prefix + "_last_magic\":" + std::to_string(lastMagic) +
+            prefix + "_window_mask\":" + std::to_string(windowMask) +
+            prefix + "_window_offset\":" + std::to_string(lastMagic == 0 ? 0U :
+                TileXREp::TileXREpServerDedupWindowOffset(lastMagic, peerBytes));
+    }
+};
+
+std::string CombineMultiDetails(const Config &c, uint64_t peerBytes,
+    const OperatorProgress &dispatch, const OperatorProgress &combine)
+{
+    const bool both = c.operatorMode == "both";
+    std::ostringstream out;
+    out << dispatch.Details("dispatch", peerBytes) << combine.Details("combine", peerBytes)
+        << ",\"stream_synchronizations\":1"
+        << ",\"kernel_scope\":" << Json(both ? "dispatch-combine-empty" : "combine-empty")
+        << ",\"native_status\":\"combine-empty\",\"combine_empty\":true,\"combine_delay_us\":50"
+        << ",\"combine_input_check\":" << Json(both ? "dispatch-final-reference" : "full-snapshot")
+        << ",\"combine_inputs_unchanged\":" << (both ? "false" : "true")
+        << ",\"y_out_unchanged\":true,\"independent_expert_out_unchanged\":"
+        << (!both || c.quantMode != 0 ? "true" : "false")
         << ",\"five_tables_linked\":" << (both ? "true" : "false")
         << ",\"send_counts_linked\":" << (both ? "true" : "false")
         << ",\"expert_out_source\":" << Json(!both ? "standalone_expert_out" :

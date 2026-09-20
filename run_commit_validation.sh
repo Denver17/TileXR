@@ -5,11 +5,12 @@ case "$#:${1:-}" in
     1:-h|1:--help)
         cat <<'EOF'
 Usage: bash run_commit_validation.sh
-Build and validate the current Combine checkpoint: ep-sdedup-combine-p1-chain-single.
-C4 builds an isolated production package and runs C1/C3/C4 Host regressions,
-then syncs to the first two configured hosts and runs six 16P functional cases.
+Build and validate the current Combine checkpoint: ep-sdedup-combine-p1-chain-multi.
+C5 builds an isolated production package and runs C1/C3/C4/C5 Host regressions,
+then syncs to the first two configured hosts and runs eight serial 16P functional cases.
 Requires configured CANN 9.1, real A5 devices, SSH/rsync and hostfile; no skips.
-Each case uses loops=1 warmup=0; Combine remains an empty kernel with 50us wait.
+Progress is printed as [i/8]; the first failure stops the matrix.
+Each case uses loops=5 warmup=2; Combine remains an empty kernel with 50us wait.
 Requires Python 3.9+, CMake, Make and g++. TILEXR_VALIDATION_JOBS controls build jobs.
 Reports: run/validation/commit-*/summary.json (or TILEXR_VALIDATION_RESULT_ROOT).
 Return the summary and logs before proceeding to the next checkpoint.
@@ -19,7 +20,7 @@ EOF
 esac
 # This entry point follows the current delivery checkpoint, independent of a
 # previous Dispatch build or deployment-specific case options.
-export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-chain-single
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-chain-multi
 export TILEXR_VALIDATION_BUILD_MODE=production
 export TILEXR_VALIDATION_ACTION=commit-validate
 if ! source "$(dirname -- "${BASH_SOURCE[0]}")/set_env.sh"; then

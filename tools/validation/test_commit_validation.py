@@ -46,12 +46,12 @@ class CombineCommitValidationTests(unittest.TestCase):
         if self.behavior == "configure-fails" and "-S" in args:
             return self.real_execute([sys.executable, "-c", "raise SystemExit(7)"], log, **kwargs)
         if "--build" in args and str(work) in args:
-            expected_targets = (self.required - {workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST}) | {workflow.COMBINE_DRY_RUN_PROGRAM} if self.checkpoint in (workflow.COMBINE_DRY_RUN_CHECKPOINT, workflow.COMBINE_CHAIN_CHECKPOINT) else self.required
-            if self.checkpoint == workflow.COMBINE_CHAIN_CHECKPOINT:
+            expected_targets = (self.required - {workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST}) | {workflow.COMBINE_DRY_RUN_PROGRAM} if self.checkpoint in (workflow.COMBINE_DRY_RUN_CHECKPOINT, *workflow.COMBINE_DEVICE_CHECKPOINTS) else self.required
+            if self.checkpoint in workflow.COMBINE_DEVICE_CHECKPOINTS:
                 expected_targets |= {workflow.CHAIN_PROGRAM}
             self.assertEqual(set(args[args.index("--target") + 1:]), expected_targets)
             work.mkdir(parents=True, exist_ok=True)
-            if self.checkpoint == workflow.COMBINE_CHAIN_CHECKPOINT:
+            if self.checkpoint in workflow.COMBINE_DEVICE_CHECKPOINTS:
                 (work / workflow.CHAIN_PROGRAM).write_text("real consumer fixture\n")
             for name in self.names:
                 marker = ("EP_SERVER_DEDUP_COMBINE_ABI_HOST_PASS test="
@@ -61,6 +61,8 @@ class CombineCommitValidationTests(unittest.TestCase):
                     marker = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS test=configuration"
                 if name in (workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_DELAY_TEST):
                     marker = "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS test=" + ("delay" if name == workflow.COMBINE_DELAY_TEST else "lifecycle")
+                if name == workflow.COMBINE_MULTI_TEST:
+                    marker = "EP_SERVER_DEDUP_COMBINE_MULTI_PASS test=lifecycle"
                 if self.behavior == "wrong-marker":
                     marker = marker.replace("COMBINE_", "")
                 program = work / name
@@ -76,8 +78,8 @@ class CombineCommitValidationTests(unittest.TestCase):
                 content += "print(" + repr(marker) + ")\n"
                 program.write_text(content, encoding="utf-8")
                 program.chmod(0o755)
-                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST):
-                    script = "test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_chain.py"
+                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST):
+                    script = "test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_multi.py" if name == workflow.COMBINE_MULTI_TEST else "test_server_dedup_combine_chain.py"
                     driver = self.root / "tests/ep/integration" / script
                     driver.parent.mkdir(parents=True, exist_ok=True)
                     driver.write_text("import pathlib,sys\nassert sys.argv[1] == '--consumer'\nassert pathlib.Path(sys.argv[2]).is_file()\nprint(" + repr(marker) + ")\n")
@@ -98,9 +100,9 @@ class CombineCommitValidationTests(unittest.TestCase):
         if args[0] == "ctest":
             self.assertIn("^(" + "|".join(sorted(self.required)) + ")$", args)
             output = json.dumps({"tests": [{"name": name, "command":
-                [sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_chain.py")),
+                [sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_multi.py" if name == workflow.COMBINE_MULTI_TEST else "test_server_dedup_combine_chain.py")),
                  "--consumer", str(work / workflow.COMBINE_DRY_RUN_PROGRAM)]
-                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST) else [str(work / name)]} for name in self.names]})
+                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST) else [str(work / name)]} for name in self.names]})
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         Path(log).write_text(output, encoding="utf-8")
         return output
@@ -274,8 +276,14 @@ class CombineEmptyKernelCommitValidationTests(CombineCommitValidationTests):
 
 class CombineChainBuildTests(unittest.TestCase):
     def test_c4_package_exports_six_host_checks_and_both_real_kernel_contracts(self):
+        self.check_package(workflow.COMBINE_CHAIN_CHECKPOINT, 6)
+
+    def test_c5_package_exports_seven_host_checks_and_both_real_kernel_contracts(self):
+        self.check_package(workflow.COMBINE_MULTI_CHECKPOINT, 7)
+
+    def check_package(self, checkpoint, expected_count):
         fixture = CombineCommitValidationTests()
-        fixture.checkpoint = workflow.COMBINE_CHAIN_CHECKPOINT
+        fixture.checkpoint = checkpoint
         fixture.mode = "production"
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
@@ -286,13 +294,13 @@ class CombineChainBuildTests(unittest.TestCase):
             self.assertEqual(workflow.host_validate(config, "host-fixture"), 0)
         manifest = workflow.verify_build(config)
         self.assertEqual({test["name"] for test in manifest["tests"]}, workflow.COMBINE_TESTS[fixture.checkpoint])
-        self.assertEqual(len(manifest["tests"]), 6)
+        self.assertEqual(len(manifest["tests"]), expected_count)
         self.assertEqual(manifest["server_dedup_combine_contract"], workflow.COMBINE_ABI)
         self.assertEqual(manifest["server_dedup_contract"], workflow.DISPATCH_ABI)
         self.assertFalse(manifest["server_dedup_profiling"])
         self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
         self.assertIn("bin/" + workflow.COMBINE_DRY_RUN_PROGRAM, manifest["artifacts"])
-        self.assertEqual(len([test for test in manifest["tests"] if test["argv"][0] == "@python"]), 2)
+        self.assertEqual(len([test for test in manifest["tests"] if test["argv"][0] == "@python"]), expected_count - 4)
         self.assertEqual(workflow.node_tests(manifest), [])
 
 

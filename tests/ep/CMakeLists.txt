@@ -369,6 +369,15 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(test_tilexr_ep_server_dedup_combine_chain PROPERTIES
         LABELS ep-sdedup-combine-p1-chain-single TIMEOUT 120)
 endif()
+# C5 adds continuous batch and shared-magic lifecycle coverage to that consumer.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_multi
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_multi.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_multi PROPERTIES
+        LABELS ep-sdedup-combine-p1-chain-multi TIMEOUT 120)
+endif()
 add_executable(test_tilexr_ep_server_dedup_combine_delay
     unit/test_tilexr_ep_server_dedup_combine_delay.cpp
     ${TILEXR_ROOT}/src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp)

@@ -42,6 +42,9 @@ COMBINE_DRY_RUN_TEST = "test_tilexr_ep_server_dedup_combine_dry_run"
 COMBINE_DRY_RUN_PROGRAM = "test_tilexr_ep_server_dedup_chain_dry_run"
 COMBINE_DRY_RUN_MARKER = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS "
 COMBINE_CHAIN_CHECKPOINT = "ep-sdedup-combine-p1-chain-single"
+COMBINE_MULTI_CHECKPOINT = "ep-sdedup-combine-p1-chain-multi"
+COMBINE_MULTI_TEST = "test_tilexr_ep_server_dedup_combine_multi"
+COMBINE_DEVICE_CHECKPOINTS = (COMBINE_CHAIN_CHECKPOINT, COMBINE_MULTI_CHECKPOINT)
 COMBINE_CHAIN_TEST = "test_tilexr_ep_server_dedup_combine_chain"
 COMBINE_DELAY_TEST = "test_tilexr_ep_server_dedup_combine_delay"
 COMBINE_CHAIN_MARKER = "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS "
@@ -50,6 +53,7 @@ COMBINE_TESTS = {
     COMBINE_EMPTY_KERNEL_CHECKPOINT: COMBINE_EMPTY_KERNEL_TESTS,
     COMBINE_DRY_RUN_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST},
     COMBINE_CHAIN_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST},
+    COMBINE_MULTI_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST, COMBINE_MULTI_TEST},
 }
 COMBINE_ABI = {"launch_bytes": 88, "tiling_bytes": 16, "runtime_args_bytes": 88,
                "block_dim": 64, "kernel_scope": "combine-empty"}
@@ -67,7 +71,7 @@ MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
 MEMORY_BOUNDARY_BYTES = 4 * 1024 ** 3
-CHAIN_CHECKPOINTS = (DISPATCH_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT)
+CHAIN_CHECKPOINTS = (DISPATCH_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS)
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
 BREAKDOWN_MARKER = "EP_SERVER_DEDUP_BREAKDOWN_PASS "
@@ -289,7 +293,7 @@ class Config:
         if not self.checkpoint:
             installed = self.root / "install/validation/manifest.json"
             self.checkpoint = read_json(installed)["checkpoint"] if installed.exists() else CHECKPOINT
-        local_only = action in ("build", "verify", "host-validate", "commit-validate") and self.checkpoint != COMBINE_CHAIN_CHECKPOINT
+        local_only = action in ("build", "verify", "host-validate", "commit-validate") and self.checkpoint not in COMBINE_DEVICE_CHECKPOINTS
         self.hostfile = (self.root / "hostfile" if local_only else
                          Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile")))
         self.user = "" if local_only else os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
@@ -314,7 +318,7 @@ class Config:
         if self.checkpoint in (COMBINE_ABI_HOST_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT) and self.mode != "host":
             raise ValueError("Combine C1/C3 仅验证 Host ABI/layout/configuration；请使用 host 模式")
         if action == "commit-validate" and self.checkpoint not in COMBINE_TESTS:
-            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3/C4")
+            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3/C4/C5")
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, COMBINE_EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -392,6 +396,8 @@ def chain_configuration(checkpoint, default_host=None):
             os.environ.get("TILEXR_VALIDATION_LOOPS", "1") != "1" or
             os.environ.get("TILEXR_VALIDATION_WARMUP", "0") != "0"):
         raise ValueError("memory-boundary / Combine C4 仅执行 functional，loops=1，warmup=0")
+    if checkpoint == COMBINE_MULTI_CHECKPOINT and os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional":
+        raise ValueError("Combine C5 仅执行 functional，performance/breakdown 属于 C6")
     shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
              for name, default in (("bs", "96"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "96"))}
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
@@ -400,8 +406,8 @@ def chain_configuration(checkpoint, default_host=None):
     operator_mode = os.environ.get("TILEXR_VALIDATION_OPERATOR_MODE", "dispatch")
     if operator_mode not in ("dispatch", "combine", "both"):
         raise ValueError("OPERATOR_MODE 必须为 dispatch/combine/both")
-    if operator_mode != "dispatch" and checkpoint not in (COMBINE_DRY_RUN_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
-        raise ValueError("Combine/both 真实执行要求 C4 checkpoint；其他检查点仅支持 dry_run=1")
+    if operator_mode != "dispatch" and checkpoint not in (COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
+        raise ValueError("Combine/both 真实执行要求 C4/C5 checkpoint；其他检查点仅支持 dry_run=1")
     legacy_quant = os.environ.get("TILEXR_VALIDATION_QUANT_MODE")
     dispatch_quant = os.environ.get("TILEXR_VALIDATION_DISPATCH_QUANT_MODE")
     if legacy_quant is not None and dispatch_quant is not None and legacy_quant != dispatch_quant:
@@ -420,7 +426,7 @@ def chain_configuration(checkpoint, default_host=None):
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
         raise ValueError("chain 检查点 dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
     run_mode, loops, warmup = "functional", 1, 0
-    if checkpoint in (DISPATCH_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
+    if checkpoint in (DISPATCH_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         run_mode = os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional")
         if run_mode not in ("functional", "performance", "breakdown"):
             raise ValueError("RUN_MODE 必须为 functional/performance/breakdown")
@@ -515,7 +521,8 @@ def validation_directory(checkpoint):
     return {COMBINE_ABI_HOST_CHECKPOINT: "validation-combine-c1",
             COMBINE_EMPTY_KERNEL_CHECKPOINT: "validation-combine-c2",
             COMBINE_DRY_RUN_CHECKPOINT: "validation-combine-c3",
-            COMBINE_CHAIN_CHECKPOINT: "validation-combine-c4"}.get(checkpoint, "validation")
+            COMBINE_CHAIN_CHECKPOINT: "validation-combine-c4",
+            COMBINE_MULTI_CHECKPOINT: "validation-combine-c5"}.get(checkpoint, "validation")
 
 
 def runtime_check(config, install, log):
@@ -538,7 +545,7 @@ def runtime_check(config, install, log):
         kernel = install / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"
         inspect(["readelf", "-h", kernel], "server-dedup-elf.log")
 
-    if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
+    if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         kernel = install / "lib/tilexr/kernels/tilexr_ep_combine_memory_server_dedup_kernel.o"
         inspect(["readelf", "-h", kernel], "combine-server-dedup-elf.log")
 
@@ -551,7 +558,7 @@ def runtime_check(config, install, log):
         if len(fields) >= 2 and fields[1] in ("T", "W"):
             exported.add(fields[0])
     required_symbols = ["TileXRMoeEpDispatchMemoryServerDedup", "TileXRMoeEpDispatchMemory"]
-    if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
+    if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         required_symbols.append("TileXRMoeEpCombineMemoryServerDedup")
     for name in required_symbols:
         if name not in exported:
@@ -580,10 +587,10 @@ def verify_build(config, *, check_run_mode=True):
     manifest = read_json(config.install / "manifest.json")
     if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
-    if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
+    if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         if manifest.get("server_dedup_combine_contract") != COMBINE_ABI:
             raise ValueError("需要 Combine C2 88B launch / 16B GM tiling / 64核空入口产物，请重新执行 run_commit_validation.sh")
-    if config.checkpoint in (DISPATCH_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
+    if config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
             raise ValueError("需要完整 Dispatch 120B ABI / 独立 GM tiling 产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
@@ -663,11 +670,11 @@ def build(config):
                  f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs,
-                 *(["--target", "tilexr-ep"] if combine_c2 or config.checkpoint == COMBINE_CHAIN_CHECKPOINT else [])],
+                 *(["--target", "tilexr-ep"] if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS else [])],
                 log / "production-build.log", timeout=3600)
         command(["cmake", "--install", work / "production"], log / "production-install.log", timeout=180)
         kernels = ["dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup"]
-        if combine_c2 or config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
+        if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
             kernels.append("combine_memory_server_dedup")
         for kernel in kernels:
             if not (stage / f"lib/tilexr/kernels/tilexr_ep_{kernel}_kernel.o").is_file():
@@ -684,15 +691,15 @@ def build(config):
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     build_targets = combine_tests
-    if config.checkpoint in (COMBINE_DRY_RUN_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
-        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
-    if config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
+    if config.checkpoint in (COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
+        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
+    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         build_targets = build_targets | {CHAIN_PROGRAM}
     targets = ["--target", *sorted(build_targets)] if build_targets else []
     command(["cmake", "--build", host_build, "-j", config.jobs, *targets], log / "host-build.log", timeout=1800)
     if not combine_tests:
         command(["cmake", "--install", host_build], log / "host-install.log")
-    if config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
+    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         (stage / "bin").mkdir(parents=True, exist_ok=True)
         shutil.copy2(host_build / CHAIN_PROGRAM, stage / "bin" / CHAIN_PROGRAM)
     if chain and not (stage / "bin" / CHAIN_PROGRAM).is_file():
@@ -711,7 +718,7 @@ def build(config):
     tests = []
     for test in listing["tests"]:
         command = test["command"]
-        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST):
+        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST):
             if (len(command) != 4 or not command[1].endswith(".py") or command[2] != "--consumer"
                     or Path(command[3]).name != COMBINE_DRY_RUN_PROGRAM):
                 raise ValueError(f"无法导出 C3 consumer 测试命令：{command}")
@@ -754,9 +761,9 @@ def build(config):
                 "artifacts": artifact_files(stage)}
     if combine_tests:
         manifest["build_timeout_seconds"] = 900
-    if combine_c2 or config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
+    if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         manifest["server_dedup_combine_contract"] = dict(COMBINE_ABI)
-    if config.checkpoint in (DISPATCH_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT):
+    if config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         manifest["server_dedup_contract"] = dict(DISPATCH_ABI)
         manifest["server_dedup_profiling"] = config.profiling
         if manifest["server_dedup_profiling"]:
@@ -770,7 +777,7 @@ def build(config):
     if config.install.exists():
         shutil.rmtree(config.install)  # 仅重建本工具拥有的安装目录。
     stage.replace(config.install)
-    if not combine_tests or config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
+    if not combine_tests or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         write_json(config.root / ".tilexr-source.json", source)
         (config.root / ".tilexr-validation-root").write_text("TileXR validation deployment\n", encoding="utf-8")
     print(f"BUILD_PASS commit={source['commit'] or 'unknown'} "
@@ -992,8 +999,8 @@ def validate_dispatch_tables(records, config):
         raise ValueError("完整 Dispatch 物理包总数与原始 route 总数不一致")
 
 
-def validate_c4_dispatch_record(dispatch, chain, mapping, run_id, manifest, config):
-    """Retain C4 identities while applying the complete existing Dispatch validator."""
+def validate_combine_dispatch_record(dispatch, chain, mapping, run_id, manifest, config):
+    """Retain the Combine checkpoint identity while applying the complete Dispatch validator."""
     if dispatch.get("checkpoint") != manifest["checkpoint"] or dispatch.get("pid") != chain["pid"]:
         raise Failure("RESULT_FAILED", "Dispatch 不属于本次进程/检查点", rank=mapping["rank"])
     adapted = dict(dispatch, checkpoint=DISPATCH_CHECKPOINT,
@@ -1002,18 +1009,74 @@ def validate_c4_dispatch_record(dispatch, chain, mapping, run_id, manifest, conf
                           dict(config, kernel_scope="dispatch"))
 
 
+def validate_multi_magic(record, config, *, dispatch_only=False):
+    """Validate caller-derived magic without consuming another communicator round."""
+    total = config["loops"] + config["warmup"]
+    both = config["operator_mode"] == "both"
+    numbers = {"stream_synchronizations": 1}
+    for operator in ("dispatch", "combine"):
+        if dispatch_only and operator != "dispatch":
+            continue
+        active = config["operator_mode"] in (operator, "both")
+        first = (2 if operator == "combine" and both else 1) if active else 0
+        last = (2 * total - int(operator == "dispatch") if both else total) if active else 0
+        mask = (1 << (first % 2) if both or total == 1 else 3) if active else 0
+        numbers[operator + "_first_magic"] = first
+        numbers[operator + "_window_mask"] = mask
+        numbers["last_magic" if dispatch_only else operator + "_last_magic"] = last
+        numbers["window_offset" if dispatch_only else operator + "_window_offset"] = (last % 2) * MEMORY_BOUNDARY_BYTES
+        if not dispatch_only:
+            for kind, count in (("", config["loops"]), ("warmup_", config["warmup"])):
+                for state in ("submitted", "completed"):
+                    numbers[operator + "_" + kind + state] = count if active else 0
+    if not dispatch_only:
+        numbers.update(warmup_submitted=config["warmup"], warmup_completed=config["warmup"], combine_delay_us=50)
+    for key, value in numbers.items():
+        if type(record.get(key)) is not int or record[key] != value:
+            raise Failure("RESULT_FAILED", "C5 提交/完成、预热、magic/选窗或同步记录不一致", field=key)
+
+
+def validate_combine_multi_record(record, mapping, run_id, manifest, config):
+    both = config["operator_mode"] == "both"
+    if config["operator_mode"] == "dispatch":
+        validate_combine_dispatch_record(record, record["chain"], mapping, run_id, manifest, config)
+        validate_multi_magic(record, config, dispatch_only=True)
+        return
+    validate_multi_magic(record, config)
+    independent = not both or config["dispatch_quant_mode"] == 4
+    flags = dict(combine_empty=True, combine_inputs_unchanged=not both, y_out_unchanged=True,
+                 independent_expert_out_unchanged=independent, five_tables_linked=both, send_counts_linked=both)
+    source = ("separate_expert_out" if independent else "dispatch_expand_x") if both else "standalone_expert_out"
+    if (any(record.get(key) is not value for key, value in flags.items()) or
+            record.get("kernel_scope") != config["kernel_scope"] or
+            record.get("expert_out_source") != source or
+            record.get("combine_input_check") != ("dispatch-final-reference" if both else "full-snapshot")):
+        raise Failure("RESULT_FAILED", "C5 输入检查范围、生命周期或原指针关联记录不一致", rank=mapping["rank"])
+    if both:
+        dispatch = record.get("dispatch")
+        if not isinstance(dispatch, dict):
+            raise Failure("LOG_PARSE_FAILED", "联合模式缺少真实 Dispatch PASS", rank=mapping["rank"])
+        validate_combine_dispatch_record(dispatch, record["chain"], mapping, run_id, manifest, config)
+        validate_multi_magic(dispatch, config, dispatch_only=True)
+    elif "dispatch" in record:
+        raise Failure("RESULT_FAILED", "Combine 独跑意外提交 Dispatch", rank=mapping["rank"])
+
+
 def validate_combine_chain_record(record, mapping, run_id, manifest, config):
-    """C4 certifies the empty Combine contract and retains full Dispatch evidence."""
+    """Certify empty Combine evidence while retaining the complete Dispatch checks."""
     if config is None:
-        raise Failure("RESULT_FAILED", "缺少 Combine C4 配置", rank=mapping["rank"])
+        raise Failure("RESULT_FAILED", "缺少 Combine 配置", rank=mapping["rank"])
     both = config["operator_mode"] == "both"
     for marker in (record, record["chain"]):
         for key in ("operator_mode", "dispatch_quant_mode", "combine_quant_mode", "quant_mode",
                     "fp8_format", "run_mode", "loops", "warmup"):
             if type(marker.get(key)) is not type(config[key]) or marker[key] != config[key]:
-                raise Failure("RESULT_FAILED", "Combine C4 配置回显不一致", rank=mapping["rank"], field=key)
+                raise Failure("RESULT_FAILED", "Combine 配置回显不一致", rank=mapping["rank"], field=key)
+    if manifest["checkpoint"] == COMBINE_MULTI_CHECKPOINT:
+        validate_combine_multi_record(record, mapping, run_id, manifest, config)
+        return
     if config["operator_mode"] == "dispatch":
-        validate_c4_dispatch_record(record, record["chain"], mapping, run_id, manifest, config)
+        validate_combine_dispatch_record(record, record["chain"], mapping, run_id, manifest, config)
         return
     numbers = dict(dispatch_submitted=int(both), dispatch_completed=int(both),
                    combine_submitted=1, combine_completed=1, warmup_submitted=0, warmup_completed=0,
@@ -1033,7 +1096,7 @@ def validate_combine_chain_record(record, mapping, run_id, manifest, config):
         dispatch = record.get("dispatch")
         if not isinstance(dispatch, dict):
             raise Failure("LOG_PARSE_FAILED", "联合模式缺少真实 Dispatch PASS", rank=mapping["rank"])
-        validate_c4_dispatch_record(dispatch, record["chain"], mapping, run_id, manifest, config)
+        validate_combine_dispatch_record(dispatch, record["chain"], mapping, run_id, manifest, config)
     elif "dispatch" in record:
         raise Failure("RESULT_FAILED", "Combine 独跑意外提交 Dispatch", rank=mapping["rank"])
 
@@ -1065,9 +1128,9 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                 raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype/route_mode/seed 与本次配置不一致", rank=mapping["rank"])
         if chain:
             linked = record["chain"]
-            if manifest["checkpoint"] == COMBINE_CHAIN_CHECKPOINT:
+            if manifest["checkpoint"] in COMBINE_DEVICE_CHECKPOINTS:
                 validate_combine_chain_record(record, mapping, run_id, manifest, chain_config)
-            loops = 1
+            loops = chain_config["loops"] if manifest["checkpoint"] == COMBINE_MULTI_CHECKPOINT else 1
             if manifest["checkpoint"] == DISPATCH_CHECKPOINT:
                 if chain_config is None:
                     raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
@@ -1192,11 +1255,11 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 marker = DISPATCH_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
                     marker = MEMORY_BOUNDARY_MARKER
-                if config.checkpoint == COMBINE_CHAIN_CHECKPOINT and config.chain["operator_mode"] != "dispatch":
+                if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and config.chain["operator_mode"] != "dispatch":
                     marker = COMBINE_CHAIN_MARKER
                 if any(line.startswith(DISPATCH_INVALID_MARKER) for line in output.splitlines()):
-                    if config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
-                        raise Failure("RESULT_FAILED", "C4 Dispatch 输出校验失败")
+                    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
+                        raise Failure("RESULT_FAILED", "Dispatch 输出校验失败")
                     if any(line.startswith(DISPATCH_MARKER) for line in output.splitlines()):
                         raise Failure("LOG_PARSE_FAILED", "Dispatch 同时报告 PASS 和 INVALID")
                     marker = DISPATCH_INVALID_MARKER
@@ -1208,7 +1271,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if marker == DISPATCH_MARKER and record.get("validation_status") == "FAIL":
                     raise Failure("LOG_PARSE_FAILED", "PASS marker 与输出校验失败状态矛盾")
                 record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
-                if config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
+                if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
                     has_dispatch = any(line.startswith(DISPATCH_MARKER) for line in output.splitlines())
                     if config.chain["operator_mode"] == "both":
                         record["dispatch"] = parse_rank_marker(output, DISPATCH_MARKER)
@@ -1314,6 +1377,8 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_", " test=" + name.removeprefix(prefix + "combine_")
     elif name in (COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST):
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_CHAIN_", " test=" + ("delay" if name == COMBINE_DELAY_TEST else "lifecycle")
+    elif name == COMBINE_MULTI_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_MULTI_", " test=lifecycle"
     elif name == COMBINE_DRY_RUN_TEST:
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_DRYRUN_", " test=configuration"
     elif name in COMBINE_ABI_HOST_TESTS:
@@ -1345,6 +1410,8 @@ def host_validate(config, run_id=None):
                       device=os.environ.get("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", "0"))
     if config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
         result.update(scope="Combine C4 Host回归：C1/C3、同consumer链路替身及空kernel等待；不含真实NPU提交。")
+    if config.checkpoint == COMBINE_MULTI_CHECKPOINT:
+        result.update(scope="Combine C5 Host回归：C1/C3/C4、连续批次/预热/选窗/生命周期及空kernel等待；不含真实NPU提交。")
     if config.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
         result.update(scope="Combine C3：C1回归、同一consumer的三种算子模式、独立量化开关及rank映射；无CANN/SSH/设备分配/communicator/launch。")
     started = time.monotonic()
@@ -1414,12 +1481,26 @@ COMBINE_CHAIN_CASES = (
 )
 
 
+COMBINE_MULTI_CASES = (
+    ("dispatch-bf16", "dispatch", "bf16", 0, "e4m3"),
+    ("dispatch-fp16", "dispatch", "fp16", 0, "e4m3"),
+) + COMBINE_CHAIN_CASES
+
+
 def combine_chain_commit_validate(config, run_id):
-    """Use the normal build/sync/run path for six separately retained C4 cases."""
+    """Run one checkpoint's bounded matrix through the normal sync/run path."""
+    multi = config.checkpoint == COMBINE_MULTI_CHECKPOINT
+    cases = COMBINE_MULTI_CASES if multi else COMBINE_CHAIN_CASES
+    checkpoint_label = "C5" if multi else "C4"
+    loops, warmup = (5, 2) if multi else (1, 0)
     log = config.logs / run_id
     summary = dict(run_id=run_id, checkpoint=config.checkpoint, mode=config.mode, status="FAIL",
-                   cases=[], errors=[], expected_cases=len(COMBINE_CHAIN_CASES),
+                   cases=[], errors=[], expected_cases=len(cases),
                    scope="Combine C4：C1/C3回归、Host生命周期及50us空kernel；前2台固定8P，Combine独跑及Dispatch→空Combine共6个单轮用例；不验Combine通信或业务数值。")
+    if multi:
+        summary["scope"] = ("Combine C5：C1/C3/C4/C5 Host回归及50us空kernel；前2台固定8P，"
+                            "三种算子模式共8个串行用例，每例2轮预热+5轮正式调用；"
+                            "批末同步、各自magic/选窗和最终Dispatch校验；不验Combine通信或业务数值。")
     original_environment = dict(os.environ)
     stage = "host-regression"
     case_config = None
@@ -1435,7 +1516,7 @@ def combine_chain_commit_validate(config, run_id):
         code = host_validate(config, run_id=host_id)
         summary["host_regression"] = str(config.logs / host_id / "summary.json")
         if code:
-            raise Failure("RESULT_FAILED", "C4 Host 回归失败；未启动设备用例")
+            raise Failure("RESULT_FAILED", checkpoint_label + " Host 回归失败；未启动设备用例")
         # The acceptance matrix owns case parameters. Deployment paths, SSH user
         # and CANN come from the same configuration used by normal sync/run.
         for key in list(os.environ):
@@ -1445,8 +1526,8 @@ def combine_chain_commit_validate(config, run_id):
                     "FP8_FORMAT", "BLOCK_DIM", "CASE_ANALYSIS", "ROUTE_MODE", "SEED", "SERVERS"):
                 os.environ.pop(key)
         os.environ.pop("TILEXR_DIRECT_HOSTS_JSON", None)
-        os.environ.update(TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS="1",
-                          TILEXR_VALIDATION_WARMUP="0", TILEXR_VALIDATION_SERVERS="2",
+        os.environ.update(TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS=str(loops),
+                          TILEXR_VALIDATION_WARMUP=str(warmup), TILEXR_VALIDATION_SERVERS="2",
                           TILEXR_VALIDATION_TIMEOUT=str(config.timeout),
                           TILEXR_VALIDATION_BS="96", TILEXR_VALIDATION_H="7168", TILEXR_VALIDATION_TOPK="6",
                           TILEXR_VALIDATION_MOE_EXPERT_NUM="96", TILEXR_VALIDATION_COMBINE_QUANT_MODE="0",
@@ -1458,13 +1539,17 @@ def combine_chain_commit_validate(config, run_id):
         selected_hosts = case_config.hosts()
         summary.update(expected_hosts=selected_hosts, rank_size=len(selected_hosts) * 8)
         sync(case_config)
-        for name, operator, dtype, quant, fp8 in COMBINE_CHAIN_CASES:
+        print(f"{checkpoint_label} 设备矩阵共 {len(cases)} 个串行用例，每例 loops={loops} warmup={warmup}；首个失败即停止。", flush=True)
+        for index, (name, operator, dtype, quant, fp8) in enumerate(cases, 1):
             stage = name
             os.environ.update(TILEXR_VALIDATION_OPERATOR_MODE=operator, TILEXR_VALIDATION_DTYPE=dtype,
                               TILEXR_VALIDATION_QUANT_MODE=str(quant), TILEXR_VALIDATION_DISPATCH_QUANT_MODE=str(quant),
                               TILEXR_VALIDATION_FP8_FORMAT=fp8,
                               TILEXR_VALIDATION_RESULT_ROOT=str(log / "cases" / name))
             case_config = Config("run")
+            print(f"[{index}/{len(cases)}] START {name} operator={operator} dtype={dtype} "
+                  f"dispatch_quant={quant} combine_quant=0 fp8={fp8} loops={loops} warmup={warmup} "
+                  f"结果目录：{case_config.logs}", flush=True)
             try:
                 code = run(case_config)
             except (Exception, KeyboardInterrupt) as error:
@@ -1480,8 +1565,10 @@ def combine_chain_commit_validate(config, run_id):
                                          summary=str(case_config.last_summary_path),
                                          configuration=dict(case_config.chain),
                                          completed_ranks=report.get("completed_ranks", 0)))
+            print(f"[{index}/{len(cases)}] {'PASS' if passed else 'FAIL'} {name} "
+                  f"结果：{case_config.last_summary_path}", flush=True)
             if not passed:
-                raise Failure("RESULT_FAILED", "C4 用例失败或缺少完整16 rank：" + name)
+                raise Failure("RESULT_FAILED", checkpoint_label + " 用例失败或缺少完整16 rank：" + name)
         summary["status"] = "PASS"
     except (Exception, KeyboardInterrupt) as error:
         summary["errors"] = failure_records(error, "RESULT_FAILED", stage=stage)
@@ -1524,7 +1611,7 @@ def commit_validate(config):
             report_failure(record)
         code = FAILURE_CODES[errors[0]["type"]]
     else:
-        code = (combine_chain_commit_validate(config, run_id) if config.checkpoint == COMBINE_CHAIN_CHECKPOINT
+        code = (combine_chain_commit_validate(config, run_id) if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS
                 else host_validate(config, run_id=run_id))
     print(f"{'成功' if code == 0 else '失败'} COMMIT_VALIDATION_{'PASS' if code == 0 else 'FAIL'} "
           f"checkpoint={config.checkpoint}\n结果：{config.logs / run_id / 'summary.json'}", flush=True)
@@ -1958,6 +2045,10 @@ def run(config):
     if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
+    elif config.checkpoint == COMBINE_MULTI_CHECKPOINT:
+        scope = (f"Combine C5：{len(mappings)}P {config.chain['operator_mode']}，{config.chain['warmup']}轮预热＋"
+                 f"{config.chain['loops']}轮正式调用，同stream连续提交、批末同步、各算子magic/选窗及生命周期；"
+                 "Dispatch检查最终输出与自身窗口；空Combine等待50us，不验Combine通信或yOut业务数值。")
     elif config.checkpoint == COMBINE_CHAIN_CHECKPOINT and config.chain["operator_mode"] == "dispatch":
         scope = f"Combine C4 安装包的 {len(mappings)}P Dispatch 独跑回归：完整单轮Dispatch与五表校验；未提交Combine。"
     elif config.checkpoint == COMBINE_CHAIN_CHECKPOINT:
@@ -1983,14 +2074,14 @@ def run(config):
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
             report["chain_configuration"] = dict(config.chain)
-            if config.checkpoint == COMBINE_CHAIN_CHECKPOINT and config.chain["operator_mode"] != "combine" and not errors:
+            if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and config.chain["operator_mode"] != "combine" and not errors:
                 try:
                     dispatch_records = [rank["dispatch"] if config.chain["operator_mode"] == "both" else rank
                                         for node in nodes for rank in node["reported_result"]["ranks"]]
                     validate_dispatch_tables(dispatch_records, dict(config.chain, rank_size=len(mappings)))
                     report["dispatch_five_tables_validated"] = True
                 except (ValueError, TypeError, KeyError) as error:
-                    failure = Failure("RESULT_FAILED", f"C4 Dispatch 跨rank五表校验失败：{error}").record()
+                    failure = Failure("RESULT_FAILED", f"Dispatch 跨rank五表校验失败：{error}").record()
                     errors.append(failure)
                     primary_error = failure
                     report.update(status="FAIL", primary_error=failure)

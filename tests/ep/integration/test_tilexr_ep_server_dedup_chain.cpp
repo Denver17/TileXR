@@ -145,7 +145,8 @@ Config Parse(int argc, char **argv)
     Require(c.checkpoint == "ep-sdedup-p2-dispatch" ||
         c.checkpoint == "ep-sdedup-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p1-dry-run" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-single",
+        c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
+        c.checkpoint == "ep-sdedup-combine-p1-chain-multi",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     Require(c.checkpoint != "ep-sdedup-combine-p1-dry-run" || c.dryRun,
         "Combine C3 requires --dry-run");
@@ -153,8 +154,9 @@ Config Parse(int argc, char **argv)
     Require(c.operatorMode == "dispatch" || c.operatorMode == "combine" || c.operatorMode == "both",
         "operator_mode must be dispatch/combine/both");
     Require(c.dryRun || c.operatorMode == "dispatch" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-single",
-        "Combine and joint device execution require C4 checkpoint");
+        c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
+        c.checkpoint == "ep-sdedup-combine-p1-chain-multi",
+        "Combine and joint device execution require C4/C5 checkpoint");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
     Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
@@ -172,6 +174,8 @@ Config Parse(int argc, char **argv)
     Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-single" ||
         (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
         "C4 requires functional mode, loops=1, warmup=0");
+    Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-multi" ||
+        c.runMode == "functional", "C5 requires functional mode");
     if (const char *routeMode = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
         c.routeMode = TileXREpDemo::ParseRouteMode(routeMode);
     if (const char *seedText = std::getenv("TILEXR_VALIDATION_SEED")) {
@@ -199,7 +203,8 @@ Config Parse(int argc, char **argv)
     c.h = Number(std::getenv("TILEXR_VALIDATION_H"), "TILEXR_VALIDATION_H");
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
-    if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.checkpoint == "ep-sdedup-combine-p1-chain-single" || c.dryRun) && c.operatorMode != "combine") {
+    if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
+        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" || c.dryRun) && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
         if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
@@ -488,6 +493,7 @@ int Run(const Config &c)
         throw std::runtime_error("memory-boundary test kernel was not built");
 #endif
     }
+    const bool multi = c.checkpoint == "ep-sdedup-combine-p1-chain-multi";
     const bool runDispatch = c.operatorMode != "combine";
     const bool runCombine = c.operatorMode != "dispatch";
     TileXREp::EpMemoryServerDedupLayout layout {};
@@ -503,7 +509,8 @@ int Run(const Config &c)
     uint64_t submission = 0, submitted = 0, completed = 0, warmupSubmitted = 0, warmupCompleted = 0;
     std::string stage = "acl-init", batch = "initialization", dispatch;
     std::string validationError, validationStage, combineDetails;
-    uint64_t combineSubmitted = 0, combineCompleted = 0;
+    OperatorProgress dispatchProgress, combineProgress;
+    int64_t sequenceMagic = 0;
     const std::string profilePath = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
         stage = name;
@@ -608,35 +615,61 @@ int Run(const Config &c)
             ",\"peer_mem_bytes\":" + std::to_string(host->peerMemBytes));
         const auto outputDtype = c.quantMode == 0 ? TileXR::TILEXR_DATA_TYPE_RESERVED :
             (c.fp8Format == "e4m3" ? TileXR::TILEXR_DATA_TYPE_FP8E4M3 : TileXR::TILEXR_DATA_TYPE_FP8E5M2);
-        // Dispatch-only retains its continuous batch. C4 uses one Dispatch,
-        // then a synchronized snapshot boundary before the empty Combine.
+        // C4 retains its synchronized full-snapshot boundary. C5 submits the
+        // entire D/C batch on one stream with no per-round Host observation.
         const uint64_t calls = uint64_t(c.warmup) + c.loops;
-        for (uint64_t call = 0; runDispatch && call < calls; ++call) {
+        std::vector<CombineTensorSnapshot> snapshots;
+        if (multi && runCombine) {
+            enterStage("combine-snapshot");
+            snapshots = CaptureCombineTensors(c, combineLayout, buffers, runDispatch);
+        }
+        const auto launchCombine = [&](bool warming) {
+            enterStage("combine-launch");
+            safeCleanup = false;
+            void *expertOut = runDispatch && c.quantMode == 0 ? buffers[2] : buffers[12];
+            Check(TileXRMoeEpCombineMemoryServerDedup(expertOut,
+                static_cast<int32_t *>(buffers[6]), static_cast<int32_t *>(buffers[4]),
+                static_cast<float *>(buffers[10]), nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE,
+                nullptr, comm, c.bs, c.h, c.topK, c.experts, c.rankSize, c.rank, 1, 0, 0, 0, 0,
+                c.combineQuantMode, static_cast<int64_t>(combineLayout.globalBs), buffers[13],
+                c.dtype, stream, static_cast<const uint32_t *>(buffers[5]), buffers[7],
+                static_cast<const uint32_t *>(buffers[8])), "TileXRMoeEpCombineMemoryServerDedup");
+            combineProgress.Submit(warming, ++sequenceMagic);
+        };
+        for (uint64_t call = 0; (runDispatch || multi) && call < calls; ++call) {
             const bool warming = call < c.warmup;
             batch = warming ? "warmup" : "measurement";
             submission = warming ? call + 1U : call - c.warmup + 1U;
-            stage = "launch";
-            // One entry per warmup/measurement phase, independent of loop
-            // count. Counters in this message describe phase entry only.
-            if (submission == 1U) enterStage("launch");
-            Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
-                nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[9], comm, c.bs, c.h, c.topK, c.experts,
-                c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
-                buffers[11], static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
-                nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
-                static_cast<uint32_t *>(buffers[7]), static_cast<uint32_t *>(buffers[8]), static_cast<float *>(buffers[10]), c.dtype, outputDtype, stream),
-                "TileXRMoeEpDispatchMemoryServerDedup");
+            if (runDispatch) {
+                stage = "launch";
+                // One entry per warmup/measurement phase, independent of loop
+                // count. Counters in this message describe phase entry only.
+                if (submission == 1U) enterStage("launch");
+                Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
+                    nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[9], comm, c.bs, c.h, c.topK, c.experts,
+                    c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
+                    buffers[11], static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
+                    nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
+                    static_cast<uint32_t *>(buffers[7]), static_cast<uint32_t *>(buffers[8]), static_cast<float *>(buffers[10]), c.dtype, outputDtype, stream),
+                    "TileXRMoeEpDispatchMemoryServerDedup");
+                dispatchProgress.Submit(warming, ++sequenceMagic);
+            }
+            if (multi && runCombine) launchCombine(warming);
             if (warming) ++warmupSubmitted;
             else ++submitted;
         }
-        if (runDispatch) {
+        if (runDispatch || multi) {
             enterStage("stream-sync");
             Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
             enterStage("batch-barrier");
             barrier.Run(2);
             completed = submitted;
             warmupCompleted = warmupSubmitted;
+            dispatchProgress.Complete();
+            if (multi) combineProgress.Complete();
             safeCleanup = true;
+        }
+        if (runDispatch) {
             enterStage("count-read");
             std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
             std::vector<int64_t> actualExperts(c.experts / c.rankSize);
@@ -665,32 +698,27 @@ int Run(const Config &c)
                 }
             }
             enterStage("dispatch-read");
-            // This fresh communicator's Dispatch-only sequence starts at magic 1.
-            dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, int64_t(calls));
+            dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, dispatchProgress.lastMagic);
+            if (multi) dispatch += ",\"dispatch_first_magic\":" + std::to_string(dispatchProgress.firstMagic) +
+                ",\"dispatch_window_mask\":" + std::to_string(dispatchProgress.windowMask) +
+                ",\"stream_synchronizations\":1";
         }
         if (runCombine) {
-            enterStage("combine-snapshot");
-            const auto snapshots = CaptureCombineTensors(c, combineLayout, buffers);
-            enterStage("combine-launch");
-            safeCleanup = false;
-            void *expertOut = runDispatch && c.quantMode == 0 ? buffers[2] : buffers[12];
-            Check(TileXRMoeEpCombineMemoryServerDedup(expertOut,
-                static_cast<int32_t *>(buffers[6]), static_cast<int32_t *>(buffers[4]),
-                static_cast<float *>(buffers[10]), nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE,
-                nullptr, comm, c.bs, c.h, c.topK, c.experts, c.rankSize, c.rank, 1, 0, 0, 0, 0,
-                c.combineQuantMode, static_cast<int64_t>(combineLayout.globalBs), buffers[13],
-                c.dtype, stream, static_cast<const uint32_t *>(buffers[5]), buffers[7],
-                static_cast<const uint32_t *>(buffers[8])), "TileXRMoeEpCombineMemoryServerDedup");
-            combineSubmitted = 1;
-            enterStage("combine-sync");
-            Check(aclrtSynchronizeStream(stream), "combine aclrtSynchronizeStream");
-            enterStage("combine-barrier");
-            barrier.Run(3);
-            combineCompleted = 1;
-            safeCleanup = true;
+            if (!multi) {
+                enterStage("combine-snapshot");
+                snapshots = CaptureCombineTensors(c, combineLayout, buffers);
+                launchCombine(false);
+                enterStage("combine-sync");
+                Check(aclrtSynchronizeStream(stream), "combine aclrtSynchronizeStream");
+                enterStage("combine-barrier");
+                barrier.Run(3);
+                combineProgress.Complete();
+                safeCleanup = true;
+            }
             enterStage("combine-read");
             ValidateCombineTensors(snapshots);
-            combineDetails = CombineSingleDetails(c, host->peerMemBytes);
+            combineDetails = multi ? CombineMultiDetails(c, host->peerMemBytes, dispatchProgress, combineProgress) :
+                CombineSingleDetails(c, host->peerMemBytes);
         }
         executionSucceeded = true;
     } catch (const OutputValidationFailure &error) {
@@ -707,7 +735,13 @@ int Run(const Config &c)
         std::cerr << "EP_SERVER_DEDUP_FAIL rank=" << c.rank << " stage=" << stage << " batch=" << batch
             << " submission=" << submission << " submitted=" << submitted << " completed=" << completed
             << " warmup_submitted=" << warmupSubmitted << " warmup_completed=" << warmupCompleted
-            << " combine_submitted=" << combineSubmitted << " combine_completed=" << combineCompleted
+            << " dispatch_submitted=" << dispatchProgress.submitted
+            << " dispatch_completed=" << dispatchProgress.completed
+            << " dispatch_warmup_submitted=" << dispatchProgress.warmupSubmitted
+            << " dispatch_warmup_completed=" << dispatchProgress.warmupCompleted
+            << " combine_submitted=" << combineProgress.submitted << " combine_completed=" << combineProgress.completed
+            << " combine_warmup_submitted=" << combineProgress.warmupSubmitted
+            << " combine_warmup_completed=" << combineProgress.warmupCompleted
             << " " << error.what() << std::endl;
     }
     if (!safeCleanup) {
@@ -742,8 +776,11 @@ int Run(const Config &c)
         if (validationError.empty()) {
             if (runDispatch) Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
             if (runCombine) Marker(c, "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS",
-                ",\"submitted\":1,\"completed\":1,\"warmup_submitted\":0,\"warmup_completed\":0,\"cleanup\":\"complete\"" +
-                combineDetails);
+                ",\"submitted\":" + std::to_string(combineProgress.submitted) +
+                ",\"completed\":" + std::to_string(combineProgress.completed) +
+                ",\"warmup_submitted\":" + std::to_string(combineProgress.warmupSubmitted) +
+                ",\"warmup_completed\":" + std::to_string(combineProgress.warmupCompleted) +
+                ",\"cleanup\":\"complete\"" + combineDetails);
         } else if (runCombine) {
             Marker(c, "EP_SERVER_DEDUP_COMBINE_CHAIN_INVALID",
                 ",\"validation_stage\":" + Json(validationStage) +

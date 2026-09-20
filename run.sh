@@ -20,8 +20,8 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
                     msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
                     case_analysis=0|1 (default: 0)
   dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
-  Dry-run requires the C3 package; real combine/both requires the C4 package.
-  C4 supports only functional mode, loops=1 and warmup=0.
+  Dry-run requires the C3 package; real combine/both defaults to the C5 package.
+  C5 supports functional warmup/multiple loops. C4 remains available via CHECKPOINT override.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
   Endpoints default to hostfile's first (local coordinator) IPv4, ports 10177/10274.
@@ -94,7 +94,7 @@ if [[ -n $legacy_quant && -n $dispatch_quant && $legacy_quant != "$dispatch_quan
 fi
 dispatch_quant=${dispatch_quant:-${legacy_quant:-0}}
 if [[ $dry_run == 0 && $operator_mode != dispatch ]]; then
-    [[ $run_mode == functional && $loops == 1 && $warmup == 0 ]] || fail 'C4 requires functional mode, loops=1, warmup=0'
+    [[ $run_mode == functional ]] || fail 'Combine C5 requires functional mode; performance/breakdown belongs to C6'
 fi
 # Resolve each case afresh; old shell exports must not change this invocation.
 export TILEXR_VALIDATION_BS=96 TILEXR_VALIDATION_H=7168 TILEXR_VALIDATION_TOPK=6
@@ -110,7 +110,12 @@ assignments+=("TILEXR_VALIDATION_SERVERS=$servers" "TILEXR_VALIDATION_MOE_EXPERT
               "TILEXR_VALIDATION_RUN_MODE=$run_mode" "TILEXR_VALIDATION_LOOPS=$loops"
               "TILEXR_VALIDATION_WARMUP=$warmup")
 if [[ $dry_run == 0 && $operator_mode != dispatch ]]; then
-    export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-chain-single TILEXR_VALIDATION_BUILD_MODE=production
+    case "${TILEXR_VALIDATION_CHECKPOINT:-}" in
+        ep-sdedup-combine-p1-chain-single)
+            [[ $loops == 1 && $warmup == 0 ]] || fail 'C4 requires loops=1, warmup=0';;
+        *) export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-chain-multi;;
+    esac
+    export TILEXR_VALIDATION_BUILD_MODE=production
 fi
 if [[ $dry_run == 1 ]]; then
     export TILEXR_VALIDATION_ACTION=case-dry-run TILEXR_VALIDATION_BUILD_MODE=host

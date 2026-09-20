@@ -4,7 +4,7 @@
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；当前交付 C4 单轮接线，等待外部验收。
+Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；当前交付 C5 连续多轮，等待外部验收。
 下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
@@ -25,10 +25,17 @@ C3 交付 commit 为 `b68b56e02e1f49975549515f2d7f805ee4e1e0c8`；用户回传�
 范围为 C1 回归、同一 consumer 三种算子模式、独立量化开关和 rank 映射；
 没有 CANN/SSH/设备分配/communicator/launch 证据。
 
-当前点 `ep-sdedup-combine-p1-chain-single`；入口仍为 `bash run_commit_validation.sh`。
-C4 接入单轮 Combine 独立和真实 Dispatch→空 Combine，验证输入原指针、容量和生命周期，
-不验证 Combine 数值输出。按用户追加要求，空 Combine 各核等待 50μs，仍不读写业务/通信数据。
-**C4 外部验收待回传，C5 未开始。**
+C4 交付 commit 为 `c86e1efe8fd598119112074df420fc1cce7ee4aa`；用户回传：
+`COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-chain-single`。
+报告路径：`/home/h00580772/TileXR-git-check/run/validation/commit-a710cc4e536641cda61bd27e23f73487/summary.json`。
+按用户回传登记通过，未独立读取 summary 或核对实际运行 SHA/工具链；报告目录不是 Git SHA。
+范围为 C1/C3 回归、Host 生命周期、50μs 空 kernel，以及前两台固定 8P 的六个串行单轮
+Combine 独跑/Dispatch→空 Combine 用例；验证同步、输入/yOut 保持、五表/count 连接及各自 magic 选窗，
+不包含 Combine 通信或 yOut 业务数值验证。
+
+当前点 `ep-sdedup-combine-p1-chain-multi`；入口仍为 `bash run_commit_validation.sh`。
+C5 连续提交 warmup/正式轮次，批末同步，分别检查各算子计数和 magic/窗口；保留空 Combine 50μs 等待。
+**C5 外部验收待回传，C6 未开始。**
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
