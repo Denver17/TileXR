@@ -41,6 +41,59 @@ class TemporaryRoot(unittest.TestCase):
         return workflow.Config()
 
 
+class SyncDebugTests(TemporaryRoot):
+    def test_failed_endpoint_does_not_stop_remaining_checks_or_change_receipts(self):
+        self.hostfile.write_text("192.0.2.1\n192.0.2.2\n192.0.2.3\n")
+        config = workflow.Config("sync")
+        config.logs.mkdir(parents=True)
+        receipt = config.logs / "sync.json"
+        receipt.write_text("retained receipt")
+        source = self.root / ".tilexr-source.json"
+        source.write_text("retained source")
+        calls = []
+
+        def execute(argv, log, **kwargs):
+            calls.append(argv)
+            if argv[0] == "rsync":
+                self.assertIn("--dry-run", argv)
+                self.assertIn("--checksum", argv)
+                self.assertIn("-vvv", argv[argv.index("-e") + 1])
+                if "192.0.2.2:" in argv[-1]:
+                    raise workflow.Failure("SYNC_FAILED", "Broken pipe", returncode=255, log=str(log))
+            else:
+                self.assertEqual(argv[-1], "hostname && command -v rsync && rsync --version")
+            return ""
+
+        with mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "inventory", return_value={"files": {"hostfile": "hash"}}), \
+                mock.patch.object(workflow, "execute", side_effect=execute):
+            self.assertEqual(workflow.sync_debug(config), workflow.FAILURE_CODES["SYNC_FAILED"])
+        self.assertEqual(len(calls), 6)
+        report = workflow.read_json(next(config.logs.glob("sync-debug-*/summary.json")))
+        self.assertEqual(report["failed_hosts"], ["192.0.2.2"])
+        self.assertEqual(report["nodes"][2]["status"], "PASS")
+        self.assertEqual(report["nodes"][1]["checks"][1]["error"]["returncode"], 255)
+        self.assertEqual(receipt.read_text(), "retained receipt")
+        self.assertEqual(source.read_text(), "retained source")
+
+    def test_cli_debug_success_without_build_and_ssh_failure(self):
+        for failed in (False, True):
+            with self.subTest(ssh_failed=failed):
+                def execute(argv, *args, **kwargs):
+                    if failed and argv[0] == "ssh":
+                        raise workflow.Failure("SYNC_FAILED", "Permission denied", returncode=255)
+                    return ""
+
+                with mock.patch.object(sys, "argv", ["workflow.py", "sync", "--debug"]), \
+                        mock.patch.object(workflow, "require_tools"), \
+                        mock.patch.object(workflow, "inventory", return_value={"files": {}}), \
+                        mock.patch.object(workflow, "execute", side_effect=execute) as commands, \
+                        mock.patch.object(workflow, "sync") as normal_sync:
+                    self.assertEqual(workflow.main(), workflow.FAILURE_CODES["SYNC_FAILED"] if failed else 0)
+                    normal_sync.assert_not_called()
+                    self.assertEqual(commands.call_count, 2)
+
+
 class HostfileTests(TemporaryRoot):
     def parse(self, text):
         self.hostfile.write_text(text, encoding="utf-8")

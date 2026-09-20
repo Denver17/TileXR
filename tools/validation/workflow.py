@@ -698,6 +698,53 @@ def remote_argv(config, host, action, *arguments):
     return ["ssh", *SSH_OPTIONS, config.target(host), command]
 
 
+def sync_debug(config):
+    """Probe every configured endpoint without preparing or changing deployment files."""
+    hosts = config.hosts()
+    require_tools(["ssh", "rsync"])
+    log = config.logs / ("sync-debug-" + uuid.uuid4().hex)
+    source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
+    paths = set(source["files"])
+    paths.add(str(config.hostfile.relative_to(config.root)))
+    for name in (".tilexr-source.json", ".tilexr-validation-root", "install/validation/", "validation.local.sh"):
+        if (config.root / name).exists():
+            paths.add(name)
+    file_list = log / "files.txt"
+    file_list.parent.mkdir(parents=True, exist_ok=True)
+    file_list.write_text("\n".join(sorted(paths)) + "\n", encoding="utf-8")
+    ssh = ["ssh", "-vvv", *SSH_OPTIONS]
+    nodes = []
+    for index, host in enumerate(hosts):
+        target = config.target(host["host"])
+        node_log = log / str(index)
+        result = dict(index=index, host=host["host"], target=target, status="PASS", checks=[])
+        checks = [
+            ("ssh_probe", [*ssh, target, "hostname && command -v rsync && rsync --version"], 30),
+            ("rsync_dry_run", ["rsync", "-a", "-r", "--dry-run", "--verbose", "--itemize-changes",
+                               "--checksum", "--protect-args", "--timeout=30",
+                               "--files-from=" + str(file_list), "-e", shlex.join(ssh),
+                               str(config.root) + "/", target + ":" + str(config.root) + "/"], 180),
+        ]
+        for stage, argv, timeout in checks:
+            check = dict(stage=stage, log=str(node_log / (stage + ".log")), status="PASS")
+            try:
+                execute(argv, check["log"], timeout=timeout,
+                        start_failure="SYNC_FAILED", exit_failure="SYNC_FAILED")
+            except Exception as error:
+                check.update(status="FAIL", error=failure_record(error, "SYNC_FAILED"))
+                result["status"] = "FAIL"
+            result["checks"].append(check)
+            print(f"SYNC_DEBUG_{check['status']} host={target} stage={stage} log={check['log']}", flush=True)
+        nodes.append(result)
+    failed = [node["target"] for node in nodes if node["status"] == "FAIL"]
+    write_json(log / "summary.json", dict(status="FAIL" if failed else "PASS", dry_run=True,
+                                         nodes=nodes, failed_hosts=failed))
+    print(f"SYNC_DEBUG_SUMMARY checked={len(nodes)} failed={len(failed)} "
+          f"failed_hosts={','.join(failed) or '-'}\n结果：{log / 'summary.json'}\n"
+          "dry-run 不写入远端部署文件；通过不代表实际数据传输或并发同步稳定。", flush=True)
+    return FAILURE_CODES["SYNC_FAILED"] if failed else 0
+
+
 def sync(config):
     def command(*args, **kwargs):
         return execute(*args, **kwargs, start_failure="SYNC_FAILED", exit_failure="SYNC_FAILED")
@@ -1681,7 +1728,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "commit-validate", "node", "rank", "verify", "cancel"))
     parser.add_argument("arguments", nargs="*")
+    parser.add_argument("--debug", action="store_true", help="仅用于 sync：逐主机 SSH 和 rsync dry-run 检查")
     args = parser.parse_args()
+    if args.debug and args.action != "sync":
+        parser.error("--debug 仅支持 sync")
     try:
         if sys.version_info < (3, 9):
             raise ValueError("七步验证工具要求 Python 3.9 或更新版本")
@@ -1700,7 +1750,11 @@ def main():
             with operation_lock(config, ".operation.lock"):
                 build(config)
         elif args.action == "sync":
+            if args.arguments:
+                raise ValueError("sync 仅接受 --debug 选项")
             with operation_lock(config, ".operation.lock"):
+                if args.debug:
+                    return sync_debug(config)
                 sync(config)
         elif args.action == "run":
             with operation_lock(config, ".operation.lock"):

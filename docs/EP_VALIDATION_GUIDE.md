@@ -302,6 +302,17 @@ bash sync.sh                     # 清理同步回执后，重新同步再运行
 `hostfile` 是分发清单；`sync.sh` 使用完整清单，`run.sh -n N` 只选择前 N 台。
 每台固定使用 0..7 卡，按清单顺序分配连续 rank。未选中节点不执行本次用例。
 
+同步出现 `Broken pipe` / exit 255 时，在同一用户、容器和目录运行
+`bash sync.sh --debug`。它按有效 hostfile 顺序逐个检查所有 IP（包括首项），
+分别执行带 `ssh -vvv` 的远端工具探测和 `rsync --dry-run`，失败后继续检查其他节点。
+日志位于 `run/validation/sync-debug-<id>/<零起始节点索引>/`，`summary.json`
+记录目标用户/IP、各阶段状态、错误与日志路径；存在失败节点时退出非零。
+该模式只写本地诊断日志/文件清单，不执行远端 prepare、安装目录清理、实际文件传输，
+也不更新 `.tilexr-source.json` 或 `sync.json`；有安装产物时纳入扫描，无需先构建。
+短 SSH 命令成功不能证明 rsync 连接正常；dry-run 成功也不能证明实际数据传输、
+远端写权限或并发同步稳定。`Broken pipe` 本身只证明连接中断，根因仍需结合失败阶段
+和远端 SSH 日志定位，不能直接归因于超时或 Kernel 代码。
+
 ```bash
 bash run.sh -n 2 -e 96 -m 0 -l 3 0
 bash run.sh -n 4 -e 192 -m 0 -l 3 0
