@@ -46,7 +46,7 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 | 点 | 后缀 | 交付范围与验收边界 |
 | --- | --- | --- |
 | C1 | `abi-host` | 27 参数 ABI、独立 Host 参数/配置校验、五表/tensor 容量及固定控制区/双窗边界；错误不提交、不消耗 magic。用户回传通过，交付 `01c9b1d` |
-| C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 16B GM tiling/88B launch ABI、固定 64 核空入口；不读写业务数据。当前交付，等待外部验收 |
+| C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 16B GM tiling/88B launch ABI、固定 64 核空入口；不读写业务数据。用户回传通过，交付 `3b27062` |
 | C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域 |
 | C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值 |
 | C5 | `chain-multi` | warmup/多轮、各自 magic/选窗、同步与生命周期；联合模式 D/C 固定使用不同窗口符合预期 |
@@ -76,9 +76,9 @@ C1 通过不证明真实通信数据区容量充足。
 缺工具/构建失败不得继续运行旧测试。每项必须同时满足退出码 0 和唯一匹配 PASS marker，
 summary 记录 commit、源码 provenance/工作区状态，避免把文件副本或未提交修改误认成该 SHA 的原样产物。
 
-### C2 当前交付：空 kernel 的安装与提交
+### C2 历史交付：空 kernel 的安装与提交
 
-C1 已获用户 `COMMIT_VALIDATION_PASS` 确认，当前入口默认 `ep-sdedup-combine-p1-empty-kernel`。
+C1/C2 均已获用户 `COMMIT_VALIDATION_PASS` 确认。C2 交付时入口默认 `ep-sdedup-combine-p1-empty-kernel`。
 `bash run_commit_validation.sh` 加载现有 `validation.local.sh` 的 CANN/driver 设置，独立构建
 `build/validation-combine-c2` 并安装到 `install/validation-combine-c2`，检查新 kernel ELF、公共导出和真实 driver 依赖。
 同一命令执行 C1 三项 Host 回归、生产 launch 替身和安装包真实注册/提交，共五项；缺少任一项不得成功。
@@ -105,6 +105,35 @@ C2 设备 consumer 使用内部 Register/Submit 入口及独立 GM 哨兵；不�
 维护经验：安装包真实测试应加载本次安装目录的 Host 库和相对路径 kernel，不能用源码编译的
 Host 替身冒充生产注册成功。GM tiling 必须在异步任务结束前保持不可变；不同算子/shape 使用
 不同缓存键，不能仅复用一个“最新 tiling”槽。失败或超时保留本次 commit、产物哈希和首个失败阶段。
+
+### C3 当前交付：共享 consumer 的三模式 dry-run
+
+C2 已按用户回传登记，报告路径及证据边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+本次只交付 C3；`bash run_commit_validation.sh` 默认 `ep-sdedup-combine-p1-dry-run`，
+独立构建 `build/validation-combine-c3` 并安装到 `install/validation-combine-c3`，不覆盖 C2/Dispatch 安装包。
+需要 Python 3.9+、CMake、Make、g++；无需 CANN、NPU、hostfile 或 SSH。
+准备/总运行/单项期限为 900/180/120 秒；必须通过 C1 三项和配置 integration driver 共四项。
+
+实现顺序与判据：
+
+1. 同一 `run.sh` / workflow / C++ consumer 接入 `operator_mode=dispatch|combine|both`，默认 dispatch。
+2. `dispatch_quant_mode=0|4` 和 `combine_quant_mode=0` 独立；旧 `quant_mode` 仅为 Dispatch 别名，
+   与显式 Dispatch 值冲突时报错。`dtype=bf16|fp16`、`fp8_format=e4m3|e5m2` 共用；非量化时格式不生效。
+3. C++ `--dry-run` 使用生产 Host layout 做参数验证，检查固定 8P/server 映射，
+   在 ACL、profiling、socket、comm 和设备分配之前返回；combine 单跑不继承 Dispatch 的路由 epoch/Count UB 限制。
+4. 以同一 C++ 源码构建可观测 runtime 替身 consumer，测试三种算子模式、两个 dtype、两种 D quant/format、
+   三种运行模式、16/64/128 rank 映射、非法配置及旧别名；要求替身调用记录为空，且缺任何 marker 都失败。
+5. `run.sh ... dry_run=1` 经现有 hostfile/rank mapping 在本机逐 rank 执行已安装 C3 consumer；
+   不连接 hostfile 中的主机。真实 combine/both 执行在 C4 前明确拒绝，不静默执行 Dispatch。
+
+C3 的 JSON 只记录计划的输入来源：both+D0 为 `dispatch_expand_x`，both+D4 为
+`separate_expert_out`（共享 dtype 的 BF16/FP16）；五表来源标记为 `dispatch_outputs`。
+这不证明真实 tensor 原指针相连，实际分配/连接/生命周期归 C4；不检查通信窗口、yOut 或带宽。
+breakdown 此处只验证配置，双记录区及双 trace 文件仍归 C6。
+
+维护经验：增加联合模式时，必须在同一个 consumer 的所有设备副作用之前设置 dry-run 边界，
+并用可观测 runtime 调用记录证明未进入设备路径；仅输出“未分配”字段不能替代此检查。
+停用算子的配置不应触发其业务路由约束，但保留的量化枚举仍须合法，避免把未支持的 Combine 量化带入后续执行。
 
 ### consumer 的职责
 

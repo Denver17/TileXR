@@ -95,7 +95,9 @@ typedef enum aclrtDevAttr {
     ACL_DEV_ATTR_VECTOR_CORE_NUM = 0,
     ACL_DEV_ATTR_UBUF_PER_VECTOR_CORE = 1
 } aclrtDevAttr;
-typedef enum aclrtMemMallocPolicy { ACL_MEM_MALLOC_NORMAL_ONLY = 2 } aclrtMemMallocPolicy;
+typedef enum aclrtMemMallocPolicy {
+    ACL_MEM_MALLOC_HUGE_FIRST = 0, ACL_MEM_MALLOC_NORMAL_ONLY = 2
+} aclrtMemMallocPolicy;
 typedef enum aclrtMemcpyKind {
     ACL_MEMCPY_HOST_TO_DEVICE = 1,
     ACL_MEMCPY_DEVICE_TO_HOST = 2,
@@ -112,6 +114,26 @@ aclError aclrtMalloc(void **devPtr, size_t size, aclrtMemMallocPolicy policy);
 aclError aclrtFree(void *devPtr);
 aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
     size_t count, aclrtMemcpyKind kind);
+#ifdef __cplusplus
+}
+#endif
+#endif
+]=])
+# The C3 target compiles the existing consumer against observable Host substitutes.
+file(WRITE "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/acl/acl.h" [=[
+#ifndef TILEXR_EP_FAKE_ACL_H
+#define TILEXR_EP_FAKE_ACL_H
+#include "acl_rt.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+aclError aclInit(const char *);
+aclError aclFinalize(void);
+aclError aclrtSetDevice(int32_t);
+aclError aclrtResetDevice(int32_t);
+aclError aclrtCreateStream(aclrtStream *);
+aclError aclrtDestroyStream(aclrtStream);
+aclError aclrtMemset(void *, size_t, int32_t, size_t);
 #ifdef __cplusplus
 }
 #endif
@@ -313,6 +335,30 @@ foreach(test_name IN ITEMS layout host_validation public_abi)
     set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-p1-abi-host TIMEOUT 120)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
+
+# C3 uses the same source and production layout validation as the device consumer.
+# Runtime substitutes record every call; the dry-run test requires no such calls.
+find_package(Threads REQUIRED)
+add_executable(test_tilexr_ep_server_dedup_chain_dry_run
+    integration/test_tilexr_ep_server_dedup_chain.cpp
+    integration/server_dedup_chain_stub.cpp
+    ${TILEXR_ROOT}/src/comm/tilexr_profiling_runtime.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/comm)
+target_link_libraries(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE Threads::Threads)
+install(TARGETS test_tilexr_ep_server_dedup_chain_dry_run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_dry_run
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_dry_run.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_dry_run PROPERTIES
+        LABELS ep-sdedup-combine-p1-dry-run TIMEOUT 120)
+endif()
 
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.

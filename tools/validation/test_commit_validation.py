@@ -46,12 +46,15 @@ class CombineCommitValidationTests(unittest.TestCase):
         if self.behavior == "configure-fails" and "-S" in args:
             return self.real_execute([sys.executable, "-c", "raise SystemExit(7)"], log, **kwargs)
         if "--build" in args and str(work) in args:
-            self.assertEqual(set(args[args.index("--target") + 1:]), self.required)
+            expected_targets = (self.required - {workflow.COMBINE_DRY_RUN_TEST}) | {workflow.COMBINE_DRY_RUN_PROGRAM} if self.checkpoint == workflow.COMBINE_DRY_RUN_CHECKPOINT else self.required
+            self.assertEqual(set(args[args.index("--target") + 1:]), expected_targets)
             work.mkdir(parents=True, exist_ok=True)
             for name in self.names:
                 marker = ("EP_SERVER_DEDUP_COMBINE_ABI_HOST_PASS test="
                           if name in workflow.COMBINE_ABI_HOST_TESTS else
                           "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_PASS test=") + name.rsplit("combine_", 1)[1]
+                if name == workflow.COMBINE_DRY_RUN_TEST:
+                    marker = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS test=configuration"
                 if self.behavior == "wrong-marker":
                     marker = marker.replace("COMBINE_", "")
                 program = work / name
@@ -67,6 +70,11 @@ class CombineCommitValidationTests(unittest.TestCase):
                 content += "print(" + repr(marker) + ")\n"
                 program.write_text(content, encoding="utf-8")
                 program.chmod(0o755)
+                if name == workflow.COMBINE_DRY_RUN_TEST:
+                    driver = self.root / "tests/ep/integration/test_server_dedup_combine_dry_run.py"
+                    driver.parent.mkdir(parents=True, exist_ok=True)
+                    driver.write_text("import pathlib,sys\nassert sys.argv[1] == '--consumer'\nassert pathlib.Path(sys.argv[2]).is_file()\nprint(" + repr(marker) + ")\n")
+                    (work / workflow.COMBINE_DRY_RUN_PROGRAM).write_text("consumer fixture\n")
         if "--install" in args:
             self.assertEqual(args[-1], str(build / "production"))
             artifacts = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
@@ -82,8 +90,10 @@ class CombineCommitValidationTests(unittest.TestCase):
         output = "fixture command completed\n"
         if args[0] == "ctest":
             self.assertIn("^(" + "|".join(sorted(self.required)) + ")$", args)
-            output = json.dumps({"tests": [{"name": name, "command": [str(work / name)]}
-                                           for name in self.names]})
+            output = json.dumps({"tests": [{"name": name, "command":
+                [sys.executable, str(self.root / "tests/ep/integration/test_server_dedup_combine_dry_run.py"),
+                 "--consumer", str(work / workflow.COMBINE_DRY_RUN_PROGRAM)]
+                if name == workflow.COMBINE_DRY_RUN_TEST else [str(work / name)]} for name in self.names]})
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         Path(log).write_text(output, encoding="utf-8")
         return output
@@ -152,6 +162,28 @@ class CombineCommitValidationTests(unittest.TestCase):
         self.assertEqual(code, workflow.FAILURE_CODES["BUILD_FAILED"])
         self.assertTrue(summary["errors"][0]["timeout"])
         self.assertEqual(self.commands, [])
+
+
+class CombineDryRunCommitValidationTests(CombineCommitValidationTests):
+    checkpoint = workflow.COMBINE_DRY_RUN_CHECKPOINT
+
+    def test_success_runs_checkpoint_tests_and_preserves_prior_installation(self):
+        retained = [self.root / "install" / name / "manifest.json" for name in
+                    ("validation", "validation-combine-c1", "validation-combine-c2")]
+        for path in retained:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("old evidence")
+        code, summary, output = self.run_checkpoint()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(summary["expected_tests"], self.names)
+        self.assertEqual(summary["checkpoint"], self.checkpoint)
+        config = workflow.Config("commit-validate")
+        manifest = workflow.verify_build(config)
+        self.assertEqual(set(manifest["artifacts"]),
+                         {"bin/" + name for name in workflow.COMBINE_ABI_HOST_TESTS | {workflow.COMBINE_DRY_RUN_PROGRAM}})
+        self.assertFalse(any("--install" in command or command[0] == "ssh" for command in self.commands))
+        self.assertTrue(all(path.read_text() == "old evidence" for path in retained))
+        self.assertIn("COMMIT_VALIDATION_PASS", output)
 
 
 class CombineEmptyKernelCommitValidationTests(CombineCommitValidationTests):

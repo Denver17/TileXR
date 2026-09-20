@@ -16,6 +16,8 @@ _tilexr_load_deployment_config() {
     local TILEXR_VALIDATION_BS TILEXR_VALIDATION_H TILEXR_VALIDATION_TOPK
     local TILEXR_VALIDATION_MOE_EXPERT_NUM TILEXR_VALIDATION_DTYPE TILEXR_VALIDATION_BLOCK_DIM
     local TILEXR_VALIDATION_QUANT_MODE TILEXR_VALIDATION_FP8_FORMAT
+    local TILEXR_VALIDATION_OPERATOR_MODE TILEXR_VALIDATION_DISPATCH_QUANT_MODE TILEXR_VALIDATION_COMBINE_QUANT_MODE
+    local TILEXR_VALIDATION_DRY_RUN
     local TILEXR_VALIDATION_SERVERS TILEXR_VALIDATION_BREAKDOWN TILEXR_VALIDATION_ACTION
     local TILEXR_VALIDATION_TIMEOUT
     local TILEXR_VALIDATION_CASE_ANALYSIS
@@ -45,7 +47,8 @@ _tilexr_validation_env() {
     # Distribution, artifact verification and local Host tests do not load CANN
     # or resolve runtime endpoints.
     if [[ ${TILEXR_VALIDATION_ACTION:-} == sync || ${TILEXR_VALIDATION_ACTION:-} == verify ||
-          ${TILEXR_VALIDATION_ACTION:-} == host-validate ]]; then
+          ${TILEXR_VALIDATION_ACTION:-} == host-validate || ${TILEXR_VALIDATION_ACTION:-} == case-dry-run ||
+          ( ${TILEXR_VALIDATION_ACTION:-} == commit-validate && ${TILEXR_VALIDATION_BUILD_MODE:-} == host ) ]]; then
         command -v "$TILEXR_VALIDATION_PYTHON" >/dev/null || return 1
         printf 'ENV_READY root=%s\n' "$root"
         return 0

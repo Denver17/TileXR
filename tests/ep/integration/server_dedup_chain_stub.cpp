@@ -1,4 +1,4 @@
-// 仅由 test_server_dedup_chain.py 链接到真实 consumer；不进入生产安装包。
+// 链接真实 consumer 的 Host 生命周期/C3 dry-run 测试；不链接生产 Host 库。
 #include <cstdlib>
 #include <array>
 #include <chrono>

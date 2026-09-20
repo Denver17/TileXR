@@ -38,7 +38,7 @@ class BatchTests(unittest.TestCase):
                     self.assertNotIn("PASS", result.stdout)
                     self.assertIn("Failed", result.stdout)
 
-    def test_commit_entry_selects_current_c2_checkpoint_and_propagates_failure(self):
+    def test_commit_entry_selects_current_c3_checkpoint_and_propagates_failure(self):
         repo = Path(__file__).resolve().parents[2]
         bash = Path(sys.executable).parent / "bash"
         if not bash.exists():
@@ -67,7 +67,7 @@ class BatchTests(unittest.TestCase):
                 text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 19, result.stderr)
             self.assertEqual(json.loads((root / 'calls').read_text()), {
-                'argv': ['commit-validate'], 'checkpoint': 'ep-sdedup-combine-p1-empty-kernel', 'mode': 'production'})
+                'argv': ['commit-validate'], 'checkpoint': 'ep-sdedup-combine-p1-dry-run', 'mode': 'host'})
             self.assertNotIn('PASS', result.stdout + result.stderr)
 
     def test_batch_invokes_core_cases_without_build_or_sync(self):

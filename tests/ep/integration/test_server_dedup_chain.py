@@ -75,6 +75,7 @@ class ChainConsumerTests(unittest.TestCase):
             str(SOURCE / "server_dedup_chain_stub.cpp"),
             str(ROOT / "src/comm/tilexr_profiling_runtime.cpp"),
             str(ROOT / "src/ep/host/ep_memory_server_dedup_layout.cpp"),
+            str(ROOT / "src/ep/host/ep_memory_server_dedup_combine_layout.cpp"),
             str(ROOT / "src/ep/host/ep_memory_layout.cpp"),
             str(ROOT / "src/ep/host/ep_layout.cpp"),
             "-o", str(cls.executable),
@@ -99,6 +100,8 @@ class ChainConsumerTests(unittest.TestCase):
             TILEXR_VALIDATION_TOPK="3", TILEXR_VALIDATION_MOE_EXPERT_NUM="32", TILEXR_VALIDATION_DTYPE="bf16",
             TILEXR_COMM_ID=f"127.0.0.1:{comm}", TILEXR_DEMO_BARRIER_ADDR=f"127.0.0.1:{barrier}",
             TEST_TRACE_DIR=self.trace.name)
+        for key in ("OPERATOR_MODE", "DISPATCH_QUANT_MODE", "COMBINE_QUANT_MODE", "QUANT_MODE", "FP8_FORMAT"):
+            self.environment.pop("TILEXR_VALIDATION_" + key, None)
         self.environment.pop("TILEXR_VALIDATION_ROUTE_MODE", None)
         self.environment.pop("TILEXR_VALIDATION_SEED", None)
         self.environment.pop("TILEXR_VALIDATION_CHECKPOINT", None)

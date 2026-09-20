@@ -212,7 +212,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
                 self.assertEqual(len(result.stdout.splitlines()), 1)
 
-    def test_commit_entry_selects_c2_and_configured_device_without_hostfile(self):
+    def test_commit_entry_selects_c3_host_without_cann_or_hostfile(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json,sys; print(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n")
         cann = self.root / "cann-env.sh"
@@ -226,17 +226,57 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(values["action"], "commit-validate")
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT)
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "production")
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_DRY_RUN_CHECKPOINT)
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "host")
         self.assertEqual(values["env"]["TILEXR_VALIDATION_ACTION"], "commit-validate")
-        self.assertEqual(values["env"]["TILEXR_EP_SERVER_DEDUP_TEST_DEVICE"], "5")
+        self.assertNotIn("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", values["env"])
         self.assertFalse((self.root / "hostfile").exists())
         self.assertEqual(self.local.read_bytes(), before)
+
+    def test_case_dry_run_resolves_new_modes_before_loading_runtime(self):
+        self.local.write_text("TILEXR_CANN_ENV_SCRIPT=/missing/cann\n"
+                              "TILEXR_VALIDATION_OPERATOR_MODE=obsolete\n"
+                              "TILEXR_VALIDATION_DISPATCH_QUANT_MODE=bad\n"
+                              "TILEXR_VALIDATION_COMBINE_QUANT_MODE=4\n")
+        (self.root / "scripts/common_env.sh").write_text("echo unexpected-cann-load >&2\nreturn 9\n")
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import json,os,sys\nfrom pathlib import Path\nfrom run_summary import write_result\n"
+            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
+            "(root/'configuration.json').write_text(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n"
+            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
+        for operator in ("dispatch", "combine", "both"):
+            output = self.root / "run" / operator
+            result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96",
+                                     "operator_mode=" + operator, "dry_run=1", "dispatch_quant_mode=4"],
+                cwd=self.root, env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+                text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            config = json.loads((output / "configuration.json").read_text())
+            self.assertEqual(config["action"], "case-dry-run")
+            self.assertEqual(config["env"]["TILEXR_VALIDATION_OPERATOR_MODE"], operator)
+            self.assertEqual(config["env"]["TILEXR_VALIDATION_QUANT_MODE"], "4")
+            self.assertEqual(config["env"]["TILEXR_VALIDATION_DISPATCH_QUANT_MODE"], "4")
+            self.assertEqual(config["env"]["TILEXR_VALIDATION_COMBINE_QUANT_MODE"], "0")
+            self.assertEqual(config["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_DRY_RUN_CHECKPOINT)
+            self.assertNotIn("unexpected-cann-load", (output / "environment.log").read_text())
+
+    def test_combine_cli_rejects_conflicts_and_real_execution_without_loading_environment(self):
+        self.local.unlink()
+        for arguments in (["operator_mode=both"], ["operator_mode=combine"],
+                          ["dry_run=1", "quant_mode=4", "dispatch_quant_mode=0"],
+                          ["dry_run=1", "combine_quant_mode=4"], ["dry_run=2"],
+                          ["operator_mode=other"], ["dispatch_quant_mode=1"]):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", *arguments],
+                    cwd=self.root, env=self.env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 2)
+                self.assertNotIn("validation.local.sh", result.stderr)
+        self.assertFalse((self.root / "run").exists())
 
     def test_commit_environment_failure_never_runs_workflow(self):
         (self.root / "tools/validation/workflow.py").write_text("raise AssertionError('must not run')\n")
         result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
-            env=dict(self.env, TILEXR_CANN_ENV_SCRIPT=str(self.root / "missing-cann-env.sh")),
+            env=dict(self.env, TILEXR_VALIDATION_PYTHON=str(self.root / "missing-python")),
             capture_output=True, text=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("COMMIT_VALIDATION_FAIL", result.stdout + result.stderr)

@@ -10,12 +10,17 @@ Usage: bash run.sh -n SERVERS -e EXPERTS [-m 0|1|2] [-l LOOPS WARMUP] [key=value
   -m  0=functional (default), 1=performance, 2=breakdown.
   -l  Measurement loops and warmup loops (default: 1 0).
   -h, --help  Show help without loading the runtime environment.
-Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 quant_mode=0 fp8_format=e4m3
+Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
+                    operator_mode=dispatch|combine|both dry_run=0|1
+                    dispatch_quant_mode=0|4 combine_quant_mode=0
+                    quant_mode=0|4 (legacy alias for dispatch_quant_mode; conflicts rejected)
                     route_mode=random|balance|balance_shift (default: balance_shift)
                     seed=UINT32 (default: 2026)
                     block_dim=auto comm_id=IP:PORT barrier_addr=IP:PORT
                     msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
                     case_analysis=0|1 (default: 0)
+  dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
+  Build it first with bash run_commit_validation.sh. Real combine/both waits for C4.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
   Endpoints default to hostfile's first (local coordinator) IPv4, ports 10177/10274.
@@ -25,6 +30,7 @@ fail() { printf 'VALIDATION_FAIL 执行阶段失败 | %s\n' "$*" >&2; exit 2; }
 declare -A seen=()
 declare -a assignments=()
 servers= experts= run_mode=functional loops=1 warmup=0 host_validation=0
+dry_run=0 operator_mode=dispatch legacy_quant= dispatch_quant= combine_quant=0
 while (( $# )); do
     key=$1
     [[ -n $key ]] || fail 'empty argument'
@@ -50,11 +56,18 @@ while (( $# )); do
             host_validation=${key#*=}
             [[ $host_validation == 0 || $host_validation == 1 ]] || fail 'host_validation must be 0 or 1'
             seen[host_validation]=1; shift;;
-        bs=*|h=*|topk=*|dtype=*|quant_mode=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*)
+        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*)
             name=${key%%=*}; value=${key#*=}
             [[ -n $value ]] || fail "missing value for $name"
             [[ -z ${seen[$name]+set} ]] || fail "duplicate argument: $name"
             seen[$name]=1
+            case "$name" in
+                operator_mode) case "$value" in dispatch|combine|both) operator_mode=$value;; *) fail 'operator_mode must be dispatch, combine or both';; esac;;
+                dry_run) [[ $value == 0 || $value == 1 ]] || fail 'dry_run must be 0 or 1'; dry_run=$value;;
+                quant_mode|dispatch_quant_mode) [[ $value == 0 || $value == 4 ]] || fail "$name must be 0 or 4"
+                    if [[ $name == quant_mode ]]; then legacy_quant=$value; else dispatch_quant=$value; fi;;
+                combine_quant_mode) [[ $value == 0 ]] || fail 'combine_quant_mode currently supports only 0'; combine_quant=$value;;
+            esac
             if [[ $name == case_analysis ]]; then
                 [[ $value == 0 || $value == 1 ]] || fail 'case_analysis must be 0 or 1'
             fi
@@ -75,9 +88,18 @@ while (( $# )); do
 done
 [[ -n $servers && -n $experts ]] || fail '-n SERVERS and -e EXPERTS are required'
 (( experts % (servers * 8) == 0 )) || fail '-e must be divisible by 8 * -n'
+if [[ -n $legacy_quant && -n $dispatch_quant && $legacy_quant != "$dispatch_quant" ]]; then
+    fail 'quant_mode conflicts with dispatch_quant_mode'
+fi
+dispatch_quant=${dispatch_quant:-${legacy_quant:-0}}
+if [[ $dry_run == 0 && $operator_mode != dispatch ]]; then
+    fail 'real combine/both requires C4; use dry_run=1 for C3'
+fi
 # Resolve each case afresh; old shell exports must not change this invocation.
 export TILEXR_VALIDATION_BS=96 TILEXR_VALIDATION_H=7168 TILEXR_VALIDATION_TOPK=6
-export TILEXR_VALIDATION_DTYPE=bf16 TILEXR_VALIDATION_QUANT_MODE=0 TILEXR_VALIDATION_FP8_FORMAT=e4m3
+export TILEXR_VALIDATION_DTYPE=bf16 TILEXR_VALIDATION_QUANT_MODE="$dispatch_quant" TILEXR_VALIDATION_FP8_FORMAT=e4m3
+export TILEXR_VALIDATION_DISPATCH_QUANT_MODE="$dispatch_quant" TILEXR_VALIDATION_COMBINE_QUANT_MODE="$combine_quant"
+export TILEXR_VALIDATION_OPERATOR_MODE="$operator_mode" TILEXR_VALIDATION_DRY_RUN="$dry_run"
 export TILEXR_VALIDATION_BLOCK_DIM=auto TILEXR_VALIDATION_ACTION=run
 export TILEXR_VALIDATION_CASE_ANALYSIS=0
 export TILEXR_VALIDATION_ROUTE_MODE=balance_shift TILEXR_VALIDATION_SEED=2026
@@ -86,7 +108,11 @@ unset TILEXR_COMM_ID TILEXR_DEMO_BARRIER_ADDR
 assignments+=("TILEXR_VALIDATION_SERVERS=$servers" "TILEXR_VALIDATION_MOE_EXPERT_NUM=$experts"
               "TILEXR_VALIDATION_RUN_MODE=$run_mode" "TILEXR_VALIDATION_LOOPS=$loops"
               "TILEXR_VALIDATION_WARMUP=$warmup")
-if [[ ! -f validation.local.sh ]]; then
+if [[ $dry_run == 1 ]]; then
+    export TILEXR_VALIDATION_ACTION=case-dry-run TILEXR_VALIDATION_BUILD_MODE=host
+    export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-dry-run
+fi
+if [[ $dry_run == 0 && ! -f validation.local.sh ]]; then
     fail "missing $PWD/validation.local.sh; configure it from validation.local.sh.example"
 fi
 case_id="case-$(date +%Y%m%d-%H%M%S)-$$"
@@ -112,10 +138,10 @@ finish() {
 }
 trap finish EXIT
 exec >"$result_root/launcher.log" 2>&1
-if [[ $host_validation == 1 ]]; then
+if [[ $host_validation == 1 && $dry_run == 0 ]]; then
     bash ./run_host_validation.sh >"$result_root/host-validation.log" 2>&1
 fi
 # Source in this shell so the configured environment reaches the workflow.
 source ./set_env.sh >"$result_root/environment.log" 2>&1
 for assignment in "${assignments[@]}"; do export "$assignment"; done
-"$TILEXR_VALIDATION_PYTHON" -u tools/validation/workflow.py run >"$result_root/workflow.log" 2>&1
+"$TILEXR_VALIDATION_PYTHON" -u tools/validation/workflow.py "$TILEXR_VALIDATION_ACTION" >"$result_root/workflow.log" 2>&1

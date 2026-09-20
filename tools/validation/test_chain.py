@@ -21,7 +21,7 @@ class ChainTests(TemporaryRoot):
 
     def test_runtime_defaults_include_actual_shape_and_endpoints(self):
         config = self.config()
-        self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, fp8_format="e4m3",
+        self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, operator_mode="dispatch", dispatch_quant_mode=0, combine_quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
                                            route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0))

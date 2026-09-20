@@ -37,8 +37,15 @@ COMBINE_EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-combine-p1-empty-kernel"
 COMBINE_REGISTRATION_TEST = "test_tilexr_ep_server_dedup_combine_registration"
 COMBINE_LAUNCH_TEST = "test_tilexr_ep_server_dedup_combine_launch"
 COMBINE_EMPTY_KERNEL_TESTS = COMBINE_ABI_HOST_TESTS | {COMBINE_LAUNCH_TEST, COMBINE_REGISTRATION_TEST}
-COMBINE_TESTS = {COMBINE_ABI_HOST_CHECKPOINT: COMBINE_ABI_HOST_TESTS,
-                 COMBINE_EMPTY_KERNEL_CHECKPOINT: COMBINE_EMPTY_KERNEL_TESTS}
+COMBINE_DRY_RUN_CHECKPOINT = "ep-sdedup-combine-p1-dry-run"
+COMBINE_DRY_RUN_TEST = "test_tilexr_ep_server_dedup_combine_dry_run"
+COMBINE_DRY_RUN_PROGRAM = "test_tilexr_ep_server_dedup_chain_dry_run"
+COMBINE_DRY_RUN_MARKER = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS "
+COMBINE_TESTS = {
+    COMBINE_ABI_HOST_CHECKPOINT: COMBINE_ABI_HOST_TESTS,
+    COMBINE_EMPTY_KERNEL_CHECKPOINT: COMBINE_EMPTY_KERNEL_TESTS,
+    COMBINE_DRY_RUN_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST},
+}
 COMBINE_ABI = {"launch_bytes": 88, "tiling_bytes": 16, "runtime_args_bytes": 88,
                "block_dim": 64, "kernel_scope": "combine-empty"}
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
@@ -268,7 +275,7 @@ def hosts_from_json(raw):
 class Config:
     def __init__(self, action="run"):
         self.action = action
-        self.is_run = action in ("run", "node", "rank")
+        self.is_run = action in ("run", "node", "rank", "case-dry-run")
         self.root = Path(os.environ.get("TILEXR_VALIDATION_ROOT", Path(__file__).resolve().parents[2])).resolve()
         self.mode = os.environ.get("TILEXR_VALIDATION_BUILD_MODE", "production")
         # 同步和人工测试继承安装检查点；build_all.sh 选择当前生产增量。
@@ -297,10 +304,10 @@ class Config:
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, *COMBINE_TESTS, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
             raise ValueError("不支持的 checkpoint：" + self.checkpoint)
-        if self.checkpoint == COMBINE_ABI_HOST_CHECKPOINT and self.mode != "host":
-            raise ValueError("Combine C1 仅验证 Host ABI/layout；请使用 host 模式")
+        if self.checkpoint in (COMBINE_ABI_HOST_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT) and self.mode != "host":
+            raise ValueError("Combine C1/C3 仅验证 Host ABI/layout/configuration；请使用 host 模式")
         if action == "commit-validate" and self.checkpoint not in COMBINE_TESTS:
-            raise ValueError("当前提交验收入口仅支持 Combine C1/C2")
+            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3")
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, COMBINE_EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -312,9 +319,15 @@ class Config:
         self.install = self.root / "install" / validation_directory(self.checkpoint)
         self.logs = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", self.root / "run/validation")).resolve()
         self.chain = None
-        if self.is_run and self.checkpoint in CHAIN_CHECKPOINTS:
-            default_host = self.hosts()[0]["host"] if not os.environ.get("TILEXR_COMM_ID") else None
+        if self.is_run and self.checkpoint in (*CHAIN_CHECKPOINTS, COMBINE_DRY_RUN_CHECKPOINT):
+            default_host = None
+            if self.checkpoint != COMBINE_DRY_RUN_CHECKPOINT and not os.environ.get("TILEXR_COMM_ID"):
+                default_host = self.hosts()[0]["host"]
             self.chain = chain_configuration(self.checkpoint, default_host)
+        if action == "case-dry-run" and self.checkpoint != COMBINE_DRY_RUN_CHECKPOINT:
+            raise ValueError("case-dry-run 要求 Combine C3 checkpoint")
+        if action in ("run", "node", "rank") and self.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
+            raise ValueError("Combine C3 仅支持 case-dry-run，不允许实际设备执行")
 
     def hosts(self):
         try:
@@ -333,7 +346,8 @@ class Config:
                 if not 0 < experts <= 1024 or experts % ranks or self.chain["topk"] > experts:
                     raise ValueError("chain 检查点要求 0<moe_expert_num<=1024，能被 rank_size 整除，topk<=moe_expert_num")
                 epoch = experts // math.gcd(experts, self.chain["topk"])
-                if self.chain["route_mode"] == "balance_shift" and self.chain["bs"] * ranks % epoch:
+                if (self.chain["operator_mode"] != "combine" and self.chain["route_mode"] == "balance_shift"
+                        and self.chain["bs"] * ranks % epoch):
                     raise ValueError("balance_shift 要求全局 Token 数能被 E/gcd(E,TopK) 整除")
             return hosts
         except FileNotFoundError:
@@ -376,7 +390,19 @@ def chain_configuration(checkpoint, default_host=None):
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
         raise ValueError("chain 检查点 shape 必须是正 int64，topk<=32")
     dtype = os.environ.get("TILEXR_VALIDATION_DTYPE", "bf16")
-    quant_mode = os.environ.get("TILEXR_VALIDATION_QUANT_MODE", "0")
+    operator_mode = os.environ.get("TILEXR_VALIDATION_OPERATOR_MODE", "dispatch")
+    if operator_mode not in ("dispatch", "combine", "both"):
+        raise ValueError("OPERATOR_MODE 必须为 dispatch/combine/both")
+    if operator_mode != "dispatch" and checkpoint != COMBINE_DRY_RUN_CHECKPOINT:
+        raise ValueError("Combine/both 真实执行属于 C4；当前仅支持 dry_run=1")
+    legacy_quant = os.environ.get("TILEXR_VALIDATION_QUANT_MODE")
+    dispatch_quant = os.environ.get("TILEXR_VALIDATION_DISPATCH_QUANT_MODE")
+    if legacy_quant is not None and dispatch_quant is not None and legacy_quant != dispatch_quant:
+        raise ValueError("QUANT_MODE 与 DISPATCH_QUANT_MODE 冲突")
+    quant_mode = dispatch_quant if dispatch_quant is not None else legacy_quant if legacy_quant is not None else "0"
+    combine_quant_mode = os.environ.get("TILEXR_VALIDATION_COMBINE_QUANT_MODE", "0")
+    if combine_quant_mode != "0":
+        raise ValueError("COMBINE_QUANT_MODE 目前仅支持 0（非量化）")
     if quant_mode not in ("0", "4"):
         raise ValueError("QUANT_MODE 必须为 0（非量化）或 4（MXFP8），FP8_FORMAT 选择 e4m3/e5m2")
     fp8_format = os.environ.get("TILEXR_VALIDATION_FP8_FORMAT", "e4m3")
@@ -387,7 +413,7 @@ def chain_configuration(checkpoint, default_host=None):
             (not block_dim.isdecimal() or not 1 <= int(block_dim) <= (1 << 32) - 1)):
         raise ValueError("chain 检查点 dtype 必须为 bf16/fp16，block_dim 必须为 auto 或正 uint32")
     run_mode, loops, warmup = "functional", 1, 0
-    if checkpoint == DISPATCH_CHECKPOINT:
+    if checkpoint in (DISPATCH_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT):
         run_mode = os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional")
         if run_mode not in ("functional", "performance", "breakdown"):
             raise ValueError("RUN_MODE 必须为 functional/performance/breakdown")
@@ -395,7 +421,7 @@ def chain_configuration(checkpoint, default_host=None):
         warmup = int(os.environ.get("TILEXR_VALIDATION_WARMUP", "0"))
         if not 1 <= loops <= (1 << 32) - 1 or not 0 <= warmup <= (1 << 32) - 1:
             raise ValueError("loops 必须为正 uint32，warmup 必须为非负 uint32")
-        if run_mode == "breakdown":
+        if run_mode == "breakdown" and checkpoint != COMBINE_DRY_RUN_CHECKPOINT:
             measurements.capture_capacity(loops, warmup)
         if block_dim not in ("auto", "64"):
             raise ValueError("Dispatch 总核数固定为 64，block_dim 必须为 auto/64")
@@ -410,15 +436,20 @@ def chain_configuration(checkpoint, default_host=None):
         except ValueError:
             raise ValueError(f"{name} 必须为首节点可跨机访问的IPv4:端口；检查 hostfile 首项或 run.sh 地址覆盖参数") from None
 
+    chain = dict(shape, dtype=dtype, operator_mode=operator_mode,
+                 quant_mode=int(quant_mode), dispatch_quant_mode=int(quant_mode), combine_quant_mode=0,
+                 fp8_format=fp8_format, block_dim=block_dim, run_mode=run_mode, loops=loops, warmup=warmup,
+                 route_mode=route_mode, seed=int(seed), case_analysis=int(case_analysis))
+    if checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
+        return chain
+
     comm_id = endpoint(os.environ.get("TILEXR_COMM_ID") or f"{default_host}:10177", "TILEXR_COMM_ID")
     host, port = comm_id.split(":")
     barrier_addr = endpoint(os.environ.get("TILEXR_DEMO_BARRIER_ADDR", f"{host}:{int(port) + 97}"),
                             "TILEXR_DEMO_BARRIER_ADDR")
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
-    chain = dict(shape, dtype=dtype, quant_mode=int(quant_mode), fp8_format=fp8_format, block_dim=block_dim, comm_id=comm_id, barrier_addr=barrier_addr,
-                 run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode=route_mode, seed=int(seed), kernel_scope="dispatch", case_analysis=int(case_analysis))
+    chain.update(comm_id=comm_id, barrier_addr=barrier_addr, kernel_scope="dispatch")
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -474,7 +505,8 @@ def require_tools(names):
 
 def validation_directory(checkpoint):
     return {COMBINE_ABI_HOST_CHECKPOINT: "validation-combine-c1",
-            COMBINE_EMPTY_KERNEL_CHECKPOINT: "validation-combine-c2"}.get(checkpoint, "validation")
+            COMBINE_EMPTY_KERNEL_CHECKPOINT: "validation-combine-c2",
+            COMBINE_DRY_RUN_CHECKPOINT: "validation-combine-c3"}.get(checkpoint, "validation")
 
 
 def runtime_check(config, install, log):
@@ -642,7 +674,10 @@ def build(config):
              f"-DBUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
-    targets = ["--target", *sorted(combine_tests)] if combine_tests else []
+    build_targets = combine_tests
+    if config.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
+        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
+    targets = ["--target", *sorted(build_targets)] if build_targets else []
     command(["cmake", "--build", host_build, "-j", config.jobs, *targets], log / "host-build.log", timeout=1800)
     if not combine_tests:
         command(["cmake", "--install", host_build], log / "host-install.log")
@@ -662,7 +697,15 @@ def build(config):
     tests = []
     for test in listing["tests"]:
         command = test["command"]
-        if len(command) == 2 and command[1].endswith(".py"):
+        if test["name"] == COMBINE_DRY_RUN_TEST:
+            if (len(command) != 4 or not command[1].endswith(".py") or command[2] != "--consumer"
+                    or Path(command[3]).name != COMBINE_DRY_RUN_PROGRAM):
+                raise ValueError(f"无法导出 C3 consumer 测试命令：{command}")
+            (stage / "bin").mkdir(parents=True, exist_ok=True)
+            shutil.copy2(command[3], stage / "bin" / COMBINE_DRY_RUN_PROGRAM)
+            argv = ["@python", str(Path(command[1]).resolve().relative_to(config.root)), "--consumer",
+                    str(config.install.relative_to(config.root) / "bin" / COMBINE_DRY_RUN_PROGRAM)]
+        elif len(command) == 2 and command[1].endswith(".py"):
             argv = ["@python", str(Path(command[1]).resolve().relative_to(config.root))]
         elif len(command) == 1:
             name = Path(command[0]).name
@@ -732,7 +775,7 @@ def remote_argv(config, host, action, *arguments):
             values.update(TILEXR_VALIDATION_SERVERS=config.server_count,
                           TILEXR_DIRECT_HOSTS_JSON=json.dumps(config.hosts(), separators=(",", ":")))
             if config.chain:
-                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format",
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "operator_mode", "dispatch_quant_mode", "combine_quant_mode", "fp8_format",
                             "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis", "route_mode", "seed"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
@@ -1059,7 +1102,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
                 env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
-                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "fp8_format", "loops", "warmup", "run_mode", "route_mode", "seed"):
+                for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "operator_mode", "dispatch_quant_mode", "combine_quant_mode", "fp8_format", "loops", "warmup", "run_mode", "route_mode", "seed"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
                 inputs = log.parent / "inputs"
                 inputs.mkdir(parents=True, exist_ok=True)
@@ -1178,7 +1221,7 @@ def node_tests(manifest):
 
 def run_validation_test(config, test, log, timeout, *, device=None, cancelled=None):
     name = test["name"]
-    argv = [sys.executable if value == "@python" else str(config.root / value)
+    argv = [sys.executable if value == "@python" else value if value.startswith("--") else str(config.root / value)
             for value in test["argv"]]
     env = None
     if name in (REGISTRATION_TEST, COMBINE_REGISTRATION_TEST):
@@ -1194,6 +1237,8 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
         marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=registration"
     elif name in (COMBINE_LAUNCH_TEST, COMBINE_REGISTRATION_TEST):
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_", " test=" + name.removeprefix(prefix + "combine_")
+    elif name == COMBINE_DRY_RUN_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_DRYRUN_", " test=configuration"
     elif name in COMBINE_ABI_HOST_TESTS:
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_ABI_HOST_", " test=" + name.removeprefix(prefix + "combine_")
     elif name.startswith(prefix):
@@ -1221,6 +1266,8 @@ def host_validate(config, run_id=None):
     if config.checkpoint == COMBINE_EMPTY_KERNEL_CHECKPOINT:
         result.update(scope="Combine C2：C1回归、生产launch替身及本机A5空kernel安装/注册/64核提交/同步；不包含通信或业务数据验证。",
                       device=os.environ.get("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", "0"))
+    if config.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
+        result.update(scope="Combine C3：C1回归、同一consumer的三种算子模式、独立量化开关及rank映射；无CANN/SSH/设备分配/communicator/launch。")
     started = time.monotonic()
     cancelled = threading.Event()
     handlers = {sig: signal.signal(sig, lambda signum, frame: cancelled.set())
@@ -1308,6 +1355,57 @@ def commit_validate(config):
     print(f"{'成功' if code == 0 else '失败'} COMMIT_VALIDATION_{'PASS' if code == 0 else 'FAIL'} "
           f"checkpoint={config.checkpoint}\n结果：{config.logs / run_id / 'summary.json'}", flush=True)
     return code
+
+
+def case_dry_run(config):
+    """Resolve the normal case/rank contract locally without starting SSH or ACL."""
+    manifest = verify_build(config, check_run_mode=False)
+    mappings = rank_mapping(config.hosts())
+    run_id = "dry-run-" + uuid.uuid4().hex
+    result = dict(run_id=run_id, build_id=manifest["build_id"], checkpoint=config.checkpoint,
+                  commit=manifest["source"]["commit"], mode="host", status="FAIL", ranks=[], errors=[],
+                  scope="C3 local configuration/rank dry-run; no device or network operations",
+                  chain_configuration=dict(config.chain), rank_size=len(mappings), completed_ranks=0)
+    deadline = time.monotonic() + config.timeout
+    try:
+        env = dict(os.environ, TILEXR_VALIDATION_CHECKPOINT=config.checkpoint)
+        for key, value in config.chain.items():
+            env["TILEXR_VALIDATION_" + key.upper()] = str(value)
+        env.pop("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM", None)
+        if config.chain["block_dim"] != "auto":
+            env["TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"] = config.chain["block_dim"]
+        for mapping in mappings:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise Failure("EXIT_FAILED", "C3 dry-run 超过总期限", timeout=True)
+            argv = [config.install / "bin" / COMBINE_DRY_RUN_PROGRAM, "--dry-run", run_id,
+                    manifest["build_id"], manifest["source"]["commit"] or "unknown",
+                    *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
+            output = execute(argv, config.logs / run_id / f"rank-{mapping['rank']}.log",
+                             timeout=remaining, cwd=config.root, env=env)
+            result["ranks"].append(parse_rank_marker(output, COMBINE_DRY_RUN_MARKER))
+        validate_rank_records(result["ranks"], mappings, run_id, manifest, config.chain)
+        for record, mapping in zip(result["ranks"], mappings):
+            if any(type(record.get(key)) is not type(value) for key, value in rank_record(mapping, run_id, manifest).items()):
+                raise Failure("RESULT_FAILED", "C3 rank 身份字段类型不一致", rank=mapping["rank"])
+            for key in ("operator_mode", "dispatch_quant_mode", "combine_quant_mode", "quant_mode",
+                        "fp8_format", "run_mode", "loops", "warmup"):
+                if type(record.get(key)) is not type(config.chain[key]) or record[key] != config.chain[key]:
+                    raise Failure("RESULT_FAILED", "C3 配置回显不一致：" + key, rank=record["rank"])
+            for key in ("device_allocated", "communicator_created", "kernel_launched", "network_used"):
+                if record.get(key) is not False:
+                    raise Failure("RESULT_FAILED", "C3 未确认无副作用：" + key, rank=record["rank"])
+        result["status"] = "PASS"
+    except (Exception, KeyboardInterrupt) as error:
+        result["errors"] = failure_records(error, "RESULT_FAILED")
+        for failure in result["errors"]:
+            report_failure(failure)
+    result["completed_ranks"] = len(result["ranks"]) if result["status"] == "PASS" else 0
+    result["cleanup"] = "failed" if any(error["type"] == "CLEANUP_FAILED" for error in result["errors"]) else "complete"
+    report = config.logs / run_id / "summary.json"
+    write_json(report, result)
+    run_summary.write_result(config.logs, result, report)
+    return 0 if result["status"] == "PASS" else FAILURE_CODES[result["errors"][0]["type"]]
 
 
 def node(config, run_id, build_id, execution_budget=None, device=None, host_index=None):
@@ -1790,7 +1888,7 @@ def run(config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "commit-validate", "node", "rank", "verify", "cancel"))
+    parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "commit-validate", "case-dry-run", "node", "rank", "verify", "cancel"))
     parser.add_argument("arguments", nargs="*")
     parser.add_argument("--debug", action="store_true", help="仅用于 sync：逐主机 SSH 和 rsync dry-run 检查")
     args = parser.parse_args()
@@ -1820,6 +1918,11 @@ def main():
                 if args.debug:
                     return sync_debug(config)
                 sync(config)
+        elif args.action == "case-dry-run":
+            if args.arguments:
+                raise ValueError("case-dry-run 不接受额外参数")
+            with operation_lock(config, ".operation.lock"):
+                return case_dry_run(config)
         elif args.action == "run":
             with operation_lock(config, ".operation.lock"):
                 return run(config)
@@ -1848,7 +1951,7 @@ def main():
         kind = {"build": "BUILD_FAILED", "sync": "SYNC_FAILED", "cancel": "CLEANUP_FAILED",
                 "node": "LAUNCH_FAILED"}.get(args.action, "CONFIG_FAILED")
         records = failure_records(error, kind, stage=args.action)
-        if args.action == "run":
+        if args.action in ("run", "case-dry-run"):
             directory = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", "run/validation"))
             report = dict(status="FAIL", primary_error=records[0], errors=records)
             write_json(directory / "failure.json", report)

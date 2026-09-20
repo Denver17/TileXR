@@ -30,6 +30,7 @@
 #include "ep_memory_server_dedup_count_layout.h"
 #include "ep_memory_layout.h"
 #include "ep_memory_server_dedup_layout.h"
+#include "ep_memory_server_dedup_combine_host.h"
 #include "tilexr_profiling.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "server_dedup_dispatch_reference.h"
@@ -105,7 +106,10 @@ struct Config {
     uint32_t seed = 2026;
     int64_t bs, h, topK, experts;
     TileXR::TileXRDataType dtype;
-    int64_t quantMode = 0;
+    int64_t quantMode = 0; // Dispatch; retain the legacy configuration alias.
+    int64_t combineQuantMode = 0;
+    std::string operatorMode = "dispatch";
+    bool dryRun = false;
     std::string fp8Format = "e4m3";
     sockaddr_in barrier {};
 };
@@ -129,14 +133,26 @@ sockaddr_in Endpoint(const char *name)
 
 Config Parse(int argc, char **argv)
 {
-    Require(argc == 10, "expected run build commit host host_index local_rank device rank rank_size");
     Config c {};
+    if (argc > 1 && std::strcmp(argv[1], "--dry-run") == 0) {
+        c.dryRun = true;
+        --argc; ++argv;
+    }
+    Require(argc == 10, "expected [--dry-run] run build commit host host_index local_rank device rank rank_size");
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
     c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-dispatch" : checkpoint;
     Require(c.checkpoint == "ep-sdedup-p2-dispatch" ||
-        c.checkpoint == "ep-sdedup-p1-memory-boundary",
+        c.checkpoint == "ep-sdedup-p1-memory-boundary" ||
+        c.checkpoint == "ep-sdedup-combine-p1-dry-run",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
+    Require(c.checkpoint != "ep-sdedup-combine-p1-dry-run" || c.dryRun,
+        "Combine C3 requires --dry-run");
+    if (const char *op = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE")) c.operatorMode = op;
+    Require(c.operatorMode == "dispatch" || c.operatorMode == "combine" || c.operatorMode == "both",
+        "operator_mode must be dispatch/combine/both");
+    Require(c.dryRun || c.operatorMode == "dispatch",
+        "Combine and joint device execution require C4; use --dry-run for C3");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
     Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
@@ -173,11 +189,12 @@ Config Parse(int argc, char **argv)
     }
     Require(c.rankSize >= 16 && c.rankSize <= 128 && c.rankSize % 8 == 0 && c.localRank < 8 &&
         c.rank < c.rankSize && c.rank == c.hostIndex * 8 + c.localRank, "invalid 8P/server mapping");
+    Require(!c.dryRun || c.device == c.localRank, "dry-run requires device == local_rank");
     c.bs = Number(std::getenv("TILEXR_VALIDATION_BS"), "TILEXR_VALIDATION_BS");
     c.h = Number(std::getenv("TILEXR_VALIDATION_H"), "TILEXR_VALIDATION_H");
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
-    if (c.checkpoint == "ep-sdedup-p2-dispatch") {
+    if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.dryRun) && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
         if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
@@ -202,10 +219,24 @@ Config Parse(int argc, char **argv)
     Require(dtype != nullptr && (std::strcmp(dtype, "bf16") == 0 || std::strcmp(dtype, "fp16") == 0),
         "TILEXR_VALIDATION_DTYPE must be bf16 or fp16");
     c.dtype = std::strcmp(dtype, "bf16") == 0 ? TileXR::TILEXR_DATA_TYPE_BFP16 : TileXR::TILEXR_DATA_TYPE_FP16;
-    if (const char *quant = std::getenv("TILEXR_VALIDATION_QUANT_MODE")) c.quantMode = Number(quant, "quant_mode");
+    const char *legacyQuant = std::getenv("TILEXR_VALIDATION_QUANT_MODE");
+    const char *dispatchQuant = std::getenv("TILEXR_VALIDATION_DISPATCH_QUANT_MODE");
+    if (legacyQuant) c.quantMode = Number(legacyQuant, "quant_mode");
+    if (dispatchQuant) {
+        const int64_t value = Number(dispatchQuant, "dispatch_quant_mode");
+        Require(!legacyQuant || c.quantMode == value, "conflicting Dispatch quantization aliases");
+        c.quantMode = value;
+    }
+    if (const char *quant = std::getenv("TILEXR_VALIDATION_COMBINE_QUANT_MODE"))
+        c.combineQuantMode = Number(quant, "combine_quant_mode");
+    Require(c.combineQuantMode == 0, "combine_quant_mode currently supports only 0");
+    if (const char *block = std::getenv("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM"))
+        Require(std::strcmp(block, "auto") == 0 || std::strcmp(block, "64") == 0,
+            "block_dim must be auto/64");
     if (const char *format = std::getenv("TILEXR_VALIDATION_FP8_FORMAT")) c.fp8Format = format;
     Require((c.quantMode == 0 || c.quantMode == 4) && (c.fp8Format == "e4m3" || c.fp8Format == "e5m2"),
         "quant_mode must be 0/4; fp8_format must be e4m3/e5m2");
+    if (c.dryRun) return c;
     c.barrier = Endpoint("TILEXR_DEMO_BARRIER_ADDR");
     const auto comm = Endpoint("TILEXR_COMM_ID");
     Require(comm.sin_port != c.barrier.sin_port || comm.sin_addr.s_addr != c.barrier.sin_addr.s_addr,
@@ -256,6 +287,9 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"server_dedup_enabled\":" << (TileXREp::kEpServerDedupEnable ? "true" : "false")
         << ",\"route_mode\":" << Json(TileXREpDemo::RouteModeName(c.routeMode))
         << ",\"seed\":" << c.seed << ",\"quant_mode\":" << c.quantMode
+        << ",\"operator_mode\":" << Json(c.operatorMode)
+        << ",\"dispatch_quant_mode\":" << c.quantMode
+        << ",\"combine_quant_mode\":" << c.combineQuantMode
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
         << Json(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16") << details << '}' << std::endl;
@@ -407,8 +441,40 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 #include "memory_boundary_consumer.h"
 #endif
 
+// Resolve configuration with production layout arithmetic before any runtime,
+// profiling, socket or device operation. This describes C4 wiring, not tensors.
+int DryRun(const Config &c)
+{
+    const bool dispatch = c.operatorMode != "combine";
+    const bool combine = c.operatorMode != "dispatch";
+    if (dispatch) {
+        TileXREp::EpMemoryServerDedupLayout layout {};
+        Check(TileXREp::TileXREpBuildMemoryServerDedupLayout(c.rankSize, c.bs, c.h,
+            c.topK, c.experts, &layout, c.quantMode == 4), "dispatch layout");
+    }
+    if (combine) {
+        TileXREp::EpMemoryServerDedupCombineLayout layout {};
+        Check(TileXREp::TileXREpBuildMemoryServerDedupCombineLayout(c.rankSize, c.bs, c.h,
+            c.topK, c.experts, &layout), "combine layout");
+    }
+    const char *input = !combine ? "none" : !dispatch ? "standalone_expert_out" :
+        c.quantMode == 0 ? "dispatch_expand_x" : "separate_expert_out";
+    std::ostringstream details;
+    details << ",\"dispatch_active\":" << (dispatch ? "true" : "false")
+        << ",\"combine_active\":" << (combine ? "true" : "false")
+        << ",\"dispatch_quantization_active\":" << (dispatch && c.quantMode == 4 ? "true" : "false")
+        << ",\"fp8_format_effective\":" << Json(dispatch && c.quantMode == 4 ? c.fp8Format : "none")
+        << ",\"combine_input_source\":" << Json(input)
+        << ",\"tables_source\":" << Json(!combine ? "none" : dispatch ? "dispatch_outputs" : "standalone")
+        << ",\"device_allocated\":false,\"communicator_created\":false"
+        << ",\"kernel_launched\":false,\"network_used\":false";
+    Marker(c, "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS", details.str());
+    return 0;
+}
+
 int Run(const Config &c)
 {
+    if (c.dryRun) return DryRun(c);
     if (c.checkpoint == "ep-sdedup-p1-memory-boundary") {
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
         return RunMemoryBoundary(c);

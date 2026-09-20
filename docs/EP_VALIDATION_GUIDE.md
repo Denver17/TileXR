@@ -1,6 +1,46 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C2：当前交付
+## Combine 第一阶段 C3：当前交付
+
+C1/C2 已收到用户通过确认；C2 报告路径和登记范围见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+拉取本次提交后继续执行：
+
+```bash
+bash run_commit_validation.sh
+```
+
+本次 checkpoint 为 `ep-sdedup-combine-p1-dry-run`。脚本重新构建独立 Host 安装包
+`install/validation-combine-c3`，执行 C1 三项回归和真实共享 C++ consumer 的 dry-run 配置测试。
+需要 Python 3.9+、CMake、Make、g++；不需要 CANN/NPU/hostfile/SSH。
+四项全部通过才输出 `COMMIT_VALIDATION_PASS`；回传终端结论及 `summary.json`，通过后才开发 C4。
+不会执行 C2 设备测试，不把本次结果当作通信或业务数据验证。
+
+现有手动 `run.sh` 增加 `operator_mode=dispatch|combine|both`（默认 dispatch）、
+`dispatch_quant_mode=0|4`、`combine_quant_mode=0`、`dry_run=0|1`。
+`quant_mode` 保留为 Dispatch 别名，别名冲突拒绝；dtype 与 fp8_format 共用，非量化时格式无效。
+例如完成一键构建后，在现有 hostfile 上本机验证联合模式配置：
+
+```bash
+bash run.sh -n 2 -e 96 -m 0 -l 1 0 operator_mode=both dispatch_quant_mode=4 combine_quant_mode=0 dtype=bf16 dry_run=1
+```
+
+该手动入口逐 rank 调用同一源码编译的 C3 consumer，仅读 hostfile，不 SSH、不加载 CANN、不分配设备内存。
+一键验收自带 rank fixture，无需准备 hostfile。真实 Combine/both 执行 C4 前拒绝；
+C3 的输入来源字段仅为配置计划，五表原指针接线、量化 Dispatch 的独立 BF16/FP16 输入归 C4。
+完整范围见[验收流程 C3](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c3-当前交付共享-consumer-的三模式-dry-run)。
+
+2026-09-20 C3 开发验证：基于 `3c39e9902957ade9b802da5284e0559eb8b1fe35` 加本次改动，
+blue 源码快照完成一键 Host 构建、安装和四项验收，输出 `COMMIT_VALIDATION_PASS`；
+快照没有 `.git`，summary 的 commit 为 null，不能视作原样 Git SHA 上的外部验收。
+共享 consumer 的 7 组 dry-run 测试通过（含 16/64/128 共 208 个 rank 映射）；
+原 Dispatch consumer 25 项 Host 生命周期回归通过；手动三模式 dry-run 各完成 16/16 rank。
+集成后的工具测试运行 278 项，277 通过、1 项因本地无 Windows PowerShell/MSYS transport harness 跳过。
+CANN 9.1.0 A5 `dav-c310-vec`、profiling OFF 的 `tilexr-ep`/kernel 编译安装及链接安装包的
+生产 chain consumer 编译通过；此次未运行 NPU，不代替用户 C3 回传或后续 C4 数据连接验收。
+源码摘要、编译配置/日志、Host 输出及报告保存在开发工作区 `build/combine-c3-verification/`；
+独立审查及集成配置复查未发现缺陷。
+
+## Combine C2 历史交付与验收
 
 C1（交付 `01c9b1d`）已收到用户通过确认。拉取本次 C2 提交后仍执行：
 
@@ -8,7 +48,7 @@ C1（交付 `01c9b1d`）已收到用户通过确认。拉取本次 C2 提交后�
 bash run_commit_validation.sh
 ```
 
-入口当前选择 `ep-sdedup-combine-p1-empty-kernel`。本机需要 CANN 9.1.0、匹配 driver 及至少 64 AIV 的 A5，
+C2 交付时入口选择 `ep-sdedup-combine-p1-empty-kernel`。本机需要 CANN 9.1.0、匹配 driver 及至少 64 AIV 的 A5，
 加载现有 `validation.local.sh` 中的环境配置，无需 hostfile、多机同步或 HCCL Test。
 设备默认为逻辑 0；可在环境配置或终端指定 `TILEXR_EP_SERVER_DEDUP_TEST_DEVICE`。
 脚本重新构建、安装并核对产物，执行三项 C1 Host 回归、生产 launch 替身和真实 A5 注册/提交测试。
@@ -18,7 +58,7 @@ bash run_commit_validation.sh
 真实 consumer 通过已安装库注册独立 Combine artifact，固定 64 核提交两个 dtype 的空 kernel，
 同步后检查 GM 哨兵不变；不创建真实多卡 comm。公开接口和 comm 生命周期联调留给 C4/C5，
 分离 profiling/trace 留给 C6。空 kernel 不生成 yOut 数值，不验证真实 Combine 通信或性能。
-本点通过后再开发 C3；详细契约见[验收流程 C2](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c2-当前交付空-kernel-的安装与提交)。
+C2 已按用户回传登记通过；以下命令/依赖为 C2 历史范围，当前入口以本页 C3 为准。
 
 2026-09-20 C2 开发验证：基于 `d073844` 加本次改动，blue 使用 CANN 9.1.0 / ccec clang 15.0.5（2026-05-18），
 A5 `dav-c310-vec`、profiling OFF 构建 `tilexr-ep` 及独立 Combine kernel 通过。
@@ -26,12 +66,12 @@ A5 `dav-c310-vec`、profiling OFF 构建 `tilexr-ep` 及独立 Combine kernel �
 其中四项 Host 测试在该新安装包通过，额外 profiling ON 的 Host launch 替身通过（确认 C2 不占 Dispatch 记录）。
 首次 Host 失败来自加载器替身漏列新 artifact，修正后重跑；手工安装首次遗漏 BUILD_TESTING=OFF，
 随后按正式脚本的配置完成构建安装，不修改生产代码绕过这些检查。
-真实 A5 注册/提交/同步尚未运行，留待用户验证环境回传；不以 BUILD_PASS 或四项 Host 通过代替 C2 五项通过。
+开发环境未运行真实 A5 注册/提交/同步；随后用户回传 C2 检查点通过，报告路径和证据边界见进度文档。
 完整源码摘要、编译/安装日志和 Host 输出保留在开发工作区 `build/combine-c2-verification/`。
 
 ## Combine C1 历史交付与验收
 
-检查点为 `ep-sdedup-combine-p1-abi-host`。以下为 C1 交付时的入口；当前脚本已更新为 C2：
+检查点为 `ep-sdedup-combine-p1-abi-host`。以下为 C1 交付时的入口；当前脚本已更新为 C3：
 
 ```bash
 bash run_commit_validation.sh
@@ -238,7 +278,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 0 -l 1 0
 ```
 
-构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C2 空 kernel 安装/提交，不代替这里的 Dispatch 多卡流程。
+构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C3 三模式 dry-run，不代替这里的 Dispatch 多卡流程。
 
 `build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 
