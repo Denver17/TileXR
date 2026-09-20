@@ -176,6 +176,8 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     const auto counts = TileXREpServerDedupCountLayout(experts);
     std::vector<uint8_t> local(data.dispatchOffset + data.dispatchBytes + 32U, 0);
     std::vector<uint8_t> peer(local.size(), 0);
+    std::fill(local.begin() + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET,
+        local.begin() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, 0xa5);
     const auto slot = TileXREpServerDedupDispatchOffset(data, 2U, rank, 0U, 0U, world, 6U, bs);
     std::memcpy(local.data() + slot, fixture.wire.data(), fixture.wire.size());
     auto *prefix = reinterpret_cast<uint32_t *>(local.data() + counts.cntOffset + counts.prefixOffset + (recvCoreNum - 1U) * counts.prefixStride);
@@ -185,7 +187,7 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     TileXR::CommArgs args {};
     args.rank = rank; args.rankSize = world;
     // Keep the opposite bank poisoned; prefix, counter, relay and flag cleanup
-    // must all follow the same magic-selected address above the 4 GiB boundary.
+    // must all follow the same magic-selected actual-capacity half.
     const uint32_t bank = uint32_t(magic) % 2U;
     std::vector<uint8_t> otherLocal(local.size(), 0xa5), otherPeer(peer.size(), 0xa5);
     ServerDedupTest::SparsePeerMemory memory;
@@ -195,7 +197,7 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     memory.Add(9U, 1U - bank, otherPeer.data(), otherPeer.size());
     args.peerMems[rank] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(rank));
     args.peerMems[9U] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(9U));
-    args.peerMemBytes = kEpServerDedupPeerBytes;
+    args.peerMemBytes = ServerDedupTest::kPeerBytes;
     const uint32_t hiddenBytes = Quantized ? h : h * 2U;
     std::vector<uint8_t> hidden(hiddenBytes + 64U, 0xcd), scales(data.scaleBytes + 64U, 0xcd);
     std::vector<uint32_t> types(17U, 0xcdcdcdcdU), destinations(19U, 0xcdcdcdcdU);
@@ -295,6 +297,9 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     Check(std::all_of(otherLocal.begin(), otherLocal.end(), [](uint8_t v) { return v == 0xa5; }) &&
         std::all_of(otherPeer.begin(), otherPeer.end(), [](uint8_t v) { return v == 0xa5; }),
         "receiver leaves the other bank's prefix, counter, payload and flags untouched");
+    Check(std::all_of(local.begin() + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET,
+        local.begin() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, [](uint8_t v) { return v == 0xa5; }),
+        "receiver preserves the Combine control region");
 }
 // CPU hooks model buffer ownership, not asynchronous device execution. Keep
 // each issued MTE3 source snapshot until the corresponding lane wait, so an
@@ -501,7 +506,7 @@ void CheckSparsePrefixReceivers()
     const auto counts = TileXREpServerDedupCountLayout(experts);
     std::vector<uint8_t> local(data.dispatchOffset + data.dispatchBytes, 0U);
     TileXR::CommArgs args {};
-    args.rank = rank; args.rankSize = world; args.peerMemBytes = kEpServerDedupPeerBytes;
+    args.rank = rank; args.rankSize = world; args.peerMemBytes = ServerDedupTest::kPeerBytes;
     args.peerMems[rank] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(rank));
     ServerDedupTest::SparsePeerMemory memory;
     // Reuse the same backing for three sequential magic values; no concurrent launches.

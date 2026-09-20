@@ -162,7 +162,7 @@ void CheckDeferredCountReceive()
     std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
     TileXR::CommArgs args {};
     args.rankSize = world;
-    args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
+    args.peerMemBytes = ServerDedupTest::kPeerBytes;
     ServerDedupTest::SparsePeerMemory memory;
     for (uint32_t rank = 0; rank < world; ++rank) {
         memory.Add(rank, 1U, state[rank].data(), state[rank].size() * sizeof(uint32_t));
@@ -235,13 +235,15 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
         auto &rank = ranks[r];
         for (uint32_t bank = 0; bank < 2U; ++bank) {
             auto &state = rank.states[bank];
-            state.assign(layout.stateBytes / 4 + 32, 0);
+            state.assign(TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET / 4 + 32, 0);
+            std::fill(state.begin() + (layout.cntOffset + layout.prefixOffset) / 4 + recvCoreNum * experts,
+                state.begin() + (layout.cntOffset + layout.cumsumFlagOffset) / 4, 0xa5a5a5a5);
             std::fill(state.begin() + layout.counterOffset / 4, state.end(), 0xa5a5a5a5);
             memory.Add(r, bank, state.data(), state.size() * sizeof(uint32_t));
         }
         rank.args.rank = r;
         rank.args.rankSize = world;
-        rank.args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
+        rank.args.peerMemBytes = ServerDedupTest::kPeerBytes;
     }
     for (auto &rank : ranks) for (uint32_t r = 0; r < world; ++r)
         rank.args.peerMems[r] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(r));
@@ -353,7 +355,10 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                 rank.expertOutput.front() == -888 && rank.expertOutput.back() == -888,
                 "exact output bytes preserve adjacent canaries");
             Check(std::all_of(rank.states[bank].begin() + layout.counterOffset / 4, rank.states[bank].end(),
-                [](uint32_t v) { return v == 0xa5a5a5a5; }), "count-only increment does not touch counter or payload space");
+                [](uint32_t v) { return v == 0xa5a5a5a5; }), "Count preserves counter, Combine control and payload space");
+            Check(std::all_of(rank.states[bank].begin() + (offset + layout.prefixOffset) / 4 + recvCoreNum * experts,
+                rank.states[bank].begin() + (offset + layout.cumsumFlagOffset) / 4,
+                [](uint32_t v) { return v == 0xa5a5a5a5; }), "compact copies preserve all unused prefix reservation");
         }
     }
 }

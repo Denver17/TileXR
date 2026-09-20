@@ -26,7 +26,7 @@ public:
         count_ = base + (core < remainder ? 1U : 0U);
         start_ = core * base + (core < remainder ? core : remainder);
         data_ = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
-        data_.dispatchOffset += TileXREpServerDedupWindowOffset(magic);
+        data_.dispatchOffset += TileXREpServerDedupWindowOffset(magic, args_->peerMemBytes);
         x_.SetGlobalBuffer(reinterpret_cast<__gm__ XType *>(x));
         ids_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(ids));
         weights_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(weights));

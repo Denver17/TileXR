@@ -19,10 +19,8 @@ struct EpServerDedupDataLayout {
     uint64_t blockCount = 0;
     uint64_t packedPayloadBytes = 0;
     uint64_t tokenStride = 0;
-    uint64_t returnStride = 0;
-    uint64_t sourceOffset = 0, sourceBytes = 0;
     uint64_t dispatchOffset = 0, dispatchBytes = 0;
-    uint64_t relayOffset = 0, relayBytes = 0, requiredBytes = 0;
+    uint64_t requiredBytes = 0;
 };
 
 TILEXR_EP_DATA_INLINE uint64_t TileXREpDedupAlign(uint64_t value, uint64_t alignment)
@@ -50,16 +48,9 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     layout.blockCount = (layout.payloadBytes + 479U) / 480U;
     layout.packedPayloadBytes = layout.blockCount * 480U;
     layout.tokenStride = layout.blockCount * 512U;
-    layout.returnStride = (uint64_t(h) * 2U + 479U) / 480U * 512U;
-    layout.sourceOffset = kEpServerDedupControlBytes;
-    layout.sourceBytes = uint64_t(bs) * topK * layout.returnStride;
-    layout.dispatchOffset = TileXREpDedupAlign(layout.sourceOffset + layout.sourceBytes, 512U);
+    layout.dispatchOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
     layout.dispatchBytes = uint64_t(experts) * bs * layout.tokenStride;
-    layout.relayOffset = TileXREpDedupAlign(layout.dispatchOffset + layout.dispatchBytes, 512U);
-    // Historical Combine reservation, unused by Dispatch. The new pull Combine
-    // must define its stage/result allocation before consuming the five tables.
-    layout.relayBytes = uint64_t(8U) * bs * topK * layout.returnStride;
-    layout.requiredBytes = layout.relayOffset + layout.relayBytes;
+    layout.requiredBytes = TileXREpDedupAlign(layout.dispatchOffset + layout.dispatchBytes, 512U);
     return layout;
 }
 

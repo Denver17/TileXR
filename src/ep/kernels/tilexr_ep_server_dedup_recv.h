@@ -23,7 +23,7 @@ public:
         receiver_ = GetBlockIdx() - kEpServerDedupSendCoreNum;
         hiddenBytes_ = Quantized ? h : h * uint32_t(sizeof(XType));
         data_ = TileXREpServerDedupDataLayout(bs, h, k, experts, Quantized);
-        windowOffset_ = TileXREpServerDedupWindowOffset(magic);
+        windowOffset_ = TileXREpServerDedupWindowOffset(magic, args_->peerMemBytes);
         data_.dispatchOffset += windowOffset_;
         expandX_.SetGlobalBuffer(expandX);
         dynamicScales_.SetGlobalBuffer(dynamicScales);

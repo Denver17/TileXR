@@ -1,7 +1,7 @@
 # EP Memory Server Dedup Dispatch：代码与数据流
 
-本文帮助读者理解当前 `TileXRMoeEpDispatchMemoryServerDedup` 实现，源码基线为
-`3922420`，分支为 `codex/SilentEmotion`。只描述已实现行为；Server Dedup Combine 的
+本文帮助读者理解当前 `TileXRMoeEpDispatchMemoryServerDedup` 实现，实现位于
+`codex/SilentEmotion` 分支。只描述已实现行为；Server Dedup Combine 的
 消费契约见[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)，其 kernel 尚未实现。
 
 ## 从一个 Token 理解去重
@@ -62,8 +62,8 @@ K 为 top-k，S 为发送核数，Crecv=64−S。alignN(x) 表示向上对齐到
 | TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD | 512 | BS<阈值时 64 核发送 Count，否则仅 Crecv 个接收核发送 Count |
 | TILEXR_EP_SERVER_DEDUP_ENABLE | 1 | 1 为远端 Server 分组去重；0 为全部原始 route DIRECT |
 
-Count 阈值与数据核比例独立；无源 Token 的核仍可能负责 Count。Count/prefix 的物理布局依赖
-Crecv，同一 communicator 生命周期内保持该布局不变。编译开启 auto-sync，
+Count 阈值与数据核比例独立；无源 Token 的核仍可能负责 Count。控制表起点固定，表内有效范围
+及矩阵行距依赖 Crecv；同一 communicator 生命周期内保持编译配置一致。编译开启 auto-sync，
 `-cce-aicore-record-overflow=false`。
 
 ## Dispatch/Combine 公共接口与 metadata shape
@@ -426,31 +426,60 @@ M*36 包含每候选 32B sum 存储和 4B 快照下标；Sum 使用紧凑结果�
 
 ## 容量与生命周期
 
-### 单窗布局
+### 共用通信 buffer 与固定控制布局
 
-每 Rank 至少 8 GiB peer memory；`windowOffset=(uint64(magic)%2)*4GiB`。
-每窗前 2 MiB 为控制区，每窗尾部保留 4 MiB 不作 EP 数据使用；runtime Flag 位于整个域末尾。
-地址和容量乘积使用 uint64。
+Dispatch/Combine 复用同一个 peer-memory allocation。两份完整 buffer 分别位于实际逻辑
+通信空间的前后半区：`windowOffset=(uint64(magic)%2)*(CommArgs.peerMemBytes/2)`。
+每份依次为 Dispatch 控制区 764KiB、Combine 控制区 52KiB、共用数据区；数据起点固定为
+1MiB（1048576B），均按 512B 对齐；两个控制区末尾的 816KiB 到 1MiB 之间
+208KiB 留空，不属于任何算子的控制表。标准 profiling、五表及输出仍使用独立 GM。
 
-Count 布局结构中的 cntOffset 相对窗口起点，cumsumOffset/prefixOffset/cumsumFlagOffset
-则相对 cntOffset。下表统一列出相对窗口起点的位置，避免重复或遗漏基址：
+公共容量及 offset 宏定义于
+[buffer 布局头](../../src/ep/common/ep_memory_server_dedup_buffer_layout.h)。
+下表 offset 相对 Dispatch 控制区；主控制区 offset 相对本次所选 buffer。
+CountLayout 内部 cumsumOffset/prefixOffset/cumsumFlagOffset 相对 cntOffset，构造时由宏相减取得。
 
-| 区域 | 窗口内起点 | 字节数 |
-| --- | --- | --- |
-| 前置保留区 | 0 | 12800，Dispatch 不访问 |
-| cnt | cntOffset=12800 | E*32 |
-| cumsum 交换 | cntOffset+cumsumOffset，cumsumOffset=E*32 | Crecv*Crecv*32 |
-| prefix 副本 | cntOffset+prefixOffset，prefixOffset=cumsumOffset+Crecv*Crecv*32 | Crecv*prefixStride，prefixStride=align32(E*4) |
-| ready | cntOffset+cumsumFlagOffset，cumsumFlagOffset=prefixOffset+Crecv*prefixStride | Crecv*Crecv*32 |
-| 对齐保留区 | counterOffset=align1024(cntOffset+cumsumFlagOffset+Crecv*Crecv*32) | 1024，Dispatch 不访问 |
-| source 预留区 | sourceOffset=2MiB | sourceBytes=BS*K*U，Dispatch 不访问 |
-| Dispatch 收包区 | dispatchOffset=align512(sourceOffset+sourceBytes) | dispatchBytes=E*BS*T |
-| relay 预留区 | relayOffset=align512(dispatchOffset+dispatchBytes) | relayBytes=8*BS*K*U，Dispatch 不访问 |
+| 表 | 固定 offset（B） | 固定预留（B） | 实际有效范围 |
+| --- | --- | --- | --- |
+| 前置保留 | 0 | 12800 | 不访问 |
+| count | 12800 | 32768 | E*32 |
+| cumsum | 45568 | 73728 | Crecv*Crecv*32 |
+| prefix 总区域 | 119296 | 393216 | Crecv*E*4 |
+| ready | 512512 | 73728 | Crecv*Crecv*32 |
+| 对齐间隙 | 586240 | 512 | 不访问 |
+| counter 保留 | 586752 | 1024 | 不访问 |
+| 区尾扩展预留 | 587776 | 194560 | 不访问 |
 
-这里 `U=returnStride=ceil(H*2/480)*512`，`T=tokenStride` 为实际 Dispatch 包长度。
-source/relay 预留区参与当前布局计算和 Host 容量检查；它们不是已经实现的 Combine 数据区。
-Host 检查 `requiredBytes=relayOffset+relayBytes≤4GiB−4MiB`、
-`stateBytes=counterOffset+1024≤2MiB`。标准 profiling 使用独立 GM。
+prefix 区域按 `1024*4*48*2=384KiB` 预留，内部各核副本继续紧凑存放，
+`prefixStride=align32(E*4)=E*4`。额外一倍仅为空间预留，不增加复制量。
+写入副本、CompleteCumsum 和接收阶段均沿用实际 E 寻址；后续 ready 表不能占用 prefix 预留。
+两个矩阵也保持实际 Crecv 行距，固定整表起点不代表改变表内布局。
+
+```text
+dispatchOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET  // 1MiB
+dispatchBytes = uint64(E)*BS*T
+requiredBytes = align512(dispatchOffset+dispatchBytes)
+bufferStride = CommArgs.peerMemBytes/2
+```
+
+T 是含包尾和 DataAsFlag 的 Dispatch wire stride。Dispatch 不预留 Combine 返回/中转区；
+Combine 数据视图与 Dispatch 共用同一起点，其中中转区紧接结果区之后；调用方按两算子
+数据需求最大值预算，详见联合设计 §6。
+双方独立检查各自视图，不用 Dispatch T 代替 Combine 的 Sresult。
+Host 先检查 shape/UB/整数范围，再要求：
+
+- `peerMemBytes%1024==0`，peer 基址 512B 对齐，地址加法无溢出；
+- `bufferStride>=TILEXR_FLAG_BUFF_BYTES`；
+- `requiredBytes<=bufferStride-TILEXR_FLAG_BUFF_BYTES`，等于时允许；
+- `stateBytes=587776<=764KiB`，各控制表实际范围不超固定预留。
+
+runtime 4MiB Flag 实际只占全域尾部，第一半区对应尾部留空，保证两份布局具有相同容量约束。
+物理 allocation 为 rank 地址偏移额外申请的字节不计入逻辑 peerMemBytes。
+chain 测试默认仍显式申请 8GiB；生产算子接受符合上述容量条件的其他大小。
+
+维护规则：整表起点、表内 stride 和复制长度是三个独立概念。固定控制表位置时不得意外扩大
+prefix 读写量；修改选窗步长时必须同步 Count、发送、接收、consumer 和替身地址解析。
+只验证两份总需求加一次 runtime 保留区会漏掉第二半区越界，必须按每半区检查。
 
 ### 清理与跨轮复用
 

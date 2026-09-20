@@ -26,7 +26,7 @@ std::vector<void *> firstBuffers;
 std::map<uintptr_t, std::vector<uint8_t>> packets;
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
-alignas(32) std::array<uint8_t, 32> localPeer {};
+alignas(512) std::array<uint8_t, 32> localPeer {};
 TileXR::TileXRProfilingRuntimeConfig profileConfig;
 std::vector<uint64_t> profileTimes;
 std::vector<uint32_t> profileEvents, profileOccupied, profileDropped;
@@ -108,7 +108,7 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
         if (!boundaryMode) {
             const uint64_t bank = calls["launch"] % 2U;
             const uint64_t expectedBank = std::getenv("TEST_WINDOW_FAULT") ? 1U - bank : bank;
-            if ((address - peer) / TileXREp::kEpServerDedupWindowBytes != expectedBank)
+            if ((address - peer) / (args.peerMemBytes / 2U) != expectedBank)
                 return Call("wrong-bank-read") == 0 ? 92 : 91;
         }
         auto found = packets.upper_bound(address);
@@ -308,7 +308,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             if (failure == "flag-first") wire[480U] = 1U;
             if (failure == "flag-last") wire[wire.size() - 1U] = 1U;
             packets[reinterpret_cast<uintptr_t>(args.peerMems[rank]) +
-                TileXREp::TileXREpServerDedupWindowOffset(int64_t(calls["launch"])) + DispatchSlot(shape, rank, row, layout)] = wire;
+                TileXREp::TileXREpServerDedupWindowOffset(int64_t(calls["launch"]), args.peerMemBytes) + DispatchSlot(shape, rank, row, layout)] = wire;
         }
         if (!outputRows.empty()) {
             if (failure == "hidden") static_cast<uint8_t *>(expandX)[0] ^= 1U;

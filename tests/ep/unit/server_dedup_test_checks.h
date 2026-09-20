@@ -2,8 +2,12 @@
 #define TILEXR_EP_SERVER_DEDUP_TEST_CHECKS_H
 
 #include <iostream>
+#include <cstdint>
 
 namespace ServerDedupTest {
+
+// Deliberately not 8 GiB: real kernel substitutes must consume CommArgs capacity.
+constexpr uint64_t kPeerBytes = 6ULL * 1024U * 1024U * 1024U;
 
 inline int &Failures()
 {

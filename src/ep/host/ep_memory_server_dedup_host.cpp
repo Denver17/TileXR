@@ -71,8 +71,11 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     if (p.globalBs != 0 && (p.globalBs < 0 || static_cast<uint64_t>(p.globalBs) != next.globalBs)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    // Both fixed-stride windows must exist; the builder checks per-window fit.
-    if (commArgs.peerMemBytes < kEpServerDedupPeerBytes) {
+    // Validate each identical half, not just two payloads plus one runtime tail.
+    // Runtime owns the final tail; the matching tail in the first half is unused.
+    const uint64_t windowBytes = commArgs.peerMemBytes / 2U;
+    if (commArgs.peerMemBytes % 1024U != 0U || windowBytes < TileXR::TILEXR_FLAG_BUFF_BYTES ||
+        next.data.requiredBytes > windowBytes - TileXR::TILEXR_FLAG_BUFF_BYTES) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -80,7 +83,8 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
         if (commArgs.peerMems[rank] == nullptr) {
             return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
         }
-        if (!IsAligned(commArgs.peerMems[rank], 32U)) {
+        const uintptr_t begin = reinterpret_cast<uintptr_t>(commArgs.peerMems[rank]);
+        if (!IsAligned(commArgs.peerMems[rank], 512U) || commArgs.peerMemBytes > UINTPTR_MAX - begin) {
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }

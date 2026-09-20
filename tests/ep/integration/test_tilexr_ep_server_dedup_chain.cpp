@@ -41,7 +41,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
 // Fixed validation capacity through Dispatch/Combine Server Dedup qualification.
-constexpr uint64_t kServerDedupPeerBytes = TileXREp::kEpServerDedupPeerBytes;
+constexpr uint64_t kServerDedupPeerBytes = 8ULL * 1024U * 1024U * 1024U;
 constexpr int kServerDedupDataMiB = static_cast<int>(
     (kServerDedupPeerBytes - TileXR::TILEXR_FLAG_BUFF_BYTES) / (1024 * 1024));
 
@@ -395,7 +395,7 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
         " GiB; actual=" + std::to_string(args.peerMemBytes));
     for (int rank = 0; rank < c.rankSize; ++rank) {
         const uintptr_t begin = reinterpret_cast<uintptr_t>(args.peerMems[rank]);
-        Require(begin != 0 && begin % 32 == 0 && args.peerMemBytes <= UINTPTR_MAX - begin,
+        Require(begin != 0 && begin % 512 == 0 && args.peerMemBytes <= UINTPTR_MAX - begin,
             "invalid peer window rank=" + std::to_string(rank));
     }
 }

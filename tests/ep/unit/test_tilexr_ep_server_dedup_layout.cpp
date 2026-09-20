@@ -21,7 +21,7 @@ int main()
         {24, 1008, 32, 98304, 256}
     };
     for (const auto &test : cases) {
-        // Larger expert domains need fewer tokens to fit one 4 GiB bank.
+        // Bound this fixture's public output capacities for larger expert domains.
         const uint64_t bs = test.experts >= 1008 ? 128U : 256U;
         Check(TileXREpBuildMemoryServerDedupLayout(test.ranks, bs, 7168, test.k, test.experts,
             &layout) == TILEXR_SUCCESS, "supported layout");
@@ -89,10 +89,38 @@ int main()
     Check(TileXREpBuildMemoryServerDedupLayout(128, 128, 7168, 8, 1024, &layout, false) == TILEXR_SUCCESS,
         "compile-time core split builds a valid layout");
     const auto split = TileXREpServerDedupCountLayout(1024);
-    Check(split.prefixOffset == split.cumsumOffset + uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * 32U &&
-        split.cumsumFlagOffset == split.prefixOffset + uint64_t(kEpServerDedupRecvCoreNum) * 4096U &&
-        layout.countStateBytes == split.stateBytes && split.stateBytes <= kEpServerDedupControlBytes,
-        "Host layout reserves the compile-time receiver matrices and prefixes");
+    Check(split.cntOffset + split.prefixOffset == 119296U &&
+        split.cumsumFlagOffset == split.prefixOffset + 393216U &&
+        layout.countStateBytes == 587776U && split.stateBytes <= TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES,
+        "fixed prefix region reserves twice the maximum 1024-expert/48-core footprint");
+    for (uint32_t experts : {16U, 96U, 384U, 1008U, 1024U}) {
+        const auto actual = TileXREpServerDedupCountLayout(experts);
+        Check(actual.cntOffset == split.cntOffset && actual.prefixOffset == split.prefixOffset &&
+            actual.cumsumOffset == split.cumsumOffset && actual.cumsumFlagOffset == split.cumsumFlagOffset &&
+            actual.counterOffset == split.counterOffset && actual.stateBytes == split.stateBytes,
+            "expert count never moves a control table");
+        Check(actual.prefixStride == experts * 4U,
+            "fixed whole-table reservation retains compact actual-E copies");
+    }
+    struct Region { uint64_t offset, bytes; };
+    const Region regions[] = {
+        {TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET, TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_BYTES},
+        {TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_OFFSET, TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES},
+        {TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_OFFSET, TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_BYTES},
+        {TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_OFFSET, TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_BYTES},
+        {TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_OFFSET, TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_BYTES},
+        {TILEXR_EP_SERVER_DEDUP_DISPATCH_RESERVED_OFFSET, TILEXR_EP_SERVER_DEDUP_DISPATCH_RESERVED_BYTES},
+        {TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET, TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES}
+    };
+    uint64_t end = 0;
+    for (const auto &region : regions) {
+        Check(region.offset % 512U == 0 && region.bytes % 512U == 0 && region.offset >= end,
+            "fixed tables are aligned and disjoint including unused capacity");
+        end = region.offset + region.bytes;
+    }
+    Check(end == 835584U && TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1048576U &&
+        end <= TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
+        "shared data follows both fixed control regions");
 
     // cnt uses bounded UB even though this increment does not allocate hidden buffers.
     Check(TileXREpBuildMemoryServerDedupLayout(128, 4096, 1, 32, 1024, &layout) ==
@@ -108,21 +136,21 @@ int main()
         countLayout.counterOffset % 1024U == 0 && countLayout.stateBytes == countLayout.counterOffset + 1024U,
         "both receiver matrices, every prefix and the isolated counter have disjoint storage");
     Check(TileXREpBuildMemoryServerDedupLayout(128, 256, 7168, 6, 384, &layout) == TILEXR_SUCCESS &&
-        layout.data.sourceOffset == 2097152 && layout.data.sourceBytes == 23592960 &&
-        layout.data.dispatchOffset == 25690112 && layout.data.dispatchBytes == 1560281088 &&
-        layout.data.relayOffset == 1585971200 && layout.data.requiredBytes == 1774714880,
-        "fixed control prefix followed by token and return reservations");
-    Check(countLayout.stateBytes <= kEpServerDedupControlBytes &&
-        kEpServerDedupPeerBytes == UINT64_C(8589934592), "8 GiB domain has room for both control prefixes");
-    for (int64_t magic = 1; magic <= 5; ++magic) {
-        const uint64_t start = TileXREpServerDedupWindowOffset(magic);
-        Check(start == (magic % 2 ? UINT64_C(4294967296) : 0), "magic alternates exact 4 GiB windows");
-        Check(start == TileXREpServerDedupWindowOffset(magic + 2), "two calls later reuses the same bank");
-        Check(start + layout.data.requiredBytes <= kEpServerDedupPeerBytes - TILEXR_FLAG_BUFF_BYTES,
-            "either bank preserves the final runtime flag reservation");
+        layout.data.dispatchOffset == 1048576U && layout.data.dispatchBytes == 1560281088U &&
+        layout.data.requiredBytes == 1561329664U,
+        "Dispatch requires only fixed controls and its own receive view");
+    for (uint64_t peerBytes : {6ULL << 30, 8ULL << 30, 10ULL << 30}) {
+        for (int64_t magic = 0; magic <= 5; ++magic) {
+            const uint64_t start = TileXREpServerDedupWindowOffset(magic, peerBytes);
+            Check(start == (magic % 2 ? peerBytes / 2U : 0), "magic alternates actual capacity halves");
+            Check(start == TileXREpServerDedupWindowOffset(magic + 2, peerBytes), "two calls later reuses the same bank");
+            Check(start + layout.data.requiredBytes <= peerBytes - TILEXR_FLAG_BUFF_BYTES,
+                "either bank preserves the final runtime flag reservation");
+        }
     }
     Check(TileXREpBuildMemoryServerDedupLayout(64, 256, 65536, 6, 384, &layout) ==
-        TILEXR_ERROR_PARA_CHECK_FAIL, "oversized single-round payload is rejected even with 8 GiB total");
+        TILEXR_SUCCESS && layout.data.requiredBytes > (4ULL << 30),
+        "shape builder reports demand without imposing a fixed communication capacity");
     Check(TileXREpBuildMemoryServerDedupLayout(16, 96, 7168, 6, 96, &layout, true) == TILEXR_SUCCESS &&
         layout.data.tokenStride == 8192 && layout.data.scaleBytes == 224 &&
         layout.expandXBytes == layout.capacityRows * 7168 && layout.dynamicScalesBytes == layout.capacityRows * 224,

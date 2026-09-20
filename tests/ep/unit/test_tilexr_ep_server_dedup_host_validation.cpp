@@ -118,7 +118,7 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
 int main()
 {
     g_commArgs.rankSize = 64;
-    g_commArgs.peerMemBytes = kEpServerDedupPeerBytes;
+    g_commArgs.peerMemBytes = ServerDedupTest::kPeerBytes;
     g_commArgs.rank = 9;
     for (auto &peer : g_commArgs.peerMems) {
         peer = reinterpret_cast<GM_ADDR>(0xE000);
@@ -261,13 +261,39 @@ int main()
     g_commArgs.peerMems[63] = nullptr;
     CheckRejected(valid, TILEXR_ERROR_NOT_INITIALIZED);
     g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(0xE000);
-    g_commArgs.peerMemBytes = kEpServerDedupPeerBytes - 1U;
+    g_commArgs.peerMemBytes = ServerDedupTest::kPeerBytes - 1U;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    g_commArgs.peerMemBytes = kEpServerDedupPeerBytes;
-    Check(Invoke(valid) == TILEXR_SUCCESS, "exact 8 GiB domain covers both windows and runtime flags");
-    g_commArgs.peerMems[63] += 1;
+    g_commArgs.peerMemBytes = ServerDedupTest::kPeerBytes;
+    Check(Invoke(valid) == TILEXR_SUCCESS, "sufficient domain smaller than 8 GiB is accepted");
+    const uint64_t exactBytes = 2U * (g_layout.data.requiredBytes + TILEXR_FLAG_BUFF_BYTES);
+    g_commArgs.peerMemBytes = exactBytes;
+    Check(Invoke(valid) == TILEXR_SUCCESS, "each half fits exactly including its runtime reserve");
+    g_commArgs.peerMemBytes = exactBytes - 1024U;
     CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
-    g_commArgs.peerMems[63] -= 1;
+    g_commArgs.peerMemBytes = exactBytes - TILEXR_FLAG_BUFF_BYTES;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL); // Two layouts plus only one runtime tail.
+    g_commArgs.peerMemBytes = exactBytes + 512U;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL); // Equal halves would be unaligned.
+    for (uint64_t bytes : {0ULL, 2ULL * TILEXR_FLAG_BUFF_BYTES - 1024U}) {
+        g_commArgs.peerMemBytes = bytes;
+        CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    }
+    auto large = valid;
+    large.dispatch.h = 65536;
+    large.dispatch.bs = 256;
+    large.dispatch.globalBs = 64 * 256;
+    g_commArgs.peerMemBytes = 8ULL << 30;
+    CheckRejected(large, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_commArgs.peerMemBytes = 32ULL << 30;
+    Check(Invoke(large) == TILEXR_SUCCESS, "large view fits an actual domain larger than 8 GiB");
+    g_commArgs.peerMemBytes = ServerDedupTest::kPeerBytes;
+    const auto savedPeer = g_commArgs.peerMems[63];
+    g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(UINTPTR_MAX & ~uintptr_t(511U));
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_commArgs.peerMems[63] = savedPeer;
+    g_commArgs.peerMems[63] += 32;
+    CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_commArgs.peerMems[63] -= 32;
     g_devRet = TILEXR_ERROR_MKIRT;
     CheckRejected(valid, TILEXR_ERROR_MKIRT);
     g_devRet = TILEXR_SUCCESS;

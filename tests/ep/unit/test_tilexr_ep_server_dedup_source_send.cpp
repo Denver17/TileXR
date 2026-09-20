@@ -54,7 +54,7 @@ void CheckDeferredCountSender()
     std::vector<uint8_t> window(data.dispatchOffset + data.dispatchBytes + 32U, 0U);
     TileXR::CommArgs args {};
     args.rankSize = world;
-    args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
+    args.peerMemBytes = ServerDedupTest::kPeerBytes;
     args.peerMems[0] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(0));
     ServerDedupTest::SparsePeerMemory memory;
     memory.Add(0U, 1U, window.data(), window.size());
@@ -101,7 +101,7 @@ void CheckDeferredCountSender()
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
-    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {})
+    uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {}, uint64_t peerBytes = ServerDedupTest::kPeerBytes)
 {
     TileXR::CommArgs args {};
     args.rankSize = ranks;
@@ -146,7 +146,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
         writes.push_back({AscendC::testCore, header[1], header[2], members, destination, reinterpret_cast<uintptr_t>(payload)});
     };
     std::map<uint32_t, std::array<std::vector<uint8_t>, 2>> windows;
-    ServerDedupTest::SparsePeerMemory memory;
+    ServerDedupTest::SparsePeerMemory memory(peerBytes);
     for (const auto &packet : packets) {
         const uint32_t destination = packet.members.front().expert / localExperts;
         if (!windows.count(destination)) {
@@ -160,7 +160,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     ServerDedupTest::ProfileCapture capture(args);
     for (const auto &window : windows)
         args.peerMems[window.first] = reinterpret_cast<uint8_t *>(ServerDedupTest::SparsePeerMemory::Base(window.first));
-    args.peerMemBytes = TileXREp::kEpServerDedupPeerBytes;
+    args.peerMemBytes = peerBytes;
     std::vector<uint32_t> masks(bs + 2U, 0xdeadbeefU);
     std::vector<float> output(bs * k + 2U, -777.0f);
     const auto observeWrite = AscendC::GmWriteObserver();
@@ -327,6 +327,7 @@ int main()
                     expert(2), expert(5), expert(2, 1), expert(1), expert(0, 42), expert(0),
                     expert(7), expert(3), expert(0, 1), expert(4), expert(7, 1), expert(1, 1)});
             }
+            Run(16, 96, 6, 64, 6, true, 0, 3, {}, 10ULL << 30);
             // Reuses each communication window across repeated calls.
             // Masks/weights are reused across all calls.
             // Source server 7 wraps through zero; server 6 has no routes.

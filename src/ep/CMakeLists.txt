@@ -161,6 +161,7 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_profiling.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_data_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_profile.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"

@@ -2,6 +2,7 @@
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_COUNT_LAYOUT_H
 
 #include "comm_args.h"
+#include "ep_memory_server_dedup_buffer_layout.h"
 #include "tilexr_types.h"
 
 // Count participation threshold is independent of the compile-time send/receive split.
@@ -31,15 +32,14 @@ constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold =
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
-// Legacy padding retained for the R07 layout; standard profiling uses separate GM.
-constexpr uint64_t kEpServerDedupProfileReservedBytes = 12800U;
-constexpr uint64_t kEpServerDedupPeerBytes = 8ULL * 1024U * 1024U * 1024U;
-constexpr uint64_t kEpServerDedupWindowBytes = kEpServerDedupPeerBytes / 2U;
-constexpr uint64_t kEpServerDedupControlBytes = 2ULL * 1024U * 1024U;
-// Runtime owns the domain's final flag region. Leave the same tail unused in
-// window 0 so both windows have identical capacity and shape-independent stride.
-constexpr uint64_t kEpServerDedupWindowUsableBytes =
-    kEpServerDedupWindowBytes - TileXR::TILEXR_FLAG_BUFF_BYTES;
+static_assert(uint64_t(kEpServerDedupMaxExperts) * kEpServerDedupCountRecordBytes <=
+    TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_BYTES, "Count records exceed their fixed region");
+static_assert(uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * kEpServerDedupCountRecordBytes <=
+    TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES &&
+    TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES <= TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_BYTES,
+    "Receiver matrices exceed their fixed regions");
+static_assert(uint64_t(kEpServerDedupMaxExperts) * sizeof(int32_t) * kEpServerDedupRecvCoreNum * 2U <=
+    TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_BYTES, "Prefix region must include one full spare footprint");
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
 #define TILEXR_EP_DEDUP_INLINE FORCE_INLINE_AICORE
@@ -59,28 +59,24 @@ struct EpServerDedupCountLayout {
     uint64_t stateBytes;
 };
 
-// Keep the core split fixed for the communicator lifetime: prefix storage is not
-// cleared and can overlap another split's control flags. All ranks must use the
-// same communicator call order and serialize its kernels
+// All ranks use the same compiled core split and serialize communicator calls
 // on one stream. Count publication (including zeros) protects two-call reuse.
-TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupWindowOffset(int64_t magic)
+// Host validates equal aligned halves and a runtime flag reserve in each half.
+TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupWindowOffset(int64_t magic, uint64_t peerMemBytes)
 {
-    return (uint64_t(magic) % 2U) * kEpServerDedupWindowBytes;
+    return (uint64_t(magic) % 2U) * (peerMemBytes / 2U);
 }
 
 TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(uint32_t experts)
 {
     EpServerDedupCountLayout layout {};
-    const uint64_t matrixBytes = uint64_t(kEpServerDedupRecvCoreNum) *
-        kEpServerDedupRecvCoreNum * kEpServerDedupCountRecordBytes;
-    layout.cntOffset = kEpServerDedupProfileReservedBytes;
-    layout.cumsumOffset = uint64_t(experts) * kEpServerDedupCountRecordBytes;
-    layout.prefixOffset = layout.cumsumOffset + matrixBytes;
+    layout.cntOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET + TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
+    layout.cumsumOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
+    layout.prefixOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
     layout.prefixStride = (uint64_t(experts) * sizeof(int32_t) + 31U) / 32U * 32U;
-    layout.cumsumFlagOffset = layout.prefixOffset + kEpServerDedupRecvCoreNum * layout.prefixStride;
-    const uint64_t bytes = layout.cntOffset + layout.cumsumFlagOffset + matrixBytes;
-    layout.counterOffset = (bytes + 1023U) / 1024U * 1024U;
-    layout.stateBytes = layout.counterOffset + 1024U;
+    layout.cumsumFlagOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
+    layout.counterOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET + TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_OFFSET;
+    layout.stateBytes = layout.counterOffset + TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_BYTES;
     return layout;
 }
 

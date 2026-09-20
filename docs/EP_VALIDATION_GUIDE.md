@@ -2,6 +2,23 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
+2026-09-20 共用通信布局：Dispatch 已使用实际 `peerMemBytes/2` 选窗，控制区固定
+764KiB/52KiB，数据从 1MiB 开始；prefix 总区域固定预留 384KiB，副本继续按实际 E*4 紧凑排列。
+Host 按每半区减 4MiB runtime 保留区检查，允许恰好容纳；不再强制 8GiB。
+工作流 layout 标识为 `r12-shared-peer-buffer`，须配套重建并同步 Host、kernel 和 consumer。
+
+验证基线为 `d122b3f` 加本次修改，记录位于 `build/shared-buffer-verification/`：blue 上
+CANN 9.1.0 / ccec clang 15.0.5 的 A5 `dav-c310-vec` kernel 与 `tilexr-ep` Host 库编译通过
+（profiling OFF）；默认配置 13 项 Server Dedup Host/替身测试及 1 项 launch 测试通过，
+其余发送核 16/24/40/48 各 3 项布局/Count/Host 测试通过；consumer 集成 25 项、workflow
+100 项通过。619 个生产、测试与构建输入摘要与 blue 实际编译快照一致。
+测试覆盖 6GiB/10GiB 实际寻址、多轮双半区、prefix 空余及 Combine 控制区哨兵、
+精确容量边界、少留一份 runtime 尾部、对齐及地址溢出拒绝。未运行 NPU，A5 多卡正确性与性能待验证。
+
+布局维护：固定整表起点不应改变表内 stride 或复制长度；扩大 prefix 预留时同时固定后续
+ready 起点。两份需求加一次 runtime 保留并不能保证第二半区安全，必须逐半区校验。
+上述替身哨兵验证地址归属，不证明实机 DMA 顺序。
+
 2026-09-20 五表迁移：设计提交 `3b0ba92` 确认 T02 后，Server Dedup Dispatch
 公开接口及 kernel 改为 TokenType、DestinationIndex、RelayReadIndex、SourceMask、
 expertScalesOut；旧 assistInfoForCombineOut/assistEx/group 参数已从该入口删除。

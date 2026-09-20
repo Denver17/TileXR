@@ -5,7 +5,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
 {
     using namespace ServerDedupReference;
     const auto shape = SourceSendShape(c);
-    const uint64_t window = TileXREp::TileXREpServerDedupWindowOffset(magic);
+    const uint64_t window = TileXREp::TileXREpServerDedupWindowOffset(magic, args.peerMemBytes);
     const auto rows = DispatchRows(shape, c.rank);
     Require(rows.size() <= layout.capacityRows, "reference exceeds public row capacity");
     const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);

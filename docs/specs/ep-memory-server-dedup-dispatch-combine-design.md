@@ -20,10 +20,11 @@
 
 ### 2.1 已确认的前提
 
-- Dispatch / Combine 共用同一个 EP peer-memory 通信域，沿用现有 magic 选窗方式。
-- 选窗的主要目的为隔离 Dispatch 与 Combine；不要求两者各自另做跨轮双缓冲。
-- M2 后续明确为卡间完成 Flag 单独配置两份乒乓缓冲，控制区预算为 `2*recvCoreNum*512B`；
-  其内部协议由 Combine 设计维护，不改变本节的 payload 选窗及模型调度契约。
+- Dispatch / Combine 共用同一个 EP peer-memory 通信域；每份 buffer 依次为 Dispatch 控制区、
+  Combine 控制区、共用数据区，三个区域均按 512B 对齐。整个布局在通信空间的前后半区各保留一份，
+  第二份基址为 peer[rank]+CommArgs.peerMemBytes/2，步长来自实际逻辑通信容量。
+- 选窗的主要目的仍为隔离 Dispatch 与 Combine，模型执行顺序契约不变；M2 随本次 Combine
+  所选整体 buffer 使用其控制区中的唯一一份完成 Flag，CB02-02 已确认，不新增独立 bank 或轮次参数。
 - 用户已确认模型在 Dispatch 与 Combine 之间、Combine 与下一次 Dispatch 之间安排其他算子，
   其实际执行顺序保证 buffer 不踩踏。本文直接采用该调度保证，不增加轮次管理、plan/epoch/windowId
   管理或 Server 内读完确认握手，不再把这些作为待讨论项。
@@ -103,10 +104,10 @@ Combine 使用这四类操作描述：
 
 ### 4.2 统一的地址符号
 
-以下 Dispatch 地址是当前实现；Combine 已确定沿用相同逻辑槽号，通过 expert/q 定位，
-T 为 Dispatch 含 Flag 的 wire 包字节 stride；Sstage/Sresult 分别为 Combine 中转和结果槽字节 stride，
-其格式及窗口内部 offset 尚待详细设计。
-所有乘积用 uint64；WD/WC 为两算子按现有规则取得的窗口偏移，不新增选窗机制。
+以下地址沿用当前 Dispatch 的逻辑槽号，通过 expert/q 定位；区域 offset 按 §6 新布局计算，
+T 为 Dispatch 含 Flag 的 wire 包字节 stride；
+Sstage=alignUp(H*2,512)，Sresult 为 Combine 单 Token 完成 DataAsFlag 拼接后的字节数。
+所有乘积用 uint64；WD/WC 为两算子所选完整 buffer 的偏移，等于相应 bufferIndex*(CommArgs.peerMemBytes/2)。
 
 ```text
 s = 原始 source rank，p = 原始 TokenId，k = 原始 top-k 位置
@@ -355,8 +356,8 @@ srcRank/srcTokenId/srcTopk 发送 partial；最终 source 按表 5 的 1.0 消�
 成员卡类型 3 的表 2 offset 必须等于上述 slot，因此生产端写入与 relay 读取闭合。
 
 MaxTokenNum=98304、K=16 时，每行 128B，表 3 共 12582912B=12MiB/卡。
-第 0 块占用已有 K 块中的一块，不增加表行大小。当前格式含 weight；可选关闭时的计算语义
-仍待 J05 明确；本版行 stride 固定为 K*8B，关闭加权也不隐式压缩字段。
+第 0 块占用已有 K 块中的一块，不增加表行大小。首版已确认仅支持有权重输入，
+本版行 stride 固定为 K*8B；无权重模式延后设计，不改变当前字段布局。
 零 selfWeight/memberWeight 都是合法权重，不能用于判断块是否有效；有效性只取决于 row 范围、
 TokenType 和 header.N。
 
@@ -395,7 +396,7 @@ output[p] = sum over k where SourceMask[p] bit k == 1:
 
 对有效 k 的消费沿用 k 升序；原始贡献在 relay 或 source 恰好加权一次。
 表 4 是接收义务 mask，不是运行时已到达 bitmap；到达判断仍由结果区发布协议完成。
-无效 weight 槽不要求清零。weight 可选模式下是否省略表 5 及其默认语义，仍在 J05/J07 收口。
+无效 weight 槽不要求清零。首版必须提供表 5；省略权重及默认权重语义不属于首版范围。
 
 BS=256、K=16 时，表 4 占 1024B=1KiB，表 5 占 16384B=16KiB。
 沿用 MaxTokenNum=98304 的例子，表 2 使用三字段 12B 格式，占 1179648B；
@@ -513,65 +514,270 @@ TokenNum、容量、peer 映射及布局计算所需输入；不增加独立 Tok
 expertOut 输入契约为 FP16/BF16 expert 结果；quantMode 控制通信量化。
 Dispatch 的 FP8 输出不能直接视为 Combine 的 expertOut 输入，本接口未定义外部量化输入的 scale。
 
-可选关闭加权的规则仍待 J05/J07 确认。若以 expertScales=nullptr 表示关闭加权，
-须统一定义表 3 selfWeight/memberWeight 与表 5 是否同时忽略，以及各 quantMode 的合法性。
-详细设计完成前不宣称支持可选加权；固定加权路径按五表规则执行。
+首版已确认仅支持有权重输入：表 3 的有效 selfWeight/memberWeight 与表 5 必须按五表规则提供并使用，
+不支持以 expertScales=nullptr 关闭加权。无权重模式延后设计；各 quantMode 及其他保留特性
+的支持范围仍由 Combine 设计 CB00-03 收口，本次确认不扩大量化或可选特性范围。
 
 Combine 内部实现安排见[Combine 模块设计](ep-memory-server-dedup-combine-design.md#模块边界m0m6)。
 Dispatch 生产端源码：[公开接口](../../src/include/tilexr_ep.h)、
 [包头与索引格式](../../src/ep/common/ep_memory_server_dedup_protocol.h)、
 [接收侧五表写出](../../src/ep/kernels/tilexr_ep_server_dedup_recv.h)。
 
-## 6. 共用通信域的布局框架
+## 6. 共用通信域的布局（CB00-02 已确认）
 
-两算子使用同一组 peer 映射及现有选窗；窗口内部允许按算子定义各自视图。
-每卡通信域为 8 GiB，分为两个 4 GiB 窗口；
-`windowOffset=(uint64(magic)%2)*4GiB`。每窗尾部保留 4 MiB，不供 EP payload 使用。
-窗口基址按 magic 取得，不固定某个窗口永久属于 Dispatch 或 Combine。
+本节定义 Dispatch 与 Combine 共用的通信布局；Combine kernel 的实现进度由独立设计维护。
+每卡复用同一个 peer-memory allocation 和 peer 映射，不为 Combine stage 另建共享 allocation。
+五表、expertOut 和 yOut 继续由调用方独立分配，保持有效到本次 Combine 完成。
+
+### 6.1 区域顺序和槽位
 
 ```text
-每卡同一 EP 通信域
-  窗口 0：4 GiB
-  窗口 1：4 GiB
-
-Dispatch 选中窗口的视图          Combine 选中窗口的视图
-  控制区                         控制区：Combine 内部状态
-  Dispatch 收包区                本卡 stage：供 Server 内 peer 读取
-  对齐及保留区                   source 结果区：DIRECT 与 partial
-                                 对齐及保留区
+peer[rank]
+  buffer 0
+    Dispatch 控制区                         ┐
+    Combine 控制区                          ├ 各区起点和区域大小按 512B 对齐
+    留空至 1MiB
+    Dispatch / Combine 共用数据区           ┘
+      Dispatch 视图：Dispatch 数据接收区
+      Combine 视图：最终结果接收区 → 中转区
+  前半区剩余空间（若有）
+  buffer 1（base = peer[rank] + CommArgs.peerMemBytes/2）
+    Dispatch 控制区
+    Combine 控制区
+    留空至 1MiB
+    Dispatch / Combine 共用数据区
+  后半区剩余可用空间（若有）
+  runtime 保留区（保持实际通信域的保留边界）
 ```
 
-以上为共同布局的逻辑视图，Combine 的区域顺序、offset 及 stage 存储归属待 J03 定稿。
-stage 的域内划区或独立分配方式、共享映射须在实现前统一，不据此扩展已确认接口。
-建议持久 metadata、expertOut、yOut 继续使用独立 GM，不挤入临时通信区。
-相同窗口相对地址在两个算子视图中的用途可以不同；不需要为此新增阶段切换握手。
-Combine 内 stage 与 source 结果区需同时存活，不能彼此覆盖。
+两份 buffer 布局完全相同，起点相距实际通信容量的一半；复制范围包括两个控制区和整个共用数据区。
+每份 Combine 控制区只放一份 M2 完成 Flag；全域随两个整体 buffer 共两份，内部不再展开双 bank。
+Dispatch/Combine 的数据视图共享同一起点，容量取两种视图需求的最大值，不求和。
+Combine 内部中转区紧接其结果接收区，二者同时存活、互不覆盖。
 
-| 区域 | writer | reader | 容量依据 |
+| 区域 | writer / reader | 已确认容量或格式 |
+| --- | --- | --- |
+| Dispatch 控制区 | Dispatch 控制协议 owner | 独立于 Combine 控制区，包含本算子的 count/cumsum 及必要控制状态 |
+| Combine 控制区 | Combine 控制协议 owner | 内部设计提供完整字节预算，所有控制记录放在共用数据区之前 |
+| Dispatch 数据接收区 | source/relay 写、本卡 Dispatch 接收核读 | L*R*BS 个槽，单槽 T 含 DataAsFlag 与 Dispatch 包尾 |
+| Combine 最终结果接收区 | DIRECT/relay 写、原始 source 读 | BS*K 个槽，Sresult 为单 Token 完成 DataAsFlag 拼接后的完整槽大小 |
+| Combine 中转区 | 本卡写、本 Server relay 读 | L*R*BS=E*BS 行；原始未加权 BF16/FP16，每行 alignUp(H*2,512) 字节 |
+
+中转 slot 与 Dispatch 数据接收区的逻辑槽号保持一致（§4.2 Dslot），并非密排 expertOut row。
+即使实际 TokenNum/type3Count 很小，也不能缩减可被大 slot 索引的容量。
+中转区只需原始数据及行尾对齐，不附加路由、weight 或 DataAsFlag；可读时机由 Combine 控制协议保证。
+结果区按原始 tokenId*K+k 寻址，Flag/scale 等完整 wire 内容计入 Sresult，避免重复计费。
+
+DIRECT/partial 在同一次调用内必须使用统一可解码的结果协议；SourceWeight=1 不能用于判断
+payload 类型。DataAsFlag 的槽位形式已确认，具体通信量化/scale/数值格式归 CB03-02/CB04-03，
+不能将结果槽直接等同于含 Dispatch 包尾的 T。
+
+### 6.2 统一 offset 与容量公式
+
+以下 offset 均相对一份 buffer 的基址，A(x)=alignUp(x,512)；所有乘积和地址使用 uint64。
+Dctrl/Cctrl 使用 §6.4 的公共固定容量宏，基于支持上限需求预留余量；prefix 的额外一倍
+预留从 Dispatch 控制区既定预算中划出，不再次扩大主控制区。
+每个算子只校验自身内部布局不超过对应宏；数据区起点不依赖对方内部控制结构或当前分核。
+控制区内每张独立小表也必须有固定 offset 宏，按最大支持规模预留容量、起点 512B 对齐；
+实际有效长度可随输入变化，预留跨度及后续小表起点不随 BS/E/sendCoreNum/recvCoreNum 改变。
+
+```text
+stageRows = uint64(localMoeExpertNum) * rankSize * batchSize  // E*BS
+Sstage = A(uint64(H)*2)
+Sresult = 单个返回 Token 完成 DataAsFlag 拼接后的字节数
+
+Ddata = stageRows * T
+Crecv = uint64(BS) * K * Sresult
+Cstage = stageRows * Sstage
+Cdata = A(Crecv) + Cstage
+sharedDataBytes = A(max(Ddata, Cdata))
+
+Dctrl = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES  // 764KiB，单份 buffer
+Cctrl = TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES   // 52KiB，单份 buffer
+dispatchControlOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET  // 0
+combineControlOffset = TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET    // 764KiB
+sharedDataOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET           // 1MiB
+dispatchOffset = sharedDataOffset
+resultOffset = sharedDataOffset
+stageOffset = sharedDataOffset + A(Crecv)
+
+singleBufferBytes = A(sharedDataOffset + sharedDataBytes)  // 单份实际需求，不是 bank 步长
+bufferStride = CommArgs.peerMemBytes / 2
+bufferIndex = uint64(magic) % 2  // 沿用整体选窗，不另设 M2 bank
+bufferBase(rank,i) = peer[rank] + uint64(i)*bufferStride  // i=0,1
+EPRequiredBytes = 2*singleBufferBytes  // 两份有效布局总量，不含半区剩余空间
+```
+
+单份 sharedDataBytes 必须同时满足 Dispatch 和 Combine，包含两者实际访问的全部数据。
+Dispatch 仅计算自身实际收包区域 Ddata，不额外叠加 Combine 返回或中转预留。两个控制区大小由公共宏固定，
+双方共享数据起点，无需读取或重算对方控制区内部需求。数据视图容量仍按 max(Ddata,Cdata)
+验证，宏只解耦控制区；bank 步长统一从 CommArgs.peerMemBytes/2 取得。双方各自校验数据视图
+可容纳即可共同满足 max 约束，调用方做总预算时再汇总两种数据需求。
+
+容量条件按实际逻辑通信空间计算：
+
+```text
+actualBytes = CommArgs.peerMemBytes
+bufferStride = actualBytes / 2
+runtimeReservedBytes = TILEXR_FLAG_BUFF_BYTES  // 当前 4MiB，位于通信域尾部
+actualBytes % 1024 == 0  // 两个半区大小相同且各自 512B 对齐；当前按 MiB 分配满足
+bufferStride >= runtimeReservedBytes
+singleBufferBytes <= bufferStride
+singleBufferBytes <= bufferStride - runtimeReservedBytes
+// 两份布局相同，最后一项为统一约束；不足时报错，等于时允许
+```
+
+必须分别验证两个半区能容纳本份布局，不能只检查两份总量加一次 runtime 保留区。
+对于偶数容量，统一条件等价于 actualBytes >= 2*(singleBufferBytes+runtimeReservedBytes)。
+runtime 保留区实际只位于全域末尾；第一半区相同位置可留空，不新增第二份 runtime 分配。
+检查加法、乘法、对齐溢出以及最高访问字节；物理 allocation 为地址偏移而额外申请的空间
+不属于 CommArgs.peerMemBytes，不能计入 EP 可用容量。
+
+### 6.3 当前代码的 8GiB 分配事实与迁移边界
+
+当前 run.sh 的 Server Dedup chain 入口通过 TileXRCommInitRankMemoryDomainWithSize 显式申请
+8188MiB 数据容量，加 runtime 的 4MiB 后，CommArgs.peerMemBytes 为 **8192MiB=8GiB**。
+这不是所有通信域初始化 API 的默认值：无 size 参数的 MemoryDomain 默认 8MiB 数据加 4MiB
+保留区，共 12MiB；普通通信域默认总量为 2GiB。
+
+参考 [chain 分配入口](../../tests/ep/integration/test_tilexr_ep_server_dedup_chain.cpp)、
+[API 说明](../../src/include/tilexr_api.h)、[通信域分配及逻辑容量](../../src/comm/tilexr_comm.cpp)、
+[默认常量](../../src/include/tilexr_types.h)。
+peerMemBytes 已由 SyncCommArgs 随整个 CommArgs 拷贝到设备 GM，Dispatch kernel 已接收该指针；
+使用实际总容量的一半作为步长无需新增公开参数或 tiling 字段。
+[Dispatch Host 校验](../../src/ep/host/ep_memory_server_dedup_host.cpp)按实际半区容量检查
+自身布局，并校验 peer 基址 512B 对齐及地址溢出；不要求至少 8GiB。
+[布局计算](../../src/ep/host/ep_memory_server_dedup_layout.cpp)仅由 shape 推导需求，
+在取得 CommArgs 后验证实际容量。公开接口、GM tiling 和运行时分配接口不变。
+
+### 6.4 固定控制区宏及上限核算
+
+两个区域在公共布局头文件中以固定容量宏定义，Dispatch/Combine Host 和 kernel 共用。
+宏表示**单个整体通信 buffer 内**的占用空间，包含按支持上限预留的扩展容量。
+两份整体 buffer 各含一个同样大小的区域，预留空间不初始化为第二套活动 Flag。
+公共定义位于 `src/ep/common/ep_memory_server_dedup_buffer_layout.h`。
+
+```cpp
+#define TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES (764ULL * 1024ULL)
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES  (52ULL * 1024ULL)
+
+// 以下 offset 相对当前整体 buffer 的基址。
+#define TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET 0ULL
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET  (764ULL * 1024ULL)
+#define TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET      (1024ULL * 1024ULL)
+```
+
+**Dispatch：单份固定预算 764KiB=782336B，当前固定表区占用 574KiB。**
+E_max=1024、接收核数 C_max=48（Send 核 16/24/32/40/48，Recv=64−Send）。
+整张 prefix 副本表预留 `1024*4*48*2=393216B=384KiB`，额外一倍不增加副本数量或搬运量。
+其内部按实际 E 紧凑存放，每核副本间距 `alignUp(E*4,32)=E*4`；实际仅使用 `C*E*4` 字节。
+全 64 核参与 SendCnt 不改变接收侧 C×C 布局。
+
+| Dispatch 控制布局组成 | 固定预留字节数 | KiB |
+| --- | --- | --- |
+| 前置保留 | 12800 | 12.5 |
+| count 记录（1024*32） | 32768 | 32 |
+| cumsum 矩阵（48*48*32） | 73728 | 72 |
+| prefix 副本总区域（1024*4*48*2） | 393216 | 384 |
+| cumsum 完成 Flag 矩阵（48*48*32） | 73728 | 72 |
+| counter 1024B 对齐补齐 | 512 | 0.5 |
+| counter 保留，不读写 | 1024 | 1 |
+| 固定 stateBytes | 587776 | 574 |
+| 区尾扩展预留 | 194560 | 190 |
+| 单份宏容量 | 782336 | 764 |
+
+prefix 的一倍余量已包含在 764KiB 中，不对上述 574KiB 再乘二。BS/H/K 影响 UB 或数据区；
+控制表的有效范围随 E/C 改变，表起点不变。R≤128、E≤1024 等当前 Host 约束保留。
+
+**Combine：单份已设计控制需求最大 26KiB，乘二为 52KiB=53248B。**
+当前 M1b/M2 已明确的通信 GM 控制记录只有以下两部分；M2 按 recvCoreNum_max=48。
+
+| Combine 控制布局组成 | 上限计算 | 字节数 | KiB |
 | --- | --- | --- | --- |
-| Dispatch 控制区 | 既有 count/cumsum owner | 对应 Dispatch 核 | 现有布局 |
-| Dispatch 收包区 | source/relay 发送核 | 本卡 Dispatch 接收核 | E*BS*T |
-| Combine 控制区 | Combine | Combine | 内部设计给出控制区预算，联合布局预留 |
-| Combine stage | 本卡 | 本 Server relay 卡 | E*BS*Sstage |
-| Combine source 结果区 | DIRECT / relay 卡 | 原始 source 卡 | BS*K*Sresult，加独立 Flag/scale（若未计入 stride） |
-| Runtime 保留区 | runtime | runtime | 保持现有保留边界 |
+| 本卡 64 核完成记录 prepareDone | 8*64*sizeof(float) | 2048 | 2 |
+| Server ready 记录 serverReady | 48*512 | 24576 | 24 |
+| 单份最大控制需求 | 上述合计，均满足 512B 区域对齐 | 26624 | 26 |
+| 单份宏容量 | alignUp(2*26624,512) | 53248 | 52 |
 
-DIRECT 和 partial 可共用 source 结果槽规则 `slot=tokenId*K+k`；mask 保证有效返回身份互不重叠。
-五表没有返回 payload 的类型标签，SourceWeight=1 也不能区分真实权重 1 的 DIRECT 与 partial。
-因此同一次调用的 DIRECT/partial 必须使用统一可解码的结果槽协议；dtype、scale 与 stride 在 J05/J06
-确定，不能令 source 猜测格式。stage 格式可以与结果槽不同。
-
-布局预算分别为：
+Combine 已确认的内部固定 offset 见 §6.5：prepareDone 占 [0,2048)，serverReady 固定预留
+[2048,26624)，[26624,53248) 为上限场景下一倍余量。recvCoreNum 较小时只减少有效记录，
+仍保留 48 核容量，不压缩表区或移动预留区起点。
+M5 的 DataAsFlag 已计入数据槽，五表/输入输出、UB 工作缓冲、独立 GM tiling 和标准 profiling
+不重复计入通信控制区。M6 若后续设计新增通信 GM 状态，由 Combine 在该固定预算内安排并校验，
+不能把尚未设计的资源宣称为已经计入 26KiB；调整支持上限或超出宏时需重新核算公共布局契约。
 
 ```text
-Dbytes = DispatchControl + aligned(E*BS*T) + 必要保留
-Cbytes = CombineControl + aligned(E*BS*Sstage) + aligned(BS*K*Sresult)
-         + 未计入 stride 的 Flag/scale/scratch + 必要保留
+每份整体 buffer：Dispatch 控制区 764KiB + Combine 控制区 52KiB = 816KiB
+816KiB..1MiB：208KiB 留空，共用数据区统一从 1MiB（1048576B）开始
+两份整体 buffer：控制区总预留 1632KiB，加留空后数据前缀总计 2MiB
+DispatchControlUsedBytes <= TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES
+CombineControlUsedBytes  <= TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES
 ```
 
-各算子视图均需满足选中窗口尾部保留边界；目标不是在每窗机械预留 Dbytes+Cbytes。
-容量核算须包含对齐与保留区，并检查实际最高访问地址。
-offset 与地址乘积使用 uint64，Host 与 kernel 共用布局计算，调用方分配按同一契约更新。
+前置乘二是容量余量，不是内部双 buffer；M2 始终每个整体 buffer 仅一份活动完成 Flag。
+容量宏固定后，支持范围内改变 E、BS 或 Send/Recv 分核均不移动两个控制区边界及共用数据起点。
+
+### 6.5 控制小表的固定 offset
+
+**已确认：** 每个主控制区及其内部每张独立控制表均使用单独的编译期 offset 宏。
+主控制区 offset 相对当前整体 buffer 基址；内部表 offset 相对所属控制区基址，均以字节计。
+各表按当前支持上限固定预留，下一张表起点按“前一张表的固定最大区间末尾向上 512B 对齐”
+在设计/编译期确定，不使用当前调用的实际长度动态计算。
+
+Dispatch 固定宏均以前缀 `TILEXR_EP_SERVER_DEDUP_DISPATCH_` 命名：
+
+| 表 | offset 宏后缀 | 固定 offset（B） | 固定预留（B） |
+| --- | --- | --- | --- |
+| count | COUNT_OFFSET | 12800 | 32768 |
+| cumsum | CUMSUM_OFFSET | 45568 | 73728 |
+| prefix 总区域 | PREFIX_OFFSET | 119296 | 393216 |
+| ready | READY_OFFSET | 512512 | 73728 |
+| counter 保留 | COUNTER_OFFSET | 586752 | 1024 |
+| 区尾扩展预留 | RESERVED_OFFSET | 587776 | 194560 |
+
+各表另有同名 `*_BYTES` 宏。offset 相对 Dispatch 控制区起点，全部 512B 对齐。
+count 记录仍为 32B；两个矩阵仍按实际 C×C 紧凑排列；prefix 副本仍按实际 E*4 间隔排列。
+只固定整表起点和最大预留区间，不要求每核副本独立固定 offset。ready 必须排在整个 384KiB
+prefix 预留之后，不能占用 prefix 的扩展余量。
+实现的 CountLayout 为兼容内部寻址，cumsumOffset/prefixOffset/cumsumFlagOffset 仍相对 cntOffset；
+构造时由公共绝对表 offset 相减得到，禁止将两种相对基址混用。
+
+
+```cpp
+// 以下 offset 相对 Combine 控制区起点；所有容量按支持上限固定。
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_OFFSET 0ULL
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_BYTES  (2ULL * 1024ULL)
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET (2ULL * 1024ULL)
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_BYTES  (24ULL * 1024ULL)
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_RESERVED_OFFSET     (26ULL * 1024ULL)
+#define TILEXR_EP_SERVER_DEDUP_COMBINE_RESERVED_BYTES      (26ULL * 1024ULL)
+```
+
+| Combine 区域 | 固定 offset | 固定预留跨度 | 实际有效范围 |
+| --- | --- | --- | --- |
+| prepareDone[8][64] | 0B | 2048B | 8 个通知核各读取 64 个 float，固定 2048B |
+| serverReady | 2048B | 24576B | 前 recvCoreNum*512B 有效，最多 48 核 |
+| 扩展预留 | 26624B | 26624B | 首版不作为第二份 Flag；后续新增表也必须独立定义固定 offset |
+
+三者起点均为 512B 的整数倍；整个 Combine 控制区固定为 53248B。
+prepareDone 是一张完整的 [8][64] 表，表内 8 行继续使用已确认的 256B 行距，
+不因整表起点要求 512B 对齐而改变原 DataCopyPad 的跨行步长。serverReady 表内每核块仍为 512B。
+
+```text
+combineBase(target,i) = peer[target] + uint64(i)*(peerMemBytes/2)
+                     + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET
+prepareDoneBase = combineBase + TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_OFFSET
+serverReadyBase = combineBase + TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET
+```
+
+例如 recvCoreNum 从 8 改为 48，serverReady 有效字节从 4096 增至 24576，但其起点始终为
+2048，扩展预留起点始终为 26624。BS、sendCoreNum、recvCoreNum 变化不移动控制表；
+实际写入/监听/清理仍按有效任务范围执行，固定预留不意味着读取未参与核的 Flag。
+
+实现验收应约束每个 offset%512==0、各表固定区间不重叠、实际使用量不超过本表固定容量、
+末表结束不超过所属控制区（Dispatch 764KiB、Combine 52KiB），且所有 Host/kernel 使用同一份宏定义。peer 基址及半区步长也须满足
+512B 对齐，才能保证实际 GM 起始地址对齐。只有调整公共支持上限或显式升级布局时才允许修改宏，
+不能用运行时输入改变宏所定义的边界。初始化/清理的完成依赖仍在 Combine 各模块单独收口。
 
 ## 7. 共同契约状态与文档归属
 
@@ -579,7 +785,7 @@ offset 与地址乘积使用 uint64，Host 与 kernel 共用布局计算，调�
 | --- | --- | --- |
 | J01 | 已确认 | expert/q 与类型 3 uint32 offset 定位同一逻辑槽，容量 E*BS |
 | J02 | 已确认 | 五表语义、有效范围、行 stride；同步 Dispatch 生产与调用方分配 |
-| J03 | 联合契约待收口 | 新中转区的存储归属、共享映射和窗口预算；Combine 给出自身内部区域需求 |
+| J03 | 布局已确认，待实现 | 两个控制区＋按 max(Ddata,Cdata) 分配的共用数据区；整体双 buffer 按实际容量的一半分窗、每窗一份 M2 Flag，stage 接在 Combine 接收区之后，按实际分配校验容量；详见 §6 |
 | J04 | 已迁出 | 分核、init、阶段和任务推进统一在 Combine 独立设计维护 |
 | J05 | 接口与内部各自维护 | 本文维护输入 dtype/weight 语义；内部累加、通信格式和数值规则在 Combine 设计维护 |
 | J06 | 已迁出 | Flag 发布/观察/清理与在途资源完成统一在 Combine 设计维护 |
@@ -602,6 +808,11 @@ Dispatch 的五表生产及 Host/替身验证已实现；Combine 设计与实现
 
 Flag 可见性与多引擎流水需要设备证据；CPU/reference 和编译不能证明跨卡数据可读。
 联合测试遵循用户给定的模型调度边界，不另加跨轮重叠要求。
+
+维护要点：两个公共宏固定控制区边界，双方分别校验自身使用量；不能拿旧预留容量代替实际布局上限再翻倍。
+数据起点固定为 1MiB（两控制区之后留空 208KiB），数据容量按双方视图最大值核算，bank 步长统一取 peerMemBytes/2。
+按半区分窗必须检查每份布局的容量及末尾保留区，不能仅用两份有效布局字节总和判断可容纳。
+8GiB 是当前 chain 的显式逻辑容量，不能当成通用 API 默认值，也不能把 runtime 保留区算作可用数据空间。
 
 维护要点：成员主动读取契约需同时明确“哪张卡存、双方如何定位、何时可读”；
 复用边界按已确认的模型契约。位置字段一旦变化，metadata 写出、Host 容量、调用方分配、

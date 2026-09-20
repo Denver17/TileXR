@@ -31,7 +31,7 @@ public:
         expertTokenNumsType_ = expertTokenNumsType;
         useAllCoreCount_ = bs < kEpServerDedupAllCoreCountBsThreshold;
         layout_ = TileXREpServerDedupCountLayout(experts);
-        stateOffset_ = TileXREpServerDedupWindowOffset(magic) + layout_.cntOffset;
+        stateOffset_ = TileXREpServerDedupWindowOffset(magic, args_->peerMemBytes) + layout_.cntOffset;
         GM_ADDR localState = args_->peerMems[epRankId_] + stateOffset_;
         windowInstatusFp32Tensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));
         selfRankWinInGMTensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(localState));
