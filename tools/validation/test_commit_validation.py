@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Combine C1 delivery gate: build provenance, exact markers and failure reports."""
+"""Combine delivery gate: build provenance, exact markers and failure reports."""
 
 from contextlib import redirect_stderr, redirect_stdout
 import io
@@ -15,6 +15,9 @@ import workflow
 
 
 class CombineCommitValidationTests(unittest.TestCase):
+    checkpoint = workflow.COMBINE_ABI_HOST_CHECKPOINT
+    mode = "host"
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="tilexr-combine-c1-")
         self.addCleanup(temporary.cleanup)
@@ -22,12 +25,13 @@ class CombineCommitValidationTests(unittest.TestCase):
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
         environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
-                           TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_ABI_HOST_CHECKPOINT,
-                           TILEXR_VALIDATION_BUILD_MODE="host")
+                           TILEXR_VALIDATION_CHECKPOINT=self.checkpoint,
+                           TILEXR_VALIDATION_BUILD_MODE=self.mode)
         patch = mock.patch.dict(os.environ, environment, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
-        self.names = sorted(workflow.COMBINE_ABI_HOST_TESTS)
+        self.required = workflow.COMBINE_TESTS[self.checkpoint]
+        self.names = sorted(self.required)
         self.commands = []
         self.behavior = "pass"
         self.real_execute = workflow.execute
@@ -35,24 +39,49 @@ class CombineCommitValidationTests(unittest.TestCase):
     def execute(self, argv, log, **kwargs):
         args = [str(arg) for arg in argv]
         self.commands.append(args)
-        work = self.root / "build/validation-combine-c1/host"
+        build = self.root / "build" / workflow.validation_directory(self.checkpoint)
+        work = build / "host"
         if args[0] not in ("cmake", "ctest", "g++"):
             return self.real_execute(argv, log, **kwargs)
         if self.behavior == "configure-fails" and "-S" in args:
             return self.real_execute([sys.executable, "-c", "raise SystemExit(7)"], log, **kwargs)
-        if "--build" in args:
-            self.assertEqual(set(args[args.index("--target") + 1:]), workflow.COMBINE_ABI_HOST_TESTS)
+        if "--build" in args and str(work) in args:
+            self.assertEqual(set(args[args.index("--target") + 1:]), self.required)
             work.mkdir(parents=True, exist_ok=True)
             for name in self.names:
-                marker = "EP_SERVER_DEDUP_COMBINE_ABI_HOST_PASS test=" + name.rsplit("combine_", 1)[1]
+                marker = ("EP_SERVER_DEDUP_COMBINE_ABI_HOST_PASS test="
+                          if name in workflow.COMBINE_ABI_HOST_TESTS else
+                          "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_PASS test=") + name.rsplit("combine_", 1)[1]
                 if self.behavior == "wrong-marker":
                     marker = marker.replace("COMBINE_", "")
                 program = work / name
-                program.write_text("#!/usr/bin/env python3\nprint(" + repr(marker) + ")\n", encoding="utf-8")
+                content = "#!/usr/bin/env python3\nimport os\n"
+                if name == workflow.COMBINE_REGISTRATION_TEST:
+                    content += ("assert os.environ['TILEXR_EP_SERVER_DEDUP_TEST_DEVICE'] == '3'\n"
+                                + "assert os.environ['LD_LIBRARY_PATH'].split(':')[0] == "
+                                + repr(str(self.root / "install/validation-combine-c2/lib")) + "\n")
+                    if self.behavior == "registration-skip":
+                        content += "raise SystemExit(77)\n"
+                    if self.behavior == "registration-no-marker":
+                        marker = "registration skipped: no A5"
+                content += "print(" + repr(marker) + ")\n"
+                program.write_text(content, encoding="utf-8")
                 program.chmod(0o755)
+        if "--install" in args:
+            self.assertEqual(args[-1], str(build / "production"))
+            artifacts = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
+            artifacts += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o" for name in (
+                "dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup",
+                "combine_memory_server_dedup")]
+            if self.behavior == "missing-artifact":
+                artifacts.pop()
+            for artifact in artifacts:
+                target = build / "install" / artifact
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text("production fixture\n")
         output = "fixture command completed\n"
         if args[0] == "ctest":
-            self.assertIn("^" + workflow.COMBINE_ABI_HOST_CHECKPOINT + "$", args)
+            self.assertIn("^(" + "|".join(sorted(self.required)) + ")$", args)
             output = json.dumps({"tests": [{"name": name, "command": [str(work / name)]}
                                            for name in self.names]})
         Path(log).parent.mkdir(parents=True, exist_ok=True)
@@ -62,6 +91,7 @@ class CombineCommitValidationTests(unittest.TestCase):
     def run_checkpoint(self):
         output = io.StringIO()
         with mock.patch.object(workflow, "require_tools"), \
+                mock.patch.object(workflow, "runtime_check"), \
                 mock.patch.object(workflow, "execute", side_effect=self.execute), \
                 mock.patch.object(sys, "argv", ["workflow.py", "commit-validate"]), \
                 redirect_stdout(output), redirect_stderr(output):
@@ -71,7 +101,7 @@ class CombineCommitValidationTests(unittest.TestCase):
         self.assertFalse((self.root / "run/validation/.operation.lock").exists())
         return code, workflow.read_json(reports[0]), output.getvalue()
 
-    def test_success_runs_exact_three_tests_and_preserves_dispatch_installation(self):
+    def test_success_runs_checkpoint_tests_and_preserves_prior_installation(self):
         dispatch = self.root / "install/validation/manifest.json"
         receipt = self.root / "run/validation/sync.json"
         for path in (dispatch, receipt):
@@ -122,6 +152,85 @@ class CombineCommitValidationTests(unittest.TestCase):
         self.assertEqual(code, workflow.FAILURE_CODES["BUILD_FAILED"])
         self.assertTrue(summary["errors"][0]["timeout"])
         self.assertEqual(self.commands, [])
+
+
+class CombineEmptyKernelCommitValidationTests(CombineCommitValidationTests):
+    checkpoint = workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT
+    mode = "production"
+
+    def setUp(self):
+        super().setUp()
+        os.environ["TILEXR_EP_SERVER_DEDUP_TEST_DEVICE"] = "3"
+
+    def test_success_runs_checkpoint_tests_and_preserves_prior_installation(self):
+        # Override C1's package expectations: C2 must include installed production
+        # artifacts and execute registration, while preserving earlier packages.
+        retained = [self.root / name for name in (
+            "install/validation/manifest.json", "install/validation-combine-c1/manifest.json",
+            "run/validation/sync.json")]
+        for path in retained:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("retained evidence")
+        code, summary, output = self.run_checkpoint()
+        self.assertEqual(code, 0, output)
+        self.assertEqual(summary["expected_tests"], sorted(workflow.COMBINE_EMPTY_KERNEL_TESTS))
+        self.assertEqual(len(summary["tests"]), 5)
+        self.assertEqual(summary["device"], "3")
+        self.assertEqual(summary["checkpoint"], self.checkpoint)
+        self.assertEqual(summary["validation_timeout_seconds"], 180)
+        self.assertEqual(summary["per_test_timeout_seconds"], 120)
+        manifest = workflow.verify_build(workflow.Config("commit-validate"))
+        self.assertEqual(manifest["server_dedup_combine_contract"], workflow.COMBINE_ABI)
+        self.assertIn("lib/tilexr/kernels/tilexr_ep_combine_memory_server_dedup_kernel.o", manifest["artifacts"])
+        self.assertTrue(any("-DBUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST=ON" in argv
+                            for argv in self.commands))
+        self.assertTrue(any(argv[-2:] == ["--target", "tilexr-ep"] for argv in self.commands))
+        self.assertFalse(any(argv[0] == "ssh" for argv in self.commands))
+        for path in retained:
+            self.assertEqual(path.read_text(), "retained evidence")
+
+    def test_missing_production_combine_artifact_fails_build(self):
+        self.behavior = "missing-artifact"
+        code, summary, _ = self.run_checkpoint()
+        self.assertEqual(code, workflow.FAILURE_CODES["BUILD_FAILED"])
+        self.assertEqual(summary["tests"], [])
+        self.assertIn("combine_memory_server_dedup", summary["errors"][0]["message"])
+
+    def test_registration_cannot_be_skipped(self):
+        self.behavior = "registration-skip"
+        code, summary, _ = self.run_checkpoint()
+        self.assertEqual(code, workflow.FAILURE_CODES["EXIT_FAILED"])
+        self.assertEqual(summary["errors"][0]["returncode"], 77)
+        self.assertEqual(summary["errors"][0]["test"], workflow.COMBINE_REGISTRATION_TEST)
+
+    def test_zero_exit_without_registration_marker_fails(self):
+        self.behavior = "registration-no-marker"
+        code, summary, _ = self.run_checkpoint()
+        self.assertEqual(code, workflow.FAILURE_CODES["LOG_PARSE_FAILED"])
+        self.assertEqual(summary["errors"][0]["test"], workflow.COMBINE_REGISTRATION_TEST)
+
+    def test_host_mode_cannot_substitute_for_c2(self):
+        with mock.patch.dict(os.environ, TILEXR_VALIDATION_BUILD_MODE="host"):
+            with self.assertRaisesRegex(ValueError, "production"):
+                workflow.Config("commit-validate")
+
+    def test_device_id_is_validated_before_registration_launch(self):
+        os.environ["TILEXR_EP_SERVER_DEDUP_TEST_DEVICE"] = "-1"
+        code, summary, _ = self.run_checkpoint()
+        self.assertEqual(code, workflow.FAILURE_CODES["CONFIG_FAILED"])
+        self.assertEqual(summary["errors"][0]["test"], workflow.COMBINE_REGISTRATION_TEST)
+        self.assertIn("device ID", summary["errors"][0]["message"])
+
+    def test_stale_contract_is_rejected(self):
+        code, _, output = self.run_checkpoint()
+        self.assertEqual(code, 0, output)
+        config = workflow.Config("commit-validate")
+        path = config.install / "manifest.json"
+        manifest = workflow.read_json(path)
+        manifest["server_dedup_combine_contract"]["launch_bytes"] = 80
+        workflow.write_json(path, manifest)
+        with self.assertRaisesRegex(ValueError, "88B"):
+            workflow.verify_build(config)
 
 
 if __name__ == "__main__":

@@ -167,13 +167,22 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 
+set(TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP
+    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_combine_memory_server_dedup_kernel.o")
+tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp"
+    "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_tiling.h")
+
 set(TILEXR_EP_KERNEL_TARGETS
+    tilexr_ep_combine_memory_server_dedup_kernel
     tilexr_ep_dispatch_memory_server_dedup_kernel
     tilexr_ep_dispatch_kernel
     tilexr_ep_combine_kernel
     tilexr_ep_dispatch_memory_kernel
     tilexr_ep_combine_memory_kernel)
 set(TILEXR_EP_KERNEL_OBJECTS
+    "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
     "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
     "${TILEXR_EP_DISPATCH_KERNEL_OP}"
     "${TILEXR_EP_COMBINE_KERNEL_OP}"

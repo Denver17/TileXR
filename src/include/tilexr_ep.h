@@ -33,8 +33,9 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
     int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream);
 
-// Server Dedup Combine: A5 only, FP16/BFP16, quantMode=0. Phase-one C1
-// validates the interface but returns NOT_SUPPORT until C2 adds the empty kernel.
+// Server Dedup Combine: A5 only, FP16/BFP16, quantMode=0, fixed 64 AIV.
+// Phase one submits an empty kernel; success means asynchronous submission,
+// not a numerical result. It leaves all tensors and communication buffers unchanged.
 // C=R*bs*min(topK,moeExpertNum/R); expertOut[C,h], assistInfoForCombine[C,3],
 // tokenType[C], relayReadIndex[C,topK,2] (raw 32-bit pairs), sourceMask[bs],
 // expertScales[bs,topK]. sendCounts is the full int32[moeExpertNum] prefix;

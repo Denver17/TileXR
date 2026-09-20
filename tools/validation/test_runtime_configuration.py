@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -18,7 +19,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         repo = Path(__file__).resolve().parents[2]
-        for name in ("set_env.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "run_host_validation.sh", "tools/validation/measurements.py",
+        for name in ("set_env.sh", "run_commit_validation.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "run_host_validation.sh", "tools/validation/measurements.py",
                      "tools/ep/msprof_kernel_stats.py", "tools/validation/run_summary.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -189,6 +190,37 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             if expected_code:
                 self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
                 self.assertEqual(len(result.stdout.splitlines()), 1)
+
+    def test_commit_entry_selects_c2_and_configured_device_without_hostfile(self):
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import os,json,sys; print(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n")
+        cann = self.root / "cann-env.sh"
+        cann.write_text("# environment fixture\n")
+        with self.local.open("a") as local:
+            local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n"
+                        "TILEXR_EP_SERVER_DEDUP_TEST_DEVICE=5\n")
+        before = self.local.read_bytes()
+        result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
+                                env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = json.loads(result.stdout.splitlines()[-1])
+        self.assertEqual(values["action"], "commit-validate")
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT)
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "production")
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_ACTION"], "commit-validate")
+        self.assertEqual(values["env"]["TILEXR_EP_SERVER_DEDUP_TEST_DEVICE"], "5")
+        self.assertFalse((self.root / "hostfile").exists())
+        self.assertEqual(self.local.read_bytes(), before)
+
+    def test_commit_environment_failure_never_runs_workflow(self):
+        (self.root / "tools/validation/workflow.py").write_text("raise AssertionError('must not run')\n")
+        result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
+            env=dict(self.env, TILEXR_CANN_ENV_SCRIPT=str(self.root / "missing-cann-env.sh")),
+            capture_output=True, text=True, timeout=10)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("COMMIT_VALIDATION_FAIL", result.stdout + result.stderr)
+        self.assertIn("type=CONFIG_FAILED", result.stdout + result.stderr)
+        self.assertNotIn("AssertionError", result.stdout + result.stderr)
 
     def test_build_default_selects_dispatch_only_for_production(self):
         (self.root / "tools/validation/workflow.py").write_text(

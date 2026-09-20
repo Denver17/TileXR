@@ -13,6 +13,7 @@ enable_testing()
 
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
+option(BUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST "Build installed A5 Combine empty-kernel consumer" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST "Build installed A5 server dedup registration consumer" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST "Build installed A5 server dedup chain consumer" OFF)
 option(BUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST "Enable the installed 4 GiB boundary test in the chain consumer" OFF)
@@ -290,8 +291,8 @@ foreach(test_name IN ITEMS protocol layout host_validation host_profile_validati
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 
-# Combine C1 reuses the public Host path. Only host_validation replaces launch;
-# public_abi links the production C1 no-launch implementation.
+# Combine public ABI and Host validation replace launch; C2 separately tests
+# the production launcher and installed A5 artifact.
 set(TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES
     ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_host.cpp
@@ -304,8 +305,7 @@ add_executable(test_tilexr_ep_server_dedup_combine_host_validation
     ${TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES})
 add_executable(test_tilexr_ep_server_dedup_combine_public_abi
     unit/test_tilexr_ep_server_dedup_combine_public_abi.cpp
-    ${TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES}
-    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_launch.cpp)
+    ${TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES})
 foreach(test_name IN ITEMS layout host_validation public_abi)
     set(test_target test_tilexr_ep_server_dedup_combine_${test_name})
     target_include_directories(${test_target} PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
@@ -413,11 +413,22 @@ add_executable(test_tilexr_ep_kernel_launch
     unit/test_tilexr_ep_kernel_launch.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_kernel_launch.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_launch.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_launch.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_memory_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_dispatch_memory_host.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
 )
+
+add_executable(test_tilexr_ep_server_dedup_combine_launch
+    $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
+target_include_directories(test_tilexr_ep_server_dedup_combine_launch BEFORE PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS})
+target_compile_definitions(test_tilexr_ep_server_dedup_combine_launch PRIVATE TILEXR_EP_TEST_COMBINE_C2=1)
+add_test(NAME test_tilexr_ep_server_dedup_combine_launch COMMAND test_tilexr_ep_server_dedup_combine_launch)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_launch PROPERTIES
+    LABELS ep-sdedup-combine-p1-empty-kernel TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_combine_launch RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_ep_kernel_launch_profile
     $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
@@ -571,6 +582,27 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST)
     set_tests_properties(test_tilexr_ep_server_dedup_registration PROPERTIES
         LABELS ep-sdedup-p1-empty-kernel TIMEOUT 120)
     install(TARGETS test_tilexr_ep_server_dedup_registration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()
+
+if(BUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST)
+    find_library(TILEXR_EP_COMBINE_DEDUP_INSTALLED_LIB tilexr-ep
+        PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
+    add_executable(test_tilexr_ep_server_dedup_combine_registration
+        integration/test_tilexr_ep_server_dedup_combine_registration.cpp)
+    target_include_directories(test_tilexr_ep_server_dedup_combine_registration PRIVATE
+        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}"
+        "${TILEXR_ROOT}/src/ep/host" "${TILEXR_ROOT}/src/ep/common"
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/include")
+    target_link_directories(test_tilexr_ep_server_dedup_combine_registration PRIVATE
+        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64" "${ASCEND_DRIVER_PATH}/lib64/driver")
+    target_link_libraries(test_tilexr_ep_server_dedup_combine_registration PRIVATE
+        ${TILEXR_EP_COMBINE_DEDUP_INSTALLED_LIB} ascendcl ${CMAKE_DL_LIBS})
+    set_target_properties(test_tilexr_ep_server_dedup_combine_registration PROPERTIES
+        SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")
+    add_test(NAME test_tilexr_ep_server_dedup_combine_registration COMMAND test_tilexr_ep_server_dedup_combine_registration)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_registration PROPERTIES
+        LABELS ep-sdedup-combine-p1-empty-kernel TIMEOUT 120)
+    install(TARGETS test_tilexr_ep_server_dedup_combine_registration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)

@@ -13,11 +13,14 @@
 #include "ep_host.h"
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_launch.h"
+#include "ep_memory_server_dedup_combine_launch.h"
+#include "server_dedup_combine_test_fixture.h"
 #include "runtime/kernel.h"
 #include "tilexr_api.h"
 #include "tilexr_kernel_binary_loader.h"
 #include "tilexr_types.h"
 #include "../../../src/comm/tilexr_kernel_tiling_cache.h"
+#include "../../../src/comm/tilexr_internal.h"
 
 namespace {
 
@@ -258,6 +261,89 @@ void TestKernelTilingCache()
         gTilingCopyResult = ACL_SUCCESS;
     }
     Check(gDeviceTilings.empty(), "destructor releases unpublished allocations too");
+}
+
+void TestCombineServerDedupLaunch()
+{
+    ResetCapture();
+    auto params = CombineTest::ValidParams();
+    TileXR::CommArgs comm {};
+    CombineTest::InitComm(comm);
+    const auto context = MakeContext(&comm);
+    TileXREp::EpMemoryServerDedupCombineLayout layout {};
+    auto launch = [&]() { return TileXREp::TileXREpLaunchCombineMemoryServerDedupKernel(params, context, layout); };
+    gSocName = "Ascend910B3";
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_SUPPORT && gMagicCalls == 0 && gLoadedFiles.empty(),
+        "Combine refuses unsupported SoC without side effects");
+    gSocName = "Ascend950PR_9589";
+    gDeviceResult = 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "Combine device query failure");
+    gDeviceResult = ACL_SUCCESS;
+    for (int64_t cores : {int64_t(0), int64_t(UINT32_MAX) + 1}) {
+        gVectorCores = cores;
+        Check(launch() == TileXR::TILEXR_ERROR_INTERNAL, "Combine rejects invalid vector count");
+    }
+    gVectorCores = 63;
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_SUPPORT, "Combine needs 64 AIVs");
+    gVectorCores = 64;
+    gLoadResult = false;
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_INITIALIZED, "missing Combine binary is an error");
+    gLoadResult = true;
+    gBinaryRegisterResult = -1;
+    Check(launch() == TileXR::TILEXR_ERROR_MKIRT, "Combine binary registration error");
+    gBinaryRegisterResult = RT_ERROR_NONE;
+    gFunctionRegisterResult = -1;
+    Check(launch() == TileXR::TILEXR_ERROR_MKIRT && gBinaryUnregisterCalls == 1,
+        "Combine failed function registration rolls back");
+    Check(gMagicCalls == 0 && gTilingAllocations == 0 && gLaunches.empty(), "registration failures cannot consume magic");
+    ResetCapture(); gVectorCores = 64;
+    gTilingMallocResult = 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL && gMagicCalls == 0, "tiling allocation fails before magic");
+    Check(gLoadedFiles == std::vector<std::string>{"tilexr_ep_combine_memory_server_dedup_kernel.o"} &&
+        gRegisteredEntries == std::vector<std::string>{"tilexr_ep_combine_memory_server_dedup_kernel"},
+        "Combine registers its own artifact and signature independently from Dispatch");
+    gTilingMallocResult = ACL_SUCCESS; gTilingCopyResult = 1;
+    Check(launch() == TileXR::TILEXR_ERROR_INTERNAL && gMagicCalls == 0 && gLaunches.empty(),
+        "tiling initialization fails before magic or submission");
+    gTilingCopyResult = ACL_SUCCESS; gMagicResult = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    Check(launch() == TileXR::TILEXR_ERROR_NOT_INITIALIZED && gLaunches.empty(), "Combine magic failure blocks launch");
+    ResetCapture(); gVectorCores = 96;
+    Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches.size() == 1, "Combine submits on larger A5 device");
+    if (gLaunches.empty()) return;
+    const std::vector<uint64_t> expected {reinterpret_cast<uint64_t>(context.devArgs), 0x100000, 0x200004,
+        0x300004, 0x400004, 0x600004, 0x700004, 0x800004, 0x500002,
+        gLaunches[0].args[9], static_cast<uint64_t>(kNextMagic)};
+    std::vector<uint8_t> tiling(16, 0);
+    tiling[0] = 4; tiling[4] = 13; tiling[8] = 192; tiling[10] = 6;
+    tiling[11] = static_cast<uint8_t>(TileXR::TILEXR_DATA_TYPE_BFP16);
+    Check(gLaunches[0].name == "tilexr_ep_combine_memory_server_dedup_kernel" &&
+        gLaunches[0].blockDim == 64 && gLaunches[0].stream == params.combine.stream &&
+        gLaunches[0].submittedBytes == 88 && gLaunches[0].args == expected && gLaunches[0].tiling == tiling,
+        "Combine 88B ABI, full prefix pointer, 16B tiling and all reserved bytes are correct");
+    Check(gMagicCalls == 1 && gBinaryRegisterCalls == 0 && gTilingAllocations == 1 && gTilingCopies == 1,
+        "one magic, immutable tiling and cached independent registration");
+    const auto firstAddress = gLaunches[0].args[9];
+    for (int i = 0; i < 3; ++i) Check(launch() == TileXR::TILEXR_SUCCESS, "same-shape repeat launch");
+    Check(gLaunches.back().args[9] == firstAddress && gTilingAllocations == 1 && gMagicCalls == 4,
+        "same-shape Combine reuses immutable tiling and consumes one magic per submission");
+    params.combine.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
+    params.combine.bs = 65536; params.combine.h = 131072; params.combine.topK = 32; params.combine.moeExpertNum = 1024;
+    Check(launch() == TileXR::TILEXR_SUCCESS, "wide shapes and FP16 are not narrowed prematurely");
+    std::vector<uint8_t> wide(16, 0);
+    wide[2] = 1; wide[6] = 2; wide[9] = 4; wide[10] = 32; wide[11] = static_cast<uint8_t>(TileXR::TILEXR_DATA_TYPE_FP16);
+    Check(gLaunches.back().tiling == wide && gLaunches.back().args[9] != firstAddress &&
+        std::memcmp(reinterpret_cast<void *>(firstAddress), tiling.data(), tiling.size()) == 0,
+        "new shape leaves earlier asynchronous Combine tiling unchanged");
+    TileXREp::EpServerDedupTilingData dispatchTiling {};
+    GM_ADDR dispatchAddress = nullptr;
+    Check(TileXRCommGetKernelTiling(params.combine.comm, &dispatchTiling, sizeof(dispatchTiling), &dispatchAddress) ==
+        TileXR::TILEXR_SUCCESS && reinterpret_cast<uint64_t>(dispatchAddress) != gLaunches.back().args[9],
+        "same communicator separates Dispatch and Combine tiling snapshots");
+    gLaunchResult = -1;
+    const int magicCalls = gMagicCalls;
+    Check(launch() == TileXR::TILEXR_ERROR_MKIRT && gMagicCalls == magicCalls + 1,
+        "runtime submit failure is propagated after exactly one magic allocation");
+    Check(gProfilingCalls == 0, "C2 never touches Dispatch profiling reservation");
 }
 
 void TestServerDedupCompileTimeLaunch()
@@ -603,6 +689,7 @@ bool LoadKernelBinary(const void *, const char *fileName, KernelBinaryView *bina
     if (name != "tilexr_ep_dispatch_kernel.o" && name != "tilexr_ep_combine_kernel.o" &&
         name != "tilexr_ep_dispatch_memory_kernel.o" &&
         name != "tilexr_ep_combine_memory_kernel.o" &&
+        name != "tilexr_ep_combine_memory_server_dedup_kernel.o" &&
         name != "tilexr_ep_dispatch_memory_server_dedup_kernel.o") {
         return false;
     }
@@ -762,6 +849,16 @@ rtError_t rtKernelLaunchWithFlagV2(const void *signature, uint32_t blockDim,
             if (gDeviceTilings.count(deviceTiling) == 0U) return -1;
             capture.tiling.assign(deviceTiling, deviceTiling + 32U);
         }
+        if (capture.name == "tilexr_ep_combine_memory_server_dedup_kernel") {
+            Check(argsInfo->argsSize == 88U, "only 88B Combine arguments are submitted");
+            if (argsInfo->argsSize != 88U) return -1;
+            const auto *fields = static_cast<const uint64_t *>(argsInfo->args);
+            auto *deviceTiling = reinterpret_cast<uint8_t *>(fields[9]);
+            Check(gDeviceTilings.count(deviceTiling) == 1U && gDeviceTilings[deviceTiling] == 16U,
+                "Combine has a separate 16B GM tiling allocation");
+            if (gDeviceTilings.count(deviceTiling) == 0U) return -1;
+            capture.tiling.assign(deviceTiling, deviceTiling + 16U);
+        }
         const uint64_t *fields = static_cast<const uint64_t *>(argsInfo->args);
         capture.args.assign(fields, fields + fieldCount);
     }
@@ -780,8 +877,13 @@ int main()
     TestCombineMemoryRuntimeLaunch();
     TestKernelTilingCache();
     TestServerDedupCompileTimeLaunch();
+    TestCombineServerDedupLaunch();
     ResetCapture();
+#if defined(TILEXR_EP_TEST_COMBINE_C2)
+    std::cout << "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_" << (gFailures == 0 ? "PASS" : "FAIL")
+#else
     std::cout << "EP_SERVER_DEDUP_EMPTY_KERNEL_" << (gFailures == 0 ? "PASS" : "FAIL")
+#endif
               << " test=launch" << std::endl;
     return gFailures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

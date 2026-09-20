@@ -1,5 +1,6 @@
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_launch.h"
+#include "ep_memory_server_dedup_combine_launch.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -36,6 +37,9 @@ constexpr char kCombineMemoryKernelName[] = "tilexr_ep_combine_memory_kernel";
 constexpr char kServerDedupKernelFile[] = "tilexr_ep_dispatch_memory_server_dedup_kernel.o";
 constexpr char kServerDedupKernelName[] = "tilexr_ep_dispatch_memory_server_dedup_kernel";
 
+constexpr char kCombineServerDedupKernelFile[] = "tilexr_ep_combine_memory_server_dedup_kernel.o";
+constexpr char kCombineServerDedupKernelName[] = "tilexr_ep_combine_memory_server_dedup_kernel";
+
 struct KernelRegistrationState {
     std::mutex mutex;
     bool registered = false;
@@ -63,6 +67,8 @@ KernelRegistrationState gCombineMemoryRegistration;
 uint8_t gCombineMemoryKernelStub = 0;
 KernelRegistrationState gServerDedupRegistration;
 uint8_t gServerDedupKernelStub = 0;
+KernelRegistrationState gCombineServerDedupRegistration;
+uint8_t gCombineServerDedupKernelStub = 0;
 
 bool HasPrefix(const char *value, const char *prefix)
 {
@@ -409,6 +415,21 @@ int TileXREpSubmitDispatchMemoryServerDedupKernel(EpServerDedupKernelArgs &args,
     // the 120B kernel arguments; no inline tiling payload or Runtime relocation.
     return LaunchRegisteredKernel(&gServerDedupKernelStub, blockDim, stream,
         &args, sizeof(args), kServerDedupKernelName);
+}
+
+int TileXREpRegisterCombineMemoryServerDedupKernel()
+{
+    if (!TileXREpIsA5Soc()) { return TileXR::TILEXR_ERROR_NOT_SUPPORT; }
+    const KernelEntry entry {kCombineServerDedupKernelName, &gCombineServerDedupKernelStub};
+    return EnsureKernelRegistered(gCombineServerDedupRegistration, kCombineServerDedupKernelFile,
+        &entry, 1U, &gCombineServerDedupKernelStub);
+}
+
+int TileXREpSubmitCombineMemoryServerDedupKernel(EpServerDedupCombineKernelArgs &args,
+    uint32_t blockDim, aclrtStream stream)
+{
+    return LaunchRegisteredKernel(&gCombineServerDedupKernelStub, blockDim, stream,
+        &args, sizeof(args), kCombineServerDedupKernelName);
 }
 
 int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpHostLaunchContext &context)

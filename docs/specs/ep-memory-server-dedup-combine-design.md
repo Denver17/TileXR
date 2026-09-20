@@ -142,7 +142,7 @@ Host 在提交 kernel 前拒绝启用，不静默忽略或降级。具体关闭�
 
 **已确认。** 共用通信域的权威布局及完整公式见[联合设计 §6](ep-memory-server-dedup-dispatch-combine-design.md#6-共用通信域的布局cb00-02-已确认)。
 本节维护对 Combine 模块的约束；C1 已实现 Host/tensor 固定布局与显式 Sresult 地址助手，
-空 kernel/注册待 C2，真实数据区使用和完整容量校验待第二阶段；Dispatch 的布局改造由独立专题维护。
+C2 已接入空 kernel/注册（16B GM tiling、88B launch、64 核），真实数据区使用和完整容量校验待第二阶段；Dispatch 的布局改造由独立专题维护。
 
 | 用户确认项 | Combine 内部落实 |
 | --- | --- |

@@ -1,8 +1,37 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C1：当前交付
+## Combine 第一阶段 C2：当前交付
 
-检查点为 `ep-sdedup-combine-p1-abi-host`。在拉取本次提交的仓库根目录执行：
+C1（交付 `01c9b1d`）已收到用户通过确认。拉取本次 C2 提交后仍执行：
+
+```bash
+bash run_commit_validation.sh
+```
+
+入口当前选择 `ep-sdedup-combine-p1-empty-kernel`。本机需要 CANN 9.1.0、匹配 driver 及至少 64 AIV 的 A5，
+加载现有 `validation.local.sh` 中的环境配置，无需 hostfile、多机同步或 HCCL Test。
+设备默认为逻辑 0；可在环境配置或终端指定 `TILEXR_EP_SERVER_DEDUP_TEST_DEVICE`。
+脚本重新构建、安装并核对产物，执行三项 C1 Host 回归、生产 launch 替身和真实 A5 注册/提交测试。
+仅输出全部五项通过才产生 `COMMIT_VALIDATION_PASS`，Host 通过不会跳过设备测试。
+报告位于脚本打印的 `run/validation/commit-*/summary.json`，失败时同时回传指向的日志。
+
+真实 consumer 通过已安装库注册独立 Combine artifact，固定 64 核提交两个 dtype 的空 kernel，
+同步后检查 GM 哨兵不变；不创建真实多卡 comm。公开接口和 comm 生命周期联调留给 C4/C5，
+分离 profiling/trace 留给 C6。空 kernel 不生成 yOut 数值，不验证真实 Combine 通信或性能。
+本点通过后再开发 C3；详细契约见[验收流程 C2](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c2-当前交付空-kernel-的安装与提交)。
+
+2026-09-20 C2 开发验证：基于 `d073844` 加本次改动，blue 使用 CANN 9.1.0 / ccec clang 15.0.5（2026-05-18），
+A5 `dav-c310-vec`、profiling OFF 构建 `tilexr-ep` 及独立 Combine kernel 通过。
+通过正式 workflow 的 C2 production build，编译并安装五项 consumer，ELF、导出、RPATH 与真实 driver 依赖检查通过；
+其中四项 Host 测试在该新安装包通过，额外 profiling ON 的 Host launch 替身通过（确认 C2 不占 Dispatch 记录）。
+首次 Host 失败来自加载器替身漏列新 artifact，修正后重跑；手工安装首次遗漏 BUILD_TESTING=OFF，
+随后按正式脚本的配置完成构建安装，不修改生产代码绕过这些检查。
+真实 A5 注册/提交/同步尚未运行，留待用户验证环境回传；不以 BUILD_PASS 或四项 Host 通过代替 C2 五项通过。
+完整源码摘要、编译/安装日志和 Host 输出保留在开发工作区 `build/combine-c2-verification/`。
+
+## Combine C1 历史交付与验收
+
+检查点为 `ep-sdedup-combine-p1-abi-host`。以下为 C1 交付时的入口；当前脚本已更新为 C2：
 
 ```bash
 bash run_commit_validation.sh
@@ -10,11 +39,11 @@ bash run_commit_validation.sh
 
 脚本重新构建并运行 `combine_public_abi`、`combine_host_validation`、`combine_layout` 三项 C++ 测试；
 打印最终 `COMMIT_VALIDATION_PASS/FAIL` 和 `run/validation/commit-*/summary.json` 路径。
-请回传 summary；失败时同时回传其中的日志。记录外部环境通过后才开发 C2。
+用户已回传 `COMMIT_VALIDATION_PASS`，C1 通过；外部 summary/实际 SHA/环境明细未提供。
 本点不需要设备、CANN、hostfile、HCCL Test 或同步到多节点；需要 Python 3.9+、CMake、Make、g++。
 构建/运行期限、各点范围及结果登记规则见[七点验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
 
-生产入口尚不启动 kernel，校验后返回 `NOT_SUPPORT`；Host 测试的 PASS 表示符合 C1 契约。
+C1 提交的生产入口不启动 kernel，校验后返回 `NOT_SUPPORT`；该提交的 Host PASS 表示符合 C1 契约。
 实际空 kernel、注册/launch、三种算子模式和独立 trace 将分别在后续检查点交付。
 C1 固定区容量校验与参数化 result/stage 地址助手不表示第二阶段 wire 格式已确定。
 
@@ -27,7 +56,7 @@ Python 新入口行为 5 项、batch 3 项、build 16 项、workflow 100 项通�
 快照 SHA256、实际命令/工具链、构建退出码和原始日志保存在开发工作区 `build/combine-c1-verification/`。
 首次编译的缺头文件问题、测试汇总漏传失败及一个非法输入用例均已修正，旧结果作废后重跑；
 测试汇总必须检查累计断言失败再输出 PASS，不能单独添加成功 marker。
-以上没有执行 NPU，也不代表用户验证环境已验收；C2 必须等待用户回传后再开始。
+以上为 C1 开发验证、没有执行 NPU；随后用户明确回传通过，已据此启动 C2。
 
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
@@ -203,7 +232,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 0 -l 1 0
 ```
 
-构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前仅一键验收 Combine C1 Host 接口/布局，不代替这里的 Dispatch 多卡流程。
+构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C2 空 kernel 安装/提交，不代替这里的 Dispatch 多卡流程。
 
 `build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 

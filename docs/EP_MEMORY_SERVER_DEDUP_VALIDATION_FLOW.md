@@ -45,23 +45,23 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 
 | 点 | 后缀 | 交付范围与验收边界 |
 | --- | --- | --- |
-| C1 | `abi-host` | 27 参数 ABI、独立 Host 参数/配置校验、五表/tensor 容量及固定控制区/双窗边界；错误不提交、不消耗 magic。当前交付，等待外部验收 |
-| C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 GM tiling/launch ABI、固定 64 核空入口；不读写业务数据 |
+| C1 | `abi-host` | 27 参数 ABI、独立 Host 参数/配置校验、五表/tensor 容量及固定控制区/双窗边界；错误不提交、不消耗 magic。用户回传通过，交付 `01c9b1d` |
+| C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 16B GM tiling/88B launch ABI、固定 64 核空入口；不读写业务数据。当前交付，等待外部验收 |
 | C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域 |
 | C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值 |
 | C5 | `chain-multi` | warmup/多轮、各自 magic/选窗、同步与生命周期；联合模式 D/C 固定使用不同窗口符合预期 |
 | C6 | `profile` | functional/performance/breakdown 共用 consumer；分离记录 base/counter/latest，两算子独立 trace；空算子算法字节 0、算法带宽 N/A |
 | C7 | `memory-boundary` | 两半区分别执行合法区边界与保护区探针，避开 runtime；保留真实 Dispatch 回归，不冒充 Combine 数据面验证 |
 
-C1 的 `run_commit_validation.sh` 一次完成构建和三项 Host 测试，不要求 CANN/hostfile/SSH/NPU；
+C1 历史入口一次完成构建和三项 Host 测试，不要求 CANN/hostfile/SSH/NPU；
 使用独立 `build/validation-combine-c1` / `install/validation-combine-c1`，不覆盖 Dispatch 安装包。
 准备期限 900 秒、运行总期限 180 秒、单项最多 120 秒；成功结论为
 `成功 COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-abi-host`。
 执行需要 Python 3.9+、CMake、Make、g++。现有 Dispatch 的 `build_all.sh` / `sync.sh` / `run.sh`
 仍按原用途使用，C3 后才扩充三种算子模式；C1 不提前改变这些调用参数。
 
-**C1 范围约束：** 生产入口完成 Host 链路后返回 `NOT_SUPPORT`，直到 C2 安装空 kernel；
-用 launch 替身验证传参/错误传播，同时 ABI 测试链接真正的 C1 no-launch 实现，不能把替身当作生产成功。
+**C1 历史范围约束：** 该提交的生产入口完成 Host 链路后返回 `NOT_SUPPORT`；C2 改为真实提交空 kernel。C1 当时
+用 launch 替身验证传参/错误传播，同时 ABI 测试链接真正的 no-launch 实现；当前 ABI 测试使用替身，真实提交由 C2 测试负责。
 Host 不读设备 sendCounts 或五表，裸指针无法证明 allocation 容量、设备归属或业务有效行，
 这些仍由 caller 记录及后续 consumer 负责。与 Dispatch 保持一致，EP rank/world/globalBs 的 0 是推导哨兵。
 
@@ -75,6 +75,36 @@ C1 通过不证明真实通信数据区容量充足。
 维护经验：提交验收只能消费本次重新构建的当前 checkpoint 安装包；构建开始先使旧 manifest 失效，
 缺工具/构建失败不得继续运行旧测试。每项必须同时满足退出码 0 和唯一匹配 PASS marker，
 summary 记录 commit、源码 provenance/工作区状态，避免把文件副本或未提交修改误认成该 SHA 的原样产物。
+
+### C2 当前交付：空 kernel 的安装与提交
+
+C1 已获用户 `COMMIT_VALIDATION_PASS` 确认，当前入口默认 `ep-sdedup-combine-p1-empty-kernel`。
+`bash run_commit_validation.sh` 加载现有 `validation.local.sh` 的 CANN/driver 设置，独立构建
+`build/validation-combine-c2` 并安装到 `install/validation-combine-c2`，检查新 kernel ELF、公共导出和真实 driver 依赖。
+同一命令执行 C1 三项 Host 回归、生产 launch 替身和安装包真实注册/提交，共五项；缺少任一项不得成功。
+本点需要 CANN 9.1.0 和本机 A5（至少 64 AIV），不需要 hostfile/SSH/多卡 rendezvous。
+`TILEXR_EP_SERVER_DEDUP_TEST_DEVICE` 指定本机逻辑设备，默认 0；以实际 report 中的设备为准。
+准备/运行/单项上限继续是 900/180/120 秒。
+
+| 契约 | C2 判据 |
+| --- | --- |
+| artifact | 独立 `tilexr_ep_combine_memory_server_dedup_kernel.o`，位于安装目录 `lib/tilexr/kernels`；Host 相对所属库加载，不嵌入 binary |
+| GM tiling | BS/H 为 uint32、E 为 uint16、K/dtype/quantMode 为 uint8，3 个保留字节置零，总计 16B；comm 缓存拥有不可变副本 |
+| launch | CommArgs、expertOut、assistInfo、sendCounts、expertScales、tokenType、relayReadIndex、sourceMask、yOut、tilingData 十个地址，加独立 int64 magic，总计 88B；固定 64 核 |
+| 失败路径 | SoC/core 查询、binary/function 注册、GM tiling 获取失败均不提交；tiling 获取成功后才取 magic，runtime launch 失败会报告错误但已消耗该 magic |
+| 空行为 | 每核只读取六个 tiling 标量，不读写五表、计数、expertOut/yOut、CommArgs 或 peer-memory；不申请/覆盖 Dispatch profiling 记录 |
+| Host 证据 | 注册失败回滚、字节布局/保留零值、原指针、固定核数、错误传播、同 shape 缓存及异步 tiling 不被后续调用覆盖 |
+| A5 证据 | consumer 链接已安装生产库，真实注册后提交 FP16/BF16 两次，stream 同步成功，输入/输出/CommArgs/tiling 哨兵保持原样 |
+
+C2 设备 consumer 使用内部 Register/Submit 入口及独立 GM 哨兵；不创建真实多卡 communicator，
+因此不证明公开 API 的多卡生命周期、选窗或数值行为（属于 C4/C5）。magic=1/2 是此隔离测试的输入，
+生产路径仍每次通过 TileXRCommNextMagic 获取。C2 未访问通信数据面，不运行 HCCL Test。
+空 kernel 的算法带宽无意义，不做性能结论；profiling 分区和两份 trace 仍归 C6。
+任何 A5 不可用、注册/提交/同步失败或缺少唯一 marker 都使本点失败，不以 Host 回归替代。
+
+维护经验：安装包真实测试应加载本次安装目录的 Host 库和相对路径 kernel，不能用源码编译的
+Host 替身冒充生产注册成功。GM tiling 必须在异步任务结束前保持不可变；不同算子/shape 使用
+不同缓存键，不能仅复用一个“最新 tiling”槽。失败或超时保留本次 commit、产物哈希和首个失败阶段。
 
 ### consumer 的职责
 

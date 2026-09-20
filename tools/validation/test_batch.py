@@ -38,7 +38,7 @@ class BatchTests(unittest.TestCase):
                     self.assertNotIn("PASS", result.stdout)
                     self.assertIn("Failed", result.stdout)
 
-    def test_commit_entry_selects_current_host_checkpoint_and_propagates_failure(self):
+    def test_commit_entry_selects_current_c2_checkpoint_and_propagates_failure(self):
         repo = Path(__file__).resolve().parents[2]
         bash = Path(sys.executable).parent / "bash"
         if not bash.exists():
@@ -47,6 +47,10 @@ class BatchTests(unittest.TestCase):
             root = Path(directory)
             shutil.copy2(repo / 'run_commit_validation.sh', root / 'run_commit_validation.sh')
             shutil.copy2(repo / 'set_env.sh', root / 'set_env.sh')
+            (root / 'scripts').mkdir()
+            (root / 'scripts/common_env.sh').write_text('# environment fixture\n')
+            cann = root / 'cann-env.sh'
+            cann.write_text('# CANN fixture\n')
             (root / 'tools/validation').mkdir(parents=True)
             (root / 'tools/validation/workflow.py').write_text(
                 'import json, os, pathlib, sys\n'
@@ -59,11 +63,11 @@ class BatchTests(unittest.TestCase):
                          TILEXR_VALIDATION_PYTHON=sys.executable,
                          TILEXR_VALIDATION_CHECKPOINT='ep-sdedup-p2-dispatch',
                          TILEXR_VALIDATION_BUILD_MODE='production',
-                         TILEXR_CANN_ENV_SCRIPT='/missing/cann/set_env.sh'),
+                         TILEXR_CANN_ENV_SCRIPT=str(cann)),
                 text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 19, result.stderr)
             self.assertEqual(json.loads((root / 'calls').read_text()), {
-                'argv': ['commit-validate'], 'checkpoint': 'ep-sdedup-combine-p1-abi-host', 'mode': 'host'})
+                'argv': ['commit-validate'], 'checkpoint': 'ep-sdedup-combine-p1-empty-kernel', 'mode': 'production'})
             self.assertNotIn('PASS', result.stdout + result.stderr)
 
     def test_batch_invokes_core_cases_without_build_or_sync(self):

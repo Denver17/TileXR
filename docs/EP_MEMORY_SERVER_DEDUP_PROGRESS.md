@@ -4,12 +4,17 @@
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 进入 C1：公开 ABI、Host 校验及布局已实现，空 kernel/设备提交尚未实现。下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
+Server Dedup Combine 已完成 C1，用户回传 `COMMIT_VALIDATION_PASS` 并要求继续；当前开发 C2 空 kernel/注册/提交。
+下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
-当前点 `ep-sdedup-combine-p1-abi-host`；用户入口为 `bash run_commit_validation.sh`。
-本点仅 Host ABI/layout；生产入口暂返回 `NOT_SUPPORT`，不提交 kernel、不消耗 magic。
-**外部验收待回传，C2 未开始。** 开发环境检查记录见 EP 验证指南，不能替代该门槛。
+C1 交付 commit 为 `01c9b1d9f2fa49ea15e57df01c1cfd1905b6cd1f`；2026-09-20 用户明确回传通过。
+未附外部 summary/环境信息，实际运行 SHA、工具链与测试日志未独立核对；按用户确认登记 C1 通过并推进 C2，
+不把这一回传当作 NPU 数据面证据。
+当前点 `ep-sdedup-combine-p1-empty-kernel`；用户入口仍为 `bash run_commit_validation.sh`。
+C2 增加独立 16B GM tiling、88B launch ABI、固定 64 AIV 空入口和安装包注册/提交测试。
+**C2 外部验收待回传，C3 未开始。**
+
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
 已确认五表与 Combine 27 参数设计接口：保留 Memory 原 24 参数，只追加 3 表，
@@ -183,8 +188,8 @@ Host 替身测试也分别在 profiling OFF/ON 通过，共六项检查。这些
 
 | 检查方向 | 状态 | 通过 commit |
 | --- | --- | --- |
-| 公共 API / Host / layout | C1 已实现，开发检查通过；用户外部验收待回传 | 待验收后登记 |
-| 空 kernel / 注册 / launch | 未开始 | — |
+| 公共 API / Host / layout | C1 用户回传 COMMIT_VALIDATION_PASS；外部详细环境未提供 | 交付 `01c9b1d` |
+| 空 kernel / 注册 / launch | C2 已实现，用户外部验收待回传 | 待验收后登记 |
 | 单轮 / 多轮框架 | 未开始 | — |
 
 ## 阶段 4：Combine 算子逻辑

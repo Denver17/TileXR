@@ -49,6 +49,15 @@ class ProductionChecksTests(unittest.TestCase):
                          ["readelf", "-h", self.install / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"])
         self.assertEqual(len(execute.call_args_list), 4)
 
+    def test_combine_c2_requires_its_symbol_and_inspects_its_artifact(self):
+        with self.assertRaisesRegex(ValueError, "TileXRMoeEpCombineMemoryServerDedup"):
+            self.check(workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT)
+        self.symbols += "\nTileXRMoeEpCombineMemoryServerDedup T 3000 10\n"
+        execute = self.check(workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT)
+        self.assertEqual(execute.call_args_list[0].args[0],
+                         ["readelf", "-h", self.install / "lib/tilexr/kernels/tilexr_ep_combine_memory_server_dedup_kernel.o"])
+        self.assertEqual(len(execute.call_args_list), 4)
+
     def test_c_abi_functions_pass_and_remaining_library_checks_run(self):
         execute = self.check()
         self.assertEqual([call.args[0][0] for call in execute.call_args_list], ["nm", "readelf", "ldd"])
