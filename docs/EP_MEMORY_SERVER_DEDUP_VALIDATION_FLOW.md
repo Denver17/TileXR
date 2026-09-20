@@ -114,7 +114,7 @@ Host/reference 从独立保存的原始路由遍历生成下列预期，不调�
 
 #### 共用通信域与地址预期
 
-按主设计 [R07-01 单份布局](specs/ep-memory-server-dedup.md#r07-01-单份通信数据域布局)计算完整偏移，不沿用空 kernel 或旧 Memory 的固定常量。所有字节运算先转 uint64 并检查溢出。
+按主设计 [单窗布局](specs/ep-memory-server-dedup.md#单窗布局)计算完整偏移，不沿用空 kernel 或旧 Memory 的固定常量。所有字节运算先转 uint64 并检查溢出。
 令 C=16、N=R*L，A32/A512 为对应字节对齐；布局如下：
 
 ```text

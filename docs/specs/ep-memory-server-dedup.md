@@ -1,32 +1,44 @@
-# EP Memory 服务器级去重设计
+# EP Memory Server Dedup Dispatch：代码与数据流
 
-## 设计状态与源码基线
+本文帮助读者理解当前 `TileXRMoeEpDispatchMemoryServerDedup` 实现，源码基线为
+`3922420`，分支为 `codex/SilentEmotion`。只描述已实现行为；Server Dedup Combine 的
+消费契约见[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)，其 kernel 尚未实现。
 
-2026-09-20 按 `codex/SilentEmotion` 的五表输出实现更新；设计基线为 `3b0ba92`。
-Dispatch 已将旧 assistEx/group 接口替换为 TokenType、DestinationIndex、RelayReadIndex、
-SourceMask 和 expertScalesOut。设计依据及逐项确认见
-[Dispatch 输出适配方案](ep-memory-server-dedup-dispatch-output-adaptation-design.md)。
-跨算子的交接契约见[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)，
-Combine kernel 尚未实现。编译/Host 证据不代表新版本已在生产 A5 上运行，验证边界见进度文档。
+## 从一个 Token 理解去重
 
-本文描述当前 Dispatch 代码，后面的 Combine 数据流明确标为设计契约。
-[第二轮讨论](ep-memory-server-dedup-open-topics.md)与[接收优化记录](ep-memory-server-dedup-receive-optimization.md)
-用于历史追溯，不覆盖本文。双 Probe、剩余 ≤5 时预探测、ready 后立即认领删除、Vector ready bitmap
-以及 metadata 地址缓存均未落地，暂不继续推进，不能作为 Combine 已有能力使用。
+输入 `x[BS,H]` 中的每个 Token 有 K 条 expert 路由和 K 个 FP32 权重。
+Dispatch 将 hidden 送到各 expert 所在卡，形成按本卡 expert/source 分段的输出行，
+同时生成计数、前缀和供 Combine 使用的五张表。
 
-| 源码 | 职责 |
+去重发生在跨 Server 的数据发送上，最终每条 expert 路由仍产生一行输出：
+
+- 目标位于源 Server，或某远端 Server 只命中一条 route：直接发送，接收类型为 DIRECT（1）。
+- 同一 Token 在某远端 Server 命中多条 route：源端只向其中最小原始 k 对应的卡发送一次，
+  该卡称为 relay，第一跳接收类型为 2。
+- relay 保存自己的 expert 输入，再在该 Server 内转发其余成员，成员接收类型为 3；
+  成员也可以是 relay 本卡的另一个 expert。
+
+例如，一个 Token 有三条 route：一条在源 Server，两条在同一远端 Server。
+源端发送一个 DIRECT 包和一个第一跳包，relay 再转发一个成员包；最终仍有三条 expert 行。
+Count 始终统计三条原始 route，跨 Server 的 hidden 传输则为一次。
+
+阅读顺序建议：先看接口与输出，再沿主 kernel 的 Count → sender/receiver 调用链阅读；
+需要核对地址和同步时，再查包格式、UB lane 与通信域布局。
+
+| 源码 | 阅读重点 |
 | --- | --- |
-| [公共入口](../../src/include/tilexr_ep.h)、[Host 检查](../../src/ep/host/ep_memory_server_dedup_host.cpp) | `TileXRMoeEpDispatchMemoryServerDedup`，配置与指针契约 |
-| [launch](../../src/ep/host/ep_memory_server_dedup_launch.cpp)、[入口](../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp) | 独立 GM tiling、120B launch、六种类型分支 |
-| [主 kernel](../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h) | Count、收发角色和本核完成边界 |
-| [counts](../../src/ep/kernels/tilexr_ep_server_dedup_counts.h) | 原始路由计数、异步发送、前缀及状态清理 |
-| [sender](../../src/ep/kernels/tilexr_ep_server_dedup_send.h) | 第一跳、DIRECT、量化打包、源端 mask/weight 输出 |
-| [receiver](../../src/ep/kernels/tilexr_ep_server_dedup_recv.h)、[任务表](../../src/ep/kernels/tilexr_ep_server_dedup_receive_tasks.h)、[包处理](../../src/ep/kernels/tilexr_ep_server_dedup_receive_packet.h) | Probe、动态 lane、输出行和 relay |
-| [Count 布局](../../src/ep/common/ep_memory_server_dedup_count_layout.h)、[数据布局](../../src/ep/common/ep_memory_server_dedup_data_layout.h)、[Host 容量](../../src/ep/host/ep_memory_server_dedup_layout.cpp) | 两窗、UB 预算、metadata 容量 |
+| [公共入口](../../src/include/tilexr_ep.h)、[Host wrapper](../../src/ep/host/tilexr_ep_memory_server_dedup_dispatch.cpp)、[Host 检查](../../src/ep/host/ep_memory_server_dedup_host.cpp) | 输入输出、支持范围与提交前检查 |
+| [launch](../../src/ep/host/ep_memory_server_dedup_launch.cpp)、[kernel 入口](../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp) | 32B GM tiling、120B 参数包、类型分支 |
+| [主 kernel](../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h) | Count、收发分工和每核完成边界 |
+| [counts](../../src/ep/kernels/tilexr_ep_server_dedup_counts.h) | 原始路由计数、发送、前缀及控制状态清理 |
+| [sender](../../src/ep/kernels/tilexr_ep_server_dedup_send.h) | 第一跳、DIRECT、量化打包和源端两表 |
+| [receiver](../../src/ep/kernels/tilexr_ep_server_dedup_recv.h)、[任务表](../../src/ep/kernels/tilexr_ep_server_dedup_receive_tasks.h)、[包处理](../../src/ep/kernels/tilexr_ep_server_dedup_receive_packet.h) | Probe、输出行、转发和接收侧三表 |
+| [Count 布局](../../src/ep/common/ep_memory_server_dedup_count_layout.h)、[数据布局](../../src/ep/common/ep_memory_server_dedup_data_layout.h)、[Host 容量](../../src/ep/host/ep_memory_server_dedup_layout.cpp) | 窗口、地址、容量和 UB 预算 |
 
 ## 支持范围
 
-记 R 为 Rank 数，E 为总专家数，L=E/R，K 为 top-k，S 为发送核数，Crecv=64−S。
+记 R 为 Rank 数，E 为总专家数，L=E/R，BS 为本卡输入 Token 数，H 为 hidden 长度，
+K 为 top-k，S 为发送核数，Crecv=64−S。alignN(x) 表示向上对齐到 N 的整数倍。
 以下容量上界 Crows=R*BS*min(K,L)，不能与接收核数 Crecv 混用。
 
 | 项目 | 当前契约 |
@@ -37,7 +49,7 @@ Combine kernel 尚未实现。编译/Host 证据不代表新版本已在生产 A
 | 输入 | BS>0、H>0，所有 Rank 的 BS 相同，globalBs=R*BS；1≤K≤min(32,E) |
 | 路由 | 每 Token 恰有 K 个合法且互不重复的 expert；输入保证该契约，kernel 不做完整路由合法性扫描 |
 | 功能 | 无共享专家、token mask；tpWorldSize 只接受 0/1，tpRankId=0、expertShardType=0 |
-| 占位参数 | scales、tpRecvCountsOut、expandScalesOut 为 nullptr；assistInfoForCombineOut 保留但 kernel 不使用 |
+| 占位参数 | scales、tpRecvCountsOut、expandScalesOut 为 nullptr |
 | 通信 | Memory peer window 支持同节点及跨节点；本入口无 UDMA 自动切换或普通 Memory 回退 |
 | 容量 | Host 检查 Count UB、控制区、单窗容量及整数乘积；调用方保证输出分配、收发 UB 能容纳实际任务及至少一个完整 lane |
 
@@ -51,8 +63,40 @@ Combine kernel 尚未实现。编译/Host 证据不代表新版本已在生产 A
 | TILEXR_EP_SERVER_DEDUP_ENABLE | 1 | 1 为远端 Server 分组去重；0 为全部原始 route DIRECT |
 
 Count 阈值与数据核比例独立；无源 Token 的核仍可能负责 Count。Count/prefix 的物理布局依赖
-Crecv，同一 communicator 生命周期内保持该布局不变。当前编译开启 auto-sync、关闭
-`-cce-aicore-record-overflow`；编译器自动同步和设备时序不能由源码标点数量推断。
+Crecv，同一 communicator 生命周期内保持该布局不变。编译开启 auto-sync，
+`-cce-aicore-record-overflow=false`。
+
+## Dispatch/Combine 公共接口与 metadata shape
+
+主要输入为 `x[BS,H]`、`expertIds[BS,K]`、`expertScales[BS,K]` 和 communicator。
+expertScales 为必需的 FP32 路由权重。公开调用返回成功表示异步提交成功；
+输出须在对应 stream 的 kernel 完成之后消费。
+
+`TileXRMoeEpDispatchMemoryServerDedup` 的五个 metadata 指针依次为 tokenTypeOut、
+destinationIndexOut、relayReadIndexOut、sourceMaskOut、expertScalesOut。
+五表基地址至少 4B 对齐，精确行距如下；`Crows=R*BS*min(K,L)`。
+
+| 输出 | 分配容量 / 有效范围 | 使用契约 |
+| --- | --- | --- |
+| expandXOut | Crows*H*(quantized?1:2)B；前 tokenNum 行 | expert 计算后恢复原 Dispatch 行序 |
+| dynamicScalesOut | 量化时 Crows*scaleBytes；前 tokenNum 行 | hidden 解量化 scale |
+| sendCountsOut | int32[E] inclusive prefix | 最后一项为 tokenNum |
+| expertTokenNumsOut | int64[L] | 累计或逐 expert 计数 |
+| tokenTypeOut | uint32[Crows]；前 tokenNum 行 | 1=DIRECT、2=第一跳、3=转发终端 |
+| destinationIndexOut | uint32[Crows][3]，12B/行 | 类型 1/2：[source,token,k]；类型 3：[slot,UINT32_MAX,UINT32_MAX] |
+| relayReadIndexOut | Crows*K*8B，仅类型 2 行 | 第 0 块 N/selfWeight，第 1..N 块 expert/q/weight |
+| sourceMaskOut | uint32[BS] | 最终等待的原始 k 位集合 |
+| expertScalesOut | FP32[BS,K] | mask 有效处 DIRECT 真实权重，group returnK 为 1.0 |
+
+真实 expertScales 输入只读，Host 拒绝与权重输出重叠；其他容量、归属及输出之间不重叠由
+持有分配记录的调用方校验。裸指针入口无法推断实际分配大小。
+类型 2 行自身对应第一跳 expert，其 selfWeight 位于 relayReadIndexOut 第 0 块。
+类型 3 的 slot 为本卡接收逻辑槽号，计算见“Dispatch 接收布局”；输出保存 uint32 槽号，
+不包含字节 stride。五表交给 Combine 时的参数映射由联合设计维护。
+
+源端第一跳下发后置 returnK 位并写权重 1.0，DIRECT 置原始 k 位并写真实权重。
+核末按本核连续输入 Token 区间写出；K=32 使用 uint32 位集合。关闭编译期去重时全为 DIRECT。
+调用方保持五表到对应 Combine 完成；容量尾部及索引无效行/块不消费。
 
 ## 算子函数与模块划分
 
@@ -69,64 +113,49 @@ Host：检查 → 注册 A5 二进制 → 取得 magic → 缓存/取得 GM tili
   kernel_total end → profile.Publish → 返回
 ```
 
-收发组并行推进。不存在独立的 `all2allDispatch` 调度入口、全核 Count 阶段屏障或核末 SyncAll。
-`CompleteCumsum` 到 receiver 的 PIPE_ALL 仍保留，防止后续 Reset/UB 重用覆盖未完成的计数输出。
+收发组并行推进，各核按自己的依赖前进；核末完成本核操作后独立返回。
+`CompleteCumsum` 与 receiver 之间的 PIPE_ALL 确保计数写出完成，再允许 Reset 和 UB 重用。
 Kernel 完成要求所有核完成，Host 异步 launch 返回不代表结果已可读。
 
-## 2026-09-18：独立 GM tiling 参数（当前 launch ABI）
+## Host 提交与 GM tiling
 
-本节保留独立 GM tiling，不引入 epHandle。2026-09-20 五表替换已删除未使用的
-assistInfoForCombineOut 槽，metadata 顺序为 type/destination/relayIndex/mask/weight。
-内部 Kernel 参数仍为 13 个输入输出/通信地址、
-GM_ADDR tilingData、int64_t magic，共 120B。globalBs 继续在 Host 校验/推导，
-不再传到 Kernel；magic 仍由 Host 每次取得并直接传入，不存入 tiling。
+Host 在基本参数、communicator、容量和 A5/核数检查通过后，注册独立 AICore 二进制，
+取得本轮 magic 和 GM tiling 地址，调用 `rtKernelLaunchWithFlagV2` 提交 64 核。
+二进制加载与提交封装见 [ep_kernel_launch.cpp](../../src/ep/host/ep_kernel_launch.cpp)。
 
-共享 EpServerDedupTilingData 固定 32B，字段如下，均在 Host 校验后窄化：
+内部 launch 参数按以下顺序组织，每个地址和 magic 均为 8B，总大小 120B：
 
-| Offset | 字段 | 类型 |
-|---|---|---|
+```text
+commArgs, x, expertIds, expertScales,
+expandXOut, dynamicScalesOut, expertTokenNumsOut, sendCountsOut,
+tokenTypeOut, destinationIndexOut, relayReadIndexOut, sourceMaskOut,
+expertScalesOut, tilingData, magic
+```
+
+[EpServerDedupTilingData](../../src/ep/common/ep_memory_server_dedup_tiling.h) 固定 32B，
+Host 校验数值范围后填入，reserved 字节为零：
+
+| 字节 offset | 字段 | 类型 |
+| --- | --- | --- |
 | 0、4、8 | bs、h、profilingLaunchSlot | uint32_t |
-| 12 | moeExpertNum | uint16_t，当前最多 1024 |
-| 14、15 | topK、reserved | uint8_t，发送/接收核数由编译期宏配置 |
-| 16～20 | expertTokenNumsType、quantMode、dtype、expandXOutDtype、reserved | uint8_t |
-| 21～31 | reserved | 11B，Host 全部置零 |
+| 12 | moeExpertNum | uint16_t |
+| 14 | topK | uint8_t |
+| 15 | reservedSendCoreNum | uint8_t |
+| 16～19 | expertTokenNumsType、quantMode、dtype、expandXOutDtype | uint8_t |
+| 20 | reservedEnableServerDedup | uint8_t |
+| 21～31 | reserved | 11B |
 
-profilingLaunchSlot 的 UINT32_MAX 无效值保留。非量化的 RESERVED 输出 dtype 在
-Host 转成输入 dtype 后打包。核内不新增范围检查，也不缩小地址计算使用的 64 位中间值。
+核数和去重开关来自编译期宏；profilingLaunchSlot 的无效值为 UINT32_MAX。
+非量化 RESERVED 输出 dtype 由 Host 解析为输入 dtype。globalBs 在 Host 推导/校验，
+magic 单独传入；kernel 从 tilingData GM 地址读取配置后，传给 counts/sender/receiver 的 Init。
 
-Host 通过 communicator 管理的 KernelTilingCache 初始化独立的 32B Device GM，
-在 aclrtMemcpy(HOST_TO_DEVICE) 同步返回成功之后取得真实 tilingData 地址。
-Kernel 直接从该地址读取字段；入口读到局部值后，轮询和 Token 循环不重复读取 tiling。
-rtKernelLaunchWithFlagV2 的 argsSize 恰为 **120B**，hasTiling=0、两个 tiling offset=0，
-不附带 tiling 内容，不使用 Runtime 的占位地址回填。32B 数据单独初始化，不计入 launch 包。
+communicator 的 [KernelTilingCache](../../src/comm/tilexr_kernel_tiling_cache.h) 以完整 32B
+配置为 key。首次使用时分配 GM 并同步 H2D 初始化，成功后发布地址；相同配置直接复用。
+各配置是不可变快照，持续有效到 communicator 销毁，防止后续提交改写尚在使用的参数。
+分配或复制失败不提交 kernel；销毁前调用方须等待该 communicator 的全部工作完成。
 
-缓存以完整且零填充的 32B 配置为 key；相同配置直接复用 GM 地址，不再次分配或复制。
-不同配置（包括 profilingLaunchSlot 的变化）拥有不同的不可变 GM，旧配置一直保留，
-因此后续提交不会覆盖尚未执行完成的 Kernel 参数。magic 不在缓存 key 内，逐轮递增
-不会创建新条目。每种不同配置占一份 32B 逻辑 GM（实际分配按 Runtime 粒度取整），
-生命周期内缓存随不同配置数增长；communicator 销毁时统一释放，不按 magic 淘汰。
-
-缓存有互斥保护，不占用 collective 的单槽 InternalResource。Host 容器先建立所有权记录，
-再分配/复制；分配或复制失败不向 launch 发布地址，返回错误，未完成初始化的分配仍由
-缓存持有以供重试或销毁。释放失败保留对应所有权；跨进程清理状态并入已有的 Rank 状态一致性检查，
-参与交换的 Rank 一起返回错误后可重试销毁，避免其他 Rank 已删除通信域时单卡重试状态交换。
-销毁前须停止提交并等待所有依赖该 communicator 的工作完成，与现有 peer memory 生命周期一致。
-CANN 9.1 的 aclrtMemcpy 是同步接口，故初始化使用的 Host 局部结构可在返回后释放；
-不另设 pinned 缓冲区、异步 H2D 源生命周期或每轮同步等待。
-
-维护要点：**传入指针并不等于只提交指针**。验证须检查实际 Runtime argsSize=120、
-hasTiling=0，同时确认地址指向独立初始化的 GM；不能只检查 Kernel 签名大小。
-单槽按配置直接覆写会破坏连续异步调用的旧参数，不可通过删除附带内容后随意复用可变缓冲区。
-
-安装 manifest 记录 launch_bytes=120、tiling_bytes=32、runtime_args_bytes=120，
-layout=r11-independent-gm-tiling。虽然 Kernel 签名未变，旧 r10/160B 随 launch 搬运产物
-仍须重新构建/同步；本次需匹配 libtile-comm、owning Host 库和 Kernel。
-公共 Host 接口及 epHandle 范围不变。
-
-验证要求：Host 检查独立分配、同步复制、真实 GM 地址解析、120B 提交、配置命中不复制、
-连续配置切换的旧内容保持、通信域隔离、分配/复制失败及释放重试。保留字段字节、
-64 位 magic、五种核数、量化类型、profiling 无效槽及窄化前拒绝检查；编译实际
-CANN 9.1/A5 入口、owning Host 库及通信库。Host 替身和编译不能证明 NPU 正确性或性能收益。
+Runtime 的 argsSize=120、hasTiling=0；参数包只包含 tiling 地址，32B tiling 内容独立存放在 GM。
+安装产物须配套包含通信库、EP Host 库、kernel 和 consumer。
 
 ## 路由与计数
 
@@ -147,14 +176,14 @@ q 不等于 srcTokenId、已发包数、DIRECT task 下标或 pending 下标。�
 
 ### Count 异步发送与 scratch 交接
 
-`SendCnt` 按目标 expert 连续区间分核，范围筛选/逐 expert reduce 保留原 Memory 数值算法。
-当前把待发送记录与筛选 scratch 分离：
+`SendCnt` 按目标 expert 连续区间分核，先筛选范围，再逐 expert 归约计数。
+待发送记录与筛选 scratch 分离：
 
 ```text
 countCores = BS < threshold ? 64 : Crecv
 alignedRecords = align8(ceil(E/countCores))
 保留发送记录 = alignedRecords * 32B（未参与或空 Count 核为 0）
-Count 峰值 UB = 4*align256(BS*K*4) + alignedRecords*(32+4)
+Count 峰值 UB 上界 = 4*align256(BS*K*4) + alignedRecords*(32+4)
 总 UB 预算 = 190 KiB
 ```
 
@@ -164,13 +193,11 @@ Count 峰值 UB = 4*align256(BS*K*4) + alignedRecords*(32+4)
 
 接收端先等待自己负责的 incoming cnt，Gather/Sum 并生成本分段相对前缀，随后发布局部和、
 清理本分段 cnt 状态；`CalcCumsum` 等待跨核局部和，取得全局偏移并修正本段前缀，再向各接收核
-发布完整 prefix 的分段数据及 ready。sumCoreBuf 真正复用为 ready 源前等待旧 MTE3 读完。
+发布完整 prefix 的分段数据及 ready。sumCoreBuf 复用为 ready 源前，等待局部和的 MTE3 读操作完成。
 `CompleteCumsum` 消费本核完整 prefix，清理 ready，并写 expert 计数。
 
-`recv_cnt` 包含局部前缀计算；`cumsum` 包含跨核等待及偏移修正。send_cnt_issue 只测下发，
-不代表 Count DMA 已完成。完整所有权和编译记录见[Count 发送掩盖方案](ep-memory-server-dedup-count-send-overlap.md)。
-历史全核 Count 的 FP8 失败与 Reset 重设 CTRL[60] 有关；当前 Init 置 0，Count 不再 Reset，
-Finish 恢复入口值。不能把历史的“Reset 后重新置 0”当成当前仍存在的调用序列。
+计数归约将整数位型作为 FP32 subnormal 参与运算，`counts.Init` 保存 CTRL[60] 并置 0；
+发送侧继承该配置执行 q 计算和可选量化。`counts.Finish` 完成本核流水后恢复入口值。
 
 ## 源端两阶段发送
 
@@ -188,11 +215,11 @@ start_i=i*base+min(i,remainder)
 开启去重时，仅对目标位于远端 Server 且同 Token 在该 Server 命中多条 route 的集合分组。
 最小原始 k 是第一跳/returnK，目标 Rank 为 relay，其余 k 按升序放入 entries。
 源 Server 内的每条 route、远端 Server 的单条 route 均为 DIRECT；同一个 Token 可有多个 group。
-即使某 group 全部 expert 位于 relay 本卡，后续成员仍走同一 relay 返回契约。
+即使某 group 全部 expert 位于 relay 本卡，后续成员仍生成类型 3 的接收行。
 
-### 当前分类表与 DIRECT 调度
+### 分类表与 DIRECT 调度
 
-当前不是持久保存 directMask[count_i] 再重扫原始 Token。第一遍 `Classify` 使用 Scalar 的
+第一遍逐 Token 调用 `Classify`，使用 Scalar 的
 seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远端 Server 时暂列 DIRECT，
 第二次遇到时生成 group 并移出 DIRECT，随后扩充该 group 位图。
 每个 Token 的第一跳立即发送；DIRECT 记录 `(token,k,expert,q)` 写入 16B 的 directTasks。
@@ -207,7 +234,7 @@ seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远
 | weightIn / weightOut | 各 align32(count_i*K*4)，只拷入本核权重区间 |
 
 关闭去重仍扫描 Server mask，但所有 route 进入 DIRECT 表，不发第一跳或 relay；sourceMask 的
-K 位均有效，输出权重全为真实值。不能只将第一跳包头改为 DIRECT，否则会漏 route。
+K 位均有效，输出权重全为真实值。
 
 ## 本卡数据发送流水
 
@@ -239,19 +266,19 @@ lane = packetsIssued % Nsend
 | MTE3 写完整 T 字节 | 下发 MTE3_V(lane)，下一次轮回再消费事件 |
 | 本核收尾 | 消费全部 lane 事件，S_MTE3 后写 mask/weight，MTE3_S 等待这批输出完成 |
 
-## Dispatch dtype 与 MXFP8（R08-03）
+## Dispatch dtype 与 MXFP8
 
 | 输入 | quantMode | expandXOutDtype | 每行公开输出 |
 | --- | --- | --- | --- |
 | BF16 / FP16 | 0 | 同输入，RESERVED 在 Host 解析为输入 dtype | H*2B；dynamicScalesOut=nullptr |
 | BF16 / FP16 | 4 | 显式 FP8E4M3 / FP8E5M2 | H 字节 hidden，另有 scaleBytes 字节 dynamicScalesOut |
 
-沿用 `TileXRMxfp8Quant` 的 ComputeMaxExp/ComputeScale/ComputeFp8Data 和现有 FP8 golden。
+`TileXRMxfp8Quant` 依次执行 ComputeMaxExp、ComputeScale 和 ComputeFp8Data。
 量化只处理 hidden；真实 route weight 始终 FP32。relay 保持收到的 FP8/scale 位型，不重新量化。
 
 ### 尾部容量与通信长度
 
-以下是布局函数的实际公式，A32/A256 表示字节或元素数按标注向上对齐：
+布局函数先计算 payload 中的逻辑位置，再转换为插入 Flag 后的 wire 位置：
 
 ```text
 quantCount = align256(H)
@@ -260,6 +287,8 @@ headerPayloadOffset = align32(quantized ? quantCount + scaleBytes : H*2)
 readIndexPayloadOffset = headerPayloadOffset + 32
 if readIndexPayloadOffset % 480 + K*8 > 480:
     readIndexPayloadOffset = align480(readIndexPayloadOffset)
+headerWireOffset = (headerPayloadOffset/480)*512 + headerPayloadOffset%480
+relayReadIndexWireOffset = (readIndexPayloadOffset/480)*512 + readIndexPayloadOffset%480
 payloadBytes = align32(readIndexPayloadOffset + K*8)
 blockCount = ceil(payloadBytes/480)
 packedPayloadBytes = blockCount*480
@@ -274,10 +303,10 @@ H=7168、K=6：非量化 payloadBytes=14464、T=15872；MXFP8 payloadBytes=7488�
 ### Payload 与 DataAsFlag
 
 每个 512B wire 块包含 480B Payload 和 32B Flag（8 个 FP32 1）。所有块的 Flag 都参与 ready；
-最后一块也在内，未使用的 entry/padding 不解析。没有另一个 metadata-ready 消息。
+包括最后一块。Flag 表示整包各块到达，未使用的成员块和 padding 不解析。
 逻辑字节位置 `x` 到 wire 位置的换算为 `x + floor(x/480)*32`。
 接收侧保留带 Flag 的整包，不先完整 unpack 到第二份 payload buffer；Init 预计算 headerWireOffset 和 relayReadIndexWireOffset，
-索引段物理连续，条目不再逐个换算；hidden/scale 输出时 MTE3 按区间跳过 Flag。
+索引段物理连续；hidden/scale 输出时 MTE3 按区间跳过 Flag。
 
 ## Token 格式与转发
 
@@ -301,12 +330,13 @@ RelayReadIndex 段固定 K*8B；若当前 block 的 480B payload 放不下整段
 起点。第 0 块为 uint32 N 与 FP32 selfWeight；第 1..N 块为 uint16 expertId、uint16 q、
 FP32 weight，按原始 k 升序保存，低 16 位为 expert、高 16 位为 q。
 N 不包含第一跳；DIRECT 的 N=0。无效块不消费、不要求清零。
-源端在打包前直接形成该段；第一跳收包后原样写入表 3，不做字段转换。
+源端在打包前直接形成该段；第一跳收包后原样写入 relayReadIndexOut，不做字段转换。
+成员 expertId/q 各占 16 位；当前 E≤1024，Count UB 预算约束 BS*K<2^14，合法输入可无损编码。
 
 第一跳先将本地类型 2 与原始返回身份保存到独立 staging，最终转发前仅将 wire 包头 type
 改为 3；包括索引段、其他头字段、占位及 Flag 在内的其他字节均保持不变。
 所有成员收到相同 wire，成员地址由 expert/q 计算。终端直接记录本卡接收 slot，
-不搜索索引段，不恢复自己的原始 k/weight，不再传递 relayRank/forwardTokenIdx。
+以 slot 写入 DestinationIndex；relay 的本地记录仍为类型 2。
 
 ## Dispatch 接收布局
 
@@ -321,7 +351,7 @@ DIRECT、第一跳和终端使用相同地址公式、跨度和原始 source 身
 
 ## 分核与监听
 
-`receiver.Process` 在 Count 完成屏障后 Reset TPipe，重新加载本接收核的完整 prefix。
+`receiver.Process` 在本核 Count 写出完成后 Reset TPipe，重新加载本接收核的完整 prefix。
 Crecv 个核按实际 tokenNum 分配输出行：
 
 ```text
@@ -336,21 +366,20 @@ j=row-begin_i
 
 ### Probe 与 pending
 
-当前只有一个 Probe 批，最多 16 个候选：保存稳定 j 快照，MTE2 读取每包所有块的 Flag，
+每次 Probe 最多 16 个候选：保存稳定 j 快照，MTE2 读取每包所有块的 Flag，
 一次 MTE2_V 后用二维 `Sum<float>` 逐行归约，V_S 后 Scalar 比较各 sum 与 blockCount*8，形成 ready 位图。
-未使用 Compares/Vector 位图，也没有第二个 Probe buffer。
 
 ready=0 时 scan 向后推进，至 pending 尾部回绕；直到某批非零 ready 才进入搬运。
 按快照下标从大到小加载/消费 ready 项，处理完当前整批后再 Probe。
 每项的本地输出、全部 relay 与 lane 释放指令提交后，才用末项替换删除 pending；
-倒序删除保证当前快照中较小下标仍有效。**不是 ready 一出现就认领删除。**
+倒序删除保证当前快照中较小下标仍有效。
 
 pendingCount=0 只代表全部任务已经下发；物理 DMA 完成仍依赖 lane 事件和最后 PIPE_ALL。
-稳定 tokenPos 保留到核末清理，row 和 t 都不绑定可变 pending 位置。
+稳定 tokenPos 保留到核末清理；row 与可变 pending 位置分别维护。
 
 ### 动态 N 槽的输入与输出流水
 
-每个 lane 由同一 wire 包及 type/destination 两个独立 32B staging 组成，没有两套整包输入/输出池：
+每个 lane 包含一个 wire 包及 type/destination 两个独立 32B staging：
 
 ```text
 B = blockCount，M = 16，m = 本核实际任务数
@@ -364,7 +393,7 @@ Nrecv = min(8, floor((190KiB-fixedBytes)/laneStride))
 ```
 
 M*36 包含每候选 32B sum 存储和 4B 快照下标；Sum 使用紧凑结果下标，其额外分配和保护区用于
-匹配 CANN 9.1/A5 的实际访问范围。输入保证 Nrecv≥1；Nrecv 不固定为 2，也不与 Nsend 共用。
+匹配 CANN 9.1/A5 的实际访问范围。输入保证 Nrecv≥1；接收 lane 数按本核预算计算。
 
 调度使用累计 issued/consumed：先将 ready 批最多 Nrecv 个包排入 MTE2，再每消费一个补充预取，
 序号跨批连续。`IssueLoad` 等待 MTE3_MTE2(lane)，读取完整 wire，再设置 MTE2_MTE3 与 MTE2_S。
@@ -378,150 +407,107 @@ M*36 包含每候选 32B sum 存储和 4B 快照下标；Sum 使用紧凑结果�
 转发改写 type 后发布 S_MTE3，接收 MTE2→MTE3 依赖也保留；各表精确写 4B/12B/K*8B，
 不把 UB staging 的 32B 对齐扩大成 GM 写入长度。GM 的索引行也不增加 32B 行间填充。
 全部本 lane 的 metadata、hidden/scale 和 relay 写出完成后才允许复用该 lane。
-核末 drain、Flag 清理和本核完成边界保持；不恢复 SyncAll 或逐 Token 全流水屏障。
-
-## Dispatch/Combine 公共接口与 metadata shape
-
-`TileXRMoeEpDispatchMemoryServerDedup` 的五个 metadata 指针依次为 tokenTypeOut、
-destinationIndexOut、relayReadIndexOut、sourceMaskOut、expertScalesOut，旧签名已废弃。
-五表基地址至少 4B 对齐，精确行距如下；`Crows=R*BS*min(K,L)`。
-
-| 输出 | 分配容量 / 有效范围 | 使用契约 |
-| --- | --- | --- |
-| expandXOut | Crows*H*(quantized?1:2)B；前 tokenNum 行 | expert 计算后恢复原 Dispatch 行序 |
-| dynamicScalesOut | 量化时 Crows*scaleBytes；前 tokenNum 行 | hidden 解量化 scale |
-| sendCountsOut | int32[E] inclusive prefix | 最后一项为 tokenNum |
-| expertTokenNumsOut | int64[L] | 累计或逐 expert 计数 |
-| tokenTypeOut | uint32[Crows]；前 tokenNum 行 | 1=DIRECT、2=第一跳、3=转发终端 |
-| destinationIndexOut | uint32[Crows][3]，12B/行 | 类型 1/2：[source,token,k]；类型 3：[slot,UINT32_MAX,UINT32_MAX] |
-| relayReadIndexOut | Crows*K*8B，仅类型 2 行 | 第 0 块 N/selfWeight，第 1..N 块 expert/q/weight |
-| sourceMaskOut | uint32[BS] | 最终等待的原始 k 位集合 |
-| expertScalesOut | FP32[BS,K] | mask 有效处 DIRECT 真实权重，group returnK 为 1.0 |
-
-真实 expertScales 输入只读，Host 拒绝与权重输出重叠；其他容量、归属及输出之间不重叠由
-持有分配记录的调用方校验。裸指针入口无法推断实际分配大小。
-类型 2 第一跳自身的贡献取 expertOut[row]，不在后续成员条目重复保存。
-类型 3 的 slot 是本卡 Combine stage 逻辑槽号，不是字节地址；stage 的物理 stride 由 Combine 决定。
-Dispatch 的 uint32 DestinationIndex 可通过同一 GM 分配的 int32 指针视图交给 Combine 的
-assistInfoForCombine，按 32 位位型解释，不复制/转换内容。
-
-源端第一跳下发后置 returnK 位并写权重 1.0，DIRECT 置原始 k 位并写真实权重。
-核末按本核连续输入 Token 区间写出；K=32 使用 uint32 位集合。关闭编译期去重时全为 DIRECT。
-调用方保持五表到对应 Combine 完成；容量尾部及索引无效行/块不消费。
+核末排空所有 lane、清理本核 Flag，并等待本核流水完成。
 
 ## 输出行与持久表
 
-所有接收行继续使用稳定 Token 级 prefix 身份：`row=tasks.Begin()+j`，
-不能用物理 tokenPos、段内 q 或变化中的 pending 下标替代。无需 AtomicAdd 或重新取号。
-表 1/2 按 row 密排；表 3 仅类型 2 行有效，因此按最大输出行容量分配，允许稀疏空洞。
-类型 3 的本卡物理逻辑槽直接来自 tasks.Position(j)，与第一跳索引中 expert/q 推导的成员槽一致。
-旧 forwardTokenIdx、group.firstHopRow 和 t*K+originalK 的持久格式已移除；Combine 改用 pull。
-历史 counter 留白与 profiling 编号保留，不生成原子取号事件，也不写 counter。
+输出行固定为 `row=tasks.Begin()+j`。pending 删除只改变扫描队列，不改变该任务的
+输出行与物理槽号。三张接收侧表的写出规则为：
 
-维护要点：从通信包直接保存 metadata 时，wire 角色与本地行角色必须分离保存，避免最终转发
-改写导致异步输出 type_3 覆盖本地 type_2。4B/12B/8K 紧密表必须按实际字节写出，
-不能沿用旧 32B 行搬运；测试须同时检查相邻行和 lane 在途数据，Host 替身不证明真实硬件时序。
+| 收到的 type | tokenTypeOut[row] | destinationIndexOut[row] | relayReadIndexOut[row] |
+| --- | --- | --- | --- |
+| 1 | 1 | [srcRank,srcTokenId,originalK] | 无效，不写出 |
+| 2 | 2 | [srcRank,srcTokenId,returnK] | 原样写入源端的完整 K*8B 索引段 |
+| 3 | 3 | [tasks.Position(j),UINT32_MAX,UINT32_MAX] | 无效，不写出 |
 
-## Combine 设计入口
-
-Combine 内部实现集中在[Combine Server Dedup 设计](ep-memory-server-dedup-combine-design.md)，
-按 M0、M1a/M1b、M2–M6 整理功能预期和简要设计方向；全部模块初版完成后再统一通读查漏。
-本文不重复维护 Combine 内部流程，当前尚未实现该 kernel。
-
-五表与 27 参数接口由[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)维护。
-当前 Dispatch 已产生五表；新 Combine 的消费与执行仍待实现。
-新中转区的存储归属和物理布局以共同契约的后续收口为准。
+表 1/2 按 row 密排，表 3 仅类型 2 行有效，因此按最大输出行容量分配并允许空洞。
+类型 3 的 slot 与源端索引中 expert/q 推导的成员槽一致。第一跳保存本地 type 后才修改
+转发 wire，确保 type/destination 的异步写出不受包头变更影响。
 
 ## 容量与生命周期
 
-### R07-01 单份通信数据域布局
+### 单窗布局
 
 每 Rank 至少 8 GiB peer memory；`windowOffset=(uint64(magic)%2)*4GiB`。
-联合设计沿用此选窗方式，主要隔离 Dispatch/Combine；模型调度保证跨调用安全复用。
-每窗前 2 MiB 为控制区，两窗各保留最后 4 MiB 不作数据使用，实际 runtime Flag 仅位于整个域末尾。
-以下 offset 相对选中窗口，所有地址乘积使用 uint64：
+每窗前 2 MiB 为控制区，每窗尾部保留 4 MiB 不作 EP 数据使用；runtime Flag 位于整个域末尾。
+地址和容量乘积使用 uint64。
 
-| 区域 | offset / 字节数 |
-| --- | --- |
-| 历史 profile 留白 | [0,12800)，当前标准打点不用此区 |
-| cnt | cntOffset=12800；E*32 |
-| cumsum 交换 | sumOffset=cntOffset+E*32；Crecv*Crecv*32 |
-| prefix 副本 | prefixOffset=sumOffset+Crecv*Crecv*32；Crecv*prefixStride，prefixStride=align32(E*4) |
-| ready | readyOffset=prefixOffset+Crecv*prefixStride；Crecv*Crecv*32 |
-| 历史 counter 留白 | counterOffset=align1024(readyOffset+Crecv*Crecv*32)；1024B，不读、不写、不清零 |
-| source 返回预留 | sourceOffset=2MiB；BS*K*U |
-| Dispatch 数据 | dispatchOffset=align512(sourceOffset+sourceBytes)；E*BS*T |
-| relay 返回历史预留 | relayOffset=align512(dispatchOffset+dispatchBytes)；8*BS*K*U |
+Count 布局结构中的 cntOffset 相对窗口起点，cumsumOffset/prefixOffset/cumsumFlagOffset
+则相对 cntOffset。下表统一列出相对窗口起点的位置，避免重复或遗漏基址：
 
-当前 U=ceil(H*2/480)*512，只是布局函数的历史非量化 Combine 返回预算；Dispatch 不访问
-source/relay 返回区。Host 仍用 requiredBytes=relayOffset+relayBytes 检查单窗 4GiB−4MiB 上限，
-stateBytes=counterOffset+1024 检查前 2MiB 上限。标准 profiling 另分配 GM，不复用历史留白。
+| 区域 | 窗口内起点 | 字节数 |
+| --- | --- | --- |
+| 前置保留区 | 0 | 12800，Dispatch 不访问 |
+| cnt | cntOffset=12800 | E*32 |
+| cumsum 交换 | cntOffset+cumsumOffset，cumsumOffset=E*32 | Crecv*Crecv*32 |
+| prefix 副本 | cntOffset+prefixOffset，prefixOffset=cumsumOffset+Crecv*Crecv*32 | Crecv*prefixStride，prefixStride=align32(E*4) |
+| ready | cntOffset+cumsumFlagOffset，cumsumFlagOffset=prefixOffset+Crecv*prefixStride | Crecv*Crecv*32 |
+| 对齐保留区 | counterOffset=align1024(cntOffset+cumsumFlagOffset+Crecv*Crecv*32) | 1024，Dispatch 不访问 |
+| source 预留区 | sourceOffset=2MiB | sourceBytes=BS*K*U，Dispatch 不访问 |
+| Dispatch 收包区 | dispatchOffset=align512(sourceOffset+sourceBytes) | dispatchBytes=E*BS*T |
+| relay 预留区 | relayOffset=align512(dispatchOffset+dispatchBytes) | relayBytes=8*BS*K*U，Dispatch 不访问 |
 
-### Combine 容量缺口
-
-当前 relayReadIndexOut 按 Crows*K*8 分配，但通信域 relay 预留仍为旧 8*BS*K*U；两者不能混用。
-旧 push 方案沿用 t*K+k 时至少需要 Crows*K*memberStride，实际 group 数小不能限制最大 t。
-新 pull 方案已确定 expert/q 逻辑槽，生产卡 stage 预算为 E*BS*Sstage；source 结果为
-BS*K*Sresult，加上控制 Flag、scale/scratch 和保留区。MaxTokenNum 是输出行容量，不是 stage 槽数。
-后续确定具体格式、offset 并重算 Host/caller 分配，再实现读写，不得套用旧 relay 区。
-若完整预算超出窗口，需在 Combine 设计中明确新的容量/窗口方案，不能假定 8GiB 自动足够。
-原“实际 group 数≤8*BS 因而可用旧容量”的约束已失效，不是当前 Dispatch 输入要求。
+这里 `U=returnStride=ceil(H*2/480)*512`，`T=tokenStride` 为实际 Dispatch 包长度。
+source/relay 预留区参与当前布局计算和 Host 容量检查；它们不是已经实现的 Combine 数据区。
+Host 检查 `requiredBytes=relayOffset+relayBytes≤4GiB−4MiB`、
+`stateBytes=counterOffset+1024≤2MiB`。标准 profiling 使用独立 GM。
 
 ### 清理与跨轮复用
 
-接收核在所有 token 写指令提交后，消费全部 MTE3_MTE2 lane 事件；准备一个全零 Flag 源，
-V_MTE3 后遍历稳定 tokenPos，仅清理自己拥有的每个包的 32B Flag 块，最后 PIPE_ALL。
-清理不覆盖 payload、其他核的槽位或本卡转发目标尚待处理的 Flag。
-当前采用核末统一清理，逐 token/批次清理不是仍待选择的当前实现。
+接收核在所有 Token 输出和转发指令提交后，消费全部 MTE3_MTE2 lane 事件；
+准备全零 Flag 源，V_MTE3 后遍历稳定 tokenPos，仅清理自己拥有的每个包的 32B Flag 块，
+最后 PIPE_ALL。清理不覆盖 payload，也不清其他接收核拥有的槽位。
 
-Count 的 cnt/sum/ready 按各自 owner 消费后清理；prefix 数据无需清零，读取受本轮 ready 约束。
-源端 mask/weight、group 空洞不额外清零，只读其有效范围。counter 已退休，核末不执行 SyncAll。
-每核 `counts.Finish` 保留本核 PIPE_ALL 与 CTRL[60] 恢复，再记录总耗时终点和 Publish。
+Count 的 cnt/sum/ready 由各自 owner 消费后清理；prefix 读取受本轮 ready 约束，无需清零。
+sourceMask 每个输入 Token 都写出，expertScalesOut 仅 mask 有效位有定义；
+RelayReadIndex 只定义类型 2 行的前 N+1 块，其余内容不要求清零。
+每核 `counts.Finish` 执行本核 PIPE_ALL 并恢复 CTRL[60]，随后记录总耗时终点和 Publish。
 
-同一 communicator 的调用保持所有 Rank 顺序一致，在同一 stream 串行执行；相同窗口隔轮复用，
-全 Rank Count 发布（包括零 cnt）及清理共同保护代际边界。此规则不能直接外推为多 stream、
-多个在途 Dispatch plan、重复 Combine 或失败后复用的支持证明；这些扩展不列入本轮联合设计。
-当前模型的跨调用安全复用由用户确认的执行顺序保证，不增加轮次管理或结束握手。
+同一 communicator 的调用在所有 Rank 保持顺序一致，在同一 stream 串行执行。
+Count 发布包括零计数，各 owner 按本轮协议完成清理；同一物理窗口每隔一轮复用。
+跨调用安全性依赖该执行顺序；多 stream 并发或多个在途 plan 不属于当前支持契约。
 
 ## 打点与性能统计
 
-当前标准 writer 每条记录先读 GetSystemCycle，再 Scalar 写 GM 时间戳和事件 ID。
-启用 breakdown 时每次 launch 都打点，覆盖相同每核槽位，仅保留最后一次 launch；
-不是仅最后一轮才启用打点。profiling OFF 的 performance 构建不记录这些事件。
-Publish 补齐、发布记录计数，不显式 clean/invalidate cache；消费者在 kernel 完成后读取。
-总耗时终点在 Publish 前，tiling 读取及 profile 初始化也在起点之前，不能等同于 msprof 完整 kernel。
+启用 profiling 的构建在每次 launch 中记录 Scalar 时间戳和事件 ID，复用每核记录槽，
+最终保留最后一次 launch。profiling OFF 构建不产生这些记录。
+`Publish` 发布记录计数；consumer 在 kernel 完成后读取。
 
-| 当前区间 | 含义 |
+| 区间 | 覆盖内容 |
 | --- | --- |
-| send_cnt_filter / send_cnt_issue | Count 筛选和下发；下发区间不含完整 DMA 完成保证 |
-| send_first_hop | 路由分类、第一跳发送和 DIRECT 任务准备；不等于纯网络时间 |
-| send_direct | 按 Server 轮转的 DIRECT 下发循环 |
-| send_prepare / send_drain_and_outputs | 第一跳循环前的准备，以及 DIRECT 循环结束后的 drain 和输出 |
-| probe | 多次空扫描直到一次非空 ready，只有一对 begin/end |
-| recv_token | ConsumeLoaded 的等待、metadata、本地输出、relay 及释放指令；不含提前预取下发 |
-| recv_enter/prefix_load/tasks/prepare/loop/drain/clear 等 | 接收阶段边界，保留；与内部 token/probe 存在包含关系 |
-| finish_local / finish_return | 本核收尾及返回观察；新记录没有 finish_sync |
+| send_cnt_filter / send_cnt_issue | Count 筛选和下发，下发结束不代表 DMA 完成 |
+| recv_cnt / cumsum | Count 等待与局部前缀、跨核局部和等待与全局偏移修正 |
+| send_first_hop | 路由分类、第一跳发送和 DIRECT 任务准备 |
+| send_direct | 按 Server 轮转的 DIRECT 发送 |
+| send_prepare / send_drain_and_outputs | 发送准备、lane drain 和源端两表输出 |
+| probe | 从开始扫描到得到非空 ready，包含多次无效等待，仅一对 begin/end |
+| recv_token | ConsumeLoaded 的等待、metadata、本地输出及 relay 下发，不包含提前预取下发 |
+| recv_enter/prefix_load/tasks/prepare/loop/drain/clear | 接收阶段边界 |
+| finish_local / finish_return | 本核收尾及返回观察 |
 
-不再产生 PacketIssue、load_issue/load_wait/metadata/output_issue/relay_issue、Atomic、CounterEnd
-或 SyncEnd；旧 ID/mapping 保留解析历史 trace。Scalar 区间不证明各 DMA 引擎实际完成，父子时长
-不能重复相加。某个记录自身的 GM store 开销会落在后续区间，打点改变编译和执行也可能扰动结果。
-
-模式 1 使用 msprof，剔除 warmup 后取最后 min(50,loops) 轮：每 Server 将 8 卡所有选中样本取均值，
-再输出各 Server 代表值的最大、最小、平均。模式 2 用最后一轮每 Rank 的最大 core kernel_total，
-再统计跨 Rank median/min/max；两种口径不同，不把历史 49us/391us 直接当作当前版本的确定差额。
-编译模式、核数、阈值、去重开关、shape、二进制哈希都须一致或明确记录差异。
-详细语义与历史诊断见[打点指南](../../tools/profiling/OPERATOR_PROFILING_GUIDE.md)。
+kernel_total 从 profile 初始化后开始，到 Publish 前结束，不能等同于 msprof 的完整 kernel 时间。
+嵌套区间不能重复求和，Scalar 下发区间也不能直接视为 DMA 完成时间。
+性能比较需核对编译模式、核数、阈值、去重开关、shape 和二进制摘要。
+运行模式、采样与报告口径见[EP 验证指南](../EP_VALIDATION_GUIDE.md)，
+事件解释见[打点指南](../../tools/profiling/OPERATOR_PROFILING_GUIDE.md)。
 
 ## 验证边界
 
-当前 Dispatch 已实现完整 cnt/cumsum、源端发送、接收及 relay、metadata 输出、双窗与清理。
-已有用户回传的 64P/E384、BS96、H7168/K6、BF16→E4M3、breakdown 100+50 轮全 Rank PASS，
-run_id=b662f5c701e74ec187fdb7f09cb39bc9，kernel 摘要前缀 65f0523c47a6；它只证明该次产物和配置，
-不覆盖此后分核、tiling、Count 重叠及编译配置的全部修改。最近 32P/BS256 的偶发执行失败
-只有汇总信息，原因未定；不能登记成已确认环境故障，也不据此改协议。
+结果校验在 NPU 批次完成后进行。独立参考从全局原始路由重建每卡预期，逐 Rank 核对：
 
-本次文档核对不运行 NPU，不新增设备验收结论。历史 Host 替身与 CANN 编译仅覆盖其各自提交；
-正式范围以保存的源码/产物身份和 run summary 为准，见[进度记录](../EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+- cnt/prefix、expert 计数和完整路由覆盖。
+- 最终 hidden、量化时的 dynamicScalesOut，以及输入权重未被修改。
+- TokenType、DestinationIndex、类型 2 的 RelayReadIndex 有效块、SourceMask 及有效 SourceWeight。
+- 参考中的成员读取槽与类型 3 写入槽一致，所有消费槽的 Flag 已清理。
 
-Combine 后续按[模块设计](ep-memory-server-dedup-combine-design.md#模块边界m0m6)逐一完善初版，
-完成所有模块后由用户整体通读，再整理遗漏点和待确认项。内部设计不在本文重复维护。
+现有 workflow 要求同一构建/case 的全部 Rank 结果完整通过，不新增 Rank 间五表交换通信。
+代码入口为[参考](../../tests/ep/integration/server_dedup_dispatch_reference.h)、
+[consumer](../../tests/ep/integration/server_dedup_dispatch_consumer.h)和
+[workflow](../../tools/validation/workflow.py)。
+
+Host/替身测试覆盖协议字节、容量、相邻行保护、lane 生命周期及错误注入；真实 CANN 编译
+验证目标工具链兼容性。NPU 数值、异步行为及性能按具体源码和产物单独验收，
+已保存的执行证据见[验证指南](../EP_VALIDATION_GUIDE.md)与[进度记录](../EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+
+本文与代码保持同步：接口、字段或调度行为更新时，直接更新对应说明、公式和示例。
+只在本文保留当前实现；优化过程与已废弃方案从 Git 历史查阅。
