@@ -9,9 +9,7 @@ TILEXR_VALIDATION_SSH_USER=""
 TILEXR_VALIDATION_PYTHON=python3
 TILEXR_VALIDATION_JOBS=4
 TILEXR_VALIDATION_MSPROF=msprof
-# 修改为首节点可跨机访问的实际 IPv4。
-TILEXR_COMM_ID=192.0.2.11:10177
-# 可省略：默认同一 IP、端口 +97。
-# TILEXR_DEMO_BARRIER_ADDR=192.0.2.11:10274
+# 无需配置主节点 IP：默认使用 hostfile 首项（必须是当前执行机器），端口 10177/10274。
+# 临时覆盖请使用 run.sh comm_id=IP:PORT barrier_addr=IP:PORT。
 # 需要额外动态库时，按环境实际路径配置：
 # export LD_LIBRARY_PATH="${LD_LIBRARY_PATH:+${LD_LIBRARY_PATH}:}/path/to/dependencies/lib"

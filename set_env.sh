@@ -20,6 +20,8 @@ _tilexr_load_deployment_config() {
     local TILEXR_VALIDATION_TIMEOUT
     local TILEXR_VALIDATION_CASE_ANALYSIS
     local TILEXR_VALIDATION_ROUTE_MODE TILEXR_VALIDATION_SEED
+    # Endpoints belong to this invocation, never to a copied machine config.
+    local TILEXR_COMM_ID TILEXR_DEMO_BARRIER_ADDR
     source "$1"
 }
 

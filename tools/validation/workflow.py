@@ -311,7 +311,10 @@ class Config:
         self.hostfile.relative_to(self.root)  # 同步契约：配置属于当前工作目录。
         self.install = self.root / "install" / validation_directory(self.checkpoint)
         self.logs = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", self.root / "run/validation")).resolve()
-        self.chain = chain_configuration(self.checkpoint) if self.is_run and self.checkpoint in CHAIN_CHECKPOINTS else None
+        self.chain = None
+        if self.is_run and self.checkpoint in CHAIN_CHECKPOINTS:
+            default_host = self.hosts()[0]["host"] if not os.environ.get("TILEXR_COMM_ID") else None
+            self.chain = chain_configuration(self.checkpoint, default_host)
 
     def hosts(self):
         try:
@@ -351,7 +354,7 @@ def source_send_stride(config):
     return (payload + 479) // 480 * 512
 
 
-def chain_configuration(checkpoint):
+def chain_configuration(checkpoint, default_host=None):
     route_mode = os.environ.get("TILEXR_VALIDATION_ROUTE_MODE", "balance_shift")
     if route_mode not in ("random", "balance", "balance_shift"):
         raise ValueError("route_mode 必须为 random、balance 或 balance_shift")
@@ -405,9 +408,9 @@ def chain_configuration(checkpoint):
                 raise ValueError()
             return f"{address}:{int(port)}"
         except ValueError:
-            raise ValueError(f"请在 validation.local.sh 配置 {name}=首节点可跨机访问的IPv4:端口") from None
+            raise ValueError(f"{name} 必须为首节点可跨机访问的IPv4:端口；检查 hostfile 首项或 run.sh 地址覆盖参数") from None
 
-    comm_id = endpoint(os.environ.get("TILEXR_COMM_ID", ""), "TILEXR_COMM_ID")
+    comm_id = endpoint(os.environ.get("TILEXR_COMM_ID") or f"{default_host}:10177", "TILEXR_COMM_ID")
     host, port = comm_id.split(":")
     barrier_addr = endpoint(os.environ.get("TILEXR_DEMO_BARRIER_ADDR", f"{host}:{int(port) + 97}"),
                             "TILEXR_DEMO_BARRIER_ADDR")
@@ -551,7 +554,12 @@ def verify_build(config, *, check_run_mode=True):
             raise ValueError("需要标准 Dispatch records.v1 打点产物，请执行 bash build_all.sh breakdown=1 和 bash sync.sh")
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
-    if artifact_files(config.install) != manifest["artifacts"]:
+    artifacts = artifact_files(config.install)
+    # Incremental deployments retain retired files; only this manifest's files
+    # belong to the active package. Local build validation remains exact.
+    if config.action in ("verify", "node", "rank"):
+        artifacts = {name: artifacts.get(name) for name in manifest["artifacts"]}
+    if artifacts != manifest["artifacts"]:
         raise ValueError("安装产物缺失或摘要不一致，请重新构建/同步")
     return manifest
 
@@ -735,17 +743,35 @@ def remote_argv(config, host, action, *arguments):
     return ["ssh", *SSH_OPTIONS, config.target(host), command]
 
 
+def sync_paths(config, source, manifest):
+    """Runtime closure plus the installed Python tests' source dependencies."""
+    prefixes = ["tools/validation/", "tools/profiling/", "tools/ep/"]
+    if manifest and any(test["argv"][0] == "@python" for test in node_tests(manifest)):
+        # The address-space test compiles the production kernel with fake APIs.
+        prefixes.extend(["tests/ep/python/", "tests/ep/unit/server_dedup_count_fake/",
+                         "src/include/", "src/ep/common/", "src/ep/kernels/"])
+    names = {"set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
+             "src/ep/profiling/server_dedup.mapping.json"}
+    if manifest:
+        names.update(arg for test in node_tests(manifest) for arg in test["argv"] if arg != "@python")
+    paths = {name for name in source["files"]
+             if name in names or name.startswith(tuple(prefixes))}
+    paths.discard(config.hostfile.relative_to(config.root).as_posix())
+    for name in (".tilexr-source.json", ".tilexr-validation-root",
+                 config.install.relative_to(config.root).as_posix() + "/", "validation.local.sh"):
+        if (config.root / name).exists():
+            paths.add(name)
+    return paths
+
+
 def sync_debug(config):
     """Probe every configured endpoint without preparing or changing deployment files."""
     hosts = config.hosts()
     require_tools(["ssh", "rsync"])
     log = config.logs / ("sync-debug-" + uuid.uuid4().hex)
     source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
-    paths = set(source["files"])
-    paths.add(str(config.hostfile.relative_to(config.root)))
-    for name in (".tilexr-source.json", ".tilexr-validation-root", "install/validation/", "validation.local.sh"):
-        if (config.root / name).exists():
-            paths.add(name)
+    manifest_path = config.install / "manifest.json"
+    paths = sync_paths(config, source, read_json(manifest_path) if manifest_path.exists() else None)
     file_list = log / "files.txt"
     file_list.parent.mkdir(parents=True, exist_ok=True)
     file_list.write_text("\n".join(sorted(paths)) + "\n", encoding="utf-8")
@@ -797,11 +823,7 @@ def sync(config):
     receipt.unlink(missing_ok=True)
     source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
     write_json(config.root / ".tilexr-source.json", source)
-    paths = set(source["files"])
-    paths.update([".tilexr-source.json", ".tilexr-validation-root", "install/validation/",
-                  str(config.hostfile.relative_to(config.root))])
-    if (config.root / "validation.local.sh").exists():
-        paths.add("validation.local.sh")
+    paths = sync_paths(config, source, manifest)
     file_list = log / "files.txt"
     file_list.parent.mkdir(parents=True, exist_ok=True)
     file_list.write_text("\n".join(sorted(paths)) + "\n", encoding="utf-8")
@@ -809,8 +831,8 @@ def sync(config):
     def send(index, host):
         node_log = log / str(index)
         prepare = '''set -eo pipefail
-python3 - "$1" "$2" <<'PY'
-import pathlib, shutil, sys
+python3 - "$1" <<'PY'
+import pathlib, sys
 root = pathlib.Path(sys.argv[1])
 if not root.is_absolute() or root == pathlib.Path('/') or '..' in root.parts:
     raise SystemExit('invalid deployment root')
@@ -828,17 +850,11 @@ for lock in ('.operation.lock', 'node.lock'):
 install = root / 'install/validation'
 if install.is_symlink() or (root / 'install').is_symlink():
     raise SystemExit('installation directory must not be a symlink')
-if install.exists():
-    shutil.rmtree(install)
-local_config = root / 'validation.local.sh'
-if sys.argv[2] == 'absent' and local_config.exists():
-    local_config.unlink()
 root.mkdir(parents=True, exist_ok=True)
 PY
 '''
         command(["ssh", *SSH_OPTIONS, config.target(host["host"]),
-                 "bash -s -- " + shlex.quote(str(config.root)) + " " +
-                 ("present" if (config.root / "validation.local.sh").exists() else "absent")],
+                 "bash -s -- " + shlex.quote(str(config.root))],
                 node_log / "prepare.log", stdin=prepare)
         command(["rsync", "-a", "-r", "--checksum", "--protect-args", "--timeout=30",
                  "--files-from=" + str(file_list), "-e", shlex.join(["ssh", *SSH_OPTIONS]),

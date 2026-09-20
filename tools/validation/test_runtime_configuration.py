@@ -30,6 +30,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         (self.root / "scripts/common_env.sh").write_text("# environment fixture\n")
         self.local = self.root / "validation.local.sh"
         self.local.write_text('TILEXR_COMM_ID=192.0.2.1:10177\n'
+                              'TILEXR_DEMO_BARRIER_ADDR=192.0.2.1:10274\n'
                               'TILEXR_VALIDATION_RUN_MODE=obsolete\n'
                               'TILEXR_VALIDATION_LOOPS=999\n'
                               'TILEXR_VALIDATION_CHECKPOINT=obsolete\n')
@@ -54,10 +55,30 @@ class RuntimeConfigurationTests(unittest.TestCase):
             result = subprocess.run([str(self.bash), "-c", command], cwd=self.root,
                                     env=dict(self.env, **overrides), capture_output=True, text=True, check=True)
             values = json.loads(result.stdout)
-            self.assertEqual(values["TILEXR_COMM_ID"], "192.0.2.1:10177")
+            self.assertNotIn("TILEXR_COMM_ID", values)
+            self.assertNotIn("TILEXR_DEMO_BARRIER_ADDR", values)
             self.assertNotIn("TILEXR_VALIDATION_RUN_MODE", values)
             for key in ("TILEXR_VALIDATION_LOOPS", "TILEXR_VALIDATION_CHECKPOINT"):
                 self.assertEqual(values.get(key), overrides.get(key))
+
+    def test_run_discards_stale_endpoints_but_preserves_cli_overrides(self):
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import os,json\nfrom pathlib import Path\nfrom run_summary import write_result\n"
+            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
+            "(root/'endpoints.json').write_text(json.dumps([os.environ.get('TILEXR_COMM_ID'), "
+            "os.environ.get('TILEXR_DEMO_BARRIER_ADDR')]))\n"
+            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
+        for index, arguments in enumerate(([], ["comm_id=192.0.2.3:12300", "barrier_addr=192.0.2.3:12400"])):
+            with self.subTest(arguments=arguments):
+                output = self.root / "run" / str(index)
+                result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", *arguments],
+                    cwd=self.root, env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output),
+                                           TILEXR_COMM_ID="192.0.2.99:11111",
+                                           TILEXR_DEMO_BARRIER_ADDR="192.0.2.99:11208"),
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(json.loads((output / "endpoints.json").read_text()),
+                                 ["192.0.2.3:12300", "192.0.2.3:12400"] if arguments else [None, None])
 
     def test_single_case_alias_changes_parameters_without_writing_environment_file(self):
         stub = self.root / "tools/validation/workflow.py"
@@ -132,7 +153,7 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                 self.assertEqual(result.returncode, code, result.stdout + result.stderr)
                 calls = [json.loads(line) for line in calls_path.read_text().splitlines()]
                 self.assertEqual([call['action'] for call in calls], [action])
-                self.assertEqual(calls[0]['comm_id'], None if entry in ('sync', 'run_host_validation') else '192.0.2.1:10177')
+                self.assertIsNone(calls[0]['comm_id'])
                 if entry == 'run':
                     self.assertEqual(len(result.stdout.splitlines()), 1)
                     self.assertEqual(result.stderr, '')

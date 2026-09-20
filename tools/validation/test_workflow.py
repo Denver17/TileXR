@@ -42,6 +42,23 @@ class TemporaryRoot(unittest.TestCase):
 
 
 class SyncDebugTests(TemporaryRoot):
+    def test_runtime_paths_keep_profiling_and_host_compile_dependencies(self):
+        config = workflow.Config("sync")
+        files = ["set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
+                 "src/ep/profiling/server_dedup.mapping.json", "tools/profiling/report.py",
+                 "src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp",
+                 "tests/ep/unit/server_dedup_count_fake/kernel_operator.h",
+                 "tests/ep/python/test_server_dedup_address_space.py", "src/include/comm_args.h",
+                 "src/ep/common/ep_memory_server_dedup_count_layout.h",
+                 "src/moonep/unrelated.cpp", "hostfile", "3rdparty/spdlog/CMakeLists.txt"]
+        manifest = dict(checkpoint=workflow.CHECKPOINT, tests=[dict(
+            argv=["@python", "tests/ep/python/test_server_dedup_address_space.py"])])
+        paths = workflow.sync_paths(config, {"files": files}, manifest)
+        self.assertEqual(paths, set(files[:-3]))
+        manifest["checkpoint"] = workflow.DISPATCH_CHECKPOINT
+        paths = workflow.sync_paths(config, {"files": files}, manifest)
+        self.assertEqual(paths, set(files[:5]))
+
     def test_failed_endpoint_does_not_stop_remaining_checks_or_change_receipts(self):
         self.hostfile.write_text("192.0.2.1\n192.0.2.2\n192.0.2.3\n")
         config = workflow.Config("sync")
@@ -120,6 +137,21 @@ class HostfileTests(TemporaryRoot):
 
 
 class ConfigTests(TemporaryRoot):
+    def test_chain_endpoints_default_to_coordinator_and_propagate_to_remote(self):
+        self.hostfile.write_text("192.0.2.1\n192.0.2.2\n")
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",
+                                         "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
+                                         "TILEXR_COMM_ID": ""}, clear=False):
+            os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
+            config = self.config()
+            self.assertEqual(config.chain["comm_id"], "192.0.2.1:10177")
+            self.assertEqual(config.chain["barrier_addr"], "192.0.2.1:10274")
+            command = workflow.remote_argv(config, "192.0.2.2", "node", "run-id", "build-id", 120)[-1]
+            self.assertIn("192.0.2.1:10177", command)
+            self.assertIn("192.0.2.1:10274", command)
+            self.hostfile.write_text("192.0.2.2\n192.0.2.1\n")
+            self.assertEqual(self.config().chain["comm_id"], "192.0.2.2:10177")
+
     def test_empty_kernel_requires_production(self):
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
             with self.assertRaisesRegex(ValueError, "production"):
@@ -1470,15 +1502,36 @@ with output.open('w', newline='') as f:
                 self.assertNotEqual(result.returncode, 0)
                 self.assertFalse((self.config_instance.logs / "sync.json").exists())
 
-    def test_resync_removes_retired_artifacts_and_local_configuration(self):
+    def test_resync_preserves_retired_artifacts_and_local_configuration(self):
         self.prepare_sync()
         stale_artifact = self.remote / "install/validation/old-artifact"
         stale_artifact.write_bytes(b"previous build\n")
         stale_config = self.remote / "validation.local.sh"
         stale_config.write_text("export OLD_CONFIGURATION=1\n", encoding="utf-8")
         self.prepare_sync()
-        self.assertFalse(stale_artifact.exists())
-        self.assertFalse(stale_config.exists())
+        self.assertEqual(stale_artifact.read_bytes(), b"previous build\n")
+        self.assertEqual(stale_config.read_text(), "export OLD_CONFIGURATION=1\n")
+        self.assert_success(self.invoke("run"))
+
+    def test_sync_omits_unrelated_sources_and_hostfile_but_keeps_runtime_config(self):
+        unrelated = self.root / "src/moonep/unrelated.cpp"
+        unrelated.parent.mkdir(parents=True)
+        unrelated.write_text("not a runtime dependency")
+        local_config = self.root / "validation.local.sh"
+        local_config.write_text("# required deployment environment\n")
+        self.prepare_sync()
+        self.assertFalse((self.remote / "src/moonep/unrelated.cpp").exists())
+        self.assertFalse((self.remote / "hostfile").exists())
+        self.assertEqual((self.remote / "validation.local.sh").read_bytes(), local_config.read_bytes())
+        self.assert_success(self.invoke("run"))
+
+    def test_incremental_remote_verification_still_rejects_corrupt_active_artifact(self):
+        self.prepare_sync()
+        (self.remote / "install/validation/old-artifact").write_text("retired")
+        (self.remote / "install/validation/artifact").write_text("corrupt")
+        result = self.invoke("run")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("VALIDATION_PASS", result.stdout)
 
     def test_unmanaged_destination_is_preserved_and_rejected(self):
         self.remote.mkdir()

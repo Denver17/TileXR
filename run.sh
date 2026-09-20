@@ -18,6 +18,7 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 quant_mode=0 fp8_format=e4m3
                     case_analysis=0|1 (default: 0)
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
+  Endpoints default to hostfile's first (local coordinator) IPv4, ports 10177/10274.
 HELP
 }
 fail() { printf 'VALIDATION_FAIL 执行阶段失败 | %s\n' "$*" >&2; exit 2; }
@@ -81,6 +82,7 @@ export TILEXR_VALIDATION_BLOCK_DIM=auto TILEXR_VALIDATION_ACTION=run
 export TILEXR_VALIDATION_CASE_ANALYSIS=0
 export TILEXR_VALIDATION_ROUTE_MODE=balance_shift TILEXR_VALIDATION_SEED=2026
 unset TILEXR_DIRECT_HOSTS_JSON TILEXR_DIRECT_RUN
+unset TILEXR_COMM_ID TILEXR_DEMO_BARRIER_ADDR
 assignments+=("TILEXR_VALIDATION_SERVERS=$servers" "TILEXR_VALIDATION_MOE_EXPERT_NUM=$experts"
               "TILEXR_VALIDATION_RUN_MODE=$run_mode" "TILEXR_VALIDATION_LOOPS=$loops"
               "TILEXR_VALIDATION_WARMUP=$warmup")

@@ -216,7 +216,13 @@ test -f validation.local.sh || cp validation.local.sh.example validation.local.s
 test -f hostfile || cp hostfile.example hostfile
 ```
 
-`validation.local.sh` 只保存 CANN/driver、Python/msprof、SSH 用户、hostfile 和首节点可跨机访问的 `TILEXR_COMM_ID`。`hostfile` 每行只填写一个 IPv4，第一项为当前首节点；每台固定使用 device 0..7，允许空行和注释。脚本向其余节点同一绝对路径分发，目标必须为空或有 `.tilexr-validation-root` 的受管理目录。
+`validation.local.sh` 只保存 CANN/driver、Python/msprof、SSH 用户和 hostfile 等环境配置。
+主节点地址默认取 hostfile 首项（必须属于当前执行机器），通信端口为 10177，barrier 端口为 10274。
+文件中遗留的 `TILEXR_COMM_ID` / `TILEXR_DEMO_BARRIER_ADDR` 不再生效，避免配置同步后指向旧主节点；
+需要覆盖时使用 `run.sh comm_id=IP:PORT barrier_addr=IP:PORT`，只指定 comm_id 时 barrier 默认同 IP、端口 +97。
+控制端将最终地址传给全部远端，远端不能各自使用本机 IP。切换控制端仍须将本机通信 IP 放在 hostfile 第一项，
+多网卡机器使用清单中的网卡地址。`hostfile` 每行只填写一个 IPv4；每台固定使用 device 0..7，允许空行和注释。
+脚本向其余节点同一绝对路径分发，目标必须为空或有 `.tilexr-validation-root` 的受管理目录。
 
 按顺序逐条执行，每步成功后再执行下一步：
 
@@ -330,6 +336,14 @@ bash sync.sh                     # 清理同步回执后，重新同步再运行
 同一 A5 产物同步到 8 台服务器后，可以连续运行 16P/32P/48P/64P 和不同专家数。
 `hostfile` 是分发清单；`sync.sh` 使用完整清单，`run.sh -n N` 只选择前 N 台。
 每台固定使用 0..7 卡，按清单顺序分配连续 rank。未选中节点不执行本次用例。
+
+`sync.sh` 保留跨主机并发，只增量更新安装产物、验证/性能解析工具和环境加载脚本，
+不删除远端安装目录或退休文件。Host 检查点还携带 Python 测试及其现场编译所需的源码。
+`hostfile` 只在首节点读取，远端运行通过 SSH 参数接收清单，不再同步该文件。
+`validation.local.sh` 仍需同步：远端依赖它加载 CANN、driver、Python 等环境；
+首节点不存在此文件时保留远端已有配置。rsync 保留 checksum，避免仅按时间戳漏掉内容变化。
+远端校验以当前 manifest 为准，允许保留旧文件，但当前清单内产物缺失或哈希错误仍拒绝运行；
+保留的旧文件不代表当前安装包，也不允许据此运行旧测试。`--debug` 使用同一运行依赖清单。
 
 同步出现 `Broken pipe` / exit 255 时，在同一用户、容器和目录运行
 `bash sync.sh --debug`。它按有效 hostfile 顺序逐个检查所有 IP（包括首项），
