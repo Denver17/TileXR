@@ -25,6 +25,9 @@
   第二份基址为 peer[rank]+CommArgs.peerMemBytes/2，步长来自实际逻辑通信容量。
 - 选窗的主要目的仍为隔离 Dispatch 与 Combine，模型执行顺序契约不变；M2 随本次 Combine
   所选整体 buffer 使用其控制区中的唯一一份完成 Flag，CB02-02 已确认，不新增独立 bank 或轮次参数。
+- 联合测试按 D→C 顺序提交且每次 launch 各递增一次 magic；两算子各自持续使用一个不同的
+  buffer 是预期行为，不要求同一算子在联合模式中轮换两个 buffer。测试分别按各算子的实际
+  magic%2 定位窗口，不能用联合循环次数代替 magic，也不为窗口覆盖额外消耗 magic。
 - 用户已确认模型在 Dispatch 与 Combine 之间、Combine 与下一次 Dispatch 之间安排其他算子，
   其实际执行顺序保证 buffer 不踩踏。本文直接采用该调度保证，不增加轮次管理、plan/epoch/windowId
   管理或 Server 内读完确认握手，不再把这些作为待讨论项。
@@ -445,7 +448,8 @@ Combine 仍需的基础接口信息：
 | comm、stream、现有 magic/选窗 | peer 映射、算子提交及通信窗口，沿用现有机制 |
 | yOut、通信区/必要 workspace | 输出与内部状态的存储，不是新增业务路由信息 |
 
-沿用 Memory 的 expertOut 输入契约：FP16/BF16 expert 结果，quantMode 控制通信量化。
+沿用 Memory 的 expertOut 输入契约：FP16/BF16 expert 结果；Combine 首版仅实现非量化，
+保留 quantMode 参数但只接受 0，Host 拒绝其他值。
 本接口不包含外部量化 expertOut 的 scale，不能把路由 weight 当成解码 scale；若未来支持该类
 输入，应另行扩展契约，不在当前已确认接口中隐含承诺。
 
@@ -511,12 +515,13 @@ int TileXRMoeEpCombineMemoryServerDedup(
 内部 tiling/launch ABI 与公开参数组织分别定义。shape、comm 和 sendCounts 提供
 TokenNum、容量、peer 映射及布局计算所需输入；不增加独立 TokenNum 或 workspace 参数。
 
-expertOut 输入契约为 FP16/BF16 expert 结果；quantMode 控制通信量化。
+expertOut 输入契约为 FP16/BF16 expert 结果；Combine 首版 quantMode 固定为 0。
 Dispatch 的 FP8 输出不能直接视为 Combine 的 expertOut 输入，本接口未定义外部量化输入的 scale。
 
 首版已确认仅支持有权重输入：表 3 的有效 selfWeight/memberWeight 与表 5 必须按五表规则提供并使用，
-不支持以 expertScales=nullptr 关闭加权。无权重模式延后设计；各 quantMode 及其他保留特性
-的支持范围仍由 Combine 设计 CB00-03 收口，本次确认不扩大量化或可选特性范围。
+不支持以 expertScales=nullptr 关闭加权。expertScales 为表 5 路由权重，不是量化 scale。
+CB00-03 已确认未实现特性仅接受关闭配置；首版不实现量化，公开参数不删除。无权重模式延后；
+量化相关内部问题统一归档到 [Combine 设计附录 A](ep-memory-server-dedup-combine-design.md#deferred-quantization)，不作为首版待定项。
 
 Combine 内部实现安排见[Combine 模块设计](ep-memory-server-dedup-combine-design.md#模块边界m0m6)。
 Dispatch 生产端源码：[公开接口](../../src/include/tilexr_ep.h)、
@@ -530,6 +535,20 @@ Dispatch 生产端源码：[公开接口](../../src/include/tilexr_ep.h)、
 五表、expertOut 和 yOut 继续由调用方独立分配，保持有效到本次 Combine 完成。
 
 ### 6.1 区域顺序和槽位
+
+**数据起点固定为每份整体 buffer 的 +1MiB（1048576B，0x100000）。** 本文所说的
+1MB 按此二进制容量解释，不是 1000000B。1MiB 是相对当前所选 buffer 基址的偏移，
+不是整个通信域只保留一次的前缀，也不是相对 Combine 控制区的偏移。
+
+| 区域 | 相对每份 buffer 的字节区间（左闭右开） | 容量 |
+| --- | --- | --- |
+| Dispatch 控制区 | [0,782336) | 764KiB |
+| Combine 控制区 | [782336,835584) | 52KiB |
+| 固定留空 | [835584,1048576) | 208KiB |
+| Dispatch/Combine 共用数据区 | 从 1048576 开始 | alignUp(max(Ddata,Cdata),512) |
+
+208KiB 留空不属于任何一方的控制区或可用数据容量；容量检查须计入完整 1MiB 前缀，
+不能用两控制区之和 816KiB 替代公共 SHARED_DATA_OFFSET 宏。
 
 ```text
 peer[rank]
@@ -550,7 +569,7 @@ peer[rank]
   runtime 保留区（保持实际通信域的保留边界）
 ```
 
-两份 buffer 布局完全相同，起点相距实际通信容量的一半；复制范围包括两个控制区和整个共用数据区。
+两份 buffer 布局完全相同，起点相距实际通信容量的一半；两份均预留两个控制区、208KiB 留空和整个共用数据区。
 每份 Combine 控制区只放一份 M2 完成 Flag；全域随两个整体 buffer 共两份，内部不再展开双 bank。
 Dispatch/Combine 的数据视图共享同一起点，容量取两种视图需求的最大值，不求和。
 Combine 内部中转区紧接其结果接收区，二者同时存活、互不覆盖。
@@ -566,11 +585,13 @@ Combine 内部中转区紧接其结果接收区，二者同时存活、互不覆
 中转 slot 与 Dispatch 数据接收区的逻辑槽号保持一致（§4.2 Dslot），并非密排 expertOut row。
 即使实际 TokenNum/type3Count 很小，也不能缩减可被大 slot 索引的容量。
 中转区只需原始数据及行尾对齐，不附加路由、weight 或 DataAsFlag；可读时机由 Combine 控制协议保证。
-结果区按原始 tokenId*K+k 寻址，Flag/scale 等完整 wire 内容计入 Sresult，避免重复计费。
+结果区按原始 tokenId*K+k 寻址，首版非量化 payload、Flag 和补齐计入 Sresult，不含量化 scale。
 
 DIRECT/partial 在同一次调用内必须使用统一可解码的结果协议；SourceWeight=1 不能用于判断
-payload 类型。DataAsFlag 的槽位形式已确认，具体通信量化/scale/数值格式归 CB03-02/CB04-03，
-不能将结果槽直接等同于含 Dispatch 包尾的 T。
+payload 类型。DataAsFlag 的槽位形式已确认，首版非量化返回格式与数值边界归 CB03-02/CB04-03，
+不能将结果槽直接等同于含 Dispatch 包尾的 T。Sresult 是选定非量化通信格式后推导的槽大小；
+Combine 独立设计中的 `ceilDiv(2H,480)*512` 用于无附加字段、BF16/FP16 返回的容量示例，
+partial 返回 dtype 仍需收口；未来量化扩展见独立设计附录 A，不影响首版设计收口。
 
 ### 6.2 统一 offset 与容量公式
 
@@ -596,7 +617,7 @@ Dctrl = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES  // 764KiB，单份 buffer
 Cctrl = TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES   // 52KiB，单份 buffer
 dispatchControlOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET  // 0
 combineControlOffset = TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET    // 764KiB
-sharedDataOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET           // 1MiB
+sharedDataOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET           // 1048576B，相对每份 buffer
 dispatchOffset = sharedDataOffset
 resultOffset = sharedDataOffset
 stageOffset = sharedDataOffset + A(Crecv)
@@ -605,7 +626,9 @@ singleBufferBytes = A(sharedDataOffset + sharedDataBytes)  // 单份实际需求
 bufferStride = CommArgs.peerMemBytes / 2
 bufferIndex = uint64(magic) % 2  // 沿用整体选窗，不另设 M2 bank
 bufferBase(rank,i) = peer[rank] + uint64(i)*bufferStride  // i=0,1
-EPRequiredBytes = 2*singleBufferBytes  // 两份有效布局总量，不含半区剩余空间
+EPRequiredBytes = 2*singleBufferBytes  // 两份布局占用总量，含各自 1MiB 前缀，不含半区剩余空间
+sharedDataBase(rank,0) = peer[rank] + 1048576
+sharedDataBase(rank,1) = peer[rank] + peerMemBytes/2 + 1048576
 ```
 
 单份 sharedDataBytes 必须同时满足 Dispatch 和 Combine，包含两者实际访问的全部数据。
@@ -785,7 +808,7 @@ serverReadyBase = combineBase + TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFS
 | --- | --- | --- |
 | J01 | 已确认 | expert/q 与类型 3 uint32 offset 定位同一逻辑槽，容量 E*BS |
 | J02 | 已确认 | 五表语义、有效范围、行 stride；同步 Dispatch 生产与调用方分配 |
-| J03 | 布局已确认，待实现 | 两个控制区＋按 max(Ddata,Cdata) 分配的共用数据区；整体双 buffer 按实际容量的一半分窗、每窗一份 M2 Flag，stage 接在 Combine 接收区之后，按实际分配校验容量；详见 §6 |
+| J03 | 布局及公共宏已确认并落到源码，Combine 待实现 | 每份 buffer 的共用数据起点为 +1MiB，前置两控制区及 208KiB 留空；按 max(Ddata,Cdata) 核算数据容量；整体双 buffer 按实际容量的一半分窗、每窗一份 M2 Flag，stage 接在 Combine 接收区之后，按实际分配校验容量；详见 §6 |
 | J04 | 已迁出 | 分核、init、阶段和任务推进统一在 Combine 独立设计维护 |
 | J05 | 接口与内部各自维护 | 本文维护输入 dtype/weight 语义；内部累加、通信格式和数值规则在 Combine 设计维护 |
 | J06 | 已迁出 | Flag 发布/观察/清理与在途资源完成统一在 Combine 设计维护 |
@@ -808,6 +831,13 @@ Dispatch 的五表生产及 Host/替身验证已实现；Combine 设计与实现
 
 Flag 可见性与多引擎流水需要设备证据；CPU/reference 和编译不能证明跨卡数据可读。
 联合测试遵循用户给定的模型调度边界，不另加跨轮重叠要求。
+
+联合模式分别校验两算子所属窗口，不交换两窗的数据角色。通信窗口检查用于 Host 布局/容量、
+完成后的协议状态检查、错包诊断和独立内存边界探针；五表与 expertOut/yOut 的输出校验读取
+调用方独立分配的 tensor，不从窗口重建输入。第一阶段空 Combine 没有协议数据可验收，
+不将其窗口保持初始值解释为通信正确。具体点位见[Combine 第一阶段补充](../EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase1-confirmed)。
+每次测试新建通信 buffer 并在执行前清零；超出这一基线的结果 Flag 初始化/复用问题列为
+[重点遗留](ep-memory-server-dedup-combine-design.md#deferred-result-flags)，不阻塞当前第一阶段。
 
 维护要点：两个公共宏固定控制区边界，双方分别校验自身使用量；不能拿旧预留容量代替实际布局上限再翻倍。
 数据起点固定为 1MiB（两控制区之后留空 208KiB），数据容量按双方视图最大值核算，bank 步长统一取 peerMemBytes/2。

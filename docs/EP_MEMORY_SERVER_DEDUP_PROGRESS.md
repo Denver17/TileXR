@@ -11,24 +11,46 @@ Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属
 TokenNum 读取 sendCounts 末项。M1–M5 用户细化补充已完成；Combine 独立设计进入整体通读和分级收口，M0/M6 衔接一并纳入。
 原 24 项中 CB00-01 已确认：接口含义沿用 Combine Memory，Host 封装、GM TilingData 和 launch
 形式参考 Dispatch Server Dedup；公开 27 参数不变，设备所需标量通过独立 tilingData 传递。
-[待确定汇总表](specs/ep-memory-server-dedup-combine-design.md#待确定汇总表)剩余 23 项：
-高风险 11 项、中风险 9 项、低风险 3 项；无参考 2 项与风险交叉，合计 12 项建议重点核对。
+CB00-03 已确认：首版仅支持有权重、非量化输入/通信，保留 quantMode 参数但仅接受 0；未实现特性只接受关闭配置。
+量化相关子问题已移至 [Combine 附录 A 遗留项](specs/ep-memory-server-dedup-combine-design.md#deferred-quantization)，后续启动量化设计时再讨论，不进入首版 UB 预算或验收。
+表 3/5 的路由 weight 保持必需；expertScales 是表 5 接口名，不是量化 scale。
+CB1A-01 跨模块 UB 复用暂缓至各模块 UB 用量明确后讨论。CB1A-02 确认 Host 首次清零、kernel 消费后当场清零；
+prepareDone/serverReady 的清理 owner、空任务和分核变化覆盖已梳理，M5 数据区 Flag 初始状态及清理完成依赖仍需收口。
+[CB00-02](specs/ep-memory-server-dedup-combine-design.md#cb00-02) 布局已确认：Dispatch 控制区、Combine 控制区、共用数据区依次 512B 对齐，前后半区各保留一份，第二份起点为 peerMemBytes/2；共用数据区按 max(Ddata,Cdata) 核算。
+控制区以公共宏解耦：Dispatch 764KiB（当前固定表区占用 574KiB），Combine 52KiB（已设计上限 26KiB 的两倍），
+合计 816KiB；其后留空 208KiB，每份 buffer 的共用数据起点固定为 +1MiB（1048576B）。
+公共宏和 Dispatch 布局已落实到源码，Combine 尚未实现；双方仅校验各自使用量，核算见[联合设计 §6.4](specs/ep-memory-server-dedup-dispatch-combine-design.md#64-固定控制区宏及上限核算)。
+Combine 控制小表独立 offset 宏已确认：prepareDone=0、serverReady=2048、扩展预留=26624，均相对 Combine 控制区并按 512B 对齐。
+两表固定预留 2KiB/24KiB，BS 或分核变化只改变有效范围，不移动表边界；Dispatch 内部固定 offset 的源码改造由独立专题维护。
+Combine 接收区为 BS*K 个 DataAsFlag 槽，中转区紧接其后，为 E*BS 行原始 BF16/FP16，行 stride=alignUp(H*2,512)。
+Sresult 为选定通信格式后推导的完整槽大小；ceilDiv(2H,480)*512 仅为无附加字段的 BF16/FP16 非量化返回示例，非量化 partial 返回格式及舍入仍归 CB03-02/CB04-03，量化格式移至附录。
+按单份完整需求分别检查两个半区，统一容量上限为 peerMemBytes/2 减去 runtime 保留区；当前 run.sh chain 每卡显式分配 8GiB，Combine 的新布局消费逻辑尚未实现。
+[待确定汇总表](specs/ep-memory-server-dedup-combine-design.md#待确定汇总表)仍有 20 项包含待确认内容（含暂缓的 CB1A-01）：
+高风险 9 项、中风险 8 项、低风险 3 项；无参考 1 项与风险交叉，合计 10 项建议重点核对。
 各模块分别记录已确认项、待确定项、推荐和代码依据，推荐尚未自动视为用户确认。
+量化子问题迁出后，原条目仍各有非量化工作，待定总数保持 20；附录 Q01–Q06 不计入首版汇总。
+Combine 最近一次通读已同步 M0–M5 固定宏/半区地址，区分控制区固定预留与有效 Flag 范围，
+明确 stage 原始行与 result DataAsFlag 槽的不同 stride；已确认项不重复放回待选方案，仍按现有 20 个待定 CB 编号继续补充。
 最新约定为固定 64 核，全部先执行 Init、CopyLocalPendingTokens 两个函数；随后分为 Send/Read 核，
 Send 核直发类型 1，Read 核拉取类型 2 成员、加权聚合并发出 partial。最终 BS 个 Token 的聚合
 独立为 M5，首版由 Read 核负责，任务映射与核类别解耦，预留后续 64 核参与。
 M2 由核 56..63 汇总本卡 sum=64.0f 后通知各卡；各 Read 核独占 512B 卡间 Flag 块，
-取 8 个槽首 float 求和为 8.0f 后就绪并自行清理。recvCoreNum=8*N（N=1..6），卡间 Flag 两份乒乓共 8..48KiB。
+取 8 个槽首 float 求和为 8.0f 后就绪并自行清理。recvCoreNum=8*N（N=1..6）。
+CB02-02 已确认：每个整体 buffer 的 Combine 控制区只放一份 M2 完成 Flag，随本次 Combine 整体选窗使用，
+不设独立双 bank/翻转状态。两份 serverReady 固定预留 48KiB（有效 8..48KiB），两份 prepareDone 共 4KiB，已知 Flag 有效范围合计 12..52KiB。
 M3 由各 Send 核用 Compare＋GatherMask 密排类型 1 原始行号，再按 sendCoreNum 商余均分；
 可整除时任务数相同，否则最多相差 1，发送地址仍取表 2 的原始行。
 表 2 仅缓存本核列表行号所覆盖的连续区间，按原始 row 减缓存首行索引，不要求整表搬入 UB。
 M4 同样密排类型 2 行号，按 recvCoreNum 商余均分汇聚转发任务；表 2/3 仅缓存本核行号范围，
 表 3 提供成员及加权信息，表 2 提供返回目的与成员寻址所需的原始 source，尚未实现。
 M5 按 BS 整 Token 分核，预载本核表 4/5 区间，逐 Token 轮询，未到齐即检查下一个。
+M5 DataAsFlag 清理已确认移至本核全部聚合任务结束后，单独清理本核连续 Token 段的全部 K 槽、全部 Flag 区，不筛选 mask。
+每 Token 一次 DataCopyPad 清理 K*N 个 Flag，for 循环中只推进目的 GM 地址，Token 间不插同步；所有调用共用 K*N*32B 零值 UB，循环前完成置零依赖，末尾统一确认 MTE3 写回完成。
+具体 UB 复用区间仍随 CB1A-01 汇总，目标块数限制按单 Token 的 K*N 核对。
 M5 已改为按 mask 置位的副本逐个提交多块 Flag 拷贝，UB 按 32B 块密排，统一等待后
 用一次 ReduceSum（mask=1、repeat=B、stride=1）累加各块首 float，B=N×有效槽数。
 用户确认总线协议保证完整性；单次 probe 为 m 次拷贝、32*m*N 字节，实际代价待设备验证。
-Combine 新中转区的分配归属和内部细节待收口；Dispatch 五表 ABI 和新包尾布局已实施。
+Combine 新中转区的分配归属、区域顺序、行对齐及整体双 buffer 已确认；内部实现细节继续收口，Dispatch 五表 ABI 和新包尾布局已实施。
 
 [Dispatch 输出适配方案](specs/ep-memory-server-dedup-dispatch-output-adaptation-design.md)已更新：
 32B 包头保留 source rank/token/k/type 四个有效值，type 与 Combine 的 TokenType 共用 1/2/3 定义；
@@ -52,8 +74,8 @@ D01–D09/T01–T03 全部确认并完成实现，执行顺序与验证入口见
 | 最新产物验收 | 上一行仅覆盖那次产物；之后源码修改不能自动继承该正确性或性能结论，128P 等组合需各自证据 |
 | 未定位故障 | 32P/E384、BS256、performance 100+50 轮报告执行阶段失败、0/32；run_id=d5d6c21f230a496e82ccfa2dc4e0494a，缺原始错误，未确认环境根因 |
 | Combine 新方向 | 64 核依次执行 Init 和本地待聚合 Token 拷贝两个函数；之后 Send 核直发，Read 核读取聚合后发送；独立 M5 首版由 Read 核聚合本卡 BS 个结果，预留 64 核参与。尚未实现 |
-| Combine 选窗与复用 | 沿用当前选窗，主要隔离 Dispatch/Combine；跨调用 buffer 安全由用户确认的模型调度保证，不新增轮次管理或读完握手 |
-| Combine 设计推进 | M1–M5 细化补充完成，已通读并分级；CB00-01 接口组织已确认，剩余 23 项待收口，M0/M6 衔接同步核对 |
+| Combine 选窗与复用 | 每份 buffer 数据起点为 +1MiB（控制区及留空），整体双 buffer 步长为 peerMemBytes/2；公共布局已落地，Combine 待实现；跨调用安全仍按模型调度保证，M2 每窗一份 Flag 随整体选窗使用，不新增公共轮次参数或读完握手 |
+| Combine 设计推进 | M1–M5 细化补充完成，已通读并分级；CB00-01 接口组织、CB00-02 布局、CB02-02 M2 单份配置已确认，CB00-03 加权与关闭配置策略已确认，剩余 20 项含待收口内容，M0/M6 衔接同步核对 |
 
 以上设备信息依据用户回传，未直接访问生产环境。约 49us 的历史 performance 与约 391us 的
 breakdown 口径和产物不同；移除 PacketIssue 未明显缓解的反馈不能证明根因已经闭合。

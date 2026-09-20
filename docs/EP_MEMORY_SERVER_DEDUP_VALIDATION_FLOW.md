@@ -25,6 +25,58 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 适用平台为 Ascend 910A5/Ascend950 A5 环境，目标工具链为 CANN 9.1.0，保持 C++14。
 910B Host 或 simulator 只能验证 Host/构建边界，不能作为 A5 kernel 执行证据。
 
+<a id="combine-phase1-confirmed"></a>
+## Combine 第一阶段：已确认的窗口检查与 breakdown 补充
+
+本节记录 Combine 空算子第一阶段的最新确认，供七个验收点落实；后文 Dispatch 阶段记录
+保留历史上下文，不能用旧固定 4GiB 步长、2MiB 数据起点或旧接口替代最新联合设计。
+当前公共布局以[联合设计 §6](specs/ep-memory-server-dedup-dispatch-combine-design.md#6-共用通信域的布局cb00-02-已确认)为准。
+
+### consumer 的职责
+
+现有 consumer 为 `tests/ep/integration/test_tilexr_ep_server_dedup_chain.cpp` 编译出的
+`test_tilexr_ep_server_dedup_chain`，由 `run.sh` 经 `tools/validation/workflow.py` 在每个 rank 启动。
+它负责设置设备、创建 comm/stream、分配并构造输入输出、调用公开算子、同步和 barrier、
+读取结果与独立参考比较、输出逐 rank marker/统计及清理资源。
+`server_dedup_dispatch_consumer.h` 是其 Dispatch 输出及通信槽校验部分。
+它是测试侧调用方，不是生产通信中的接收核；后续在同一 consumer 中接入三种算子模式。
+
+### 选窗与检查时机
+
+联合模式 D→C 各 launch 一次并各递增 magic，D/C 各自持续使用一个不同窗口是已确认预期，
+不是设计漏洞；C5 不要求两算子在联合模式中各自轮换两窗。以新 comm、首次 magic=1 为例，
+D 为 1/3/5…、C 为 2/4/6…；实际 bufferIndex 始终按各自 magic%2 取得，不由自然语言窗口
+编号推断。不要为检查取窗额外调用 TileXRCommNextMagic，也不要把联合循环数作为 D 的 magic。
+
+| 场景 / 验收点 | 需要检查的对象和时机 |
+| --- | --- |
+| C1 Host/layout | 提交前检查两个半区的地址、容量、对齐和 runtime 保留边界；属于地址计算检查，不扫描设备窗口内容 |
+| C4/C5 中的真实 Dispatch | 完成同步及测试 barrier 后，按最后一次 Dispatch magic 读取其已消费槽，验证 DataAsFlag 已清零；输出不符时可读对应槽辅助诊断 |
+| C4/C5 中的空 Combine | 检查正确传参、选窗、完成及输入/yOut 不被修改；没有结果包或 ready 协议可校验，不要求窗口产生非零数据 |
+| C7 独立边界探针 | 分别检查两个 buffer 内合法区域边界及邻接保护区，探针结束后读回；不侵入 runtime 保留区，不替代算法通信验证 |
+| 后续真实 Combine | 在对应功能点检查自身控制/结果/stage 区的协议不变量，不复用 Dispatch 的包格式解析器 |
+
+五表、计数、expertOut/yOut 是 caller 独立分配的 tensor，正常输出校验直接读这些 tensor；
+通信窗口不是这些输出的存储位置。当前 Dispatch 校验按实际使用槽读回，不要求扫描整个
+8GiB 通信域；读取在设备批次完成后进行，不进入 kernel 计时区间或逐轮热路径。
+联合模式按两算子的角色分别检查各自窗口，不把 Combine 窗口交给 Dispatch 校验器。
+
+### C6：两算子记录区及 trace 隔离
+
+breakdown 扩充标准 profiling 记录区，以不同 base 分隔 D/C 的记录、有效计数、丢弃计数和
+latest-launch 状态；记录区不占通信窗口。Dispatch 单测只解析 D 区，Combine 单测只解析 C 区，
+联合模式分别解析并分别保存两份算子 trace；未启用区域不解析、不要求有效数据。
+沿用现有跨 rank trace 组织，两套输出明确标注 operator，并绑定各自 kernel/launch 身份。
+不能用同一个 latest 记录槽先后覆盖两算子的记录，也不以在 D/C 之间导出同一槽代替分区。
+完整要求见[Combine breakdown 设计](specs/ep-memory-server-dedup-combine-design.md#第一阶段-breakdown-记录隔离已确认)。
+
+### Flag 遗留范围
+
+每次测试新建通信 buffer 并在执行前清零，当前第一阶段不受首次 Flag 初值问题阻塞。
+未重新清零的已用域、shape/数据布局变化后的结果 Flag 复用为[重点遗留](specs/ep-memory-server-dedup-combine-design.md#deferred-result-flags)，
+后续单独讨论；不新增每轮 Host 清零，不取消真实 kernel 已确认的用后清理职责。
+本节只记录设计和验收要求，不表示 Combine 或 profiling 分区已经实现或通过设备验证。
+
 ## 总体验证策略
 
 每个功能增量都遵循以下闭环：
