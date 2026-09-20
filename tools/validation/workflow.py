@@ -327,7 +327,10 @@ class Config:
 def source_send_stride(config):
     h, k = config["h"], config["topk"]
     data = ((h + 255) // 256 * 256 + (h + 63) // 64 * 2) if config["quant_mode"] == 4 else h * 2
-    payload = (data + 31) // 32 * 32 + (32 + 16 * (k - 1) + 31) // 32 * 32
+    index = (data + 31) // 32 * 32 + 32
+    if index % 480 + 8 * k > 480:
+        index = (index + 479) // 480 * 480
+    payload = index + 8 * k
     return (payload + 479) // 480 * 512
 
 
@@ -772,62 +775,22 @@ def dry_run_rank(config, run_id, build_id, rank):
     return 0
 
 
-def validate_relay_links(record, config, rank_size):
-    """Validate a rank's final output associations before global t matching."""
-    links = record.get("relay_links")
-    if not isinstance(links, list):
-        raise ValueError("缺少 Dispatch relay_links")
-    capacity_rows = rank_size * config["bs"] * min(config["topk"], config["moe_expert_num"] // rank_size)
-    first_hops = terminals = 0
-    routes = set()
-    for link in links:
-        if not isinstance(link, list) or len(link) != 7 or any(type(value) is not int for value in link):
-            raise ValueError("relay_links 必须为 7 整数记录")
-        source, token, first_k, relay, index, original_k, count = link
-        if (not 0 <= source < rank_size or not 0 <= token < config["bs"] or
-                not 0 <= first_k < config["topk"] or not 0 <= original_k < config["topk"] or
-                not 0 <= relay < rank_size or not 0 <= index < capacity_rows or
-                relay // 8 != record["rank"] // 8):
-            raise ValueError("relay_links 身份或 t 越界")
-        route = (source, token, original_k)
-        if route in routes:
-            raise ValueError("relay_links 重复原始 route")
-        routes.add(route)
-        if first_k == original_k:
-            if relay != record["rank"] or not 0 < count < config["topk"]:
-                raise ValueError("relay_links 第一跳 owner 或 forward_count 无效")
-            first_hops += 1
-        else:
-            if count != -1:
-                raise ValueError("relay_links 终端 forward_count 必须为 -1")
-            terminals += 1
-    if first_hops != record["first_hop_received"] or terminals != record["relay_received"]:
-        raise ValueError("relay_links 与第一跳/终端接收数量不一致")
-
-
-def validate_dispatch_links(records, config):
-    """Match terminal t to its first-hop allocation across all ranks."""
-    parents, children, allocated, routes = {}, {}, set(), set()
+def validate_dispatch_tables(records, config):
+    """All ranks must match the same global route oracle locally; no table exchange."""
+    ranks = [record.get("rank") for record in records]
+    if (len(ranks) != config["rank_size"] or any(type(rank) is not int for rank in ranks)
+            or set(ranks) != set(range(config["rank_size"]))):
+        raise ValueError("五表校验 Rank 缺失、重复或越界")
+    identity = ("run_id", "build_id", "commit", "bs", "h", "topk", "moe_expert_num", "dtype",
+                "quant_mode", "fp8_format", "route_mode", "seed", "server_dedup_enabled")
     for record in records:
-        validate_relay_links(record, config, config["rank_size"])
-        for source, token, first_k, relay, index, original_k, count in record["relay_links"]:
-            route = (source, token, original_k)
-            if route in routes:
-                raise ValueError("跨 Rank relay_links 重复原始 route")
-            routes.add(route)
-            key = (source, token, first_k, relay)
-            if first_k == original_k:
-                if key in parents or (relay, index) in allocated:
-                    raise ValueError("第一跳重复或多个 Token 复用同一个 relay/t")
-                parents[key] = (index, count)
-                allocated.add((relay, index))
-            else:
-                children.setdefault(key, []).append(index)
-    if parents.keys() != children.keys():
-        raise ValueError("relay_links 缺少第一跳或终端")
-    for key, (index, count) in parents.items():
-        if len(children[key]) != count or any(value != index for value in children[key]):
-            raise ValueError("终端 t 或转发数量与第一跳不一致")
+        if any(key not in record or record[key] != records[0].get(key) for key in identity):
+            raise ValueError("五表校验不属于同一构建和 case")
+        if any(key in config and record[key] != config[key] for key in identity):
+            raise ValueError("五表校验与本次 case 不一致")
+        if any(record.get(key) is not True for key in
+               ("dispatch_outputs_validated", "five_tables_validated", "member_addresses_validated")):
+            raise ValueError("缺少各 Rank 五表及成员地址本地匹配校验")
     if sum(record[kind + "_packets"] for record in records for kind in ("first_hop", "direct", "relay")) != (
             config["rank_size"] * config["bs"] * config["topk"]):
         raise ValueError("完整 Dispatch 物理包总数与原始 route 总数不一致")
@@ -884,12 +847,11 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     if any(record.get(key) is not True for key in
                            ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated",
                             "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated",
-                            "group_validated", "flags_cleared", "prefix_indices_validated")):
-                        raise Failure("RESULT_FAILED", "Dispatch 数据、metadata、group 或轮末清理缺少完整校验", rank=mapping["rank"])
+                            "five_tables_validated", "member_addresses_validated", "flags_cleared")):
+                        raise Failure("RESULT_FAILED", "Dispatch 数据、五表、成员地址或轮末清理缺少完整校验", rank=mapping["rank"])
                     try:
                         measurements.validate_dispatch_traffic(record, dict(chain_config,
                             server_dedup_enabled=record["server_dedup_enabled"]))
-                        validate_relay_links(record, chain_config, mapping["rank_size"])
                     except (ValueError, TypeError, KeyError) as error:
                         raise Failure("RESULT_FAILED", f"Dispatch 流量记录无效：{error}", rank=mapping["rank"]) from error
                 loops = chain_config["loops"]
@@ -1534,7 +1496,7 @@ def run(config):
         scope = (f"{len(mappings)}P 每 rank 8 GiB communicator（两个 4 GiB window）、"
                   f"{config.chain['warmup']} 轮预热＋{config.chain['loops']} 轮测量（同域连续提交）、"
                   "最后一轮 cnt/cumsum、DIRECT/第一跳/终端完整 route 覆盖、源端输出、"
-                  "最终 hidden/scales/assistEx/group、跨 Rank relay/t 关联、Token 级 prefix 编号和轮末 Flag 清理校验；不包含 Combine。")
+                  "最终 hidden/scales/五表、全局路由参考及各 Rank 成员地址本地匹配和轮末 Flag 清理校验；不包含 Combine。")
     else:
         scope += "；未执行 NPU launch 或去重通信。"
     report = {"run_id": run_id, "commit": manifest["source"]["commit"], "build_id": manifest["build_id"],
@@ -1556,8 +1518,8 @@ def run(config):
                 kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
                 if not errors:
                     try:
-                        validate_dispatch_links(records, full_config)
-                        report["relay_links_validated"] = True
+                        validate_dispatch_tables(records, full_config)
+                        report["five_tables_validated"] = True
                     except (ValueError, TypeError, KeyError) as error:
                         failure = Failure("RESULT_FAILED", f"Dispatch 跨 rank 校验失败：{error}",
                                           validation_status="FAIL", communication_completed=True).record()
@@ -1568,7 +1530,7 @@ def run(config):
                 # Missing/invalid captures remain failures, never partial-rank aggregates.
                 try:
                     aggregate = measurements.summarize_measurements(records, full_config, kernel_sha,
-                        output_valid=report.get("relay_links_validated", False))
+                        output_valid=report.get("five_tables_validated", False))
                     report["chain_configuration"]["server_dedup_enabled"] = aggregate["configuration"]["server_dedup_enabled"]
                     if config.chain["run_mode"] != "functional":
                         report["measurements"] = aggregate

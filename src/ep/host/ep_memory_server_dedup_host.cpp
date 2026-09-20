@@ -19,8 +19,8 @@ int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams
         p.topK <= 0 || p.topK > kEpServerDedupMaxTopK || p.moeExpertNum <= 0 ||
         !IsAligned(p.x, 2U) || !IsAligned(p.expertIds, 4U) || !IsAligned(p.expandXOut, 2U) ||
         !IsAligned(p.expertTokenNumsOut, 8U) || !IsAligned(p.epRecvCountsOut, 4U) ||
-        !IsAligned(params.assistExOut, 32U) || !IsAligned(params.sourceMaskOut, 4U) ||
-        !IsAligned(params.groupOut, 32U) ||
+        !IsAligned(params.tokenTypeOut, 4U) || !IsAligned(params.destinationIndexOut, 4U) ||
+        !IsAligned(params.relayReadIndexOut, 4U) || !IsAligned(params.sourceMaskOut, 4U) ||
         !IsAligned(p.expertScales, 4U) || !IsAligned(params.expertScalesOut, 4U)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }

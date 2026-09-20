@@ -2,13 +2,12 @@
 
 ## 设计状态与源码基线
 
-2026-09-18 按 `/users/hzy/workspace/TileXR`、`codex/SilentEmotion` 的当前源码校准。
-核对基线为 `4858ce6`（包含编译期分核、GM tiling、Count 重叠及编译期去重开关）；
-该源码身份不等同于生产环境已部署版本。本次只修订文档，不改变 Dispatch 行为。
-Dispatch 优化设计阶段收口，后续工作转入 [Combine 设计](ep-memory-server-dedup-combine-design.md)。
-跨算子的 metadata 交接和共用通信域布局，另见
-[Dispatch / Combine 联合设计初版](ep-memory-server-dedup-dispatch-combine-design.md)；其中五表和 Combine 27 参数签名已确认为目标契约，尚未修改当前 ABI；实现细节待设计。
-“设计收口”表示以现有实现为基线，不表示全部规模、性能目标或偶发环境问题已经验收。
+2026-09-20 按 `codex/SilentEmotion` 的五表输出实现更新；设计基线为 `3b0ba92`。
+Dispatch 已将旧 assistEx/group 接口替换为 TokenType、DestinationIndex、RelayReadIndex、
+SourceMask 和 expertScalesOut。设计依据及逐项确认见
+[Dispatch 输出适配方案](ep-memory-server-dedup-dispatch-output-adaptation-design.md)。
+跨算子的交接契约见[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)，
+Combine kernel 尚未实现。编译/Host 证据不代表新版本已在生产 A5 上运行，验证边界见进度文档。
 
 本文描述当前 Dispatch 代码，后面的 Combine 数据流明确标为设计契约。
 [第二轮讨论](ep-memory-server-dedup-open-topics.md)与[接收优化记录](ep-memory-server-dedup-receive-optimization.md)
@@ -76,9 +75,9 @@ Kernel 完成要求所有核完成，Host 异步 launch 返回不代表结果已
 
 ## 2026-09-18：独立 GM tiling 参数（当前 launch ABI）
 
-本节替代历史按值标量 launch 布局；只迁移 tiling，不引入 epHandle。
-公共 Host API、13 个输入输出/通信地址及其输出语义保持不变；未使用的
-assistInfoForCombineOut 地址仍保留。内部 Kernel 参数顺序为这 13 个地址、
+本节保留独立 GM tiling，不引入 epHandle。2026-09-20 五表替换已删除未使用的
+assistInfoForCombineOut 槽，metadata 顺序为 type/destination/relayIndex/mask/weight。
+内部 Kernel 参数仍为 13 个输入输出/通信地址、
 GM_ADDR tilingData、int64_t magic，共 120B。globalBs 继续在 Host 校验/推导，
 不再传到 Kernel；magic 仍由 Host 每次取得并直接传入，不存入 tiling。
 
@@ -208,7 +207,7 @@ seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远
 | weightIn / weightOut | 各 align32(count_i*K*4)，只拷入本核权重区间 |
 
 关闭去重仍扫描 Server mask，但所有 route 进入 DIRECT 表，不发第一跳或 relay；sourceMask 的
-K 位均有效，输出权重全为真实值。不能只将原第一跳的 forwardCount 置零，否则会漏 route。
+K 位均有效，输出权重全为真实值。不能只将第一跳包头改为 DIRECT，否则会漏 route。
 
 ## 本卡数据发送流水
 
@@ -257,8 +256,11 @@ lane = packetsIssued % Nsend
 ```text
 quantCount = align256(H)
 scaleBytes = quantized ? align2(ceil(H/32)) : 0
-tailOffset = align32(quantized ? quantCount + scaleBytes : H*2)
-payloadBytes = tailOffset + align32(32 + 16*(K-1))
+headerPayloadOffset = align32(quantized ? quantCount + scaleBytes : H*2)
+readIndexPayloadOffset = headerPayloadOffset + 32
+if readIndexPayloadOffset % 480 + K*8 > 480:
+    readIndexPayloadOffset = align480(readIndexPayloadOffset)
+payloadBytes = align32(readIndexPayloadOffset + K*8)
 blockCount = ceil(payloadBytes/480)
 packedPayloadBytes = blockCount*480
 T = tokenStride = blockCount*512
@@ -266,7 +268,7 @@ T = tokenStride = blockCount*512
 
 MXFP8 scale 位于逻辑 payload 的 quantCount 起点；每 32 个 hidden 元素一个 1B scale，按两项对齐。
 输出只写 H 个 FP8 元素和 scaleBytes 字节，通信补齐不变成 public 行间距。
-H=7168、K=6：非量化 payloadBytes=14464、T=15872；MXFP8 payloadBytes=7520、T=8192，
+H=7168、K=6：非量化 payloadBytes=14464、T=15872；MXFP8 payloadBytes=7488、T=8192，
 输出每行含 7168B hidden 和 224B scale。
 
 ### Payload 与 DataAsFlag
@@ -274,8 +276,8 @@ H=7168、K=6：非量化 payloadBytes=14464、T=15872；MXFP8 payloadBytes=7520�
 每个 512B wire 块包含 480B Payload 和 32B Flag（8 个 FP32 1）。所有块的 Flag 都参与 ready；
 最后一块也在内，未使用的 entry/padding 不解析。没有另一个 metadata-ready 消息。
 逻辑字节位置 `x` 到 wire 位置的换算为 `x + floor(x/480)*32`。
-接收侧保留带 Flag 的整包，不先完整 unpack 到第二份 payload buffer；头部和每个 entry 分别换算
-wire 位置，输出时 MTE3 按区间跳过 Flag。
+接收侧保留带 Flag 的整包，不先完整 unpack 到第二份 payload buffer；Init 预计算 headerWireOffset 和 relayReadIndexWireOffset，
+索引段物理连续，条目不再逐个换算；hidden/scale 输出时 MTE3 按区间跳过 Flag。
 
 ## Token 格式与转发
 
@@ -283,68 +285,28 @@ wire 位置，输出时 MTE3 按区间跳过 Flag。
 
 尾部属于 Dispatch Payload，与 hidden/scale 一起按完整 T 发送，不另发控制包。
 
-### 尾部字段字节表
+### 32B 包头与连续索引段
 
-固定头部已确认使用 4B 字段：整数为 `int32_t`，weight 为 FP32，各字段按 4B 对齐，字段间不插入 padding。
-尾部起点为待发送数据有效长度向上对齐到 32B 后的位置，尾部整体长度也向上对齐到 32B。
-下表 offset 从逻辑尾部首字节开始，单位均为 B；对应未插入 Flag 的 UB 偏移为 `tailOffset+offset`。
-表内 offset 不包含数据段及其对齐填充，也不包含到达 Flag。
-DataAsFlag 在 Payload 分块之间插入 Flag，因此这些 offset 不能直接当作通信窗口中的物理偏移；剥离 Flag 后可恢复原 UB 偏移。
+包头和索引段起点各自 32B 对齐。包头固定 32B，四个有效 uint32 字段为：
 
-| 字段 | 类型 | 大小 | 尾部 offset | 含义、单位与有效范围 |
-| --- | --- | --- | --- | --- |
-| `srcRank` | `int32_t` | 4B | 0 | 原始输入所属 Rank，范围 `[0,R)`；经 relay 转发后仍是原始 source，不改为 relayRank |
-| `srcTokenId` | `int32_t` | 4B | 4 | 原始 source 上的输入 Token 行号，范围 `[0,BS)`；用于 Combine 恢复原始 Token |
-| `k` | `int32_t` | 4B | 8 | DIRECT 当前 route 或第一跳 route 的原始 top-k 位置，范围 `[0,K)`；终端包保留第一跳值 |
-| `weight` | `float`（FP32） | 4B | 12 | 与头部 k 对应的一个 expert route 权重，单位为标量权重；不是整个 Token 共用的权重，终端包仍保留第一跳值 |
-| `forwardCount` | `int32_t` | 4B | 16 | 0 表示 DIRECT；正数 n 表示第一跳有 n 次后续 expert 发送；-1 表示终端包，不再转发。计数包含本卡转发，必须能编码负值 |
-| `forwardEntryCount` | `int32_t` | 4B | 20 | 原始列表的有效条目数 n，范围 `[0,K-1]`；forwardCount 改为 -1 后仍保留 n，使终端只解析有效 entries |
-| `relayRank` | `int32_t` | 4B | 24 | Combine 应返回的中转 Rank；终端包有效范围 `[0,R)`，由第一跳 owner 填本 Rank。本卡转发同样填写；未使用时填 -1 |
-| `forwardTokenIdx` | `int32_t` | 4B | 28 | 第一跳 owner 的零基 Token prefix 输出行 t=row；所有转发副本共用，用于 Combine 定位 group/返回槽位。未分配时填 -1 |
-| `forwardEntries` | entry 数组，固定 K-1 条容量 | 每条 16B；有效部分 `16*n` B | 32 | 每条对应一次后续 expert 发送；有效范围 `[0,n)`，排除第一跳 route。转发时原列表完整保留，预留容量见下表 |
+| 偏移 | 字段 | 语义 |
+| --- | --- | --- |
+| 0 | srcRank | 原始 source，转发时保持不变 |
+| 4 | srcTokenId | 原始 source 输入行 |
+| 8 | topK | DIRECT 的原始 k 或第一跳 returnK，不是总 K |
+| 12 | type | 1=DIRECT、2=第一跳、3=转发终端，与持久 TokenType 枚举一致 |
+| 16..31 | padding | 无业务语义，不要求清零 |
 
-固定头部合计 `8*4=32B`。有效 `forwardTokenIdx` 落在 relay 本轮 `[0,tokenNum)`，由 C 容量覆盖；不生成或传递 X。
-`forwardTokenIdx` 等于第一跳输出 row，不能用 srcTokenId、段内 q、原始 k 或终端自己的 row 替代。
-以上范围描述字段语义，不增加已由输入契约排除的逐 Token 安全扫描。
-头部与 assistEx 的 weight 使用 FP32、group 由 relay 执行加权求和均已确认；公共 dtype 契约归 R08，内部计算精度及数值验收归 Combine 文档。
+RelayReadIndex 段固定 K*8B；若当前 block 的 480B payload 放不下整段，则移至下一 block
+起点。第 0 块为 uint32 N 与 FP32 selfWeight；第 1..N 块为 uint16 expertId、uint16 q、
+FP32 weight，按原始 k 升序保存，低 16 位为 expert、高 16 位为 q。
+N 不包含第一跳；DIRECT 的 N=0。无效块不消费、不要求清零。
+源端在打包前直接形成该段；第一跳收包后原样写入表 3，不做字段转换。
 
-### 各类包的字段值
-
-DIRECT 同时覆盖源 Server 内的逐 route 发送和远端 Server 仅有一条 route 的发送。
-第一跳专指远端 Server 的 m>1 分组；终端包包含 relay 向本卡或同 Server 其他卡发送的全部后续副本。
-表中未使用返回字段填 -1、DIRECT 有效长度填 0，均为已确认的头部初始化约定；不把 -1 当成有效 Rank 或编号读取。
-
-| 字段 | DIRECT | source 发往 relay 的第一跳 | relay 发出的终端公共副本 |
-| --- | --- | --- | --- |
-| `srcRank` | 原始 source | 原始 source | 原样保留 |
-| `srcTokenId` | 原始 Token 行号 | 原始 Token 行号 | 原样保留 |
-| `k` | 当前 route 的原始 k | 该目标 Server 首条 route 的原始 k | 保留第一跳 k；当前接收 expert 的 k 从匹配 entry 取得 |
-| `weight` | 当前 route 的 weight | 第一跳 route 的 weight | 保留第一跳 weight；当前接收 expert 的 weight 从匹配 entry 取得 |
-| `forwardCount` | 0 | `n=m-1`，n>0 | -1；所有副本相同 |
-| `forwardEntryCount` | 0 | n | 保留 n，不改为 -1，也不随已下发任务减少 |
-| `relayRank` | 未使用，填 -1 | 不读取，填 -1；第一跳接收端知道自身 Rank | 当前 relay 的 Rank，所有副本相同 |
-| `forwardTokenIdx` | 未使用，填 -1 | 尚未分配，填 -1 | 首次转发前使用第一跳输出 row 作为 t，所有副本相同 |
-| `forwardEntries[0:n]` | 无有效元素 | n 条后续 expert route | 完整保留同一份 n 条记录，不按目标裁剪、不删除已下发条目 |
-| 容量内未使用的 entries / 纯传输 padding | 不清零，接收端不解析 | 不清零，接收端不解析 | 随完整 Payload 打包发送，不初始化、不参与匹配或计算 |
-
-头部的 forwardCount 描述包的角色和第一跳初始任务数；发送进度由 owner 的临时状态保存。
-不能通过修改公共包中的 forwardEntryCount 或逐项移除 entries 来记录进度，否则会破坏后续接收端的匹配依据。
-
-### ForwardEntries 条目字节表
-
-每个 entry 的字段布局已确认为下表，i 表示从零开始的 entry 下标，`0<=i<n`。
-“条目内 offset”相对本条首字节，“尾部 offset”相对整个逻辑尾部首字节，单位均为 B。
-
-| 字段 | 类型 | 大小 | 条目内 offset | 尾部 offset | 含义与使用方式 |
-| --- | --- | --- | --- | --- | --- |
-| `destinationExpertId` | `int32_t` | 4B | 0 | `32+16*i` | 此次后续发送的全局 expert ID，范围 `[0,moeExpertNum)`；目标 Rank=`id/L`，localExpert=`id%L`，无须再存独立目的 Rank 字段 |
-| `destinationQ` | `int32_t` | 4B | 4 | `36+16*i` | 原始 source 发往该 expert 的从零开始的槽位序号 q，由 source 按 Memory 原始路由前缀计算；范围 `[0,cnt)`，有效 q 小于 BS。relay 用它计算接收地址 |
-| `originalK` | `int32_t` | 4B | 8 | `40+16*i` | 此 expert route 在原始 top-k 中的位置，范围 `[0,K)`；用于恢复该 expert 行的 k 以及 Combine 返回信息，不等于 entry 下标 i |
-| `weight` | `float`（FP32） | 4B | 12 | `44+16*i` | 与本条 originalK 对应的一个 expert route 权重；终端 expert 匹配本条后提取，不使用公共头部的 weight |
-
-单条 entry 合计 16B，包含转发寻址及终端恢复自身 route 所需的信息；公共返回引用仅在头部存一份。
-第一跳和 DIRECT 当前包的目的 expert/q 由接收槽位表达，不额外在头部重复携带。
-终端同样从监听槽位取得自身 expert，在 `[0,forwardEntryCount)` 中唯一匹配；无需读取未使用容量。
+第一跳先将本地类型 2 与原始返回身份保存到独立 staging，最终转发前仅将 wire 包头 type
+改为 3；包括索引段、其他头字段、占位及 Flag 在内的其他字节均保持不变。
+所有成员收到相同 wire，成员地址由 expert/q 计算。终端直接记录本卡接收 slot，
+不搜索索引段，不恢复自己的原始 k/weight，不再传递 relayRank/forwardTokenIdx。
 
 ## Dispatch 接收布局
 
@@ -388,7 +350,7 @@ pendingCount=0 只代表全部任务已经下发；物理 DMA 完成仍依赖 la
 
 ### 动态 N 槽的输入与输出流水
 
-每个 lane 由同一 wire 包及独立 assist/group 区组成，没有两套整包输入/输出池：
+每个 lane 由同一 wire 包及 type/destination 两个独立 32B staging 组成，没有两套整包输入/输出池：
 
 ```text
 B = blockCount，M = 16，m = 本核实际任务数
@@ -397,8 +359,7 @@ tablesBytes = 2*align32(m*4)
 flagsBytes = M*B*32 + 256
 workBytes = M*align32(ceil(B/8))*4 + 256
 fixedBytes = prefixBytes + tablesBytes + flagsBytes + workBytes + M*36
-G = align32(4 + 8*(K-1))
-laneStride = T + 32 + G
+laneStride = T + 64
 Nrecv = min(8, floor((190KiB-fixedBytes)/laneStride))
 ```
 
@@ -408,102 +369,58 @@ M*36 包含每候选 32B sum 存储和 4B 快照下标；Sum 使用紧凑结果�
 调度使用累计 issued/consumed：先将 ready 批最多 Nrecv 个包排入 MTE2，再每消费一个补充预取，
 序号跨批连续。`IssueLoad` 等待 MTE3_MTE2(lane)，读取完整 wire，再设置 MTE2_MTE3 与 MTE2_S。
 `ConsumeLoaded` 等待 MTE2_S 后做 Scalar metadata，S_MTE3 后等待 MTE2_MTE3，依次下发 hidden、
-可选 scale、assist、可选 group 及全部 relay；最后设置 MTE3_MTE2。下一次 MTE2 覆盖同一 lane
+可选 scale、type、destination、类型 2 的索引段及全部 relay；最后设置 MTE3_MTE2。下一次 MTE2 覆盖同一 lane
 前必须消费该事件。因此多 lane 允许 MTE2 与前序 MTE3 重叠，标点不证明硬件已实际重叠。
 
 ### 公共转发副本与输出
 
-DIRECT 的 assist 直接保留八字段。第一跳先用 t=row 写独立 assist/group，再将当前 wire 的
-forwardCount 改为 -1、relayRank/t 改成本 owner，保留全部 entries 和原始头部 k/weight。
-所有 relay 写复用该只读 wire，仅变更目的地址。终端根据自身物理槽的 expert 匹配有效 entry，
-把对应 originalK/weight 写入 assist，不用公共头部的第一跳权重。
-
-MTE3 输出从 wire 跳过 Flag，按 row 密排写 hidden/scale；assist 和 group 也由同一 lane 的
-MTE3 完成事件保护。当前不增加 metadata 地址缓存、Vector 整包中间拷贝或每 token 完成屏障。
+本地 type/destination 从改写前的包头构造，类型 2 的索引段直接引用 wire 的连续片段。
+转发改写 type 后发布 S_MTE3，接收 MTE2→MTE3 依赖也保留；各表精确写 4B/12B/K*8B，
+不把 UB staging 的 32B 对齐扩大成 GM 写入长度。GM 的索引行也不增加 32B 行间填充。
+全部本 lane 的 metadata、hidden/scale 和 relay 写出完成后才允许复用该 lane。
+核末 drain、Flag 清理和本核完成边界保持；不恢复 SyncAll 或逐 Token 全流水屏障。
 
 ## Dispatch/Combine 公共接口与 metadata shape
 
-当前公共函数为 `TileXRMoeEpDispatchMemoryServerDedup`，三个持久 metadata 输出为 assistEx、
-sourceMask、group，另有独立 `float *expertScalesOut`（groupOut 后、dtype 前）。
-真实 expertScales 输入只读，Host 明确拒绝与权重输出重叠；裸指针 API 不推断所有分配的实际长度，
-调用方负责容量和其他 buffer 不重叠，分配夹具可用专门的 allocation validator 检查。
+`TileXRMoeEpDispatchMemoryServerDedup` 的五个 metadata 指针依次为 tokenTypeOut、
+destinationIndexOut、relayReadIndexOut、sourceMaskOut、expertScalesOut，旧签名已废弃。
+五表基地址至少 4B 对齐，精确行距如下；`Crows=R*BS*min(K,L)`。
 
-| 输出 | 分配容量 / 有效范围 | Combine 的使用契约 |
+| 输出 | 分配容量 / 有效范围 | 使用契约 |
 | --- | --- | --- |
-| expandXOut | Crows*H*(quantized?1:2)B；前 tokenNum 行有效 | expert 计算后按原 Dispatch 行序交回 |
-| dynamicScalesOut | 量化时 Crows*scaleBytes；前 tokenNum 行有效 | Dispatch hidden 解量化所需；不等于路由权重 |
-| sendCountsOut | int32[E] inclusive prefix | 最后一项给出 tokenNum |
-| expertTokenNumsOut | int64[L]，累计或逐 expert 数 | 按 expert 定位输出分段 |
-| assistEx | Crows*32B，前 tokenNum 行有效 | 保存行角色、原始 source/k/weight、relay 引用 |
-| sourceMask | uint32[BS] | 只等待/消费置位的原始 k 槽 |
-| group | Crows*G，G=align32(4+8*(K−1)) | 仅第一跳 assist 引用的稀疏 group[t] 有效 |
-| expertScalesOut | FP32[BS,K] | DIRECT 真实 weight；group returnK 为 1.0；mask 空洞不读 |
+| expandXOut | Crows*H*(quantized?1:2)B；前 tokenNum 行 | expert 计算后恢复原 Dispatch 行序 |
+| dynamicScalesOut | 量化时 Crows*scaleBytes；前 tokenNum 行 | hidden 解量化 scale |
+| sendCountsOut | int32[E] inclusive prefix | 最后一项为 tokenNum |
+| expertTokenNumsOut | int64[L] | 累计或逐 expert 计数 |
+| tokenTypeOut | uint32[Crows]；前 tokenNum 行 | 1=DIRECT、2=第一跳、3=转发终端 |
+| destinationIndexOut | uint32[Crows][3]，12B/行 | 类型 1/2：[source,token,k]；类型 3：[slot,UINT32_MAX,UINT32_MAX] |
+| relayReadIndexOut | Crows*K*8B，仅类型 2 行 | 第 0 块 N/selfWeight，第 1..N 块 expert/q/weight |
+| sourceMaskOut | uint32[BS] | 最终等待的原始 k 位集合 |
+| expertScalesOut | FP32[BS,K] | mask 有效处 DIRECT 真实权重，group returnK 为 1.0 |
 
-### AssistEx 布局与写入前转换
+真实 expertScales 输入只读，Host 拒绝与权重输出重叠；其他容量、归属及输出之间不重叠由
+持有分配记录的调用方校验。裸指针入口无法推断实际分配大小。
+类型 2 第一跳自身的贡献取 expertOut[row]，不在后续成员条目重复保存。
+类型 3 的 slot 是本卡 Combine stage 逻辑槽号，不是字节地址；stage 的物理 stride 由 Combine 决定。
+Dispatch 的 uint32 DestinationIndex 可通过同一 GM 分配的 int32 指针视图交给 Combine 的
+assistInfoForCombine，按 32 位位型解释，不复制/转换内容。
 
-assistEx 的八个 4B 字段顺序是 srcRank、srcTokenId、k、FP32 weight、forwardCount、
-forwardEntryCount、relayRank、forwardTokenIdx。第一跳保留正数 n 和真实第一跳 weight，
-终端保留 -1 角色并从 entry 取得自身 k/weight；DIRECT 引用为 (-1,-1)。
+源端第一跳下发后置 returnK 位并写权重 1.0，DIRECT 置原始 k 位并写真实权重。
+核末按本核连续输入 Token 区间写出；K=32 使用 uint32 位集合。关闭编译期去重时全为 DIRECT。
+调用方保持五表到对应 Combine 完成；容量尾部及索引无效行/块不消费。
 
-### Relay Group 成员表
+## 输出行与持久表
 
-Group 的 offset 0 为 uint32 firstHopRow=t；offset 4 起最多 K−1 个 8B 成员，
-每项为 uint32 recvSlot=t*K+originalK 和 FP32 weight。仅前 n 项有效，成员按原始 k 升序；
-第一跳不进入 member 列表，firstHopRow 指向它的本地 expert 行。group 行可有空洞，不发布 group 数 X。
+所有接收行继续使用稳定 Token 级 prefix 身份：`row=tasks.Begin()+j`，
+不能用物理 tokenPos、段内 q 或变化中的 pending 下标替代。无需 AtomicAdd 或重新取号。
+表 1/2 按 row 密排；表 3 仅类型 2 行有效，因此按最大输出行容量分配，允许稀疏空洞。
+类型 3 的本卡物理逻辑槽直接来自 tasks.Position(j)，与第一跳索引中 expert/q 推导的成员槽一致。
+旧 forwardTokenIdx、group.firstHopRow 和 t*K+originalK 的持久格式已移除；Combine 改用 pull。
+历史 counter 留白与 profiling 编号保留，不生成原子取号事件，也不写 counter。
 
-### SourceMask 生成与写出
-
-源端在第一跳下发后将 returnK 置位、对应权重写 1.0；DIRECT 下发后将原始 k 置位并写真实权重。
-核末按本核连续 Token 区间写出，不消费未置位的 weight；K=32 按 uint32 位集合处理。
-
-调用方保持 assistEx/sourceMask/group/expertScalesOut 到对应 Combine 消费完成，且 expert 内部
-若重排行，须先还原 Dispatch 行序。不跨调用重用 t 作为持久 ID，也不在 Combine 重新扫描通信
-payload 构造 plan。上述是当前旧输出的生命周期；新 Combine 消费的五表见联合设计 §5，
-不能将本节旧 assistEx/group 直接接入新入口。
-
-## 中转编号与持久表
-
-### 2026-09-16：Dispatch 使用 Token 级 prefix 编号（当前契约）
-
-本节替代本文及历史 R04/R05/R07 中的 AtomicAdd 取号、密排 t 和 group 表 8*BS 行约定。
-当前只实现 Dispatch；Combine 的数据区扩容、收发、监听和清理留到 Combine 阶段。
-
-对于第一跳包（forwardCount>0），使用接收端已有的零基 Token 级 prefix 行号：
-
-```text
-t = 当前 localExpert/source 段之前的累计条数 + q
-  = tasks.Begin() + j = row
-forwardTokenIdx = t
-C = R * BS * min(K, L)  # 现有 capacityRows，L=moeExpertNum/R
-0 <= t < 本卡 tokenNum <= C
-groupBytes = C * align32(4 + 8*(K-1))
-```
-
-不能使用整段的 inclusive prefix、段内 q、物理 tokenPos 或会变化的 pending 下标取号。
-所有接收 row 在本卡本轮唯一，第一跳是其子集，因此无需 AtomicAdd 或额外 prefix 计算。
-第一跳 owner 写入 assistEx[row]、group[t] 及公共转发包尾；全部终端副本（包括本卡其他
-expert）继承该 owner 的 (relayRank,t)，不以终端自己的 row 重算。DIRECT 保持 -1 引用。
-不同卡允许相同 t，由 relayRank 区分；相同路由重复调用的 t 稳定，但不是跨调用持久 ID。
-
-Group 行可以有空洞，第一跳的 group[t].firstHopRow 等于 t，字段及 32B assistEx ABI 保留。
-只消费有效 assistEx 中 forwardCount>0 引用的 group，且只读取其前 forwardEntryCount 个成员；
-空洞无需初始化或清零。members[i].recvSlot 继续为 t*K+originalK，成员的顺序及真实 weight 不变。
-按 C 预留 groupOut；不能依据实际 group 数或旧 8*BS 上限分配、校验地址。删除原子取号及
-轮末 counter 清零；当前也移除核末 SyncAll，保留本核完成、双窗口和 Dispatch Flag 清理边界。
-原 counter 的 1KiB 布局区和 profiling 事件编号仅作历史保留，不再产生 Atomic/CounterEnd 事件。
-
-当前 Dispatch 不访问 Combine relay 返回区，保留旧通信窗口预留和容量检查以隔离性能变量；
-旧 relayBytes=8*BS*K*returnStride 不满足稀疏编号契约，不代表 Combine 已可用。
-旧 push 方案至少要 C*K*returnStride；2026-09-18 新 pull 方案则需按生产卡 stage 的新地址
-重新核算整个窗口、框架分配和生命周期，不能把 recvSlot 直接用于旧 relay 预留区。
-
-本轮验收：编号与独立原始路由参考的第一跳输出行一致；覆盖 t>=8*BS、稀疏空洞、不同接收核、
-乱序 ready、DIRECT/第一跳/终端、本卡和跨卡副本、连续 magic；分配和结果校验同步采用新容量。
-Host 替身证明编号/字节/边界契约，CANN 9.1 A5 编译证明编译；性能差异需要相同 case 的 A5 实测，
-不能从去掉原子指令推断收益。当前调用方必须重新按新 groupBytes 分配，函数签名未变不代表旧分配兼容。
-
-维护要点：从密排计数器改用已有稀疏身份时，容量由最大可寻址索引决定，而不是有效 group 数；
-必须同步调整 caller 分配、元数据检查及独立 oracle，否则正常高 row 会越界或被测试误拒。
+维护要点：从通信包直接保存 metadata 时，wire 角色与本地行角色必须分离保存，避免最终转发
+改写导致异步输出 type_3 覆盖本地 type_2。4B/12B/8K 紧密表必须按实际字节写出，
+不能沿用旧 32B 行搬运；测试须同时检查相邻行和 lane 在途数据，Host 替身不证明真实硬件时序。
 
 ## Combine 设计入口
 
@@ -512,7 +429,7 @@ Combine 内部实现集中在[Combine Server Dedup 设计](ep-memory-server-dedu
 本文不重复维护 Combine 内部流程，当前尚未实现该 kernel。
 
 五表与 27 参数接口由[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)维护。
-当前 Dispatch 仍输出前述旧 assistEx/group，需适配五表后才能接入新 Combine。
+当前 Dispatch 已产生五表；新 Combine 的消费与执行仍待实现。
 新中转区的存储归属和物理布局以共同契约的后续收口为准。
 
 ## 容量与生命周期
@@ -542,7 +459,7 @@ stateBytes=counterOffset+1024 检查前 2MiB 上限。标准 profiling 另分配
 
 ### Combine 容量缺口
 
-当前 groupOut 已按 Crows 分配，但 relay 结果预留仍为旧 8*BS*K*U；两者不能混用。
+当前 relayReadIndexOut 按 Crows*K*8 分配，但通信域 relay 预留仍为旧 8*BS*K*U；两者不能混用。
 旧 push 方案沿用 t*K+k 时至少需要 Crows*K*memberStride，实际 group 数小不能限制最大 t。
 新 pull 方案已确定 expert/q 逻辑槽，生产卡 stage 预算为 E*BS*Sstage；source 结果为
 BS*K*Sresult，加上控制 Flag、scale/scratch 和保留区。MaxTokenNum 是输出行容量，不是 stage 槽数。

@@ -12,7 +12,8 @@ class DispatchMemoryServerDedupKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR x, GM_ADDR expertIds, GM_ADDR expertScales,
         GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
-        GM_ADDR assistExOut, GM_ADDR sourceMaskOut, GM_ADDR groupOut, GM_ADDR expertScalesOut,
+        GM_ADDR tokenTypeOut, GM_ADDR destinationIndexOut, GM_ADDR relayReadIndexOut,
+        GM_ADDR sourceMaskOut, GM_ADDR expertScalesOut,
         uint32_t bs, uint32_t h, uint32_t topK,
         uint32_t experts, uint32_t expertTokenNumsType, int64_t magic, uint32_t profilingLaunchSlot, TPipe *pipe)
     {
@@ -24,7 +25,7 @@ public:
         if (core_ < kEpServerDedupSendCoreNum)
             sender_.Init(args_, x, expertIds, expertScales, sourceMaskOut, expertScalesOut, bs, h, topK, experts, pipe, magic);
         else
-            receiver_.Init(args_, expandXOut, dynamicScalesOut, assistExOut, groupOut, bs, h, topK, experts, pipe, magic);
+            receiver_.Init(args_, expandXOut, dynamicScalesOut, tokenTypeOut, destinationIndexOut, relayReadIndexOut, bs, h, topK, experts, pipe, magic);
         profile_.Mark(1);
     }
 

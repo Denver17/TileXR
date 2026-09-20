@@ -466,9 +466,10 @@ int Run(const Config &c)
         }
         enterStage("allocation");
         const uint64_t sizes[] = {layout.xBytes, layout.expertIdsBytes, layout.expandXBytes,
-            layout.expertTokenNumsBytes, layout.sendCountsBytes, layout.assistExBytes,
-            layout.sourceMaskBytes, layout.groupBytes, layout.weightBytes, layout.weightBytes, layout.dynamicScalesBytes};
-        const uint32_t alignments[] = {2, 4, 2, 8, 4, 32, 4, 32, 4, 4, 1};
+            layout.expertTokenNumsBytes, layout.sendCountsBytes, layout.tokenTypeBytes,
+            layout.destinationIndexBytes, layout.relayReadIndexBytes, layout.sourceMaskBytes,
+            layout.weightBytes, layout.weightBytes, layout.dynamicScalesBytes};
+        const uint32_t alignments[] = {2, 4, 2, 8, 4, 4, 4, 8, 4, 4, 4, 1};
         std::vector<TileXREp::EpServerDedupAllocation> allocations;
         for (std::size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); ++i) {
             if (sizes[i] == 0) { buffers.push_back(nullptr); continue; }
@@ -487,11 +488,11 @@ int Run(const Config &c)
         SaveSourceSendInputs(c, xHost, idsHost, weightsHost);
         Check(aclrtMemcpy(buffers[0], layout.xBytes, xHost.data(), layout.xBytes, ACL_MEMCPY_HOST_TO_DEVICE), "copy x");
         Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
-        Check(aclrtMemcpy(buffers[8], layout.weightBytes, weightsHost.data(),
+        Check(aclrtMemcpy(buffers[9], layout.weightBytes, weightsHost.data(),
             weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
-        Check(aclrtMemset(buffers[6], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
-        Check(aclrtMemset(buffers[9], layout.weightBytes, 0xff, layout.weightBytes), "initialize source weights");
-        for (const uint32_t index : {2U, 5U, 7U, 10U})
+        Check(aclrtMemset(buffers[8], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
+        Check(aclrtMemset(buffers[10], layout.weightBytes, 0xff, layout.weightBytes), "initialize source weights");
+        for (const uint32_t index : {2U, 5U, 6U, 7U, 11U})
             if (sizes[index]) Check(aclrtMemset(buffers[index], sizes[index], 0xa5, sizes[index]), "initialize dispatch output");
         // Valid count/prefix outputs are nonnegative. Preserve a distinct value
         // when a successful launch fails to write an output element.
@@ -519,11 +520,11 @@ int Run(const Config &c)
             // count. Counters in this message describe phase entry only.
             if (submission == 1U) enterStage("launch");
             Check(TileXRMoeEpDispatchMemoryServerDedup(buffers[0], static_cast<int32_t *>(buffers[1]), nullptr,
-                nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[8], comm, c.bs, c.h, c.topK, c.experts,
+                nullptr, TileXREp::TILEXR_EP_ACTIVE_MASK_NONE, buffers[9], comm, c.bs, c.h, c.topK, c.experts,
                 c.rankSize, c.rank, 1, 0, 0, 0, 0, c.quantMode, static_cast<int64_t>(layout.globalBs), 1, buffers[2],
-                buffers[10], nullptr, static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
+                buffers[11], static_cast<int64_t *>(buffers[3]), static_cast<int32_t *>(buffers[4]),
                 nullptr, nullptr, static_cast<uint32_t *>(buffers[5]), static_cast<uint32_t *>(buffers[6]),
-                static_cast<uint32_t *>(buffers[7]), static_cast<float *>(buffers[9]), c.dtype, outputDtype, stream),
+                static_cast<uint32_t *>(buffers[7]), static_cast<uint32_t *>(buffers[8]), static_cast<float *>(buffers[10]), c.dtype, outputDtype, stream),
                 "TileXRMoeEpDispatchMemoryServerDedup");
             if (warming) ++warmupSubmitted;
             else ++submitted;

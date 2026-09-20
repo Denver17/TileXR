@@ -80,17 +80,17 @@ inline std::vector<uint8_t> Payload(const Shape &s, uint32_t rank, const Packet 
     if (s.quantized) TileXREpDemo::QuantizeMxfp8Row(values.data(), s.h,
         s.e4m3 ? TileXREpDemo::Mxfp8Format::E4M3 : TileXREpDemo::Mxfp8Format::E5M2,
         result.data(), result.data() + layout.quantCount);
-    const auto tail = layout.tailOffset;
+    const auto tail = layout.headerPayloadOffset;
     Put(result, tail, rank); Put(result, tail + 4U, packet.token); Put(result, tail + 8U, packet.members[0].k);
-    Put(result, tail + 12U, packet.members[0].weight);
-    Put(result, tail + 16U, uint32_t(packet.members.size() - 1U));
-    Put(result, tail + 20U, uint32_t(packet.members.size() - 1U));
-    Put(result, tail + 24U, int32_t(-1)); Put(result, tail + 28U, int32_t(-1));
+    Put(result, tail + 12U, uint32_t(packet.members.size() == 1U ? 1U : 2U));
+    const auto index = layout.readIndexPayloadOffset;
+    Put(result, index, uint32_t(packet.members.size() - 1U));
+    Put(result, index + 4U, packet.members[0].weight);
     for (uint32_t i = 1; i < packet.members.size(); ++i) {
         const auto &route = packet.members[i];
-        const auto offset = tail + 32U + (i - 1U) * 16U;
-        Put(result, offset, route.expert); Put(result, offset + 4U, route.q);
-        Put(result, offset + 8U, route.k); Put(result, offset + 12U, route.weight);
+        const auto offset = index + i * 8U;
+        Put(result, offset, uint16_t(route.expert)); Put(result, offset + 2U, uint16_t(route.q));
+        Put(result, offset + 4U, route.weight);
     }
     return result;
 }
@@ -127,7 +127,8 @@ inline void CheckPacket(const Shape &s, uint32_t source, const Packet &packet,
     };
     compare(0, uint64_t(s.h) * (s.quantized ? 1U : 2U), "packet hidden");
     if (s.quantized) compare(layout.quantCount, layout.scaleBytes, "packet scale");
-    compare(layout.tailOffset, 32U + 16U * (packet.members.size() - 1U), "packet tail");
+    compare(layout.headerPayloadOffset, 16U, "packet header");
+    compare(layout.readIndexPayloadOffset, 8U * packet.members.size(), "packet read index");
 }
 } // namespace ServerDedupReference
 #endif

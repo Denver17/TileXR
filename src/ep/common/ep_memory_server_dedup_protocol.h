@@ -5,32 +5,25 @@
 #include <cstdint>
 
 namespace TileXREp {
-
 constexpr uint32_t kEpServerDedupRanksPerServer = 8U;
 constexpr uint32_t kEpServerDedupAlignmentBytes = 32U;
 constexpr uint32_t kEpServerDedupMaxTopK = 32U;
 
-// Weight words preserve FP32 bits; these records are not a public descriptor.
-struct alignas(32) EpServerDedupAssistEx {
-    int32_t srcRank;
-    int32_t srcTokenId;
-    int32_t k;
-    uint32_t weightBits;
-    int32_t forwardCount;
-    int32_t forwardEntryCount;
-    int32_t relayRank;
-    int32_t forwardTokenIdx; // First-hop output row on relayRank; terminals inherit it.
+// The wire header and TokenType output use the same values.
+enum class EpServerDedupTokenType : uint32_t { Direct = 1U, FirstHop = 2U, Terminal = 3U };
+
+struct alignas(32) EpServerDedupPacketHeader {
+    uint32_t srcRank;
+    uint32_t srcTokenId;
+    uint32_t topK; // Original route index / returnK, not the shape K.
+    uint32_t type;
+    uint32_t padding[4];
 };
 
-struct EpServerDedupGroupMember {
-    uint32_t recvSlot;
-    uint32_t weightBits;
-};
-
-struct EpServerDedupForwardEntry {
-    int32_t destinationExpertId;
-    int32_t destinationQ;
-    int32_t originalK;
+// Block 0: index=N, weightBits=selfWeight. Member: index=expert|(q<<16).
+// A RelayReadIndex row contains exactly K blocks; only blocks 0..N are valid.
+struct EpServerDedupReadIndexBlock {
+    uint32_t index;
     uint32_t weightBits;
 };
 
@@ -40,24 +33,14 @@ struct EpServerDedupDirectTask {
     uint32_t expertId;
     uint32_t q;
 };
-static_assert(sizeof(EpServerDedupForwardEntry) == 16U, "forward entry ABI");
+static_assert(sizeof(EpServerDedupTokenType) == 4U, "token type ABI");
+static_assert(sizeof(EpServerDedupPacketHeader) == 32U, "packet header ABI");
+static_assert(alignof(EpServerDedupPacketHeader) == 32U, "packet header alignment");
+static_assert(offsetof(EpServerDedupPacketHeader, srcTokenId) == 4U, "source token offset");
+static_assert(offsetof(EpServerDedupPacketHeader, topK) == 8U, "return k offset");
+static_assert(offsetof(EpServerDedupPacketHeader, type) == 12U, "packet role offset");
+static_assert(sizeof(EpServerDedupReadIndexBlock) == 8U, "read index block ABI");
+static_assert(offsetof(EpServerDedupReadIndexBlock, weightBits) == 4U, "weight bits offset");
 static_assert(sizeof(EpServerDedupDirectTask) == 16U, "source direct task ABI");
-
-constexpr uint32_t kEpServerDedupGroupMembersOffset = sizeof(int32_t);
-
-static_assert(sizeof(EpServerDedupAssistEx) == 32U, "AssistEx must occupy eight words");
-static_assert(alignof(EpServerDedupAssistEx) == 32U, "AssistEx alignment must be 32B");
-static_assert(offsetof(EpServerDedupAssistEx, srcRank) == 0U, "srcRank offset");
-static_assert(offsetof(EpServerDedupAssistEx, srcTokenId) == 4U, "srcTokenId offset");
-static_assert(offsetof(EpServerDedupAssistEx, k) == 8U, "k offset");
-static_assert(offsetof(EpServerDedupAssistEx, weightBits) == 12U, "weight offset");
-static_assert(offsetof(EpServerDedupAssistEx, forwardCount) == 16U, "forwardCount offset");
-static_assert(offsetof(EpServerDedupAssistEx, forwardEntryCount) == 20U, "entry count offset");
-static_assert(offsetof(EpServerDedupAssistEx, relayRank) == 24U, "relayRank offset");
-static_assert(offsetof(EpServerDedupAssistEx, forwardTokenIdx) == 28U, "forwardTokenIdx offset");
-static_assert(sizeof(EpServerDedupGroupMember) == 8U, "Group member must occupy two words");
-static_assert(offsetof(EpServerDedupGroupMember, weightBits) == 4U, "Member weight offset");
-
 } // namespace TileXREp
-
-#endif // TILEXR_EP_MEMORY_SERVER_DEDUP_PROTOCOL_H
+#endif

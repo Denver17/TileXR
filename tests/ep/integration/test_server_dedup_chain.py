@@ -132,32 +132,12 @@ class ChainConsumerTests(unittest.TestCase):
     def records(self, output, prefix):
         return [json.loads(line[len(prefix) + 1:]) for line in output.splitlines() if line.startswith(prefix + " ")]
 
-    def check_relay_links(self, records):
-        first_hops, terminals = {}, []
+    def check_five_tables(self, records):
+        self.assertEqual({record["rank"] for record in records}, set(range(16)))
+        self.assertEqual(len(records), 16)
         for record in records:
-            first_count = terminal_count = 0
-            for source, token, first_k, relay, t, k, count in record["relay_links"]:
-                key = (source, token, first_k, relay)
-                if k == first_k:
-                    self.assertNotIn(key, first_hops)
-                    self.assertEqual(relay, record["rank"])
-                    self.assertGreater(count, 0)
-                    first_hops[key] = (t, count)
-                    first_count += 1
-                else:
-                    self.assertEqual(count, -1)
-                    terminals.append((key, t, k))
-                    terminal_count += 1
-            self.assertEqual(first_count, record["first_hop_received"])
-            self.assertEqual(terminal_count, record["relay_received"])
-        members = {key: set() for key in first_hops}
-        for key, t, k in terminals:
-            self.assertIn(key, first_hops)
-            self.assertEqual(t, first_hops[key][0])
-            self.assertNotIn(k, members[key])
-            members[key].add(k)
-        for key, (_, count) in first_hops.items():
-            self.assertEqual(len(members[key]), count)
+            self.assertTrue(record["five_tables_validated"])
+            self.assertTrue(record["member_addresses_validated"])
 
     def barrier_peer(self, rank, phase, run=b"run-identity"):
         deadline = time.monotonic() + 5
@@ -312,7 +292,7 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["warmup"], 0)
                         self.assertIs(record["server_dedup_enabled"], True)
                         self.assertEqual(record["cleanup"], "complete")
-                        for key in ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated", "group_validated", "flags_cleared", "prefix_indices_validated"):
+                        for key in ("first_hop_validated", "direct_validated", "relay_validated", "route_coverage_validated", "source_outputs_validated", "weights_unchanged", "dispatch_outputs_validated", "five_tables_validated", "member_addresses_validated", "flags_cleared"):
                             self.assertIs(record[key], True)
                         sent += record["first_hop_packets"]; received += record["first_hop_received"]
                         direct_sent += record["direct_packets"]; direct_received += record["direct_received"]
@@ -321,7 +301,7 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(record["local_data_bytes"] + record["same_server_data_bytes"] + record["cross_server_data_bytes"],
                                          record["first_hop_bytes"] + record["direct_bytes"] + record["relay_bytes"])
                         calls = self.trace_lines(rank)
-                        self.assertEqual(calls.count("malloc"), 10 + (quant == "4"))
+                        self.assertEqual(calls.count("malloc"), 11 + (quant == "4"))
                         self.assertEqual(calls.count("free"), calls.count("malloc"))
                         self.assertEqual(calls.count("launch"), 1)
                         self.assertEqual(calls.count("sync"), 1)
@@ -333,11 +313,11 @@ class ChainConsumerTests(unittest.TestCase):
                     self.assertEqual(direct_sent, direct_received)
                     self.assertEqual(sum(r["relay_packets"] for r in records), sum(r["relay_received"] for r in records))
                     self.assertEqual(sum(r["first_hop_packets"] + r["direct_packets"] + r["relay_packets"] for r in records), 16 * 2 * 3)
-                    self.check_relay_links(records)
+                    self.check_five_tables(records)
                     for path in Path(self.trace.name).iterdir(): path.unlink()
 
-    def test_dispatch_tail_boundary_quantized_scales_and_changed_group_numbers(self):
-        for quant, fault in (("0", None), ("4", None), ("4", "scale"), ("0", "duplicate-t")):
+    def test_dispatch_tail_boundary_quantized_scales_and_immutable_indices(self):
+        for quant, fault in (("0", None), ("4", None), ("4", "scale"), ("0", "relay-duplicate")):
             with self.subTest(quant=quant, fault=fault):
                 env = dict(TILEXR_VALIDATION_BS="3", TILEXR_VALIDATION_H="225", TILEXR_VALIDATION_TOPK="6",
                            TILEXR_VALIDATION_QUANT_MODE=quant, TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
@@ -359,7 +339,7 @@ class ChainConsumerTests(unittest.TestCase):
                     self.assertGreater(failed, 0)
                 else:
                     self.assertEqual(failed, 0)
-                    self.check_relay_links(records)
+                    self.check_five_tables(records)
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_checkpoint_and_loop_validation_precedes_initialization(self):
@@ -397,8 +377,8 @@ class ChainConsumerTests(unittest.TestCase):
                     self.assertEqual(calls.count("launch"), loops + 2)
                     self.assertEqual(calls.count("sync"), 1)
                     self.assertGreater(calls.index("sync"), max(i for i, call in enumerate(calls) if call == "launch"))
-                    self.assertEqual(calls.count("malloc"), 10)
-                    self.assertEqual(calls.count("free"), 10)
+                    self.assertEqual(calls.count("malloc"), 11)
+                    self.assertEqual(calls.count("free"), 11)
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 
     def test_repeated_launch_failure_preserves_partial_batch_accounting(self):
@@ -454,8 +434,9 @@ class ChainConsumerTests(unittest.TestCase):
 
     def test_packet_corruption_never_reports_success(self):
         for fault in ("hidden", "flag-first", "flag-last", "mask", "source-weight", "input-weight", "missing-output",
-                      "assist-source", "assist-token", "assist-k", "assist-weight", "assist-role", "assist-count",
-                      "assist-relay", "assist-t", "group-row", "group-slot", "group-weight", "row-order", "non-prefix-t"):
+                      "destination-source", "destination-token", "destination-k", "token-type", "terminal-slot",
+                      "terminal-sentinel", "relay-count", "relay-self-weight", "relay-expert", "relay-q",
+                      "relay-weight", "relay-missing", "relay-duplicate", "row-order"):
             with self.subTest(fault=fault):
                 processes = [self.start(rank, environment={"TEST_PACKET_FAULT": fault}) for rank in range(16)]
                 failures = 0
@@ -469,8 +450,6 @@ class ChainConsumerTests(unittest.TestCase):
                         if fault == "hidden":
                             self.assertIn("byte=0", errors)
                             self.assertIn("mismatches=1", errors)
-                            self.assertIn("assist_actual=[", errors)
-                            self.assertIn("assist_expected=[", errors)
                             self.assertIn("wire_hidden_match=1 wire_output_match=0", errors)
                     self.assertEqual(self.trace_lines(rank)[-1], "finalize")
                 self.assertGreater(failures, 0, fault)
@@ -511,7 +490,7 @@ class ChainConsumerTests(unittest.TestCase):
 
     def test_output_mismatch_preserves_completed_execution_and_capture(self):
         for mode, fault in ((mode, fault) for mode in ("functional", "performance", "breakdown")
-                            for fault in ({"TEST_PACKET_FAULT": "group-row"}, {"TEST_COUNT_FAULT": "prefix"})):
+                            for fault in ({"TEST_PACKET_FAULT": "relay-count"}, {"TEST_COUNT_FAULT": "prefix"})):
             env = dict(fault, TILEXR_VALIDATION_RUN_MODE=mode, TILEXR_VALIDATION_LOOPS="3",
                        TILEXR_VALIDATION_WARMUP="2")
             processes = [self.start(rank, environment=env) for rank in range(16)]

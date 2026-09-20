@@ -817,14 +817,11 @@ record.update(route_mode=os.environ['TILEXR_VALIDATION_ROUTE_MODE'], seed=int(os
               direct_packets=288, direct_received=288, direct_bytes=288*15872,
               local_data_bytes=24*15872, same_server_data_bytes=504*15872, cross_server_data_bytes=48*15872,
               relay_packets=240, relay_received=240, relay_bytes=240*15872, data_bytes=576*15872,
-              relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, prefix_indices_validated=True,
+              relay_validated=True, dispatch_outputs_validated=True, five_tables_validated=True, member_addresses_validated=True, flags_cleared=True,
               first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True)
-previous_relay = rank // 8 * 8 + (rank + 7) % 8
-record['relay_links'] = [[(rank + 8) % rank_size, token * 2, 0, rank, token, 0, 5] for token in range(48)] + [
-    [(previous_relay + 8) % rank_size, token * 2, 0, previous_relay, token, k, -1] for token in range(48) for k in range(1, 6)]
 if not record['server_dedup_enabled']:
     record.update(first_hop_packets=0, first_hop_received=0, first_hop_bytes=0,
-                  relay_packets=0, relay_received=0, relay_bytes=0, relay_links=[],
+                  relay_packets=0, relay_received=0, relay_bytes=0,
                   direct_packets=576, direct_received=576, direct_bytes=576*15872,
                   same_server_data_bytes=264*15872, cross_server_data_bytes=288*15872)
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
@@ -838,10 +835,10 @@ if behavior == 'wrong-seed':
 if os.environ.get('CHAIN_TEST_BEHAVIOR') in ('invalid-output', 'late-analysis-input') and rank == 0:
     import time
     time.sleep(1)
-if behavior == 'wrong-relay-index':
-    record['relay_links'][-1][4] += 1
-if behavior == 'missing-relay-link':
-    record['relay_links'].pop()
+if behavior == 'wrong-member-address':
+    record['member_addresses_validated'] = False
+if behavior == 'missing-table-verdict':
+    record.pop('five_tables_validated')
 if behavior == 'wrong-shape':
     record['bs'] += 1
 if behavior == 'launch-failure':
@@ -878,7 +875,7 @@ if boundary:
                   host_boundary_ff=behavior != 'boundary-mismatch', guard_zero=True)
 if behavior == 'single-marker':
     prefix = 'EP_SERVER_DEDUP_SINGLE_ROUND_PASS '
-if behavior.startswith('invalid-output'):
+if behavior.startswith('invalid-output') or behavior == 'wrong-member-address':
     prefix = 'EP_SERVER_DEDUP_DISPATCH_INVALID '
     record = {key: record[key] for key in (
         'run_id', 'build_id', 'commit', 'checkpoint', 'host', 'host_index', 'local_rank', 'device',
@@ -886,7 +883,7 @@ if behavior.startswith('invalid-output'):
         'server_dedup_enabled',
         'dtype', 'route_mode', 'seed', 'quant_mode', 'fp8_format', 'kernel_scope', 'native_status', 'token_stride')}
     record.update(status='FAIL', validation_status='FAIL', validation_stage='dispatch-read',
-                  validation_error='group firstHopRow mismatch row=0')
+                  validation_error='RelayReadIndex mismatch row=0')
     if behavior == 'invalid-output-stale':
         record['run_id'] = 'old-run'
 if os.environ.get('TILEXR_VALIDATION_CASE_ANALYSIS') == '1' and behavior != 'missing-analysis-input':
@@ -919,7 +916,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertEqual(summary["chain_configuration"]["loops"], 1)
         self.assertEqual(summary["chain_configuration"]["dtype"], "bf16")
         self.assertNotIn("case_analysis", summary)
-        self.assertTrue(summary["relay_links_validated"])
+        self.assertTrue(summary["five_tables_validated"])
         self.assertIn("最后一轮 cnt/cumsum", summary["scope"])
         self.assertNotIn("未执行 NPU launch", summary["scope"])
         for node in summary["nodes"]:
@@ -1100,15 +1097,15 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertFalse(list(self.config_instance.logs.glob("*/launch-*.log")))
         self.assertFalse(list(self.config_instance.logs.glob("*/pid.json")))
 
-    def test_dispatch_cross_rank_relay_mismatch_fails_functional_summary(self):
+    def test_dispatch_member_address_mismatch_fails_functional_summary(self):
         self.enable_chain()
         self.prepare_sync()
-        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "wrong-relay-index"})
+        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "wrong-member-address"})
         self.assertNotEqual(command.returncode, 0)
         summary = self.summary()
         self.assertEqual(summary["primary_error"]["type"], "RESULT_FAILED")
-        self.assertIn("终端 t", summary["primary_error"]["message"])
-        self.assertNotIn("relay_links_validated", summary)
+        self.assertIn("RelayReadIndex mismatch", summary["primary_error"]["message"])
+        self.assertNotIn("five_tables_validated", summary)
 
     def test_chain_multi_rejects_missing_rounds_or_single_marker(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT)
@@ -1264,7 +1261,7 @@ with output.open('w', newline='') as f:
                          {f"rank-{rank}.json" for rank in range(16)})
         index = workflow.read_json(Path(summary["traces"]["index"]))
         self.assertEqual(index["reports"]["8"]["validation_status"], "FAIL")
-        self.assertIn("group firstHopRow mismatch", index["reports"]["8"]["validation_error"])
+        self.assertIn("RelayReadIndex mismatch", index["reports"]["8"]["validation_error"])
         self.assertEqual([(error["type"], error["rank"]) for error in summary["errors"]], [("RESULT_FAILED", 8)])
         for node in summary["nodes"]:
             result = node["reported_result"]
@@ -1294,16 +1291,16 @@ with output.open('w', newline='') as f:
         self.assertIn("server_latency(us) max/min/mean=", line)
         self.assertIn("bandwidth=N/A", line)
 
-    def test_collection_failure_retains_timing_but_cannot_certify_unchecked_links(self):
+    def test_collection_failure_retains_timing_but_cannot_certify_unchecked_tables(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "performance")
         self.enable_msprof()
         self.prepare_sync()
-        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "wrong-relay-index",
+        command = self.invoke("run", environment={"CHAIN_TEST_BEHAVIOR": "wrong-member-address",
                                                    "FAKE_SCENARIO": "collect-fail"})
         self.assertEqual(command.returncode, workflow.FAILURE_CODES["LOG_COLLECT_FAILED"])
         summary = self.summary()
         self.assertEqual(summary["completed_ranks"], 16)
-        self.assertNotIn("relay_links_validated", summary)
+        self.assertNotIn("five_tables_validated", summary)
         measured = summary["measurements"]
         self.assertEqual(len(measured["performance"]["server_mean_us"]), 2)
         self.assertEqual(measured["validation_status"], "FAIL")

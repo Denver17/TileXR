@@ -62,17 +62,22 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
 // expertScalesOut 是独立 FP32[bs,topK] 输出；sourceMask 有效位中 DIRECT 为真实权重，第一跳首 k 为 1.0。
 // 关闭去重时 sourceMask 的全部 topK 位有效，expertScalesOut 全部保留原始权重。
-// groupOut 按 epWorldSize*bs*min(topK,moeExpertNum/epWorldSize) 行预留；仅第一跳 row 有效。
-// forwardTokenIdx 为 relay 第一跳的零基输出 row；行字节数为 align32(4*(1+2*(topK-1)))。
-// 调用方须按新容量重新分配 groupOut；sourceMaskOut 仍为 bs 个 uint32。
+// C=epWorldSize*bs*min(topK,moeExpertNum/epWorldSize)，有效 row 数为 sendCountsOut[moeExpertNum-1]。
+// tokenTypeOut 为 uint32[C]，1=DIRECT、2=第一跳、3=转发终端，与 expandXOut 行序一致。
+// destinationIndexOut 为 uint32[C][3]：类型 1/2 为 [srcRank,srcTokenId,originalK]，
+// 类型 3 为 [本卡 Combine stage 逻辑 slot,UINT32_MAX,UINT32_MAX]，slot 必须按无符号解释。
+// relayReadIndexOut 行距为 topK*8B，仅类型 2 有效；首块为 uint32 N 与 FP32 selfWeight，
+// 后续 N 块为 uint16 expertId、uint16 q、FP32 weight，其余块不消费。
+// sourceMaskOut 为 uint32[bs]；五表基地址至少 4B 对齐，行距不另行向 32B 取整。
+// 五表输出应持有到对应 Combine 完成；旧 Server Dedup metadata 接口不再兼容。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,
     int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t quantMode,
     int64_t globalBs, int64_t expertTokenNumsType, void *expandXOut, void *dynamicScalesOut,
-    int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
-    int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
-    uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
+    int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
+    uint32_t *tokenTypeOut, uint32_t *destinationIndexOut, uint32_t *relayReadIndexOut,
+    uint32_t *sourceMaskOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
     aclrtStream stream);
 
 }

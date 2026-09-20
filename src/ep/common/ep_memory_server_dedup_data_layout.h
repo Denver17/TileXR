@@ -13,7 +13,8 @@ namespace TileXREp {
 struct EpServerDedupDataLayout {
     uint64_t quantCount = 0;
     uint64_t scaleBytes = 0;
-    uint64_t tailOffset = 0;
+    uint64_t headerPayloadOffset = 0, readIndexPayloadOffset = 0;
+    uint64_t headerWireOffset = 0, relayReadIndexWireOffset = 0;
     uint64_t payloadBytes = 0;
     uint64_t blockCount = 0;
     uint64_t packedPayloadBytes = 0;
@@ -38,8 +39,14 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     EpServerDedupDataLayout layout {};
     layout.quantCount = TileXREpDedupAlign(h, 256U);
     layout.scaleBytes = quantized ? TileXREpDedupAlign((uint64_t(h) + 31U) / 32U, 2U) : 0;
-    layout.tailOffset = TileXREpDedupAlign(quantized ? layout.quantCount + layout.scaleBytes : uint64_t(h) * 2U, 32U);
-    layout.payloadBytes = layout.tailOffset + TileXREpDedupAlign(32U + uint64_t(topK - 1U) * 16U, 32U);
+    layout.headerPayloadOffset = TileXREpDedupAlign(quantized ? layout.quantCount + layout.scaleBytes : uint64_t(h) * 2U, 32U);
+    layout.readIndexPayloadOffset = layout.headerPayloadOffset + 32U;
+    const uint64_t readIndexBytes = uint64_t(topK) * 8U;
+    if (layout.readIndexPayloadOffset % 480U + readIndexBytes > 480U)
+        layout.readIndexPayloadOffset = TileXREpDedupAlign(layout.readIndexPayloadOffset, 480U);
+    layout.headerWireOffset = layout.headerPayloadOffset / 480U * 512U + layout.headerPayloadOffset % 480U;
+    layout.relayReadIndexWireOffset = layout.readIndexPayloadOffset / 480U * 512U + layout.readIndexPayloadOffset % 480U;
+    layout.payloadBytes = TileXREpDedupAlign(layout.readIndexPayloadOffset + readIndexBytes, 32U);
     layout.blockCount = (layout.payloadBytes + 479U) / 480U;
     layout.packedPayloadBytes = layout.blockCount * 480U;
     layout.tokenStride = layout.blockCount * 512U;
@@ -49,8 +56,8 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     layout.dispatchOffset = TileXREpDedupAlign(layout.sourceOffset + layout.sourceBytes, 512U);
     layout.dispatchBytes = uint64_t(experts) * bs * layout.tokenStride;
     layout.relayOffset = TileXREpDedupAlign(layout.dispatchOffset + layout.dispatchBytes, 512U);
-    // Historical Combine reservation, unused by Dispatch. Prefix-index Combine
-    // must resize this to capacityRows*K*returnStride before consuming new t.
+    // Historical Combine reservation, unused by Dispatch. The new pull Combine
+    // must define its stage/result allocation before consuming the five tables.
     layout.relayBytes = uint64_t(8U) * bs * topK * layout.returnStride;
     layout.requiredBytes = layout.relayOffset + layout.relayBytes;
     return layout;

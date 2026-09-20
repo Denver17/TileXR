@@ -50,9 +50,10 @@ EpMemoryServerDedupParams ValidParams()
     p.expertTokenNumsType = 1;
     p.dtype = TILEXR_DATA_TYPE_BFP16;
     p.expandXOutDtype = TILEXR_DATA_TYPE_BFP16;
-    params.assistExOut = reinterpret_cast<uint32_t *>(0xB000);
+    params.tokenTypeOut = reinterpret_cast<uint32_t *>(0xB004);
+    params.destinationIndexOut = reinterpret_cast<uint32_t *>(0x9004);
     params.sourceMaskOut = reinterpret_cast<uint32_t *>(0xC004);
-    params.groupOut = reinterpret_cast<uint32_t *>(0xD000);
+    params.relayReadIndexOut = reinterpret_cast<uint32_t *>(0xD004);
     params.expertScalesOut = reinterpret_cast<float *>(0xF000);
     return params;
 }
@@ -64,9 +65,9 @@ int Invoke(const EpMemoryServerDedupParams &params)
         p.activeMaskType, p.expertScales, p.comm, p.bs, p.h, p.topK, p.moeExpertNum,
         p.epWorldSize, p.epRankId, p.tpWorldSize, p.tpRankId, p.expertShardType,
         p.sharedExpertNum, p.sharedExpertRankNum, p.quantMode, p.globalBs, p.expertTokenNumsType,
-        p.expandXOut, p.dynamicScalesOut, p.assistInfoForCombineOut, p.expertTokenNumsOut,
-        p.epRecvCountsOut, p.tpRecvCountsOut, p.expandScalesOut, params.assistExOut,
-        params.sourceMaskOut, params.groupOut, params.expertScalesOut, p.dtype, p.expandXOutDtype, p.stream);
+        p.expandXOut, p.dynamicScalesOut, p.expertTokenNumsOut,
+        p.epRecvCountsOut, p.tpRecvCountsOut, p.expandScalesOut, params.tokenTypeOut, params.destinationIndexOut,
+        params.relayReadIndexOut, params.sourceMaskOut, params.expertScalesOut, p.dtype, p.expandXOutDtype, p.stream);
 }
 
 void CheckRejected(const EpMemoryServerDedupParams &params, int expected)
@@ -131,20 +132,23 @@ int main()
         "input and weight pointers forwarded without reading them");
     Check(captured.expandXOut == p.expandXOut && captured.expertTokenNumsOut == p.expertTokenNumsOut &&
         captured.epRecvCountsOut == p.epRecvCountsOut, "original output pointers forwarded");
-    Check(g_submitted.assistExOut == valid.assistExOut && g_submitted.sourceMaskOut == valid.sourceMaskOut &&
-        g_submitted.groupOut == valid.groupOut && g_submitted.expertScalesOut == valid.expertScalesOut,
+    Check(g_submitted.tokenTypeOut == valid.tokenTypeOut &&
+        g_submitted.destinationIndexOut == valid.destinationIndexOut &&
+        g_submitted.sourceMaskOut == valid.sourceMaskOut &&
+        g_submitted.relayReadIndexOut == valid.relayReadIndexOut && g_submitted.expertScalesOut == valid.expertScalesOut,
         "metadata and independent weight output retain their order");
     Check(captured.bs == 4 && captured.h == 13 && captured.topK == 6 && captured.moeExpertNum == 192 &&
         captured.globalBs == 256 && captured.epRankId == 9 && captured.epWorldSize == 64 &&
         captured.tpWorldSize == 1 && captured.expertTokenNumsType == 1, "shape and count settings forwarded");
-    Check(captured.dtype == TILEXR_DATA_TYPE_BFP16 && captured.expandXOutDtype == TILEXR_DATA_TYPE_BFP16 &&
-        captured.assistInfoForCombineOut == nullptr, "dtype and optional legacy assist forwarded");
+    Check(captured.dtype == TILEXR_DATA_TYPE_BFP16 && captured.expandXOutDtype == TILEXR_DATA_TYPE_BFP16,
+        "input and output dtype forwarded");
     Check(g_context.hostArgs == &g_commArgs && g_context.devArgs == g_devArgs &&
-        g_layout.capacityRows == 768 && g_layout.assistExBytes == 24576 && g_layout.groupBytes == 49152,
+        g_layout.capacityRows == 768 && g_layout.tokenTypeBytes == 3072 && g_layout.destinationIndexBytes == 9216 &&
+        g_layout.relayReadIndexRowStrideBytes == 48 && g_layout.relayReadIndexBytes == 36864,
         "validated context and bounded output layout forwarded");
 
 
-    for (int test = 0; test < 43; ++test) {
+    for (int test = 0; test < 45; ++test) {
         auto params = valid;
         auto &v = params.dispatch;
         int error = TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -156,11 +160,11 @@ int main()
             case 4: v.expandXOut = nullptr; break;
             case 5: v.expertTokenNumsOut = nullptr; break;
             case 6: v.epRecvCountsOut = nullptr; break;
-            case 7: params.assistExOut = nullptr; break;
+            case 7: params.tokenTypeOut = nullptr; break;
             case 8: params.sourceMaskOut = nullptr; break;
-            case 9: params.groupOut = nullptr; break;
-            case 10: params.assistExOut += 1; break;
-            case 11: params.groupOut += 1; break;
+            case 9: params.relayReadIndexOut = nullptr; break;
+            case 10: params.tokenTypeOut = reinterpret_cast<uint32_t *>(0xB001); break;
+            case 11: params.relayReadIndexOut = reinterpret_cast<uint32_t *>(0xD001); break;
             case 12: params.sourceMaskOut = reinterpret_cast<uint32_t *>(0xC001); break;
             case 13: v.bs = 0; break;
             case 14: v.h = 0; break;
@@ -194,6 +198,8 @@ int main()
             case 41: v.quantMode = 256; error = TILEXR_ERROR_NOT_SUPPORT; break;
             case 42: v.dtype = static_cast<TileXRDataType>(256 + TILEXR_DATA_TYPE_BFP16);
                 error = TILEXR_ERROR_NOT_SUPPORT; break;
+            case 43: params.destinationIndexOut = nullptr; break;
+            case 44: params.destinationIndexOut = reinterpret_cast<uint32_t *>(0x9001); break;
         }
         CheckRejected(params, error);
     }
@@ -237,10 +243,8 @@ int main()
     defaults.dispatch.expandXOutDtype = TILEXR_DATA_TYPE_RESERVED;
     defaults.dispatch.globalBs = defaults.dispatch.epWorldSize = defaults.dispatch.epRankId = 0;
     defaults.dispatch.tpWorldSize = defaults.dispatch.expertTokenNumsType = 0;
-    defaults.dispatch.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0x1234);
-    Check(Invoke(defaults) == TILEXR_SUCCESS && g_layout.globalBs == 256 &&
-        g_submitted.dispatch.assistInfoForCombineOut == defaults.dispatch.assistInfoForCombineOut,
-        "FP16/defaults/required weight and legacy assist placeholder accepted");
+    Check(Invoke(defaults) == TILEXR_SUCCESS && g_layout.globalBs == 256,
+        "FP16/defaults and 4B-aligned five-table outputs accepted");
 
     g_a5 = false;
     const int hostCalls = g_hostCalls;

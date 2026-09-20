@@ -194,21 +194,21 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
     int64_t maskType, void *weights, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t experts, int64_t world, int64_t rank, int64_t tpWorld, int64_t tpRank,
     int64_t shard, int64_t shared, int64_t sharedRanks, int64_t quant, int64_t globalBs,
-    int64_t countType, void *expandX, void *dynamic, int32_t *assist, int64_t *counts,
-    int32_t *sendCounts, int32_t *tpCounts, void *expandScales, uint32_t *assistEx,
-    uint32_t *sourceMask, uint32_t *group, float *weightsOut, TileXR::TileXRDataType dtype,
+    int64_t countType, void *expandX, void *dynamic, int64_t *counts,
+    int32_t *sendCounts, int32_t *tpCounts, void *expandScales, uint32_t *tokenType,
+    uint32_t *destinationIndex, uint32_t *relayReadIndex, uint32_t *sourceMask, float *weightsOut, TileXR::TileXRDataType dtype,
     TileXR::TileXRDataType outDtype, aclrtStream stream)
 {
     if (x == nullptr || ids == nullptr || comm != &args || bs <= 0 || h <= 0 || topK <= 0 || topK > 32 ||
         experts <= 0 || world <= 0 || experts % world != 0 || rank != rankId || tpWorld != 1 || tpRank != 0 || shard != 0 ||
         shared != 0 || sharedRanks != 0 || (quant != 0 && quant != 4) || globalBs != world * bs || (countType != 0 && countType != 1) ||
         maskType != 0 || scales != nullptr || mask != nullptr || weights == nullptr || (quant == 4 ? dynamic == nullptr : dynamic != nullptr) ||
-        assist != nullptr || tpCounts != nullptr || expandScales != nullptr || expandX == nullptr ||
-        counts == nullptr || sendCounts == nullptr || assistEx == nullptr || sourceMask == nullptr ||
-        group == nullptr || weightsOut == nullptr || weightsOut == weights || stream != reinterpret_cast<void *>(0x20) || (quant == 0 ? outDtype != TileXR::TILEXR_DATA_TYPE_RESERVED :
+        tpCounts != nullptr || expandScales != nullptr || expandX == nullptr ||
+        counts == nullptr || sendCounts == nullptr || tokenType == nullptr || destinationIndex == nullptr || sourceMask == nullptr ||
+        relayReadIndex == nullptr || weightsOut == nullptr || weightsOut == weights || stream != reinterpret_cast<void *>(0x20) || (quant == 0 ? outDtype != TileXR::TILEXR_DATA_TYPE_RESERVED :
             (outDtype != TileXR::TILEXR_DATA_TYPE_FP8E4M3 && outDtype != TileXR::TILEXR_DATA_TYPE_FP8E5M2)) ||
         (dtype != TileXR::TILEXR_DATA_TYPE_FP16 && dtype != TileXR::TILEXR_DATA_TYPE_BFP16)) { return 92; }
-    std::vector<void *> current {x, ids, expandX, counts, sendCounts, assistEx, sourceMask, group, weights, weightsOut};
+    std::vector<void *> current {x, ids, expandX, counts, sendCounts, tokenType, destinationIndex, relayReadIndex, sourceMask, weights, weightsOut};
     if (dynamic) current.push_back(dynamic);
     if (calls["launch"] == 0) { firstBuffers = current; }
     if (current != firstBuffers || allocations.size() != current.size() || calls["comm-init"] != 1 ||
@@ -261,17 +261,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         const char *packetFault = std::getenv("TEST_PACKET_FAULT");
         const std::string failure = packetFault == nullptr ? "" : packetFault;
         const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);
-        const uint64_t groupStride = (4U + 8U * (shape.k - 1U) + 31U) / 32U * 32U;
-        using GroupKey = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
-        std::map<GroupKey, uint32_t> groupIndices;
-        for (uint32_t relay = 0; relay < shape.ranks; ++relay) {
-            const auto relayRows = DispatchRows(shape, relay);
-            for (uint32_t index = 0; index < relayRows.size(); ++index) {
-                const auto &row = relayRows[index];
-                if (row.FirstHop())
-                    groupIndices[{row.source, row.token, row.packet.members.front().k, relay}] = index;
-            }
-        }
         std::fill(sourceMask, sourceMask + bs, 0);
         const auto sourcePackets = SourcePackets(Ids(shape, rank), Weights(shape, rank), rank, world, experts, topK);
         for (const auto &packet : sourcePackets) {
@@ -281,7 +270,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         }
         const auto outputRows = DispatchRows(shape, rank);
         packets.clear();
-        uint32_t previousT = UINT32_MAX;
         for (size_t index = 0; index < outputRows.size(); ++index) {
             const auto &row = outputRows[index];
             const auto payload = Payload(shape, row.source, row.packet, layout);
@@ -289,34 +277,30 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             std::memcpy(hidden, payload.data(), hiddenStride);
             if (quant == 4) std::memcpy(static_cast<uint8_t *>(dynamic) + index * layout.scaleBytes,
                 payload.data() + layout.quantCount, layout.scaleBytes);
-            uint32_t t = row.Direct() ? UINT32_MAX : groupIndices.at({row.source, row.token, row.packet.members.front().k, row.relay});
-            if (row.FirstHop() && failure == "duplicate-t") {
-                if (previousT != UINT32_MAX) t = previousT;
-                previousT = t;
+            uint32_t type = TokenType(row);
+            auto destination = DestinationIndex(shape, row);
+            if (failure == "destination-source") destination[0] ^= 1U;
+            if (failure == "destination-token") destination[1] ^= 1U;
+            if (failure == "destination-k") destination[2] ^= 1U;
+            if (failure == "token-type") type = type % 3U + 1U;
+            if (failure == "terminal-slot" && type == 3U) destination[0] ^= 1U;
+            if (failure == "terminal-sentinel" && type == 3U) destination[1] = 0U;
+            if (failure != "missing-output") {
+                tokenType[index] = type;
+                std::copy(destination.begin(), destination.end(), destinationIndex + index * 3U);
             }
-            if (row.FirstHop() && failure == "non-prefix-t") t = (t + 1U) % uint32_t(outputRows.size());
-            auto metadata = DispatchAssist(row, t);
-            if (failure == "assist-source") metadata[0] ^= 1U;
-            if (failure == "assist-token") metadata[1] ^= 1U;
-            if (failure == "assist-k") metadata[2] ^= 1U;
-            if (failure == "assist-weight") metadata[3] ^= 1U;
-            if (failure == "assist-role") metadata[4] ^= 1U;
-            if (failure == "assist-count") metadata[5] ^= 1U;
-            if (failure == "assist-relay" && !row.Direct()) metadata[6] ^= 1U;
-            if (failure == "assist-t" && !row.Direct()) metadata[7] = shape.ranks * shape.bs * std::min(shape.k, shape.experts / shape.ranks);
-            if (failure == "terminal-t" && !row.Direct() && !row.FirstHop()) metadata[7] = (t + 1U) % (shape.ranks * shape.bs * std::min(shape.k, shape.experts / shape.ranks));
-            if (failure != "missing-output") std::memcpy(assistEx + index * 8U, metadata.data(), 32U);
             if (row.FirstHop()) {
-                auto *groupRow = reinterpret_cast<uint32_t *>(reinterpret_cast<uint8_t *>(group) + t * groupStride);
-                groupRow[0] = uint32_t(index);
-                for (uint32_t member = 1; member < row.packet.members.size(); ++member) {
-                    const auto &route = row.packet.members[member];
-                    groupRow[1U + (member - 1U) * 2U] = t * shape.k + route.k;
-                    groupRow[2U + (member - 1U) * 2U] = FloatBits(route.weight);
+                auto words = RelayReadIndex(row);
+                if (failure == "relay-count") words[0] += 1U;
+                if (failure == "relay-self-weight") words[1] ^= 1U;
+                if (failure == "relay-expert") words[2] ^= 1U;
+                if (failure == "relay-q") words[2] ^= 1U << 16U;
+                if (failure == "relay-weight") words[3] ^= 1U;
+                if (failure == "relay-missing") --words[0];
+                if (failure == "relay-duplicate" && words.size() >= 6U) {
+                    words[4] = words[2]; words[5] = words[3];
                 }
-                if (failure == "group-row") groupRow[0] ^= 1U;
-                if (failure == "group-slot") groupRow[1] ^= 1U;
-                if (failure == "group-weight") groupRow[2] ^= 1U;
+                std::copy(words.begin(), words.end(), relayReadIndex + index * shape.k * 2U);
             }
             auto wire = Pack(payload);
             for (uint64_t block = 0; block < layout.blockCount; ++block)
@@ -330,7 +314,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             if (failure == "hidden") static_cast<uint8_t *>(expandX)[0] ^= 1U;
             if (failure == "scale" && quant == 4) static_cast<uint8_t *>(dynamic)[0] ^= 1U;
             if (failure == "row-order" && outputRows.size() > 1U)
-                std::swap_ranges(assistEx, assistEx + 8U, assistEx + 8U);
+                std::swap_ranges(destinationIndex, destinationIndex + 3U, destinationIndex + 3U);
         }
         if (failure == "mask") sourceMask[0] ^= 1U;
         if (failure == "input-weight") static_cast<float *>(weights)[0] += 1.0f;

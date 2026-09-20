@@ -1,9 +1,9 @@
 # EP Memory Server Dedup 进度
 
-## 当前状态（2026-09-19）
+## 当前状态（2026-09-20）
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
-源码校准基线 `4858ce6`。完整 Dispatch 已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
+五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
 Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
@@ -13,7 +13,7 @@ TokenNum 读取 sendCounts 末项。Combine 独立设计按 M0、M1a/M1b、M2–
 最新约定为固定 64 核，全部先执行 Init、CopyLocalPendingTokens 两个函数；随后分为 Send/Read 核，
 Send 核直发类型 1，Read 核拉取类型 2 成员、加权聚合并发出 partial。最终 BS 个 Token 的聚合
 独立为 M5，首版由 Read 核负责，任务映射与核类别解耦，预留后续 64 核参与。
-新中转区的分配归属和内部细节待收口，尚未实施 ABI 或布局变更。
+Combine 新中转区的分配归属和内部细节待收口；Dispatch 五表 ABI 和新包尾布局已实施。
 
 [Dispatch 输出适配方案](specs/ep-memory-server-dedup-dispatch-output-adaptation-design.md)已更新：
 32B 包头保留 source rank/token/k/type 四个有效值，type 与 Combine 的 TokenType 共用 1/2/3 定义；
@@ -22,13 +22,16 @@ Send 核直发类型 1，Read 核拉取类型 2 成员、加权聚合并发出 p
 第一跳保留本地 type_2，最终转发前仅改包头 type 为 type_3，其他字段不变。
 T01 独立参考与逐输出校验已确认；T02 采用全局路由参考加各 Rank 本地匹配方案，
 不新增 Rank 间校验通信。D08 写出同步、D09 Host/caller 清理和 T03 回归已确认，
-生产方案 D01–D09 已具备开始实施的逻辑细节，执行顺序与验证入口见适配方案第六节。
-2026-09-20 T02 也已确认，D01–D09/T01–T03 全部收口；先提交设计文档，再实施代码。尚无新构建/设备验证结论。
+D01–D09/T01–T03 全部确认并完成实现，执行顺序与验证入口见适配方案第六节。
+2026-09-20：真实 CANN 9.1/A5 profiling OFF/ON kernel 与 Host 库编译通过；
+14 项相关 Host CTest、25 项 C++ 集成替身、113 项 Python chain/workflow 回归通过；
+关闭编译期去重的隔离副本另有 6 项发送/Host/launch 回归通过。
+五表真实 NPU 正确性、多轮复用和性能尚待用户设备验证，历史产物的设备结论不自动继承。
 
 | 方向 | 当前实现与验证边界 |
 | --- | --- |
 | Dispatch 数据面 | 原始 cnt/cumsum、第一跳/DIRECT、接收/relay、metadata、双窗与清 Flag 均已实现 |
-| 当前优化 | Count 异步下发/共享 scratch、动态收发 lane、二维 Probe、t=row、核末无 SyncAll、简化打点、独立 GM tiling、编译期核数/去重开关 |
+| 当前优化 | Count 异步下发/共享 scratch、动态收发 lane、二维 Probe、Token prefix 行与 slot 定位、五表输出、核末无 SyncAll、简化打点、独立 GM tiling、编译期核数/去重开关 |
 | 暂缓候选 | 双 Probe、剩余 ≤5 时预探测、ready 认领删除、Vector ready bitmap、metadata 地址缓存 |
 | 已收到的完整设备结果 | 64P/E384、BS96、H7168/K6、quant_mode=4/e4m3、breakdown 100+50 轮，64/64 PASS；run_id=b662f5c701e74ec187fdb7f09cb39bc9、kernel=65f0523c47a6 |
 | 最新产物验收 | 上一行仅覆盖那次产物；之后源码修改不能自动继承该正确性或性能结论，128P 等组合需各自证据 |
@@ -39,7 +42,7 @@ T01 独立参考与逐输出校验已确认；T02 采用全局路由参考加各
 
 以上设备信息依据用户回传，未直接访问生产环境。约 49us 的历史 performance 与约 391us 的
 breakdown 口径和产物不同；移除 PacketIssue 未明显缓解的反馈不能证明根因已经闭合。
-本次文档修订不新增 NPU 通过记录，也不将“优化设计告一段落”解释为所有性能目标验收。
+本次五表迁移不新增 NPU 通过记录，也不将“优化设计告一段落”解释为所有性能目标验收。
 
 ## 历史验证记录
 

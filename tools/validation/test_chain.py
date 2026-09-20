@@ -110,9 +110,7 @@ class ChainTests(TemporaryRoot):
                                 first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
                                 local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
                                 relay_packets=2, relay_received=2, relay_bytes=31744, data_bytes=111104,
-                                relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, prefix_indices_validated=True,
-                                relay_links=[[0, token, 0, mapping["rank"], token, original_k, 1 if original_k == 0 else -1]
-                                             for token in range(2) for original_k in range(2)],
+                                relay_validated=True, dispatch_outputs_validated=True, five_tables_validated=True, member_addresses_validated=True, flags_cleared=True,
                                 first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch"))
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
@@ -151,6 +149,13 @@ class ChainTests(TemporaryRoot):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_QUANT_MODE": quant, "TILEXR_VALIDATION_FP8_FORMAT": format}):
                 self.assertEqual(workflow.source_send_stride(self.config().chain), stride)
 
+    def test_packet_stride_keeps_entire_index_inside_one_data_block(self):
+        for h, quant, k, expected in ((208, 0, 1, 512), (208, 0, 4, 512),
+                                     (208, 0, 5, 1024), (256, 4, 20, 512),
+                                     (256, 4, 21, 1024), (256, 4, 32, 1024)):
+            with self.subTest(h=h, quant=quant, k=k):
+                self.assertEqual(workflow.source_send_stride(dict(h=h, quant_mode=quant, topk=k)), expected)
+
     def test_multi_requires_all_configured_rounds_and_batch_identity(self):
         os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DISPATCH_CHECKPOINT
         os.environ["TILEXR_VALIDATION_LOOPS"] = "1"
@@ -164,15 +169,13 @@ class ChainTests(TemporaryRoot):
                       first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
                                 local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
                                 relay_packets=2, relay_received=2, relay_bytes=31744, data_bytes=111104,
-                                relay_validated=True, dispatch_outputs_validated=True, group_validated=True, flags_cleared=True, prefix_indices_validated=True,
-                                relay_links=[[0, token, 0, mapping["rank"], token, original_k, 1 if original_k == 0 else -1]
-                                             for token in range(2) for original_k in range(2)],
+                                relay_validated=True, dispatch_outputs_validated=True, five_tables_validated=True, member_addresses_validated=True, flags_cleared=True,
                       first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch")
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
         for key, value in (("first_hop_validated", False), ("token_stride", 8192), ("first_hop_bytes", 1),
                            ("direct_validated", False), ("relay_validated", False), ("dispatch_outputs_validated", False),
-                           ("group_validated", False), ("flags_cleared", False), ("prefix_indices_validated", False),
-                           ("relay_bytes", 0), ("relay_received", None), ("data_bytes", 79360), ("relay_links", []), ("route_coverage_validated", False), ("direct_bytes", 0),
+                           ("five_tables_validated", False), ("flags_cleared", False), ("member_addresses_validated", False),
+                           ("relay_bytes", 0), ("relay_received", None), ("data_bytes", 79360), ("route_coverage_validated", False), ("direct_bytes", 0),
                            ("direct_packets", True), ("direct_received", None), ("same_server_data_bytes", -1),
                            ("weights_unchanged", False), ("source_outputs_validated", False), ("direct_packets", 1),
                            ("quant_mode", 3), ("kernel_scope", "cnt_cumsum"), ("loops", 3), ("submitted", 4), ("completed", 4), ("completed", 6),
@@ -206,49 +209,27 @@ class ChainTests(TemporaryRoot):
             with self.subTest(key=key), self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records([dict(record, **{key: value})], [mapping], "run", manifest, config.chain)
 
-    def test_dispatch_links_match_actual_relay_t_across_ranks_and_require_all_children(self):
+    def test_dispatch_tables_require_all_ranks_matching_one_case(self):
         config = dict(self.config().chain, rank_size=16, bs=2, topk=3)
-        capacity = 16 * config["bs"] * min(config["topk"], config["moe_expert_num"] // 16)
-        records = []
-        for rank in range(16):
-            previous = rank // 8 * 8 + (rank + 7) % 8
-            records.append(dict(rank=rank, first_hop_packets=1, first_hop_received=1,
-                                relay_packets=1, relay_received=1, direct_packets=4,
-                                relay_links=[[(rank + 8) % 16, 0, 1, rank, capacity - 1 - rank, 1, 1],
-                                             [(previous + 8) % 16, 0, 1, previous, capacity - 1 - previous, 2, -1]]))
-        workflow.validate_dispatch_links(records, config)
-        for fault in ("missing", "shape", "type", "owner", "range", "count", "terminal-count", "t", "orphan", "duplicate", "reuse", "routes"):
+        records = [dict(config, rank=rank, run_id="run", build_id="build", commit="a" * 40,
+                        server_dedup_enabled=True, dispatch_outputs_validated=True,
+                        five_tables_validated=True, member_addresses_validated=True,
+                        first_hop_packets=1, relay_packets=1, direct_packets=4) for rank in range(16)]
+        workflow.validate_dispatch_tables(records, config)
+        for fault in ("missing-rank", "duplicate-rank", "missing-table-verdict", "failed-address-verdict",
+                      "different-seed", "different-build", "different-run", "missing-identity", "routes"):
             changed = copy.deepcopy(records)
-            first, terminal = changed[0]["relay_links"]
-            if fault == "missing": changed[0].pop("relay_links")
-            if fault == "shape": first.pop()
-            if fault == "type": first[4] = True
-            if fault == "owner": first[3] = 1
-            if fault == "range": first[4] = capacity
-            if fault == "count": first[6] = 2
-            if fault == "terminal-count": terminal[6] = 0
-            if fault == "t": terminal[4] += 1
-            if fault == "orphan": terminal[1] = 1
-            if fault == "duplicate": changed[0]["relay_links"].append(terminal[:])
-            if fault == "reuse":
-                changed[0]["relay_links"].append([8, 1, 1, 0, capacity - 1, 1, 1])
-                changed[0]["first_hop_received"] += 1
+            if fault == "missing-rank": changed.pop()
+            if fault == "duplicate-rank": changed[0]["rank"] = 1
+            if fault == "missing-table-verdict": changed[0].pop("five_tables_validated")
+            if fault == "failed-address-verdict": changed[0]["member_addresses_validated"] = False
+            if fault == "different-seed": changed[0]["seed"] += 1
+            if fault == "different-build": changed[0]["build_id"] = "stale"
+            if fault == "different-run": changed[0]["run_id"] = "stale"
+            if fault == "missing-identity": changed[0].pop("seed")
             if fault == "routes": changed[0]["direct_packets"] -= 1
             with self.subTest(fault=fault), self.assertRaises(ValueError):
-                workflow.validate_dispatch_links(changed, config)
-
-    def test_relay_prefix_capacity_uses_full_output_rows(self):
-        for experts in (16, 32, 96):
-            config = dict(bs=2, topk=3, moe_expert_num=experts)
-            capacity = 16 * 2 * min(3, experts // 16)
-            for index in (16, capacity - 1):
-                record = dict(rank=8, first_hop_received=1, relay_received=0,
-                              relay_links=[[0, 0, 0, 8, index, 0, 1]])
-                workflow.validate_relay_links(record, config, 16)
-            for index in (-1, capacity):
-                record["relay_links"][0][4] = index
-                with self.assertRaises(ValueError):
-                    workflow.validate_relay_links(record, config, 16)
+                workflow.validate_dispatch_tables(changed, config)
 
     def test_memory_boundary_is_one_functional_case(self):
         os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.MEMORY_BOUNDARY_CHECKPOINT

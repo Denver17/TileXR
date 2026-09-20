@@ -4,6 +4,7 @@
 #include "kernel_operator.h"
 #include <tilexr_ep_mxfp8_quant.h>
 #include "ep_memory_server_dedup_data_layout.h"
+#include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_profile.h"
 
 namespace TileXREp {
@@ -240,23 +241,24 @@ private:
     }
     __aicore__ inline void FillTail(LocalTensor<uint8_t> payload, uint32_t token, uint32_t firstK, uint32_t mask)
     {
-        auto header = payload[data_.tailOffset].template ReinterpretCast<int32_t>();
-        auto weights = header.template ReinterpretCast<float>();
-        header.SetValue(0U, args_->rank); header.SetValue(1U, start_ + token); header.SetValue(2U, firstK);
-        weights.SetValue(3U, routeWeights_.GetValue(token * k_ + firstK));
-        header.SetValue(6U, -1); header.SetValue(7U, -1);
-        uint32_t entries = 0;
+        auto header = payload[data_.headerPayloadOffset].template ReinterpretCast<uint32_t>();
+        auto index = payload[data_.readIndexPayloadOffset].template ReinterpretCast<uint32_t>();
+        auto weights = index.template ReinterpretCast<float>();
+        header.SetValue(0U, uint32_t(args_->rank));
+        header.SetValue(1U, start_ + token);
+        header.SetValue(2U, firstK);
+        header.SetValue(3U, uint32_t(mask == 0U ? EpServerDedupTokenType::Direct : EpServerDedupTokenType::FirstHop));
+        weights.SetValue(1U, routeWeights_.GetValue(token * k_ + firstK));
+        uint32_t entries = 0U;
         for (uint32_t k = firstK + 1U; mask != 0U && k < k_; ++k) if (mask & (uint32_t(1) << k)) {
-            const uint32_t index = (start_ + token) * k_ + k;
-            const uint32_t expert = uint32_t(routeIds_.GetValue(index));
-            const uint32_t q = CalTokenSendExpertCnt(expert, index);
-            header.SetValue(8U + entries * 4U, expert);
-            header.SetValue(9U + entries * 4U, q);
-            header.SetValue(10U + entries * 4U, k);
-            weights.SetValue(11U + entries * 4U, routeWeights_.GetValue(token * k_ + k));
+            const uint32_t routeIndex = (start_ + token) * k_ + k;
+            const uint32_t expert = uint32_t(routeIds_.GetValue(routeIndex));
+            const uint32_t q = CalTokenSendExpertCnt(expert, routeIndex);
             ++entries;
+            index.SetValue(entries * 2U, expert | (q << 16U));
+            weights.SetValue(entries * 2U + 1U, routeWeights_.GetValue(token * k_ + k));
         }
-        header.SetValue(4U, entries); header.SetValue(5U, entries);
+        index.SetValue(0U, entries);
     }
     __aicore__ inline void SendPacket(TQue<QuePosition::VECIN, 1> &input,
         uint32_t token, uint32_t firstK, uint32_t expert, uint32_t q, uint32_t mask,

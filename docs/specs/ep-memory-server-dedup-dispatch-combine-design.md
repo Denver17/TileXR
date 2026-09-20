@@ -4,7 +4,8 @@
 
 2026-09-18 建立初版；2026-09-19 确认五表与 Combine 公共接口，内部模块仍待详细设计。代码路径为 `/users/hzy/workspace/TileXR`，
 分支为 `codex/SilentEmotion`，本次现状核对基线为 `e2d1704`。
-Dispatch 已实现，Server Dedup Combine 尚未实现；本文不新增设备验证结论。
+2026-09-20：Dispatch 已迁移到 §5 的五表接口及新包尾；Server Dedup Combine 尚未实现。
+§3 保留 `e2d1704` 的历史信息盘点，避免将其中旧表/转发方式误认为当前代码。本文不新增设备验证结论。
 
 本文集中维护两个算子之间的共同契约：
 
@@ -15,8 +16,8 @@ Dispatch 已实现，Server Dedup Combine 尚未实现；本文不新增设备�
 [Dispatch 输出适配设计](ep-memory-server-dedup-dispatch-output-adaptation-design.md)维护五表生产、
 新包尾布局及逐项确认状态；
 [Combine 独立设计](ep-memory-server-dedup-combine-design.md)集中维护核数、init、阶段、同步、流水和模块实现。
-本文 §4/§5 仅描述信息交接和已确认的五表/接口契约，§3 是实际源码现状，§7 跟踪共同契约状态。
-接口已确认不代表已写入公开头文件；历史 R/C 文档中的 push-member 地址及旧表不覆盖新 pull 方案。
+本文 §4/§5 仅描述信息交接和已确认的五表/接口契约，§3 是改动前源码盘点，§7 跟踪共同契约状态。
+Dispatch 五表已写入公开头文件，Combine 接口仍为设计；历史 R/C 文档中的 push-member 地址及旧表不覆盖新 pull 方案。
 
 ## 2. 设计边界
 
@@ -43,7 +44,7 @@ Dispatch 已实现，Server Dedup Combine 尚未实现；本文不新增设备�
 不在本文维护 Dispatch/Combine 内部流水、Combine 核数、阶段、UB lane、H tile 或 Event。
 不新增 UDMA 路径。具体 API 实现与性能结论留到方案明确后的开发和设备验证。
 
-## 3. 当前已有的信息与空间
+## 3. 改动前已有的信息与空间（历史基线 e2d1704）
 
 ### 3.1 符号
 
@@ -75,7 +76,7 @@ group 当前保存 `firstHopRow=t`，随后为 `(recvSlot=t*K+originalK, FP32 we
 仅第一跳引用的 group 行有效，仅前 n 个 member 有效；第一跳不在 member 列表中。
 第一跳是 group 最小 k，亦为 returnK；成员按其余原始 k 升序保存。
 当前 group **没有 member rank、expertId 或 q**，不能直接提供 pull 所需的 peer 地址。
-新五表替换方案见 §5；本节旧字段均指未修改的实际代码。
+新五表替换方案见 §5；本节旧字段均指改动前的历史代码。
 
 Dispatch 包尾已有 32B header 和每项 16B `(expertId, q, originalK, weight)`。
 包尾随 Dispatch 数据传输，持久 group 是其处理后的输出，两者不能混用。
@@ -235,7 +236,7 @@ A=B 时同样使用类型 3 的 stage 槽；第一跳自身只累计一次。
 ### 5.0 五表契约（2026-09-19）
 
 用户将 Dispatch/Combine 的信息交接整理为五张表，五表的用途与逻辑 shape 均已定义。
-新五表契约优先于此前沿用 assistEx/group 的组织建议；当前代码仍使用旧 ABI。
+新五表契约优先于此前沿用 assistEx/group 的组织建议；Dispatch 已迁移到新 ABI。
 
 | 表 | 逻辑 shape | 索引身份 | Combine 消费方式 |
 | --- | --- | --- | --- |
@@ -283,7 +284,7 @@ TokenType 只提供三类枚举，不承载原 forwardCount 中的成员数量�
 表或公共参数契约承接；原始返回地址、成员地址、weight 也不由本表推导。
 
 在 128P、384 experts、BS256、K16 的示例中，MaxTokenNum=98304，表 1 占 393216B=384KiB。
-本节为目标契约；新 Combine 使用五表，当前代码中的旧 assistEx/group 尚未迁移。
+本节为共同契约；Dispatch 已按此生产五表，新 Combine 的消费逻辑尚待实现。
 
 #### 表 2：目的地址索引表
 

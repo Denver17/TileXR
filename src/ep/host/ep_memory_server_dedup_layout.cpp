@@ -54,9 +54,7 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
         next.data.requiredBytes > kEpServerDedupWindowUsableBytes) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
-    const uint64_t logicalGroupBytes = kEpServerDedupGroupMembersOffset +
-        static_cast<uint64_t>(topK - 1) * sizeof(EpServerDedupGroupMember);
-    next.groupRowStrideBytes = (logicalGroupBytes + 31U) / 32U * 32U;
+    next.relayReadIndexRowStrideBytes = static_cast<uint64_t>(topK) * 8U;
     uint64_t rowBytes = 0;
     uint64_t routeCount = 0;
     if (!MultiplyBytes(next.globalBs, std::min<uint64_t>(topK, next.localExpertNum), &next.capacityRows) ||
@@ -69,10 +67,11 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
         !MultiplyBytes(next.capacityRows, next.data.scaleBytes, &next.dynamicScalesBytes) ||
         !MultiplyBytes(next.localExpertNum, sizeof(int64_t), &next.expertTokenNumsBytes) ||
         !MultiplyBytes(moeExpertNum, sizeof(int32_t), &next.sendCountsBytes) ||
-        !MultiplyBytes(next.capacityRows, sizeof(EpServerDedupAssistEx), &next.assistExBytes) ||
+        !MultiplyBytes(next.capacityRows, sizeof(uint32_t), &next.tokenTypeBytes) ||
+        !MultiplyBytes(next.capacityRows, 3U * sizeof(uint32_t), &next.destinationIndexBytes) ||
         !MultiplyBytes(bs, sizeof(uint32_t), &next.sourceMaskBytes) ||
         // Sparse first-hop indices use the full Dispatch output-row capacity.
-        !MultiplyBytes(next.capacityRows, next.groupRowStrideBytes, &next.groupBytes)) {
+        !MultiplyBytes(next.capacityRows, next.relayReadIndexRowStrideBytes, &next.relayReadIndexBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     *out = next;

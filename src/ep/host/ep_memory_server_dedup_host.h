@@ -8,9 +8,10 @@ namespace TileXREp {
 
 struct EpMemoryServerDedupParams {
     EpDispatchParams dispatch {};
-    uint32_t *assistExOut = nullptr;
+    uint32_t *tokenTypeOut = nullptr;
+    uint32_t *destinationIndexOut = nullptr;
+    uint32_t *relayReadIndexOut = nullptr;
     uint32_t *sourceMaskOut = nullptr;
-    uint32_t *groupOut = nullptr;
     float *expertScalesOut = nullptr;
 };
 

@@ -2,6 +2,31 @@
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
+2026-09-20 五表迁移：设计提交 `3b0ba92` 确认 T02 后，Server Dedup Dispatch
+公开接口及 kernel 改为 TokenType、DestinationIndex、RelayReadIndex、SourceMask、
+expertScalesOut；旧 assistInfoForCombineOut/assistEx/group 参数已从该入口删除。
+包头仍为 32B，四个有效字段为 source rank/token/k/type；8*K 索引段在源端生成，
+第一跳按原始字节保存。本地类型先保存为 2，仅转发包头改为 3。必须一起重建并同步
+Host、kernel 和 consumer，旧产物不能混用；普通 Memory API 不变。
+
+验证证据保存在 `build/five-table-validation/`：CANN 9.1.0/A5 的 profiling OFF/ON
+kernel 与 Host 库编译通过，安装后的公共头文件/生产库 consumer 编译链接通过；
+相关 Host CTest 14/14、C++ consumer 集成替身 25/25、Python chain/workflow 113/113
+通过。独立源码副本将编译期去重宏改为 0 后，发送/Host/launch 回归 6/6 通过；
+默认源码保持宏为 1。替身覆盖新行距和相邻行保护、转发仅改 type、索引段字节保留、
+故障注入及多轮复用。438 个生产/测试/构建文件摘要与 blue 默认宏源码快照一致。
+没有运行 NPU；真实异步执行、量化计算、多卡正确性和性能仍待设备验证。
+
+T02 校验在 NPU 批次完成后执行：各 Rank 从相同全局路由独立构造参考，比较本卡五表，
+同时验证参考中的 relay 读地址与终端写地址及完整成员身份/重数匹配；沿用已有结果汇总，
+要求同一构建/case 的全部 Rank 均通过。无需新增 Rank 间通信或交换实测表，旧 relay_links
+及 group/prefix 判据已删除，不把缺失 Rank 或局部通过判为全局通过。
+
+维护经验：紧密存放的 4B/12B 输出行须分别使用 32B 对齐的 UB staging 和精确字节数
+写出，不能按 32B 覆盖邻行；角色 staging 必须与将被改写的 wire header 分离，
+并与数据/转发共用 lane 完成边界。ABI 迁移应同步核对生产入口、调用方、launch 参数槽位、
+独立预期和汇总判据；仅修正生产签名会留下错误断言或旧校验口径。
+
 2026-09-18 编译开关调整：EP AICore kernel 将
 `-mllvm -cce-aicore-record-overflow` 设为 `false`。该选项仅控制 AICore
 overflow 检测代码生成，不改变用户 kernel 参数 ABI；CANN 9.1/A5 对当前
@@ -33,7 +58,7 @@ receiver 在等待跨核局部和前计算相对前缀，局部和源的等待�
 新 `send_cnt_issue`（`0x53000220/21`）只记录依赖发布和下发；旧 `send_cnt_send` 保持历史含等待语义，不能混用两者计算通信提速。
 本次没有运行 NPU；A5 收益和全核 cnt + FP8 正确性仍需设备验证。
 
-当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行、assistEx/group；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；第一跳 forwardTokenIdx 使用 Token 级 prefix 输出 row，不再执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行及三张接收侧表；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；输出使用 Token 级 prefix 行序，终端记录逻辑 slot，不执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
 默认发送/接收核数为 32/32，Count 全核参与阈值为 512：BS<512 时 64 核统计并发送 cnt，
 BS>=512 时仅接收核承担该步骤。阈值和收发核比例均为编译期配置；

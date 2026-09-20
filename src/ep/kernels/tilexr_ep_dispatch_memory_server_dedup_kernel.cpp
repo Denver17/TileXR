@@ -6,11 +6,10 @@
 extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_server_dedup_kernel(
     GM_ADDR commArgs, GM_ADDR x, GM_ADDR expertIds, GM_ADDR expertScales,
     GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
-    GM_ADDR assistInfoForCombineOut, GM_ADDR assistExOut, GM_ADDR sourceMaskOut, GM_ADDR groupOut,
+    GM_ADDR tokenTypeOut, GM_ADDR destinationIndexOut, GM_ADDR relayReadIndexOut, GM_ADDR sourceMaskOut,
     GM_ADDR expertScalesOut, GM_ADDR tilingData, int64_t magic)
 {
     // Host owns validation; each core reads its configuration once before work.
-    (void)assistInfoForCombineOut;
     const auto *tiling = reinterpret_cast<const __gm__ TileXREp::EpServerDedupTilingData *>(tilingData);
     const uint32_t bs = tiling->bs;
     const uint32_t h = tiling->h;
@@ -25,7 +24,7 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
 #define TILEXR_RUN_DEDUP(XType, Quantized, E4M3) \
     TileXREp::DispatchMemoryServerDedupKernel<XType, Quantized, E4M3> kernel; \
     kernel.Init(commArgs, x, expertIds, expertScales, expandXOut, dynamicScalesOut, \
-        expertTokenNumsOut, sendCountsOut, assistExOut, sourceMaskOut, groupOut, expertScalesOut, \
+        expertTokenNumsOut, sendCountsOut, tokenTypeOut, destinationIndexOut, relayReadIndexOut, sourceMaskOut, expertScalesOut, \
         bs, h, \
         topK, moeExpertNum, expertTokenNumsType, magic, profilingLaunchSlot, &pipe); \
     kernel.Process()

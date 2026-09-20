@@ -3,6 +3,7 @@
 
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_data_layout.h"
+#include "ep_memory_server_dedup_protocol.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -20,24 +21,19 @@ __aicore__ inline uint32_t ServerDedupWireOffset(uint32_t logical)
     return logical + logical / 480U * 32U;
 }
 
-// The 32B-aligned header and each 16B-aligned entry fit within one 480B
-// payload block. The complete tail can cross Flag gaps, so map each entry
-// separately. The caller establishes MTE2_S before Scalar reads.
+// Init supplies physical offsets. The entire index segment fits in one payload
+// block, so every block is contiguous and no per-entry Flag mapping is needed.
 class ServerDedupPacketTail {
 public:
-    __aicore__ inline ServerDedupPacketTail(LocalTensor<uint8_t> wire, uint32_t offset)
-        : wire_(wire[offset / 480U * 512U]), withinBlock_(offset % 480U) {}
-    __aicore__ inline LocalTensor<uint32_t> Header()
-    {
-        return wire_[withinBlock_].ReinterpretCast<uint32_t>();
-    }
-    __aicore__ inline LocalTensor<uint32_t> Entry(uint32_t index)
-    {
-        return wire_[ServerDedupWireOffset(withinBlock_ + 32U + index * 16U)].ReinterpretCast<uint32_t>();
-    }
+    __aicore__ inline ServerDedupPacketTail(LocalTensor<uint8_t> wire,
+        uint32_t headerOffset, uint32_t indexOffset)
+        : header_(wire[headerOffset].ReinterpretCast<uint32_t>()),
+          index_(wire[indexOffset].ReinterpretCast<uint32_t>()) {}
+    __aicore__ inline LocalTensor<uint32_t> Header() { return header_; }
+    __aicore__ inline LocalTensor<uint32_t> ReadIndex() { return index_; }
+    __aicore__ inline LocalTensor<uint32_t> Entry(uint32_t index) { return index_[(index + 1U) * 2U]; }
 private:
-    LocalTensor<uint8_t> wire_; // Origin is the block containing the header.
-    uint32_t withinBlock_;
+    LocalTensor<uint32_t> header_, index_;
 };
 
 __aicore__ inline void ReadServerDedupFlags(GM_ADDR slot, uint32_t blocks, LocalTensor<float> flags)
@@ -70,52 +66,25 @@ __aicore__ inline void WriteServerDedupPayloadRange(GlobalTensor<uint8_t> output
         DataCopyPad(output[written], wire[ServerDedupWireOffset(logical)], {1U, bytes, 0U, 0U, 0U});
 }
 
-__aicore__ inline void BuildServerDedupAssist(LocalTensor<uint32_t> meta,
-    ServerDedupPacketTail tail, int32_t role, uint32_t myExpert, uint32_t relayRank, uint32_t relayIndex)
+// Snapshot the local role independently of the header that forwarding changes.
+__aicore__ inline void BuildServerDedupMetadata(LocalTensor<uint32_t> type,
+    LocalTensor<uint32_t> destination, ServerDedupPacketTail tail, uint32_t slot)
 {
     auto header = tail.Header();
-    const uint32_t entries = header.GetValue(5U);
-    auto route = header;
-    if (role == -1) {
-        for (uint32_t i = 0; i < entries; ++i) {
-            auto entry = tail.Entry(i);
-            if (entry.GetValue(0U) != myExpert) continue;
-            route = entry;
-            break;
-        }
-    }
-    meta.SetValue(0U, header.GetValue(0U));
-    meta.SetValue(1U, header.GetValue(1U));
-    meta.SetValue(2U, route.GetValue(2U));
-    meta.SetValue(3U, route.GetValue(3U));
-    meta.SetValue(4U, uint32_t(role));
-    meta.SetValue(5U, entries);
-    meta.SetValue(6U, role > 0 ? relayRank : header.GetValue(6U));
-    meta.SetValue(7U, role > 0 ? relayIndex : header.GetValue(7U));
-}
-
-__aicore__ inline void BuildServerDedupGroup(LocalTensor<uint32_t> group,
-    ServerDedupPacketTail tail, uint32_t row, uint32_t relayIndex, uint32_t topK)
-{
-    group.SetValue(0U, row);
-    const uint32_t entries = tail.Header().GetValue(5U);
-    const uint32_t returnBase = relayIndex * topK;
-    for (uint32_t i = 0; i < entries; ++i) {
-        auto entry = tail.Entry(i);
-        group.SetValue(1U + i * 2U, returnBase + entry.GetValue(2U));
-        group.SetValue(2U + i * 2U, entry.GetValue(3U));
+    const uint32_t role = header.GetValue(3U);
+    type.SetValue(0U, role);
+    if (role == uint32_t(EpServerDedupTokenType::Terminal)) {
+        destination.SetValue(0U, slot);
+        destination.SetValue(1U, UINT32_MAX);
+        destination.SetValue(2U, UINT32_MAX);
+    } else {
+        for (uint32_t i = 0U; i < 3U; ++i) destination.SetValue(i, header.GetValue(i));
     }
 }
 
-// Save first-hop metadata before changing this same packet. All subsequent
-// destination writes consume it unchanged until the lane completion event.
-__aicore__ inline void PrepareServerDedupForward(ServerDedupPacketTail tail,
-    uint32_t relayRank, uint32_t relayIndex)
+__aicore__ inline void PrepareServerDedupForward(ServerDedupPacketTail tail)
 {
-    auto header = tail.Header();
-    header.SetValue(4U, UINT32_MAX);
-    header.SetValue(6U, relayRank);
-    header.SetValue(7U, relayIndex);
+    tail.Header().SetValue(3U, uint32_t(EpServerDedupTokenType::Terminal));
 }
 } // namespace TileXREp
 #endif

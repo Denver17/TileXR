@@ -11,17 +11,18 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
     const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);
     const uint64_t scaleStride = layout.data.scaleBytes;
     std::vector<uint8_t> hidden(rows.size() * hiddenStride), scales(rows.size() * scaleStride);
-    std::vector<uint32_t> assist(rows.size() * 8U), mask(shape.bs), expectedMask(shape.bs, 0U);
+    std::vector<uint32_t> types(rows.size()), destinations(rows.size() * 3U), mask(shape.bs), expectedMask(shape.bs, 0U);
     std::vector<float> weights(originalWeights.size()), weightsOut(originalWeights.size());
     const auto read = [&](void *target, uint64_t bytes, const void *source, const char *name) {
         if (bytes) Check(aclrtMemcpy(target, bytes, source, bytes, ACL_MEMCPY_DEVICE_TO_HOST), name);
     };
     read(hidden.data(), hidden.size(), buffers[2], "read dispatch hidden");
-    read(scales.data(), scales.size(), buffers[10], "read dispatch scales");
-    read(assist.data(), assist.size() * sizeof(uint32_t), buffers[5], "read dispatch assistEx");
-    read(mask.data(), layout.sourceMaskBytes, buffers[6], "read dispatch sourceMask");
-    read(weights.data(), layout.weightBytes, buffers[8], "read input weights");
-    read(weightsOut.data(), layout.weightBytes, buffers[9], "read dispatch source weights");
+    read(scales.data(), scales.size(), buffers[11], "read dispatch scales");
+    read(types.data(), types.size() * sizeof(uint32_t), buffers[5], "read dispatch TokenType");
+    read(destinations.data(), destinations.size() * sizeof(uint32_t), buffers[6], "read dispatch DestinationIndex");
+    read(mask.data(), layout.sourceMaskBytes, buffers[8], "read dispatch sourceMask");
+    read(weights.data(), layout.weightBytes, buffers[9], "read input weights");
+    read(weightsOut.data(), layout.weightBytes, buffers[10], "read dispatch source weights");
     ValidateOutput(std::memcmp(weights.data(), originalWeights.data(), layout.weightBytes) == 0, "input weights modified");
     uint64_t firstHopSent = 0, firstHopReceived = 0, directSent = 0, directReceived = 0;
     uint64_t relaySent = 0, relayReceived = 0, localBytes = 0, sameServerBytes = 0, crossServerBytes = 0;
@@ -42,9 +43,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
             "source weight mismatch token=" + std::to_string(packet.token) + " k=" + std::to_string(first.k));
     }
     ValidateOutput(mask == expectedMask, "sourceMask mismatch");
-    std::set<uint32_t> groupIds;
-    std::ostringstream links;
-    bool firstLink = true;
+    ValidateOutput(RelayAddressesMatch(shape), "global reference member address mismatch");
     for (size_t index = 0; index < rows.size(); ++index) {
         const auto &row = rows[index];
         const std::string context = " row=" + std::to_string(index) + " source=" + std::to_string(row.source) +
@@ -64,14 +63,6 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
             if (shape.quantized)
                 detail << " scale_match=" << (std::memcmp(scales.data() + index * scaleStride,
                     payload.data() + layout.data.quantCount, scaleStride) == 0);
-            const auto expectedAssist = DispatchAssist(row, assist[index * 8U + 7U]);
-            detail << " assist_actual=[";
-            for (uint32_t word = 0; word < 8U; ++word)
-                detail << (word == 0U ? "" : ",") << assist[index * 8U + word];
-            detail << "] assist_expected=[";
-            for (uint32_t word = 0; word < 8U; ++word)
-                detail << (word == 0U ? "" : ",") << expectedAssist[word];
-            detail << ']';
             // Read only after batch synchronization. Cleared ready flags do not
             // erase payload; compare logical bytes while skipping the flag gaps.
             try {
@@ -102,35 +93,25 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         }
         if (shape.quantized) ValidateOutput(std::memcmp(scales.data() + index * scaleStride,
             payload.data() + layout.data.quantCount, scaleStride) == 0, "dispatch scale mismatch" + context);
-        const uint32_t t = assist[index * 8U + 7U];
-        if (!row.Direct()) ValidateOutput(t < layout.capacityRows, "assistEx t outside group capacity" + context);
-        const auto expected = DispatchAssist(row, t);
-        for (uint32_t word = 0; word < 8U; ++word)
-            ValidateOutput(assist[index * 8U + word] == expected[word], "assistEx mismatch word=" + std::to_string(word) + context);
+        ValidateOutput(types[index] == TokenType(row), "TokenType mismatch" + context);
+        const auto expected = DestinationIndex(shape, row);
+        for (uint32_t word = 0; word < 3U; ++word)
+            ValidateOutput(destinations[index * 3U + word] == expected[word],
+                "DestinationIndex mismatch word=" + std::to_string(word) + context);
         if (row.Direct()) ++directReceived;
-        else {
-            if (!firstLink) links << ',';
-            firstLink = false;
-            links << '[' << row.source << ',' << row.token << ',' << row.packet.members.front().k << ',' << row.relay << ','
-                << t << ',' << row.k << ',' << (row.FirstHop() ? int64_t(row.packet.members.size() - 1U) : -1) << ']';
-            if (row.FirstHop()) {
-                ++firstHopReceived;
-                ValidateOutput(t == index, "first-hop t differs from Token prefix row" + context);
-                ValidateOutput(groupIds.insert(t).second, "duplicate first-hop group t" + context);
-                const uint32_t n = uint32_t(row.packet.members.size() - 1U);
-                std::vector<uint32_t> group(1U + 2U * n);
-                read(group.data(), group.size() * sizeof(uint32_t),
-                    static_cast<const uint8_t *>(buffers[7]) + t * layout.groupRowStrideBytes, "read valid dispatch group");
-                ValidateOutput(group[0] == index, "group firstHopRow mismatch" + context);
-                for (uint32_t member = 0; member < n; ++member) {
-                    const auto &route = row.packet.members[member + 1U];
-                    ValidateOutput(group[1U + member * 2U] == t * shape.k + route.k, "group recvSlot mismatch" + context);
-                    ValidateOutput(group[2U + member * 2U] == FloatBits(route.weight), "group weight mismatch" + context);
-                    ++relaySent;
-                    traffic(route.expert / uint32_t(layout.localExpertNum));
-                }
-            } else ++relayReceived;
-        }
+        else if (row.FirstHop()) {
+            ++firstHopReceived;
+            const auto expectedIndex = RelayReadIndex(row);
+            std::vector<uint32_t> actualIndex(expectedIndex.size());
+            read(actualIndex.data(), actualIndex.size() * sizeof(uint32_t),
+                static_cast<const uint8_t *>(buffers[7]) + index * layout.relayReadIndexRowStrideBytes,
+                "read valid RelayReadIndex");
+            ValidateOutput(actualIndex == expectedIndex, "RelayReadIndex mismatch" + context);
+            for (size_t member = 1; member < row.packet.members.size(); ++member) {
+                ++relaySent;
+                traffic(row.packet.members[member].expert / uint32_t(layout.localExpertNum));
+            }
+        } else ++relayReceived;
         // After complete Dispatch every original route has been consumed. Check
         // all eight words in every Flag, including metadata-only tail blocks.
         std::vector<uint8_t> wire(layout.data.tokenStride);
@@ -155,8 +136,8 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         ",\"relay_bytes\":" + std::to_string(relaySent * layout.data.tokenStride) +
         ",\"data_bytes\":" + std::to_string((firstHopSent + directSent + relaySent) * layout.data.tokenStride) +
         ",\"local_data_bytes\":" + std::to_string(localBytes) + ",\"same_server_data_bytes\":" + std::to_string(sameServerBytes) +
-        ",\"cross_server_data_bytes\":" + std::to_string(crossServerBytes) + ",\"relay_links\":[" + links.str() + ']' +
+        ",\"cross_server_data_bytes\":" + std::to_string(crossServerBytes) +
         ",\"first_hop_validated\":true,\"direct_validated\":true,\"relay_validated\":true,\"route_coverage_validated\":true"
-        ",\"source_outputs_validated\":true,\"weights_unchanged\":true,\"dispatch_outputs_validated\":true,\"group_validated\":true"
-        ",\"flags_cleared\":true,\"prefix_indices_validated\":true";
+        ",\"source_outputs_validated\":true,\"weights_unchanged\":true,\"dispatch_outputs_validated\":true,\"five_tables_validated\":true,\"member_addresses_validated\":true"
+        ",\"flags_cleared\":true";
 }

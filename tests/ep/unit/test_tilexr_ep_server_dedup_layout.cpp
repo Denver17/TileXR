@@ -13,10 +13,10 @@ int main()
     EpMemoryServerDedupLayout layout {};
     struct Case { int64_t ranks; int64_t experts; int64_t k; uint64_t rows; uint64_t stride; };
     const Case cases[] = {
-        {16, 32, 1, 4096, 32}, {64, 384, 6, 98304, 64},
-        {128, 384, 6, 98304, 64}, {16, 512, 32, 131072, 256},
+        {16, 32, 1, 4096, 8}, {64, 384, 6, 98304, 48},
+        {128, 384, 6, 98304, 48}, {16, 512, 32, 131072, 256},
         {64, 384, 8, 98304, 64}, {128, 384, 16, 98304, 128},
-        {16, 16, 1, 4096, 32}, {16, 1024, 32, 65536, 256},
+        {16, 16, 1, 4096, 8}, {16, 1024, 32, 65536, 256},
         {64, 1024, 16, 131072, 128}, {128, 1024, 8, 131072, 64},
         {24, 1008, 32, 98304, 256}
     };
@@ -25,9 +25,10 @@ int main()
         const uint64_t bs = test.experts >= 1008 ? 128U : 256U;
         Check(TileXREpBuildMemoryServerDedupLayout(test.ranks, bs, 7168, test.k, test.experts,
             &layout) == TILEXR_SUCCESS, "supported layout");
-        Check(layout.capacityRows == test.rows && layout.groupRowStrideBytes == test.stride,
-            "capacity and group stride");
-        Check(layout.assistExBytes == test.rows * 32 && layout.groupBytes == test.rows * test.stride,
+        Check(layout.capacityRows == test.rows && layout.relayReadIndexRowStrideBytes == test.stride,
+            "capacity and tightly packed RelayReadIndex stride");
+        Check(layout.tokenTypeBytes == test.rows * 4 && layout.destinationIndexBytes == test.rows * 12 &&
+            layout.relayReadIndexBytes == test.rows * test.stride,
             "metadata byte sizes");
         Check(layout.sourceMaskBytes == bs * 4U && layout.xBytes == bs * 7168U * 2U, "input and mask sizes");
         Check(layout.expertIdsBytes == bs * test.k * 4U && layout.weightBytes == layout.expertIdsBytes,
@@ -37,7 +38,36 @@ int main()
             "count output sizes");
     }
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS &&
-        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.groupBytes == 512, "tight H tail and K=1");
+        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.relayReadIndexBytes == 128, "tight H tail and K=1");
+    struct WireCase {
+        uint32_t h, k;
+        bool quantized;
+        uint64_t header, index, stride;
+    };
+    // Explicit wire positions cover a fitting segment, exact payload boundary,
+    // and a segment that must skip the 32B flag and start in the next block.
+    const WireCase wireCases[] = {
+        {184, 6, false, 384, 416, 512},
+        {200, 4, false, 416, 448, 512},
+        {200, 6, false, 416, 512, 1024},
+        {200, 1, false, 416, 448, 512},
+        {200, 32, false, 416, 512, 1024},
+        {1, 1, true, 288, 320, 512},
+        {1, 6, true, 288, 320, 512},
+        {1, 20, true, 288, 320, 512},
+        {1, 21, true, 288, 512, 1024},
+        {1, 32, true, 288, 512, 1024}
+    };
+    for (const auto &test : wireCases) {
+        Check(TileXREpBuildMemoryServerDedupLayout(16, 1, test.h, test.k, 32,
+            &layout, test.quantized) == TILEXR_SUCCESS, "wire boundary layout supported");
+        Check(layout.data.headerWireOffset == test.header &&
+            layout.data.relayReadIndexWireOffset == test.index && layout.data.tokenStride == test.stride,
+            "Host caches exact aligned header/index offsets and complete token stride");
+        Check(layout.data.headerWireOffset % 32U == 0 && layout.data.relayReadIndexWireOffset % 32U == 0 &&
+            layout.data.relayReadIndexWireOffset % 512U + test.k * 8U <= 480U,
+            "both segment starts align to 32B and all index bytes precede the flag");
+    }
     const int64_t invalid[][5] = {
         {0, 1, 1, 1, 32}, {8, 1, 1, 1, 32}, {17, 1, 1, 1, 34}, {136, 1, 1, 1, 272},
         {16, 0, 1, 1, 32}, {16, -1, 1, 1, 32}, {16, 1, 0, 1, 32}, {16, 1, -1, 1, 32},
@@ -48,10 +78,10 @@ int main()
         {128, std::numeric_limits<int64_t>::max() / 128, 1, 32, 4096}
     };
     for (const auto &test : invalid) {
-        layout.groupBytes = 123;
+        layout.relayReadIndexBytes = 123;
         Check(TileXREpBuildMemoryServerDedupLayout(test[0], test[1], test[2], test[3], test[4],
             &layout) == TILEXR_ERROR_PARA_CHECK_FAIL, "invalid or overflowing layout rejected");
-        Check(layout.groupBytes == 0 && layout.capacityRows == 0, "failure clears stale layout");
+        Check(layout.relayReadIndexBytes == 0 && layout.capacityRows == 0, "failure clears stale layout");
     }
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 1, 1, 32, nullptr) == TILEXR_ERROR_PARA_CHECK_FAIL,
         "null layout rejected");
@@ -100,13 +130,13 @@ int main()
 
     alignas(32) uint8_t storage[512] = {};
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS,
-        "one-token group capacity");
-    EpServerDedupAllocation group {storage, 256, layout.groupBytes, 32, 1};
-    Check(TileXREpValidateServerDedupAllocations(&group, 1, 1) == TILEXR_ERROR_PARA_CHECK_FAIL,
-        "old 8*BS-row group allocation is insufficient");
-    group.bytes = sizeof(storage);
-    Check(TileXREpValidateServerDedupAllocations(&group, 1, 1) == TILEXR_SUCCESS,
-        "capacityRows group allocation fits exactly");
+        "one-token RelayReadIndex capacity");
+    EpServerDedupAllocation relayReadIndex {storage + 4, 64, layout.relayReadIndexBytes, 4, 1};
+    Check(TileXREpValidateServerDedupAllocations(&relayReadIndex, 1, 1) == TILEXR_ERROR_PARA_CHECK_FAIL,
+        "insufficient RelayReadIndex allocation rejected");
+    relayReadIndex.bytes = layout.relayReadIndexBytes;
+    Check(TileXREpValidateServerDedupAllocations(&relayReadIndex, 1, 1) == TILEXR_SUCCESS,
+        "4B-aligned capacityRows allocation fits exactly");
     const EpServerDedupAllocation valid[] = {
         {storage, 64, 64, 32, 1}, {storage + 64, 32, 4, 4, 1}, {storage + 96, 160, 128, 32, 1}
     };

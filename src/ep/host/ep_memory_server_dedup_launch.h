@@ -17,10 +17,10 @@ struct EpServerDedupKernelArgs {
     GM_ADDR dynamicScalesOut;
     GM_ADDR expertTokenNumsOut;
     GM_ADDR sendCountsOut;
-    GM_ADDR assistInfoForCombineOut;
-    GM_ADDR assistExOut;
+    GM_ADDR tokenTypeOut;
+    GM_ADDR destinationIndexOut;
+    GM_ADDR relayReadIndexOut;
     GM_ADDR sourceMaskOut;
-    GM_ADDR groupOut;
     GM_ADDR expertScalesOut;
     GM_ADDR tilingData;
     int64_t magic;
@@ -28,6 +28,10 @@ struct EpServerDedupKernelArgs {
 static_assert(std::is_standard_layout<EpServerDedupKernelArgs>::value, "launch arguments must be standard layout");
 static_assert(sizeof(EpServerDedupKernelArgs) == 120, "launch ABI has fourteen addresses and magic");
 static_assert(offsetof(EpServerDedupKernelArgs, dynamicScalesOut) == 40, "quant scale address");
+static_assert(offsetof(EpServerDedupKernelArgs, tokenTypeOut) == 64, "token type address");
+static_assert(offsetof(EpServerDedupKernelArgs, destinationIndexOut) == 72, "destination index address");
+static_assert(offsetof(EpServerDedupKernelArgs, relayReadIndexOut) == 80, "relay read index address");
+static_assert(offsetof(EpServerDedupKernelArgs, sourceMaskOut) == 88, "source mask address");
 static_assert(offsetof(EpServerDedupKernelArgs, expertScalesOut) == 96, "source weight address");
 static_assert(offsetof(EpServerDedupKernelArgs, tilingData) == 104, "tiling GM address");
 static_assert(offsetof(EpServerDedupKernelArgs, magic) == 112, "communication magic offset");

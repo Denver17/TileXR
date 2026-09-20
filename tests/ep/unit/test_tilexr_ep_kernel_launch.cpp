@@ -279,9 +279,10 @@ void TestServerDedupCompileTimeLaunch()
     p.dtype = TileXR::TILEXR_DATA_TYPE_BFP16;
     p.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_RESERVED;
     p.stream = reinterpret_cast<aclrtStream>(0x8000);
-    params.assistExOut = reinterpret_cast<uint32_t *>(0x9000);
+    params.tokenTypeOut = reinterpret_cast<uint32_t *>(0x9000);
+    params.destinationIndexOut = reinterpret_cast<uint32_t *>(0xe000);
     params.sourceMaskOut = reinterpret_cast<uint32_t *>(0xa000);
-    params.groupOut = reinterpret_cast<uint32_t *>(0xb000);
+    params.relayReadIndexOut = reinterpret_cast<uint32_t *>(0xb000);
     params.expertScalesOut = reinterpret_cast<float *>(0xc000);
     p.dynamicScalesOut = reinterpret_cast<void *>(0xd000);
     p.quantMode = 4;
@@ -361,10 +362,10 @@ void TestServerDedupCompileTimeLaunch()
 #else
     constexpr uint64_t firstProfilingSlot = UINT32_MAX;
 #endif
-    // Independent wire expectations: thirteen unchanged addresses, real GM
+    // Independent wire expectations: five-table addresses in contract order, real GM
     // tiling pointer, then magic. Read tiling separately from its device allocation.
     const std::vector<uint64_t> expected = {reinterpret_cast<uint64_t>(context.devArgs),
-        0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0, 0x9000, 0xa000, 0xb000, 0xc000,
+        0x1000, 0x2000, 0x3000, 0x5000, 0xd000, 0x6000, 0x7000, 0x9000, 0xe000, 0xb000, 0xa000, 0xc000,
         gLaunches[0].args[13], kNextMagic};
     std::vector<uint8_t> expectedTiling = {
         0x00, 0x01, 0x00, 0x00, 0x00, 0x1c, 0x00, 0x00, // bs=256, h=7168
@@ -429,9 +430,9 @@ void TestServerDedupCompileTimeLaunch()
     p.quantMode = 0;
     p.dynamicScalesOut = nullptr;
     p.expandXOutDtype = TileXR::TILEXR_DATA_TYPE_RESERVED;
-    p.assistInfoForCombineOut = reinterpret_cast<int32_t *>(0xc000);
+    params.tokenTypeOut = reinterpret_cast<uint32_t *>(0xf000);
     Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches[0].blockDim == 64 &&
-        gLaunches[0].args[8] == 0xc000 && gLaunches[0].tiling[19] == static_cast<uint8_t>(p.dtype) &&
+        gLaunches[0].args[8] == 0xf000 && gLaunches[0].tiling[19] == static_cast<uint8_t>(p.dtype) &&
         gLaunches[0].tiling[17] == 0U && gLaunches[0].tiling[18] == 3U,
         "larger devices retain the selected split and explicit FP16 tiling");
     ResetCapture();

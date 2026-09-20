@@ -44,9 +44,9 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     int64_t moeExpertNum, int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,
     int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum, int64_t quantMode,
     int64_t globalBs, int64_t expertTokenNumsType, void *expandXOut, void *dynamicScalesOut,
-    int32_t *assistInfoForCombineOut, int64_t *expertTokenNumsOut, int32_t *sendCountsOut,
-    int32_t *tpRecvCountsOut, void *expandScalesOut, uint32_t *assistExOut, uint32_t *sourceMaskOut,
-    uint32_t *groupOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
+    int64_t *expertTokenNumsOut, int32_t *sendCountsOut, int32_t *tpRecvCountsOut, void *expandScalesOut,
+    uint32_t *tokenTypeOut, uint32_t *destinationIndexOut, uint32_t *relayReadIndexOut,
+    uint32_t *sourceMaskOut, float *expertScalesOut, TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype,
     aclrtStream stream)
 {
     TileXREp::EpMemoryServerDedupParams params {};
@@ -74,7 +74,6 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     p.expertTokenNumsType = expertTokenNumsType;
     p.expandXOut = expandXOut;
     p.dynamicScalesOut = dynamicScalesOut;
-    p.assistInfoForCombineOut = assistInfoForCombineOut;
     p.expertTokenNumsOut = expertTokenNumsOut;
     p.epRecvCountsOut = sendCountsOut;
     p.tpRecvCountsOut = tpRecvCountsOut;
@@ -82,9 +81,10 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scal
     p.dtype = dtype;
     p.expandXOutDtype = expandXOutDtype;
     p.stream = stream;
-    params.assistExOut = assistExOut;
+    params.tokenTypeOut = tokenTypeOut;
+    params.destinationIndexOut = destinationIndexOut;
+    params.relayReadIndexOut = relayReadIndexOut;
     params.sourceMaskOut = sourceMaskOut;
-    params.groupOut = groupOut;
     params.expertScalesOut = expertScalesOut;
     return DispatchServerDedup(params);
 }

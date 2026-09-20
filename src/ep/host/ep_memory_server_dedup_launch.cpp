@@ -60,9 +60,9 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(const EpMemoryServerDedupParam
     EpServerDedupKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.x),
         reinterpret_cast<GM_ADDR>(p.expertIds), static_cast<GM_ADDR>(p.expertScales),
         static_cast<GM_ADDR>(p.expandXOut), static_cast<GM_ADDR>(p.dynamicScalesOut), reinterpret_cast<GM_ADDR>(p.expertTokenNumsOut),
-        reinterpret_cast<GM_ADDR>(p.epRecvCountsOut), reinterpret_cast<GM_ADDR>(p.assistInfoForCombineOut),
-        reinterpret_cast<GM_ADDR>(params.assistExOut), reinterpret_cast<GM_ADDR>(params.sourceMaskOut),
-        reinterpret_cast<GM_ADDR>(params.groupOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), tilingData, magic};
+        reinterpret_cast<GM_ADDR>(p.epRecvCountsOut), reinterpret_cast<GM_ADDR>(params.tokenTypeOut),
+        reinterpret_cast<GM_ADDR>(params.destinationIndexOut), reinterpret_cast<GM_ADDR>(params.relayReadIndexOut),
+        reinterpret_cast<GM_ADDR>(params.sourceMaskOut), reinterpret_cast<GM_ADDR>(params.expertScalesOut), tilingData, magic};
     return TileXREpSubmitDispatchMemoryServerDedupKernel(args, kEpServerDedupCoreNum, p.stream);
 }
 

@@ -139,12 +139,11 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     std::vector<Write> writes;
     AscendC::GmWriteObserver() = [&](const void *destination, const void *payload, uint32_t bytes) {
         Check(bytes == data.tokenStride, "each source packet uses the complete shared stride");
-        uint32_t header[8] {};
-        for (uint32_t i = 0; i < sizeof(header); ++i) {
-            const uint64_t offset = data.tailOffset + i;
-            reinterpret_cast<uint8_t *>(header)[i] = static_cast<const uint8_t *>(payload)[offset / 480U * 512U + offset % 480U];
-        }
-        writes.push_back({AscendC::testCore, header[1], header[2], header[4], destination, reinterpret_cast<uintptr_t>(payload)});
+        uint32_t header[4] {}, members = 0U;
+        std::memcpy(header, static_cast<const uint8_t *>(payload) + data.headerWireOffset, sizeof(header));
+        std::memcpy(&members, static_cast<const uint8_t *>(payload) + data.relayReadIndexWireOffset, 4U);
+        Check(header[3] == (members == 0U ? 1U : 2U), "source packet uses the shared token type enum");
+        writes.push_back({AscendC::testCore, header[1], header[2], members, destination, reinterpret_cast<uintptr_t>(payload)});
     };
     std::map<uint32_t, std::array<std::vector<uint8_t>, 2>> windows;
     ServerDedupTest::SparsePeerMemory memory;
@@ -271,17 +270,19 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 }
             }
             Check(std::memcmp(payload.data(), hidden.data() + packet.token * h, h * 2U) == 0, "full hidden bytes preserve token identity");
-            std::vector<uint32_t> tail((32U + 16U * (k - 1U)) / 4U);
-            std::memcpy(tail.data(), payload.data() + data.tailOffset, tail.size() * 4U);
-            Check(tail[0] == source && tail[1] == packet.token && tail[2] == first.k &&
-                tail[4] == packet.members.size() - 1U && tail[5] == tail[4] && tail[6] == UINT32_MAX && tail[7] == UINT32_MAX,
-                "DIRECT/first-hop header identity/count/return fields");
-            Check(std::memcmp(&tail[3], &first.weight, 4U) == 0, "header retains real weight");
-            for (uint32_t i = 1; i < packet.members.size(); ++i) {
+            uint32_t header[4] {};
+            std::memcpy(header, payload.data() + data.headerPayloadOffset, sizeof(header));
+            Check(header[0] == source && header[1] == packet.token && header[2] == first.k &&
+                header[3] == (packet.members.size() == 1U ? 1U : 2U), "DIRECT/first-hop header identity and role");
+            std::vector<uint32_t> index(k * 2U);
+            std::memcpy(index.data(), payload.data() + data.readIndexPayloadOffset, k * 8U);
+            Check(index[0] == packet.members.size() - 1U, "index header contains non-first-hop member count");
+            Check(std::memcmp(&index[1], &first.weight, 4U) == 0, "index header retains real self weight");
+            for (uint32_t i = 1U; i < packet.members.size(); ++i) {
                 const auto &member = packet.members[i];
-                const uint32_t index = 8U + (i - 1U) * 4U;
-                Check(tail[index] == member.expert && tail[index + 1U] == member.q && tail[index + 2U] == member.k &&
-                    std::memcmp(&tail[index + 3U], &member.weight, 4U) == 0, "entries follow original k/q/weight, excluding the first hop");
+                Check((index[i * 2U] & 0xffffU) == member.expert && (index[i * 2U] >> 16U) == member.q &&
+                    std::memcmp(&index[i * 2U + 1U], &member.weight, 4U) == 0,
+                    "8B members preserve expert/q/weight in original k order");
             }
             expectedMasks[packet.token] |= uint32_t(1) << first.k;
             Check(output[1U + packet.token * k + first.k] == (packet.members.size() > 1U ? 1.0f : first.weight),
