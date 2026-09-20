@@ -22,6 +22,8 @@
 
 - Dispatch / Combine 共用同一个 EP peer-memory 通信域，沿用现有 magic 选窗方式。
 - 选窗的主要目的为隔离 Dispatch 与 Combine；不要求两者各自另做跨轮双缓冲。
+- M2 后续明确为卡间完成 Flag 单独配置两份乒乓缓冲，控制区预算为 `2*recvCoreNum*512B`；
+  其内部协议由 Combine 设计维护，不改变本节的 payload 选窗及模型调度契约。
 - 用户已确认模型在 Dispatch 与 Combine 之间、Combine 与下一次 Dispatch 之间安排其他算子，
   其实际执行顺序保证 buffer 不踩踏。本文直接采用该调度保证，不增加轮次管理、plan/epoch/windowId
   管理或 Server 内读完确认握手，不再把这些作为待讨论项。
@@ -294,7 +296,8 @@ A 按表 3 计算出的读取 slot 与 B 在表 2 保存的 offset 相同。
 
 用户定义 `RelayReadIndex[MaxTokenNum][K]`，每块 8B，总容量为 MaxTokenNum 行，
 候选行范围为 `[0,TokenNum)`；此范围内依然稀疏，只有 TokenType[row]=2 的行包含有效信息。
-其他类型整行 K*8B 均无效，Combine 不读；不要求无效内容为零。
+其他类型整行 K*8B 均无效，Combine 不解析、不消费；不要求无效内容为零。
+按原始行范围搬入局部表缓存时可连带搬入这些无效行，解析仍仅针对任务列表中的类型 2。
 
 类型 2 的第 0 块是 header，不是成员索引：
 
@@ -584,7 +587,8 @@ offset 与地址乘积使用 uint64，Host 与 kernel 共用布局计算，调�
 | J08 | 验证分工 | 本文验证五表、地址和信息完备性；Combine 设计负责内部流程与设备验收 |
 
 [Combine 模块设计](ep-memory-server-dedup-combine-design.md#模块边界m0m6)独立维护内部功能与设计方向。
-推进顺序为完成全部模块初版，再由用户整体通读，届时统一整理遗漏点和待确认项。
+M1–M5 的用户细化补充已完成，现已进入整体通读与分级收口；M0/M6 衔接一并纳入。
+内部推荐、风险和参考依据统一见[Combine 待确定汇总表](ep-memory-server-dedup-combine-design.md#待确定汇总表)。
 
 ## 8. 验证边界与维护要求
 

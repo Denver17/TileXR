@@ -1,8 +1,9 @@
 # EP Memory Server Dedup Combine 设计索引
 
 Combine 内部设计已集中迁入 [Combine Server Dedup 设计](ep-memory-server-dedup-combine-design.md)。
-当前按 M0、M1a/M1b、M2–M6 维护功能预期和简要设计方向。全部模块初版完成后再整体通读查漏，
-历史 F/C 详细问题不作为当前待确认清单。下列旧锚点仅用于跳转到现有设计职责。
+M1–M5 的细化补充已完成，当前进入整体通读与待确定项收口；M0/M6 的衔接也已纳入。
+当前问题、风险分级、推荐及依据集中于[待确定汇总表](ep-memory-server-dedup-combine-design.md#待确定汇总表)。
+历史 F/C 编号不作为当前待确认清单。下列旧锚点仅用于跳转到现有设计职责。
 五表和公共接口仍由[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)维护。
 本文件仅保留历史链接锚点，不再存放内部方案正文。
 

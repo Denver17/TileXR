@@ -8,11 +8,26 @@ Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
 已确认五表与 Combine 27 参数设计接口：保留 Memory 原 24 参数，只追加 3 表，
-TokenNum 读取 sendCounts 末项。Combine 独立设计按 M0、M1a/M1b、M2–M6 整理功能预期与简要设计方向；
-先逐模块完成细分设计初版，再由用户整体通读，届时统一整理遗漏点和待确认项。
+TokenNum 读取 sendCounts 末项。M1–M5 用户细化补充已完成；Combine 独立设计进入整体通读和分级收口，M0/M6 衔接一并纳入。
+原 24 项中 CB00-01 已确认：接口含义沿用 Combine Memory，Host 封装、GM TilingData 和 launch
+形式参考 Dispatch Server Dedup；公开 27 参数不变，设备所需标量通过独立 tilingData 传递。
+[待确定汇总表](specs/ep-memory-server-dedup-combine-design.md#待确定汇总表)剩余 23 项：
+高风险 11 项、中风险 9 项、低风险 3 项；无参考 2 项与风险交叉，合计 12 项建议重点核对。
+各模块分别记录已确认项、待确定项、推荐和代码依据，推荐尚未自动视为用户确认。
 最新约定为固定 64 核，全部先执行 Init、CopyLocalPendingTokens 两个函数；随后分为 Send/Read 核，
 Send 核直发类型 1，Read 核拉取类型 2 成员、加权聚合并发出 partial。最终 BS 个 Token 的聚合
 独立为 M5，首版由 Read 核负责，任务映射与核类别解耦，预留后续 64 核参与。
+M2 由核 56..63 汇总本卡 sum=64.0f 后通知各卡；各 Read 核独占 512B 卡间 Flag 块，
+取 8 个槽首 float 求和为 8.0f 后就绪并自行清理。recvCoreNum=8*N（N=1..6），卡间 Flag 两份乒乓共 8..48KiB。
+M3 由各 Send 核用 Compare＋GatherMask 密排类型 1 原始行号，再按 sendCoreNum 商余均分；
+可整除时任务数相同，否则最多相差 1，发送地址仍取表 2 的原始行。
+表 2 仅缓存本核列表行号所覆盖的连续区间，按原始 row 减缓存首行索引，不要求整表搬入 UB。
+M4 同样密排类型 2 行号，按 recvCoreNum 商余均分汇聚转发任务；表 2/3 仅缓存本核行号范围，
+表 3 提供成员及加权信息，表 2 提供返回目的与成员寻址所需的原始 source，尚未实现。
+M5 按 BS 整 Token 分核，预载本核表 4/5 区间，逐 Token 轮询，未到齐即检查下一个。
+M5 已改为按 mask 置位的副本逐个提交多块 Flag 拷贝，UB 按 32B 块密排，统一等待后
+用一次 ReduceSum（mask=1、repeat=B、stride=1）累加各块首 float，B=N×有效槽数。
+用户确认总线协议保证完整性；单次 probe 为 m 次拷贝、32*m*N 字节，实际代价待设备验证。
 Combine 新中转区的分配归属和内部细节待收口；Dispatch 五表 ABI 和新包尾布局已实施。
 
 [Dispatch 输出适配方案](specs/ep-memory-server-dedup-dispatch-output-adaptation-design.md)已更新：
@@ -38,7 +53,7 @@ D01–D09/T01–T03 全部确认并完成实现，执行顺序与验证入口见
 | 未定位故障 | 32P/E384、BS256、performance 100+50 轮报告执行阶段失败、0/32；run_id=d5d6c21f230a496e82ccfa2dc4e0494a，缺原始错误，未确认环境根因 |
 | Combine 新方向 | 64 核依次执行 Init 和本地待聚合 Token 拷贝两个函数；之后 Send 核直发，Read 核读取聚合后发送；独立 M5 首版由 Read 核聚合本卡 BS 个结果，预留 64 核参与。尚未实现 |
 | Combine 选窗与复用 | 沿用当前选窗，主要隔离 Dispatch/Combine；跨调用 buffer 安全由用户确认的模型调度保证，不新增轮次管理或读完握手 |
-| Combine 设计推进 | 先完成所有模块细分设计初版，再整体通读查漏；当前仅列功能预期与简要设计方向，不展开详细待确认清单 |
+| Combine 设计推进 | M1–M5 细化补充完成，已通读并分级；CB00-01 接口组织已确认，剩余 23 项待收口，M0/M6 衔接同步核对 |
 
 以上设备信息依据用户回传，未直接访问生产环境。约 49us 的历史 performance 与约 391us 的
 breakdown 口径和产物不同；移除 PacketIssue 未明显缓解的反馈不能证明根因已经闭合。
