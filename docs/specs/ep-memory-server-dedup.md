@@ -5,7 +5,9 @@
 2026-09-18 按 `/users/hzy/workspace/TileXR`、`codex/SilentEmotion` 的当前源码校准。
 核对基线为 `4858ce6`（包含编译期分核、GM tiling、Count 重叠及编译期去重开关）；
 该源码身份不等同于生产环境已部署版本。本次只修订文档，不改变 Dispatch 行为。
-Dispatch 优化设计阶段收口，后续工作转入 [Combine 待确认项](ep-memory-server-dedup-combine-open-topics.md)。
+Dispatch 优化设计阶段收口，后续工作转入 [Combine 设计](ep-memory-server-dedup-combine-design.md)。
+跨算子的 metadata 交接和共用通信域布局，另见
+[Dispatch / Combine 联合设计初版](ep-memory-server-dedup-dispatch-combine-design.md)；其中五表和 Combine 27 参数签名已确认为目标契约，尚未修改当前 ABI；实现细节待设计。
 “设计收口”表示以现有实现为基线，不表示全部规模、性能目标或偶发环境问题已经验收。
 
 本文描述当前 Dispatch 代码，后面的 Combine 数据流明确标为设计契约。
@@ -456,7 +458,8 @@ Group 的 offset 0 为 uint32 firstHopRow=t；offset 4 起最多 K−1 个 8B �
 
 调用方保持 assistEx/sourceMask/group/expertScalesOut 到对应 Combine 消费完成，且 expert 内部
 若重排行，须先还原 Dispatch 行序。不跨调用重用 t 作为持久 ID，也不在 Combine 重新扫描通信
-payload 构造 plan。上述是 Combine 将消费的输入契约，不表示该去重 Combine API/实现已存在。
+payload 构造 plan。上述是当前旧输出的生命周期；新 Combine 消费的五表见联合设计 §5，
+不能将本节旧 assistEx/group 直接接入新入口。
 
 ## 中转编号与持久表
 
@@ -490,9 +493,9 @@ Group 行可以有空洞，第一跳的 group[t].firstHopRow 等于 t，字段�
 原 counter 的 1KiB 布局区和 profiling 事件编号仅作历史保留，不再产生 Atomic/CounterEnd 事件。
 
 当前 Dispatch 不访问 Combine relay 返回区，保留旧通信窗口预留和容量检查以隔离性能变量；
-旧 relayBytes=8*BS*K*returnStride 不满足新编号契约，不代表 Combine 已可用。后续 Combine
-至少按 C*K*returnStride 预算其离散结果区，重新核算整个窗口、框架分配和生命周期。
-不能把新的 recvSlot 直接用于旧 relay 预留区。内存压缩优化留到后续。
+旧 relayBytes=8*BS*K*returnStride 不满足稀疏编号契约，不代表 Combine 已可用。
+旧 push 方案至少要 C*K*returnStride；2026-09-18 新 pull 方案则需按生产卡 stage 的新地址
+重新核算整个窗口、框架分配和生命周期，不能把 recvSlot 直接用于旧 relay 预留区。
 
 本轮验收：编号与独立原始路由参考的第一跳输出行一致；覆盖 t>=8*BS、稀疏空洞、不同接收核、
 乱序 ready、DIRECT/第一跳/终端、本卡和跨卡副本、连续 magic；分配和结果校验同步采用新容量。
@@ -502,77 +505,22 @@ Host 替身证明编号/字节/边界契约，CANN 9.1 A5 编译证明编译；�
 维护要点：从密排计数器改用已有稀疏身份时，容量由最大可寻址索引决定，而不是有效 group 数；
 必须同步调整 caller 分配、元数据检查及独立 oracle，否则正常高 row 会越界或被测试误拒。
 
-## Combine 数据流
+## Combine 设计入口
 
-本节为后续 Combine 的设计契约，尚未实现，不作为 Dispatch 设备能力或 Combine 验收结论。
+Combine 内部实现集中在[Combine Server Dedup 设计](ep-memory-server-dedup-combine-design.md)，
+按 M0、M1a/M1b、M2–M6 整理功能预期和简要设计方向；全部模块初版完成后再统一通读查漏。
+本文不重复维护 Combine 内部流程，当前尚未实现该 kernel。
 
-Combine 保留每条 expert 输出的独立贡献，先在目标 Server 的 relay 对同一原始 Token 的 group 执行加权求和，
-再将 server partial 返回原始 source。Expert 输出通常数值不同，不按 payload 相同来合并。
-
-| 路径 | 目标与消费方式 |
-| --- | --- |
-| DIRECT | 未加权 expert 输出返回原始 source 的 `[srcTokenId][k]` 结果位置；本地 DIRECT 可直接读取，均由 source 乘对应 weight 后累加 |
-| 转发 expert -> relay | 本卡及跨卡转发所得未加权 expert 输出均按 forwardTokenIdx、原始 k 返回统一中转区的对应槽位，由 relay 乘该 route 的 weight 后累加 |
-| 第一跳 expert | relay 从关联的本地输出行取得未加权贡献，乘第一跳 weight 后纳入同一 group；每组仅此一条，其他本卡 expert 均走转发返回 |
-| Relay partial -> source | 将 group 已加权求和的结果返回原始 source 的 `[srcTokenId][returnK]` 位置 |
-| Source 最终归约 | 只消费 sourceMask 指定的位置，统一乘本卡 expertScales 后累加；partial 槽权重为 1.0，DIRECT 槽为真实权重，被 partial 代表的其他 k 不再等待 |
-
-本卡及同 Server 其他卡的转发结果共用一块中转结果区，返回地址统一为：
-
-```text
-recvSlot = uint64(forwardTokenIdx) * K + originalK
-combineAddress = mappedPeerWindowBase[relayRank]
-               + relayResultRegionOffset + recvSlot * memberSlotStride
-```
-
-发送方通过自己的 peer 映射定位 relay；本卡返回取本卡对应基址，使用相同公式。
-现有 assistEx 中的 relayRank、forwardTokenIdx 和 k 已足够计算地址，不额外传输 recvSlot，不查询远端 group 表，也不再次密排取号。
-不同 group 的 t 全卡唯一；同一 group 内各 expert route 的原始 k 唯一，因此 `(t,k)` 唯一确定贡献，不需要发送卡维度。
-每组固定预留 K 个槽位，即使 n=1 也保留 K 个；第一跳仍通过 firstHopRow 读取，不写入对应返回槽。
-只监听 members[0:n] 列出的位置，第一跳及不属于该 group 的 k 槽位均不使用、不等待；K=1 时不产生 relay group。
-Relay 只等待持久表中实际存在的转发贡献，包含本卡返回，不等待全体预留 slot。
-本卡转发与跨卡转发使用同样的归约成员记录和完成条件，不因发送卡等于 relay 而绕过返回流程。
-
-沿用已有顺序约定：group 先处理第一跳，再按密排 member 顺序归约，等价于按原始 k 升序消费全部成员；source 按 sourceMask 的 slot 升序归约。
-`returnK` 是该 group 的最小原始 k。Source 从 K 个有效位开始，将一个 group 的成员位替换为 returnK 位。
-这不会丢弃 expert 贡献，而是将其合入一个 partial；本阶段存在的每个输入 Token 都有有效 route，
-不沿用 inactive token 或空 route 的零 mask 规则。
-
-K=32 时 mask 必须按 32 位位集合解释，bit31 不是负长度或无效标志；
-构造完整 K 位集合不能使用未定义的 32 位左移 32 操作。
-
-每条 route 的 weight 必须在合并前应用且只应用一次。已确认随 Dispatch 包提供对应信息：
-头部保存第一跳 weight，entries 保存各自 weight，终端按 expert 匹配提取。
-已确认每条 expert route 的 weight 保存到所在 Rank 的 `assistEx`。
-已确认 relay 对本 Server 内该 group 的全部成员执行乘 weight 和求和，包含第一跳、本卡转发和跨卡转发贡献；
-转发终端返回未加权 expert 输出。relay 完成加权归约后返回一份 partial，source 使用 Dispatch 输出的 expertScalesOut 权重 1.0；
-DIRECT 使用真实权重，两类有效结果统一乘权重累加，不再次应用第一跳真实 weight。源 Server 内逐 route DIRECT 的范围保持 R01 约定。
-对同一个原始 Token，逻辑计算为：
-
-```text
-partial[g] = sum(k in group[g], weight[k] * expertOut[k])
-output = sum(g, partial[g]) + sum(k in DIRECT, weight[k] * expertOut[k])
-       = sum(k where sourceMask[k]=1, result[k] * expertScales[token,k])
-```
-
-该式描述贡献关系，执行仍遵循前述 k/slot 顺序。
-第一跳权重从其本卡 assistEx 取得；其他转发成员的 weight 在 Dispatch 到达 relay 时已随 forwardEntries 提供，
-须持久保留为 relay Combine 的本地输入，不直接读取其他卡的 assistEx，也不在 Combine 另发一轮 weight。
-已确认每条 member 保存 `(recvSlot,weight)`，Dispatch 按 `t*K+originalK` 完成位置换算后密排保存，GM 写入随算子完成；返回数据格式及完整区域预算继续在 R08-03/R07-01 收口。
-头部、assistEx、group 的 weight 均按 FP32 保存，真实权重与 source 归约权重的职责及持久来源已由 R04-07/R04-08 确认。
-Source 仅需 sourceMask 和转换后的 expertScales，无需区分结果类型；权重存储保持到 Combine 消费完成。
-首版要求 `expertScales` 非空且为 FP32 `[BS,K]`；无 weight 指针直接报错。各计算/通信阶段 dtype 尚待 R08/Combine 对应议题确认。
-两级归约改变浮点求和括号，不承诺与普通 Memory 位级一致。
-
-Combine 的 expert 发送、group 监听/归约、partial 发送及 source 归约如何分核、按 H 分块和并行推进，
-已迁至 [Combine 内部待确认项 C15-C24](ep-memory-server-dedup-combine-open-topics.md#本轮迁入边界)，
-不能直接将 Dispatch 的已确认核组设计当作 Combine 调度方案。
+五表与 27 参数接口由[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)维护。
+当前 Dispatch 仍输出前述旧 assistEx/group，需适配五表后才能接入新 Combine。
+新中转区的存储归属和物理布局以共同契约的后续收口为准。
 
 ## 容量与生命周期
 
 ### R07-01 单份通信数据域布局
 
 每 Rank 至少 8 GiB peer memory；`windowOffset=(uint64(magic)%2)*4GiB`。
+联合设计沿用此选窗方式，主要隔离 Dispatch/Combine；模型调度保证跨调用安全复用。
 每窗前 2 MiB 为控制区，两窗各保留最后 4 MiB 不作数据使用，实际 runtime Flag 仅位于整个域末尾。
 以下 offset 相对选中窗口，所有地址乘积使用 uint64：
 
@@ -595,8 +543,10 @@ stateBytes=counterOffset+1024 检查前 2MiB 上限。标准 profiling 另分配
 ### Combine 容量缺口
 
 当前 groupOut 已按 Crows 分配，但 relay 结果预留仍为旧 8*BS*K*U；两者不能混用。
-沿用 t*K+k 地址契约时，Combine 至少需要 Crows*K*memberStride 的可寻址空间；实际 group 数小
-也不能限制最大 t。应先重算完整窗口和 Host/caller 分配，再实现返回，不得把高 t 直接写入旧区。
+旧 push 方案沿用 t*K+k 时至少需要 Crows*K*memberStride，实际 group 数小不能限制最大 t。
+新 pull 方案已确定 expert/q 逻辑槽，生产卡 stage 预算为 E*BS*Sstage；source 结果为
+BS*K*Sresult，加上控制 Flag、scale/scratch 和保留区。MaxTokenNum 是输出行容量，不是 stage 槽数。
+后续确定具体格式、offset 并重算 Host/caller 分配，再实现读写，不得套用旧 relay 区。
 若完整预算超出窗口，需在 Combine 设计中明确新的容量/窗口方案，不能假定 8GiB 自动足够。
 原“实际 group 数≤8*BS 因而可用旧容量”的约束已失效，不是当前 Dispatch 输入要求。
 
@@ -613,7 +563,8 @@ Count 的 cnt/sum/ready 按各自 owner 消费后清理；prefix 数据无需清
 
 同一 communicator 的调用保持所有 Rank 顺序一致，在同一 stream 串行执行；相同窗口隔轮复用，
 全 Rank Count 发布（包括零 cnt）及清理共同保护代际边界。此规则不能直接外推为多 stream、
-多个在途 Dispatch plan、重复 Combine 或失败后复用的支持证明，后续归 Combine 生命周期议题。
+多个在途 Dispatch plan、重复 Combine 或失败后复用的支持证明；这些扩展不列入本轮联合设计。
+当前模型的跨调用安全复用由用户确认的执行顺序保证，不增加轮次管理或结束握手。
 
 ## 打点与性能统计
 
@@ -655,12 +606,5 @@ run_id=b662f5c701e74ec187fdb7f09cb39bc9，kernel 摘要前缀 65f0523c47a6；它
 本次文档核对不运行 NPU，不新增设备验收结论。历史 Host 替身与 CANN 编译仅覆盖其各自提交；
 正式范围以保存的源码/产物身份和 run summary 为准，见[进度记录](../EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
-Combine 下一轮先完善以下问题：
-
-1. expertOut、member 返回、partial、累加器及最终输出的 dtype、精度与权重只应用一次的规则。
-2. 稀疏 t 的返回区容量与窗口预算，Dispatch 输出到 Combine 的生命周期和 magic 选择。
-3. expert 返回、relay 归约/partial、source 归约的核职责、H 分块与不会循环等待的推进方式。
-4. 各类 Flag/UB/GM 的唯一 owner、完成与清理，以及 Combine-only 独立 oracle 和联合验收。
-
-保留 [Combine C15–C24](ep-memory-server-dedup-combine-open-topics.md#本轮迁入边界) 的讨论入口，
-不把 Dispatch 的动态 lane、核数或已收口参数直接当作 Combine 的最终调度选择。
+Combine 后续按[模块设计](ep-memory-server-dedup-combine-design.md#模块边界m0m6)逐一完善初版，
+完成所有模块后由用户整体通读，再整理遗漏点和待确认项。内部设计不在本文重复维护。

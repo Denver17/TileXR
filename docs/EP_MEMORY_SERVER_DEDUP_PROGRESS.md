@@ -1,10 +1,29 @@
 # EP Memory Server Dedup 进度
 
-## 当前状态（2026-09-18）
+## 当前状态（2026-09-19）
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
-源码校准基线 `4858ce6`。完整 Dispatch 已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-open-topics.md)；
+源码校准基线 `4858ce6`。完整 Dispatch 已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
 Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
+
+已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
+已确认五表与 Combine 27 参数设计接口：保留 Memory 原 24 参数，只追加 3 表，
+TokenNum 读取 sendCounts 末项。Combine 独立设计按 M0、M1a/M1b、M2–M6 整理功能预期与简要设计方向；
+先逐模块完成细分设计初版，再由用户整体通读，届时统一整理遗漏点和待确认项。
+最新约定为固定 64 核，全部先执行 Init、CopyLocalPendingTokens 两个函数；随后分为 Send/Read 核，
+Send 核直发类型 1，Read 核拉取类型 2 成员、加权聚合并发出 partial。最终 BS 个 Token 的聚合
+独立为 M5，首版由 Read 核负责，任务映射与核类别解耦，预留后续 64 核参与。
+新中转区的分配归属和内部细节待收口，尚未实施 ABI 或布局变更。
+
+[Dispatch 输出适配方案](specs/ep-memory-server-dedup-dispatch-output-adaptation-design.md)已更新：
+32B 包头保留 source rank/token/k/type 四个有效值，type 与 Combine 的 TokenType 共用 1/2/3 定义；
+源端生成可原样保存的 8*K 索引段，两个段起点 32B 对齐，索引段避免跨 Flag，Init 缓存两个 wire offset。
+上述布局和原样保存方式、源端生成规则、接收任务定位及 DestinationIndex 生成均已确认；
+第一跳保留本地 type_2，最终转发前仅改包头 type 为 type_3，其他字段不变。
+T01 独立参考与逐输出校验已确认；T02 采用全局路由参考加各 Rank 本地匹配方案，
+不新增 Rank 间校验通信。D08 写出同步、D09 Host/caller 清理和 T03 回归已确认，
+生产方案 D01–D09 已具备开始实施的逻辑细节，执行顺序与验证入口见适配方案第六节。
+2026-09-20 T02 也已确认，D01–D09/T01–T03 全部收口；先提交设计文档，再实施代码。尚无新构建/设备验证结论。
 
 | 方向 | 当前实现与验证边界 |
 | --- | --- |
@@ -14,7 +33,9 @@ Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属
 | 已收到的完整设备结果 | 64P/E384、BS96、H7168/K6、quant_mode=4/e4m3、breakdown 100+50 轮，64/64 PASS；run_id=b662f5c701e74ec187fdb7f09cb39bc9、kernel=65f0523c47a6 |
 | 最新产物验收 | 上一行仅覆盖那次产物；之后源码修改不能自动继承该正确性或性能结论，128P 等组合需各自证据 |
 | 未定位故障 | 32P/E384、BS256、performance 100+50 轮报告执行阶段失败、0/32；run_id=d5d6c21f230a496e82ccfa2dc4e0494a，缺原始错误，未确认环境根因 |
-| Combine 前置缺口 | 稀疏 t 的结果区容量、dtype/数值、职责与 H 分块、窗口/plan 生命周期、独立及联合验收 |
+| Combine 新方向 | 64 核依次执行 Init 和本地待聚合 Token 拷贝两个函数；之后 Send 核直发，Read 核读取聚合后发送；独立 M5 首版由 Read 核聚合本卡 BS 个结果，预留 64 核参与。尚未实现 |
+| Combine 选窗与复用 | 沿用当前选窗，主要隔离 Dispatch/Combine；跨调用 buffer 安全由用户确认的模型调度保证，不新增轮次管理或读完握手 |
+| Combine 设计推进 | 先完成所有模块细分设计初版，再整体通读查漏；当前仅列功能预期与简要设计方向，不展开详细待确认清单 |
 
 以上设备信息依据用户回传，未直接访问生产环境。约 49us 的历史 performance 与约 391us 的
 breakdown 口径和产物不同；移除 PacketIssue 未明显缓解的反馈不能证明根因已经闭合。
