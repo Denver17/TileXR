@@ -290,6 +290,30 @@ foreach(test_name IN ITEMS protocol layout host_validation host_profile_validati
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 
+# Combine C1 reuses the public Host path. Only host_validation replaces launch;
+# public_abi links the production C1 no-launch implementation.
+set(TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_host.cpp
+    ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_server_dedup_combine.cpp)
+add_executable(test_tilexr_ep_server_dedup_combine_layout
+    unit/test_tilexr_ep_server_dedup_combine_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_layout.cpp)
+add_executable(test_tilexr_ep_server_dedup_combine_host_validation
+    unit/test_tilexr_ep_server_dedup_combine_host_validation.cpp
+    ${TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES})
+add_executable(test_tilexr_ep_server_dedup_combine_public_abi
+    unit/test_tilexr_ep_server_dedup_combine_public_abi.cpp
+    ${TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES}
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_launch.cpp)
+foreach(test_name IN ITEMS layout host_validation public_abi)
+    set(test_target test_tilexr_ep_server_dedup_combine_${test_name})
+    target_include_directories(${test_target} PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
+    add_test(NAME ${test_target} COMMAND ${test_target})
+    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-p1-abi-host TIMEOUT 120)
+    install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endforeach()
+
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
 foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile)

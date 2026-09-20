@@ -4,7 +4,12 @@
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 尚未实现。下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
+Server Dedup Combine 进入 C1：公开 ABI、Host 校验及布局已实现，空 kernel/设备提交尚未实现。下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
+
+Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
+当前点 `ep-sdedup-combine-p1-abi-host`；用户入口为 `bash run_commit_validation.sh`。
+本点仅 Host ABI/layout；生产入口暂返回 `NOT_SUPPORT`，不提交 kernel、不消耗 magic。
+**外部验收待回传，C2 未开始。** 开发环境检查记录见 EP 验证指南，不能替代该门槛。
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，
 已确认五表与 Combine 27 参数设计接口：保留 Memory 原 24 参数，只追加 3 表，
@@ -19,7 +24,7 @@ prepareDone/serverReady 的清理 owner、空任务和分核变化覆盖已梳�
 [CB00-02](specs/ep-memory-server-dedup-combine-design.md#cb00-02) 布局已确认：Dispatch 控制区、Combine 控制区、共用数据区依次 512B 对齐，前后半区各保留一份，第二份起点为 peerMemBytes/2；共用数据区按 max(Ddata,Cdata) 核算。
 控制区以公共宏解耦：Dispatch 764KiB（当前固定表区占用 574KiB），Combine 52KiB（已设计上限 26KiB 的两倍），
 合计 816KiB；其后留空 208KiB，每份 buffer 的共用数据起点固定为 +1MiB（1048576B）。
-公共宏和 Dispatch 布局已落实到源码，Combine 尚未实现；双方仅校验各自使用量，核算见[联合设计 §6.4](specs/ep-memory-server-dedup-dispatch-combine-design.md#64-固定控制区宏及上限核算)。
+公共宏和 Dispatch 布局已落实到源码，Combine C1 已接入固定区与参数化地址助手，真实数据面尚未实现；双方仅校验各自使用量，核算见[联合设计 §6.4](specs/ep-memory-server-dedup-dispatch-combine-design.md#64-固定控制区宏及上限核算)。
 Combine 控制小表独立 offset 宏已确认：prepareDone=0、serverReady=2048、扩展预留=26624，均相对 Combine 控制区并按 512B 对齐。
 两表固定预留 2KiB/24KiB，BS 或分核变化只改变有效范围，不移动表边界；Dispatch 内部固定 offset 的源码改造由独立专题维护。
 Combine 接收区为 BS*K 个 DataAsFlag 槽，中转区紧接其后，为 E*BS 行原始 BF16/FP16，行 stride=alignUp(H*2,512)。
@@ -178,7 +183,7 @@ Host 替身测试也分别在 profiling OFF/ON 通过，共六项检查。这些
 
 | 检查方向 | 状态 | 通过 commit |
 | --- | --- | --- |
-| 公共 API / Host / layout | 未开始 | — |
+| 公共 API / Host / layout | C1 已实现，开发检查通过；用户外部验收待回传 | 待验收后登记 |
 | 空 kernel / 注册 / launch | 未开始 | — |
 | 单轮 / 多轮框架 | 未开始 | — |
 

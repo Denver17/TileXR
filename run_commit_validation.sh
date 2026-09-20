@@ -1,13 +1,23 @@
 #!/usr/bin/env bash
-# Compatibility notice only: each stage must be started manually.
-cat >&2 <<'EOF'
-run_commit_validation.sh is retired. Run these steps separately from the first server:
-  bash build_all.sh
-  bash sync.sh
-  bash run.sh -n 2 -e 96 -m 0 -l 3 0
-Then check the cumulative output and collect performance with the same installation:
-  bash run.sh -n 2 -e 96 -m 0 -l 4 0
-  bash run.sh -n 2 -e 96 -m 1 -l 50 50
-See docs/EP_VALIDATION_GUIDE.md. No build, sync, or test has been started.
+set -eo pipefail
+case "$#:${1:-}" in
+    0:) ;;
+    1:-h|1:--help)
+        cat <<'EOF'
+Usage: bash run_commit_validation.sh
+Build and validate the current Combine checkpoint: ep-sdedup-combine-p1-abi-host.
+C1 runs three local C++ Host tests; no CANN, SSH, hostfile or NPU is required.
+Requires Python 3.9+, CMake, Make and g++. TILEXR_VALIDATION_JOBS controls build jobs.
+Reports: run/validation/commit-*/summary.json (or TILEXR_VALIDATION_RESULT_ROOT).
+Return the summary and logs before proceeding to the next checkpoint.
 EOF
-exit 2
+        exit 0 ;;
+    *) printf '[commit-validate] Failed: no arguments expected (use --help)\n' >&2; exit 2 ;;
+esac
+# This entry point follows the current delivery checkpoint, independent of a
+# previous Dispatch build or deployment-specific case options.
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-abi-host
+export TILEXR_VALIDATION_BUILD_MODE=host
+export TILEXR_VALIDATION_ACTION=host-validate
+source "$(dirname -- "${BASH_SOURCE[0]}")/set_env.sh"
+exec "$TILEXR_VALIDATION_PYTHON" -u "$TILEXR_VALIDATION_ROOT/tools/validation/workflow.py" commit-validate

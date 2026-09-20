@@ -1,4 +1,5 @@
 """批测入口只负责调用核心脚本，不隐式编译或同步。"""
+import json
 import os
 from pathlib import Path
 import shutil
@@ -37,7 +38,7 @@ class BatchTests(unittest.TestCase):
                     self.assertNotIn("PASS", result.stdout)
                     self.assertIn("Failed", result.stdout)
 
-    def test_retired_commit_entry_only_explains_manual_steps(self):
+    def test_commit_entry_selects_current_host_checkpoint_and_propagates_failure(self):
         repo = Path(__file__).resolve().parents[2]
         bash = Path(sys.executable).parent / "bash"
         if not bash.exists():
@@ -45,15 +46,24 @@ class BatchTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             shutil.copy2(repo / 'run_commit_validation.sh', root / 'run_commit_validation.sh')
-            for step in ('build_all', 'sync', 'run', 'run_case'):
-                (root / (step + '.sh')).write_text(f'echo {step} >> calls\nexit 0\n')
+            shutil.copy2(repo / 'set_env.sh', root / 'set_env.sh')
+            (root / 'tools/validation').mkdir(parents=True)
+            (root / 'tools/validation/workflow.py').write_text(
+                'import json, os, pathlib, sys\n'
+                'pathlib.Path("calls").write_text(json.dumps({"argv": sys.argv[1:], '
+                '"checkpoint": os.environ["TILEXR_VALIDATION_CHECKPOINT"], '
+                '"mode": os.environ["TILEXR_VALIDATION_BUILD_MODE"]}))\n'
+                'raise SystemExit(19)\n', encoding='utf-8')
             result = subprocess.run([str(bash), 'run_commit_validation.sh'], cwd=root,
-                env=dict(os.environ, PATH=str(bash.parent) + os.pathsep + os.environ['PATH']),
+                env=dict(os.environ, PATH=str(bash.parent) + os.pathsep + os.environ['PATH'],
+                         TILEXR_VALIDATION_PYTHON=sys.executable,
+                         TILEXR_VALIDATION_CHECKPOINT='ep-sdedup-p2-dispatch',
+                         TILEXR_VALIDATION_BUILD_MODE='production',
+                         TILEXR_CANN_ENV_SCRIPT='/missing/cann/set_env.sh'),
                 text=True, capture_output=True, timeout=10)
-            self.assertEqual(result.returncode, 2)
-            self.assertFalse((root / 'calls').exists())
-            for command in ('bash build_all.sh', 'bash sync.sh', 'bash run.sh'):
-                self.assertIn(command, result.stderr)
+            self.assertEqual(result.returncode, 19, result.stderr)
+            self.assertEqual(json.loads((root / 'calls').read_text()), {
+                'argv': ['commit-validate'], 'checkpoint': 'ep-sdedup-combine-p1-abi-host', 'mode': 'host'})
             self.assertNotIn('PASS', result.stdout + result.stderr)
 
     def test_batch_invokes_core_cases_without_build_or_sync(self):

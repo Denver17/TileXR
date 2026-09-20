@@ -28,6 +28,11 @@ from source import inventory
 
 
 CHECKPOINT = "ep-sdedup-p1-abi-host"
+COMBINE_ABI_HOST_CHECKPOINT = "ep-sdedup-combine-p1-abi-host"
+COMBINE_ABI_HOST_TESTS = {
+    "test_tilexr_ep_server_dedup_combine_" + name
+    for name in ("public_abi", "layout", "host_validation")
+}
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
 DRY_RUN_CHECKPOINT = "ep-sdedup-p1-dry-run"
 DRY_RUN_MARKER = "EP_SERVER_DEDUP_DRYRUN_PASS "
@@ -263,10 +268,10 @@ class Config:
         if not self.checkpoint:
             installed = self.root / "install/validation/manifest.json"
             self.checkpoint = read_json(installed)["checkpoint"] if installed.exists() else CHECKPOINT
-        self.hostfile = (self.root / "hostfile" if action in ("build", "verify", "host-validate") else
+        self.hostfile = (self.root / "hostfile" if action in ("build", "verify", "host-validate", "commit-validate") else
                          Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile")))
-        self.user = "" if action in ("build", "verify", "host-validate") else os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
-        self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4")) if action == "build" else 4
+        self.user = "" if action in ("build", "verify", "host-validate", "commit-validate") else os.environ.get("TILEXR_VALIDATION_SSH_USER", "")
+        self.jobs = int(os.environ.get("TILEXR_VALIDATION_JOBS", "4")) if action in ("build", "commit-validate") else 4
         self.timeout = int(os.environ.get("TILEXR_VALIDATION_TIMEOUT", "180")) if self.is_run else 180
         self.server_count = None
         if self.is_run and os.environ.get("TILEXR_VALIDATION_SERVERS") is not None:
@@ -282,8 +287,12 @@ class Config:
         if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send"):
             raise ValueError("旧 cnt-only/first-hop/source-send checkpoint 已由 ep-sdedup-p2-dispatch 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
-                CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
+                CHECKPOINT, COMBINE_ABI_HOST_CHECKPOINT, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
             raise ValueError("不支持的 checkpoint：" + self.checkpoint)
+        if self.checkpoint == COMBINE_ABI_HOST_CHECKPOINT and self.mode != "host":
+            raise ValueError("Combine C1 仅验证 Host ABI/layout；请使用 host 模式")
+        if action == "commit-validate" and self.checkpoint != COMBINE_ABI_HOST_CHECKPOINT:
+            raise ValueError("当前提交验收入口仅支持 Combine C1")
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -292,7 +301,8 @@ class Config:
             raise ValueError("SSH_USER 格式错误")
         self.hostfile = self.hostfile.resolve()
         self.hostfile.relative_to(self.root)  # 同步契约：配置属于当前工作目录。
-        self.install = self.root / "install/validation"
+        self.install = self.root / ("install/validation-combine-c1"
+                                    if self.checkpoint == COMBINE_ABI_HOST_CHECKPOINT else "install/validation")
         self.logs = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", self.root / "run/validation")).resolve()
         self.chain = chain_configuration(self.checkpoint) if self.is_run and self.checkpoint in CHAIN_CHECKPOINTS else None
 
@@ -521,7 +531,8 @@ def verify_build(config, *, check_run_mode=True):
 
 
 def clean_build_directory(config):
-    work = config.root / "build/validation"
+    work = config.root / ("build/validation-combine-c1"
+                          if config.checkpoint == COMBINE_ABI_HOST_CHECKPOINT else "build/validation")
     # 只删除用户授权的本工具构建目录；先检查路径，不能跟随 build symlink。
     for path in (work.parent, work, config.install.parent, config.install):
         if path.is_symlink():
@@ -529,7 +540,8 @@ def clean_build_directory(config):
     work.resolve().relative_to(config.root)
     if work.exists() and not work.is_dir():
         raise ValueError(f"构建路径不是目录：{work}")
-    (config.logs / "sync.json").unlink(missing_ok=True)
+    if config.checkpoint != COMBINE_ABI_HOST_CHECKPOINT:
+        (config.logs / "sync.json").unlink(missing_ok=True)
     # 即使本次编译失败，也不能把上一轮安装包当作本次构建使用。
     (config.install / "manifest.json").unlink(missing_ok=True)
     if work.exists():
@@ -539,7 +551,16 @@ def clean_build_directory(config):
 
 
 def build(config):
+    # C1 preparation has its own 900-second budget; Host execution starts a
+    # separate 180-second budget after the fresh package is ready.
+    build_deadline = time.monotonic() + 900 if config.checkpoint == COMBINE_ABI_HOST_CHECKPOINT else None
+
     def command(*args, **kwargs):
+        if build_deadline is not None:
+            remaining = build_deadline - time.monotonic()
+            if remaining <= 0:
+                raise Failure("BUILD_FAILED", "Combine C1 构建超过 900 秒总期限", timeout=True)
+            kwargs["timeout"] = min(kwargs.get("timeout", 180), remaining)
         return execute(*args, **kwargs, start_failure="BUILD_FAILED", exit_failure="BUILD_FAILED")
 
     build_id = uuid.uuid4().hex
@@ -551,6 +572,12 @@ def build(config):
     print(f"开始构建 {config.checkpoint}，mode={config.mode}，日志：{log}", flush=True)
     for tool in ("cmake", "g++"):
         command([tool, "--version"], log / (tool + "-version.log"))
+    combine_c1 = config.checkpoint == COMBINE_ABI_HOST_CHECKPOINT
+    if combine_c1 and (config.root / ".git").exists():
+        status = command(["git", "status", "--porcelain", "--untracked-files=normal"],
+                         log / "source-status.log", cwd=config.root)
+        source["working_tree_dirty"] = bool(status.strip())
+        source["working_tree_status"] = status.splitlines()
     common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}"]
     if config.mode == "production":
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
@@ -574,12 +601,15 @@ def build(config):
              f"-DBUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
-    command(["cmake", "--build", host_build, "-j", config.jobs], log / "host-build.log", timeout=1800)
-    command(["cmake", "--install", host_build], log / "host-install.log")
+    targets = ["--target", *sorted(COMBINE_ABI_HOST_TESTS)] if combine_c1 else []
+    command(["cmake", "--build", host_build, "-j", config.jobs, *targets], log / "host-build.log", timeout=1800)
+    if not combine_c1:
+        command(["cmake", "--install", host_build], log / "host-install.log")
     if chain and not (stage / "bin" / CHAIN_PROGRAM).is_file():
         raise ValueError(f"Server Dedup 测试未安装：{CHAIN_PROGRAM}")
     try:
-        listing = json.loads(command(["ctest", "--test-dir", host_build, "--show-only=json-v1"],
+        label = ["-L", "^" + COMBINE_ABI_HOST_CHECKPOINT + "$"] if combine_c1 else []
+        listing = json.loads(command(["ctest", "--test-dir", host_build, "--show-only=json-v1", *label],
                                      log / "tests.json"))
     except json.JSONDecodeError as error:
         raise Failure("LOG_PARSE_FAILED", "无法解析 CTest 测试清单", log=str(log / "tests.json")) from error
@@ -595,15 +625,21 @@ def build(config):
             argv = ["@python", str(Path(command[1]).resolve().relative_to(config.root))]
         elif len(command) == 1:
             name = Path(command[0]).name
+            if combine_c1:
+                # C1 installs only its built targets; the general CMake install
+                # also expects unrelated Dispatch executables to be built.
+                (stage / "bin").mkdir(parents=True, exist_ok=True)
+                shutil.copy2(command[0], stage / "bin" / name)
             if not (stage / "bin" / name).is_file():
                 raise ValueError(f"Host 测试未安装：{name}")
-            argv = [str(Path("install/validation/bin") / name)]
+            argv = [str(config.install.relative_to(config.root) / "bin" / name)]
         else:
             raise ValueError(f"无法导出测试命令：{command}")
         tests.append({"name": test["name"], "argv": argv})
     names = [test["name"] for test in tests]
-    missing = (REQUIRED_TESTS | ({REGISTRATION_TEST} if registration else set())) - set(names)
-    if missing or len(names) != len(set(names)):
+    required = COMBINE_ABI_HOST_TESTS if combine_c1 else REQUIRED_TESTS | ({REGISTRATION_TEST} if registration else set())
+    missing = required - set(names)
+    if missing or len(names) != len(set(names)) or (combine_c1 and set(names) != required):
         raise ValueError(f"必需测试缺失或重复：{sorted(missing)}")
     if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
         # This delivery accepts only the new capacity/access case; no old checkpoint regression.
@@ -618,6 +654,8 @@ def build(config):
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""), "tests": tests,
                 "artifacts": artifact_files(stage)}
+    if combine_c1:
+        manifest["build_timeout_seconds"] = 900
     if config.checkpoint == DISPATCH_CHECKPOINT:
         manifest["server_dedup_contract"] = dict(DISPATCH_ABI)
         manifest["server_dedup_profiling"] = config.profiling
@@ -630,8 +668,9 @@ def build(config):
     if config.install.exists():
         shutil.rmtree(config.install)  # 仅重建本工具拥有的安装目录。
     stage.replace(config.install)
-    write_json(config.root / ".tilexr-source.json", source)
-    (config.root / ".tilexr-validation-root").write_text("TileXR validation deployment\n", encoding="utf-8")
+    if not combine_c1:
+        write_json(config.root / ".tilexr-source.json", source)
+        (config.root / ".tilexr-validation-root").write_text("TileXR validation deployment\n", encoding="utf-8")
     print(f"BUILD_PASS commit={source['commit'] or 'unknown'} "
           f"mode={config.mode} tests={len(tests)}\n日志：{log}", flush=True)
 
@@ -1053,6 +1092,8 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
     marker = None
     if name == REGISTRATION_TEST:
         marker, suffix = "EP_SERVER_DEDUP_EMPTY_KERNEL_", " test=registration"
+    elif name in COMBINE_ABI_HOST_TESTS:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_ABI_HOST_", " test=" + name.removeprefix(prefix + "combine_")
     elif name.startswith(prefix):
         marker, suffix = "EP_SERVER_DEDUP_ABI_HOST_", " test=" + name[len(prefix):]
     elif name == "test_tilexr_ep_kernel_launch" and config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
@@ -1065,12 +1106,16 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
             raise Failure("LOG_PARSE_FAILED", "缺少或无法解析唯一的 PASS/FAIL marker", log=str(path))
 
 
-def host_validate(config):
-    run_id = "host-" + uuid.uuid4().hex
+def host_validate(config, run_id=None):
+    run_id = run_id or "host-" + uuid.uuid4().hex
     log = config.logs / run_id
     result = {"run_id": run_id, "host": socket.gethostname(), "checkpoint": config.checkpoint,
               "mode": config.mode, "status": "FAIL", "tests": [], "errors": [],
               "scope": "本机已安装的 Host/Python 回归；不包含设备注册、NPU launch 或通信验证。"}
+    if config.checkpoint == COMBINE_ABI_HOST_CHECKPOINT:
+        result.update(scope="Combine C1：公共 ABI、Host 参数校验及布局；不包含 NPU launch 或通信验证。",
+                      build_timeout_seconds=900, validation_timeout_seconds=config.timeout,
+                      per_test_timeout_seconds=120)
     started = time.monotonic()
     cancelled = threading.Event()
     handlers = {sig: signal.signal(sig, lambda signum, frame: cancelled.set())
@@ -1079,9 +1124,13 @@ def host_validate(config):
     try:
         manifest = verify_build(config, check_run_mode=False)
         result.update(build_id=manifest["build_id"], commit=manifest["source"]["commit"],
-                      source_provenance=manifest["source"]["provenance"])
+                      source_provenance=manifest["source"]["provenance"],
+                      source_working_tree_dirty=manifest["source"].get("working_tree_dirty"),
+                      build_logs=str(config.logs / ("build-" + manifest["build_id"])))
         tests = [test for test in manifest["tests"] if test["name"] != REGISTRATION_TEST]
         names = [test["name"] for test in tests]
+        if config.checkpoint == COMBINE_ABI_HOST_CHECKPOINT and set(names) != COMBINE_ABI_HOST_TESTS:
+            raise ValueError("Combine C1 安装包必须完整包含 ABI、Host validation、layout 三项测试")
         if not names or len(names) != len(set(names)):
             raise ValueError("安装包没有 Host/Python 测试或测试名称重复，请检查构建 manifest")
         result["expected_tests"] = names
@@ -1089,7 +1138,12 @@ def host_validate(config):
             current_test = test["name"]
             if cancelled.is_set():
                 raise InterruptedError("Host/Python 回归已取消")
-            run_validation_test(config, test, log, config.timeout, cancelled=cancelled)
+            budget = config.timeout
+            if config.checkpoint == COMBINE_ABI_HOST_CHECKPOINT:
+                budget = min(120, started + config.timeout - time.monotonic())
+                if budget <= 0:
+                    raise Failure("EXIT_FAILED", "Combine C1 Host 验证超过总期限", timeout=True)
+            run_validation_test(config, test, log, budget, cancelled=cancelled)
             result["tests"].append({"name": current_test, "status": "PASS"})
             current_test = None
         if cancelled.is_set():
@@ -1110,10 +1164,39 @@ def host_validate(config):
         write_json(log / "summary.json", result)
     for error in result["errors"]:
         report_failure(error)
-    print(f"HOST_VALIDATION_{result['status']} build_id={result.get('build_id', 'unknown')} "
+    print(f"HOST_VALIDATION_{result['status']} commit={result.get('commit', 'unknown')} "
+          f"build_id={result.get('build_id', 'unknown')} "
           f"tests={sum(test['status'] == 'PASS' for test in result['tests'])}/{len(result.get('expected_tests', []))}", flush=True)
     print(f"结果：{log / 'summary.json'}\n范围：{result['scope']}", flush=True)
     return 0 if result["status"] == "PASS" else FAILURE_CODES[result["errors"][0]["type"]]
+
+
+def commit_validate(config):
+    """Build and validate one delivered checkpoint; never advance the gate."""
+    run_id = "commit-" + uuid.uuid4().hex
+    try:
+        build(config)
+    except (Exception, KeyboardInterrupt) as error:
+        errors = failure_records(error, "BUILD_FAILED", stage="build")
+        config.cleanup_failed = any(record["type"] == "CLEANUP_FAILED" for record in errors)
+        try:
+            source = inventory(config.root)
+        except Exception:
+            source = {"commit": None, "provenance": "unavailable"}
+        write_json(config.logs / run_id / "summary.json", {
+            "run_id": run_id, "checkpoint": config.checkpoint, "mode": config.mode,
+            "commit": source["commit"], "source_provenance": source["provenance"],
+            "status": "FAIL", "tests": [], "errors": errors,
+            "scope": "Combine C1 Host 构建失败；未执行 NPU 或通信验证。",
+        })
+        for record in errors:
+            report_failure(record)
+        code = FAILURE_CODES[errors[0]["type"]]
+    else:
+        code = host_validate(config, run_id=run_id)
+    print(f"{'成功' if code == 0 else '失败'} COMMIT_VALIDATION_{'PASS' if code == 0 else 'FAIL'} "
+          f"checkpoint={config.checkpoint}\n结果：{config.logs / run_id / 'summary.json'}", flush=True)
+    return code
 
 
 def node(config, run_id, build_id, execution_budget=None, device=None, host_index=None):
@@ -1596,7 +1679,7 @@ def run(config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "node", "rank", "verify", "cancel"))
+    parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "commit-validate", "node", "rank", "verify", "cancel"))
     parser.add_argument("arguments", nargs="*")
     args = parser.parse_args()
     try:
@@ -1627,6 +1710,11 @@ def main():
                 raise ValueError("host-validate 不接受额外参数")
             with operation_lock(config, ".operation.lock"):
                 return host_validate(config)
+        elif args.action == "commit-validate":
+            if args.arguments:
+                raise ValueError("commit-validate 不接受额外参数")
+            with operation_lock(config, ".operation.lock"):
+                return commit_validate(config)
         elif args.action == "node":
             with operation_lock(config, "node.lock"):
                 return node(config, *args.arguments)

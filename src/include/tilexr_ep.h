@@ -33,6 +33,23 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
     int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream);
 
+// Server Dedup Combine: A5 only, FP16/BFP16, quantMode=0. Phase-one C1
+// validates the interface but returns NOT_SUPPORT until C2 adds the empty kernel.
+// C=R*bs*min(topK,moeExpertNum/R); expertOut[C,h], assistInfoForCombine[C,3],
+// tokenType[C], relayReadIndex[C,topK,2] (raw 32-bit pairs), sourceMask[bs],
+// expertScales[bs,topK]. sendCounts is the full int32[moeExpertNum] prefix;
+// its last item is the device-side valid row count. Host never reads tensors.
+// yOut[bs,h] has dtype. Tensor capacity/device ownership are caller obligations.
+// Table pointers retain Dispatch row order and remain alive through completion.
+// epWorldSize/epRankId/globalBs accept 0 as the existing infer-from-comm sentinel.
+int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assistInfoForCombine, int32_t *sendCounts,
+    float *expertScales, bool *xActiveMask, int64_t activeMaskType, void *sharedExpertX,
+    TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
+    int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,
+    int64_t expertShardType, int64_t sharedExpertNum, int64_t sharedExpertRankNum,
+    int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream,
+    const uint32_t *tokenType, const void *relayReadIndex, const uint32_t *sourceMask);
+
 int TileXRMoeEpDispatch(void *x, int32_t *expertIds, void *scales, bool *xActiveMask, void *expertScales,
     TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum, int64_t epWorldSize,
     int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId, int64_t expertShardType, int64_t sharedExpertNum,

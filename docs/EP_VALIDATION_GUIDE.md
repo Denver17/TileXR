@@ -1,5 +1,35 @@
 # EP 验证与人工测试
 
+## Combine 第一阶段 C1：当前交付
+
+检查点为 `ep-sdedup-combine-p1-abi-host`。在拉取本次提交的仓库根目录执行：
+
+```bash
+bash run_commit_validation.sh
+```
+
+脚本重新构建并运行 `combine_public_abi`、`combine_host_validation`、`combine_layout` 三项 C++ 测试；
+打印最终 `COMMIT_VALIDATION_PASS/FAIL` 和 `run/validation/commit-*/summary.json` 路径。
+请回传 summary；失败时同时回传其中的日志。记录外部环境通过后才开发 C2。
+本点不需要设备、CANN、hostfile、HCCL Test 或同步到多节点；需要 Python 3.9+、CMake、Make、g++。
+构建/运行期限、各点范围及结果登记规则见[七点验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
+
+生产入口尚不启动 kernel，校验后返回 `NOT_SUPPORT`；Host 测试的 PASS 表示符合 C1 契约。
+实际空 kernel、注册/launch、三种算子模式和独立 trace 将分别在后续检查点交付。
+C1 固定区容量校验与参数化 result/stage 地址助手不表示第二阶段 wire 格式已确定。
+
+2026-09-20 开发验证：配置的 blue 环境使用 CANN 9.1.0、ccec clang 15.0.5（2026-05-18），
+A5 `dav-c310-vec`、profiling OFF 构建 `tilexr-ep`（包含所属 kernel）通过，动态符号表包含新公开入口。
+一键 C1 Host 三项通过；Dispatch 五项 ABI/Host/layout 回归和原 kernel launch 一项通过。
+Python 新入口行为 5 项、batch 3 项、build 16 项、workflow 100 项通过。
+本工作区没有 cmake/g++，本机一键执行正确失败并保留报告；成功的 C++ 检查是在 blue 的源码快照完成。
+源码基线为 `4dd2fd7309949fc37a3fd74d503d3934b5271bb0` 加本次 C1 改动，
+快照 SHA256、实际命令/工具链、构建退出码和原始日志保存在开发工作区 `build/combine-c1-verification/`。
+首次编译的缺头文件问题、测试汇总漏传失败及一个非法输入用例均已修正，旧结果作废后重跑；
+测试汇总必须检查累计断言失败再输出 PASS，不能单独添加成功 marker。
+以上没有执行 NPU，也不代表用户验证环境已验收；C2 必须等待用户回传后再开始。
+
+
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
 2026-09-20 共用通信布局：Dispatch 已使用实际 `peerMemBytes/2` 选窗，控制区固定
@@ -75,7 +105,7 @@ receiver 在等待跨核局部和前计算相对前缀，局部和源的等待�
 新 `send_cnt_issue`（`0x53000220/21`）只记录依赖发布和下发；旧 `send_cnt_send` 保持历史含等待语义，不能混用两者计算通信提速。
 本次没有运行 NPU；A5 收益和全核 cnt + FP8 正确性仍需设备验证。
 
-当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行及三张接收侧表；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；输出使用 Token 级 prefix 行序，终端记录逻辑 slot，不执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 尚未实现。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
+当前检查点为 `ep-sdedup-p2-dispatch`：默认 32 核执行第一跳及循环 DIRECT，另外 32 核完成 cnt/cumsum 后接收、转发并写最终 expert 行及三张接收侧表；核末完成本核写出及当前窗口的数据 Flag 清理后独立返回，不再执行 SyncAll；输出使用 Token 级 prefix 行序，终端记录逻辑 slot，不执行 AtomicAdd 或 counter 清零；不再发布/等待跨 Rank 结束握手。Combine 数据面尚未实现（C1 Host 接口已接入）。完整 Dispatch 的设备验收使用下面的多卡运行流程，`EP_SERVER_DEDUP_ABI_HOST_PASS test=receive_packet` 只表示 Host 替身测试通过。
 
 默认发送/接收核数为 32/32，Count 全核参与阈值为 512：BS<512 时 64 核统计并发送 cnt，
 BS>=512 时仅接收核承担该步骤。阈值和收发核比例均为编译期配置；
@@ -173,7 +203,7 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 0 -l 1 0
 ```
 
-构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 只提示迁移命令，不再一键执行。
+构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前仅一键验收 Combine C1 Host 接口/布局，不代替这里的 Dispatch 多卡流程。
 
 `build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 

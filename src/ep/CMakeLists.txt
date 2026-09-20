@@ -195,6 +195,10 @@ add_library(tilexr-ep SHARED
     host/ep_memory_server_dedup_host.cpp
     host/ep_memory_server_dedup_launch.cpp
     host/tilexr_ep_memory_server_dedup_dispatch.cpp
+    host/ep_memory_server_dedup_combine_layout.cpp
+    host/ep_memory_server_dedup_combine_host.cpp
+    host/ep_memory_server_dedup_combine_launch.cpp
+    host/tilexr_ep_memory_server_dedup_combine.cpp
     ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp
 )
 

@@ -6,7 +6,7 @@
 第一阶段保留公共框架和空 kernel 的历史验收基线；当前细化第二阶段的数据发送、cnt 发送/接收和 cumsum 计算。
 实际通过范围和 commit 只登记在[调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)，计划更新不表示新增功能已实现或测试通过。
 接口和逻辑以[主设计](specs/ep-memory-server-dedup.md)中的最新已确认结论为准；待确认文档中的推荐或候选不自动成为实现要求。
-本次不细化尚未收敛的数据接收/转发流水、跨调用窗口复用和 Combine，也不以这些遗留项阻塞已收敛的发送及 cnt 路径。
+Dispatch 阶段历史规划保留如下；当前新增 Combine 第一阶段的七点交付闭环，以本页 Combine 小节为准。
 
 2026-09-09 接口复核：主设计已明确只新增 `assistEx/sourceMask/group` 三类 metadata，不新增 descriptor、group 注册、X 或独立 `tokenNum` 参数。
 旧 `forwardPlan` 仅为历史名称；旧三字段 assist 可保留接口占位，但去重逻辑不额外复制同义表。
@@ -31,6 +31,50 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 本节记录 Combine 空算子第一阶段的最新确认，供七个验收点落实；后文 Dispatch 阶段记录
 保留历史上下文，不能用旧固定 4GiB 步长、2MiB 数据起点或旧接口替代最新联合设计。
 当前公共布局以[联合设计 §6](specs/ep-memory-server-dedup-dispatch-combine-design.md#6-共用通信域的布局cb00-02-已确认)为准。
+
+### 七点交付与外部验收门槛（2026-09-20）
+
+每次只开发当前一个检查点：开发/对应检查 → commit 并推送 `codex/SilentEmotion` →
+用户在验证环境拉取该 commit，执行 `bash run_commit_validation.sh` → 回传结果 →
+记录 SHA、环境、命令、结果及验证边界 → **通过后才开始下一点**。
+开发环境通过、提交成功或脚本返回 0 均不能替代用户回传的检查点验收；失败只修当前点。
+回传至少包含终端结论和 `summary.json`；失败同时提供 summary 指向的构建/测试日志。
+不需要为每个检查点建立新的测试脚本，入口随当前交付点更新；不会自动推进下一点。
+
+所有检查点名称前缀为 `ep-sdedup-combine-p1-`：
+
+| 点 | 后缀 | 交付范围与验收边界 |
+| --- | --- | --- |
+| C1 | `abi-host` | 27 参数 ABI、独立 Host 参数/配置校验、五表/tensor 容量及固定控制区/双窗边界；错误不提交、不消耗 magic。当前交付，等待外部验收 |
+| C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 GM tiling/launch ABI、固定 64 核空入口；不读写业务数据 |
+| C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域 |
+| C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值 |
+| C5 | `chain-multi` | warmup/多轮、各自 magic/选窗、同步与生命周期；联合模式 D/C 固定使用不同窗口符合预期 |
+| C6 | `profile` | functional/performance/breakdown 共用 consumer；分离记录 base/counter/latest，两算子独立 trace；空算子算法字节 0、算法带宽 N/A |
+| C7 | `memory-boundary` | 两半区分别执行合法区边界与保护区探针，避开 runtime；保留真实 Dispatch 回归，不冒充 Combine 数据面验证 |
+
+C1 的 `run_commit_validation.sh` 一次完成构建和三项 Host 测试，不要求 CANN/hostfile/SSH/NPU；
+使用独立 `build/validation-combine-c1` / `install/validation-combine-c1`，不覆盖 Dispatch 安装包。
+准备期限 900 秒、运行总期限 180 秒、单项最多 120 秒；成功结论为
+`成功 COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-abi-host`。
+执行需要 Python 3.9+、CMake、Make、g++。现有 Dispatch 的 `build_all.sh` / `sync.sh` / `run.sh`
+仍按原用途使用，C3 后才扩充三种算子模式；C1 不提前改变这些调用参数。
+
+**C1 范围约束：** 生产入口完成 Host 链路后返回 `NOT_SUPPORT`，直到 C2 安装空 kernel；
+用 launch 替身验证传参/错误传播，同时 ABI 测试链接真正的 C1 no-launch 实现，不能把替身当作生产成功。
+Host 不读设备 sendCounts 或五表，裸指针无法证明 allocation 容量、设备归属或业务有效行，
+这些仍由 caller 记录及后续 consumer 负责。与 Dispatch 保持一致，EP rank/world/globalBs 的 0 是推导哨兵。
+
+固定控制区及 1MiB 数据起点已经确定；空 kernel 无 result/stage 访问，C1 的 Host 容量门槛为
+每半区至少 `1MiB + runtime 保留区`，并检查整个 peer 地址跨度及 512B 对齐。
+结果 wire 的非量化 dtype/尾块仍属 CB03-02/CB04-03，因此独立地址助手接收显式 `resultSlotBytes`
+验证 `BS*K*Sresult` 和 `E*BS*alignUp(H*2,512)`，不默认采用示例 `ceilDiv(2H,480)*512`。
+第二阶段启用 result/stage 前必须据最终 wire 格式把完整 `Cdata` 纳入生产 Host 容量校验；
+C1 通过不证明真实通信数据区容量充足。
+
+维护经验：提交验收只能消费本次重新构建的当前 checkpoint 安装包；构建开始先使旧 manifest 失效，
+缺工具/构建失败不得继续运行旧测试。每项必须同时满足退出码 0 和唯一匹配 PASS marker，
+summary 记录 commit、源码 provenance/工作区状态，避免把文件副本或未提交修改误认成该 SHA 的原样产物。
 
 ### consumer 的职责
 

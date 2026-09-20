@@ -465,8 +465,9 @@ MaxTokenNum 是分配上界，可由配置推导，不能替代 TokenNum。即�
 ### 5.1 Combine 公共接口
 
 已确认独立入口 `TileXRMoeEpCombineMemoryServerDedup` 共 27 个参数，
-其中五表按下表接入。该 Combine 签名尚未写入公开声明、Host 或 kernel。
-保留参数的存在不代表对应可选特性已经支持，Host 支持范围仍须在实现时明确校验。
+其中五表按下表接入。C1 已写入公开声明、独立 Host 校验及布局，生产入口暂返回 NOT_SUPPORT；
+独立空 kernel/注册/tiling/launch 留到 C2，真实通信留到第二阶段。
+保留参数的存在不代表对应可选特性已经支持；C1 显式拒绝量化、active mask、TP 和共享专家的启用配置。
 
 #### 五表与参数的对应
 
