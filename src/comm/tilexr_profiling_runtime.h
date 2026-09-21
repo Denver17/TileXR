@@ -27,7 +27,7 @@ struct TileXRProfilingRuntimeConfig {
     bool latestLaunch = false;
 };
 
-// One allocator per communicator. Reservation is Host-only and never waits for
+// One allocator per communicator capture region. Reservation is Host-only and never waits for
 // device execution. Kernels sharing the capture must execute in order.
 class TileXRProfilingLaunchState {
 public:
@@ -51,6 +51,9 @@ private:
 };
 
 bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
+    TileXRProfilingRuntimeConfig *config, std::string *error);
+
+bool LoadTileXRCombineProfilingRuntimeConfig(int rank, int device, int commDomain,
     TileXRProfilingRuntimeConfig *config, std::string *error);
 
 bool WriteTileXRProfilingRecords(const TileXRProfilingRuntimeConfig &config,

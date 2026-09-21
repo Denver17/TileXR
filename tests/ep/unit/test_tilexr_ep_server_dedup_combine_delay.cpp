@@ -27,7 +27,7 @@ void CheckDelay(uint64_t start)
     // end the loop. Requiring every sample rejects both early and late exits.
     timestamps = {start, start, start + 49999U, start + 50000U};
     nextTimestamp = 0;
-    TileXREp::EpServerDedupCombineTilingData tiling{2, 16, 32, 3, 0, 0, {0, 0, 0}};
+    TileXREp::EpServerDedupCombineTilingData tiling{2, 16, 32, 3, 0, 0, 0, {0, 0}};
     const auto originalTiling = tiling;
     std::array<uint8_t, 128> tensor;
     tensor.fill(0xa5);

@@ -25,6 +25,7 @@ from dataclasses import replace
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 KERNEL_NAME = "tilexr_ep_dispatch_memory_server_dedup_kernel"
+KERNEL_NAMES = {"dispatch": KERNEL_NAME, "combine": "tilexr_ep_combine_memory_server_dedup_kernel"}
 RESULT_SEPARATOR = "=" * 32
 PERFORMANCE_SAMPLE_LIMIT = 50
 RANKS_PER_SERVER = 8
@@ -61,16 +62,24 @@ def capture_capacity(loops, warmup):
     return PROFILING_RECORDS_PER_LAUNCH
 
 
-def profiling_mapping(mapping_path=None):
+def profiling_mapping(mapping_path=None, *, operator="dispatch"):
+    kernel_name(operator)
     if mapping_path is not None:
         return Path(mapping_path)
     module = Path(__file__).resolve()
-    candidates = (module.parents[2] / "src/ep/profiling/server_dedup.mapping.json",
-                  module.parents[2] / "profiling/server_dedup.mapping.json")
+    filename = "server_dedup.mapping.json" if operator == "dispatch" else "server_dedup_combine.mapping.json"
+    candidates = (module.parents[2] / "src/ep/profiling" / filename,
+                  module.parents[2] / "profiling" / filename)
     for path in candidates:
         if path.is_file():
             return path
     raise ValueError("missing installed Server Dedup profiling mapping")
+
+
+def kernel_name(operator):
+    if operator not in KERNEL_NAMES:
+        raise ValueError("operator must be dispatch/combine")
+    return KERNEL_NAMES[operator]
 
 
 def _selection(config):
@@ -189,9 +198,10 @@ def breakdown_timeline(run):
         "omitted_markers": "instant and zero-duration samples; raw records and diagnostics retained"})
 
 
-def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=None):
+def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=None, *,
+                     operator="dispatch", run_id=None, kernel_sha=None):
     """Validate producer identity using the standard reader and retain incomplete reports."""
-    mapping = profiling_mapping(mapping_path)
+    mapping = profiling_mapping(mapping_path, operator=operator)
     selection = _selection(config)
     run = load_profile_run(mapping, [Path(path)], **selection)
     if run.capture_id != str(UUID(capture_id)):
@@ -201,10 +211,17 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
     expected_cores = set(range(64))
     if any({lane.core for lane in launch.lanes} != expected_cores for launch in run.launches):
         raise ValueError("breakdown requires all 64 core streams per launch")
+    if run.operator != kernel_name(operator).removesuffix("_kernel"):
+        raise ValueError("breakdown mapping operator does not match its producer")
+    identity = dict(operator=operator, kernel=kernel_name(operator))
+    if run_id is not None:
+        identity["run_id"] = run_id
+    if kernel_sha is not None:
+        identity["kernel_sha256"] = kernel_sha
     run = replace(run, attributes={**run.attributes, "selection": "last_launch",
                   "capture_mode": "latest_launch", "captured_launch": config["warmup"] + config["loops"] - 1,
-                  "submitted_launches": config["warmup"] + config["loops"]})
-    run = breakdown_timeline(run)
+                  "submitted_launches": config["warmup"] + config["loops"], **identity})
+    run = breakdown_timeline(run) if operator == "dispatch" else combine_breakdown_timeline(run)
     generated = generate_reports_for_run(run, Path(output_dir))
     # Common analysis owns timing semantics; EP only reduces each rank's result.
     analysis = analyze_run(run)
@@ -212,7 +229,7 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
                       for sample in lane.samples if sample.kind == "interval"}
     durations = [max((sample.duration_us for lane in launch.lanes for sample in lane.samples
                       if sample.critical), default=0.0) for launch in run.launches if launch.id >= 0]
-    evidence = dict(schema=RECORDS_SCHEMA, summary_schema=PROFILE_SUMMARY_SCHEMA,
+    evidence = dict(schema=RECORDS_SCHEMA, summary_schema=PROFILE_SUMMARY_SCHEMA, **identity,
                 rank=rank, capture_id=run.capture_id, records_path=str(Path(path).resolve()),
                 run_mode="breakdown", loops=config["loops"], warmup=config["warmup"],
                 launches=config["loops"] + config["warmup"], measured_launches=len(durations),
@@ -231,6 +248,24 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
     atomic_write_json(Path(evidence["summary_path"]), evidence)
     evidence["summary_sha256"] = _file_digest(evidence["summary_path"])
     return evidence
+
+
+def combine_breakdown_timeline(run):
+    """The empty kernel's only measured interval is its intentional wait."""
+    launches = []
+    for launch in run.launches:
+        lanes = []
+        for lane in launch.lanes:
+            samples = list(lane.samples)
+            samples.extend(replace(sample, name="empty_wait", stage_id=0x3003,
+                parent_stage_id=sample.stage_id, category="wait", critical=False,
+                attributes={**sample.attributes, "scope": "empty/framework"})
+                for sample in lane.samples if sample.critical and sample.raw_end > sample.raw_start)
+            lanes.append(replace(lane, samples=tuple(samples)))
+        launches.append(replace(launch, lanes=tuple(lanes)))
+    return replace(run, launches=tuple(launches), attributes={**run.attributes,
+        "scope": "empty/framework", "algorithm_bytes": 0, "algorithm_bandwidth": "N/A",
+        "timing": "Scalar boundaries around the empty kernel's 50 us wait; no Combine algorithm"})
 
 
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。
@@ -263,23 +298,24 @@ def _statistics(samples, suffix=""):
             "mean" + suffix: math.fsum(samples) / len(samples)}
 
 
-def performance_record(output_dir, loops, warmup):
+def performance_record(output_dir, loops, warmup, *, operator="dispatch"):
     """独立 rank 的本次 profile 必须恰好包含 warmup+loops 次目标 kernel。"""
     _integer(loops, "loops", 1)
     _integer(warmup, "warmup")
     inputs = profiler.discover_profile_inputs(Path(output_dir))
     if len(inputs) != 1:
         raise ValueError(f"每 rank 需要唯一 profile 输入，发现 {len(inputs)} 个")
+    target = kernel_name(operator)
     samples, source = profiler.series_from_input(
-        inputs[0], KERNEL_NAME, loops, strict_samples=True)
+        inputs[0], target, loops, strict_samples=True)
     if source["matched_samples"] != warmup + loops:
         raise ValueError(f"目标 kernel 样本数应为 {warmup + loops}，实际 {source['matched_samples']}")
-    return {"kernel": KERNEL_NAME, "samples": loops, "sample_us": samples,
+    return {"kernel": target, "samples": loops, "sample_us": samples,
             "matched_samples": source.pop("matched_samples"), "source": source,
             **_statistics(samples, "_us")}
 
 
-def validate_rank_measurements(record, chain_config):
+def validate_rank_measurements(record, chain_config, *, operator="dispatch"):
     """校验单 rank 的测量内容；run/build/rank 身份由调用方校验。"""
     mode = chain_config["run_mode"]
     if mode == "functional":
@@ -320,7 +356,8 @@ def validate_rank_measurements(record, chain_config):
                 raise ValueError("breakdown stage statistics are inconsistent")
         return
     evidence = record.get("performance")
-    if not isinstance(evidence, dict) or evidence.get("kernel") != KERNEL_NAME:
+    target = kernel_name(operator)
+    if not isinstance(evidence, dict) or evidence.get("kernel") != target:
         raise ValueError("缺少目标 kernel 的 performance 记录")
     samples = evidence.get("sample_us")
     if (not isinstance(samples, list) or len(samples) != loops
@@ -337,7 +374,7 @@ def validate_rank_measurements(record, chain_config):
     if (not isinstance(source, dict) or not isinstance(source.get("path"), str) or not source["path"]
             or source.get("source_type") not in ("op_summary_csv", "ai_core_op_summary_db")
             or not isinstance(source.get("matched_kernel_names"), list) or not source["matched_kernel_names"]
-            or any(not isinstance(name, str) or not profiler.kernel_name_matches(name, KERNEL_NAME)
+            or any(not isinstance(name, str) or not profiler.kernel_name_matches(name, target)
                    for name in source["matched_kernel_names"])):
         raise ValueError("performance 缺少有效的 profile 来源")
 
@@ -377,7 +414,7 @@ def validate_dispatch_traffic(record, config):
             raise ValueError("关闭 server 去重时必须全部 DIRECT，且无 first-hop/relay")
 
 
-def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_valid=True):
+def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_valid=True, operator="dispatch"):
     """performance 汇总各 server 最后最多 50 轮均值；breakdown 取最后一轮。"""
     rank_size = _integer(chain_config["rank_size"], "rank_size", 1)
     if (not isinstance(rank_records, list) or len(rank_records) != rank_size
@@ -394,7 +431,7 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                 type(chain_config["server_dedup_enabled"]) is not bool or
                 record.get("server_dedup_enabled") is not chain_config["server_dedup_enabled"]):
             raise ValueError("Dispatch server_dedup_enabled 与本次配置不一致")
-        validate_rank_measurements(record, chain_config)
+        validate_rank_measurements(record, chain_config, operator=operator)
     output_valid = output_valid and all(row.get("validation_status") != "FAIL" for row in ranks)
     mode = chain_config["run_mode"]
     source_send = chain_config.get("kernel_scope") == "source_send"
@@ -408,7 +445,7 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                 raise ValueError(kind + " 全 Rank 发送/接收包数不一致")
     count_scope = chain_config.get("kernel_scope") == "cnt_cumsum"
     summary = {"run_mode": mode, "backend": "memory", "native_status": "dispatch" if dispatch else "source_send" if source_send else "cnt_cumsum" if count_scope else "empty",
-               "kernel": KERNEL_NAME, "kernel_sha256": kernel_sha,
+               "kernel": kernel_name(operator), "kernel_sha256": kernel_sha,
                "rank_size": rank_size, "validation_status": "PASS" if output_valid else "FAIL",
                "configuration": {name: chain_config[name] for name in
                                  ("bs", "h", "topk", "moe_expert_num", "dtype", "block_dim", "loops", "warmup")},
@@ -547,7 +584,8 @@ def validate_report_artifacts(evidence, rank, chain_config):
         raise ValueError("profiling report summary rank mismatch")
     identity = ("schema", "capture_id", "run_mode", "loops", "warmup", "launches", "measured_launches",
                 "selection", "capture_mode", "captured_launch", "captured_launches", "status", "sample_us",
-                "stages_us", "dropped_records", "artifact_manifest")
+                "stages_us", "dropped_records", "artifact_manifest", "operator", "kernel", "run_id", "kernel_sha256",
+                "last_launch", "scope", "native_status", "algorithm_bytes", "algorithm_bandwidth_gbps", "algorithm_bandwidth")
     if any(summary.get(key) != evidence.get(key) for key in identity):
         raise ValueError("profiling report summary disagrees with node scalar result")
     if (summary.get("loops") != chain_config["loops"] or summary.get("warmup") != chain_config["warmup"]
@@ -603,7 +641,7 @@ def _write_trace_index(output_dir, result):
     atomic_write_json(Path(output_dir) / "index.json", result)
 
 
-def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, kernel_sha):
+def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, kernel_sha, *, operator="dispatch"):
     """Collect one Chrome JSON per rank and a compact index; never reparse captures."""
     if chain_config["run_mode"] != "breakdown":
         raise ValueError("report collection requires breakdown mode")
@@ -639,7 +677,7 @@ def collect_breakdown_reports(rank_records, chain_config, output_dir, run_id, ke
                 raise ValueError("profiling report capture UUID does not belong to this run")
             traces[str(rank)] = copy_rank_trace(evidence["artifacts"]["perfetto_trace.json"], trace_dir, rank)
             entry.update(status="incomplete", artifacts_verified=True)
-            validate_rank_measurements(dict(rank=rank, breakdown=evidence), chain_config)
+            validate_rank_measurements(dict(rank=rank, breakdown=evidence), chain_config, operator=operator)
             entry["status"] = "complete"
             entry["kernel_us"] = evidence["sample_us"][0]
             values[rank] = entry["kernel_us"]

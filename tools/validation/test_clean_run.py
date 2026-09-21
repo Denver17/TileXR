@@ -134,7 +134,7 @@ class CleanupTests(unittest.TestCase):
     def test_public_script_uses_config_without_loading_cann(self):
         repo = Path(__file__).resolve().parents[2]
         for name in ("clean_run.sh", "tools/validation/clean_run.py", "tools/validation/workflow.py",
-                     "tools/validation/source.py", "tools/validation/measurements.py", "tools/validation/run_summary.py",
+                     "tools/validation/source.py", "tools/validation/measurements.py", "tools/validation/operator_measurements.py", "tools/validation/run_summary.py",
                      "tools/ep/msprof_kernel_stats.py"):
             dest = self.root / name
             dest.parent.mkdir(parents=True, exist_ok=True)

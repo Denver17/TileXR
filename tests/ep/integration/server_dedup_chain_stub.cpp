@@ -31,7 +31,8 @@ uint64_t lastDispatchMagic = 0;
 bool IsMultiBatch()
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0;
+    return checkpoint && (std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0 ||
+        std::strcmp(checkpoint, "ep-sdedup-combine-p1-profile") == 0);
 }
 bool BatchPending()
 {
@@ -45,6 +46,9 @@ TileXR::TileXRProfilingRuntimeConfig profileConfig;
 std::vector<uint64_t> profileTimes;
 std::vector<uint32_t> profileEvents, profileOccupied, profileDropped;
 uint32_t profileStride = 0;
+TileXR::TileXRProfilingRuntimeConfig combineProfileConfig;
+std::vector<uint64_t> combineProfileTimes;
+std::vector<uint32_t> combineProfileEvents, combineProfileOccupied, combineProfileDropped;
 int Call(const char *name)
 {
     const uint64_t count = ++calls[name];
@@ -180,6 +184,17 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
         profileOccupied.resize(64U);
         profileDropped.resize(profileOccupied.size());
     }
+    if (!TileXR::LoadTileXRCombineProfilingRuntimeConfig(rank, deviceId, domain, &combineProfileConfig, &error)) return 94;
+    if (combineProfileConfig.enabled) {
+        if (combineProfileConfig.recordsPerCore != 65536U ||
+            (profileConfig.enabled && profileConfig.recordsPath == combineProfileConfig.recordsPath)) return 95;
+        combineProfileConfig.latestLaunch = true;
+        combineProfileConfig.recordsPerCore = 16U;
+        combineProfileTimes.resize(16U * 64U);
+        combineProfileEvents.resize(combineProfileTimes.size());
+        combineProfileOccupied.resize(64U);
+        combineProfileDropped.resize(64U);
+    }
     return Call("comm-init");
 }
 int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, int rank, TileXRCommPtr *comm)
@@ -215,6 +230,17 @@ int TileXRCommDestroy(TileXRCommPtr)
                     profileDropped, profileTimes, profileEvents, &error)) return 94;
         }
         const int result = Call("profiling-export");
+        if (result != 0) return result;
+    }
+    if (combineProfileConfig.enabled) {
+        const char *fault = std::getenv("TEST_COMBINE_PROFILE_FAULT");
+        if (!fault || std::strcmp(fault, "missing") != 0) {
+            std::string error;
+            if (fault && std::strcmp(fault, "capture") == 0) ++combineProfileConfig.captureId[0];
+            if (!TileXR::WriteTileXRProfilingRecords(combineProfileConfig, rankId, combineProfileOccupied,
+                    combineProfileDropped, combineProfileTimes, combineProfileEvents, &error)) return 94;
+        }
+        const int result = Call("combine-profiling-export");
         if (result != 0) return result;
     }
     return Call("comm-destroy");
@@ -450,6 +476,21 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
     const int result = Call("combine-launch");
     if (result != 0) return result;
     ++sharedMagic;
+    if (combineProfileConfig.enabled) {
+        const uint64_t origin = calls["combine-launch"] * 100000U;
+        const char *profileFault = std::getenv("TEST_COMBINE_PROFILE_FAULT");
+        for (uint32_t core = 0; core < 64U; ++core) {
+            const uint32_t base = core * 16U;
+            combineProfileTimes[base] = origin + core;
+            combineProfileTimes[base + 1U] = origin + core + 50000U;
+            combineProfileEvents[base] = 0x3001U;
+            combineProfileEvents[base + 1U] = 0x3002U;
+            combineProfileOccupied[core] = 8U;
+            combineProfileDropped[core] = 0;
+            if (profileFault && std::strcmp(profileFault, "overflow") == 0) combineProfileDropped[core] = 1U;
+            if (profileFault && std::strcmp(profileFault, "end") == 0) combineProfileEvents[base + 1U] = 0;
+        }
+    }
     const char *fault = std::getenv("TEST_COMBINE_FAULT");
     const char *faultCall = std::getenv("TEST_COMBINE_FAULT_CALL");
     if (fault && (!faultCall || calls["combine-launch"] == std::strtoull(faultCall, nullptr, 10))) {

@@ -30,14 +30,16 @@ Host 回归不会在 build 后自动执行；`run.sh` 默认 `host_validation=0`
 报告保存在 `run/validation/host-<id>/summary.json`，每项测试的原始日志放在同一目录。
 修改 Host/ABI/布局、Planner 或 Python 分析工具后，以及完整交付验收时，建议手动执行此入口。
 
-`bash run_commit_validation.sh` 当前交付 Combine C5（`ep-sdedup-combine-p1-chain-multi`）：
-构建独立 `install/validation-combine-c5`，完成七项 Host 回归后，使用 hostfile 前两台各 8 卡
-串行执行 8 个设备用例，每例 2 轮预热 + 5 轮正式调用。覆盖 dispatch/combine/both、BF16/FP16
-及联合模式量化 Dispatch；Combine 仍非量化且为空算子，每次等待 50μs。
-终端以 `[i/8] START/PASS/FAIL` 标明当前用例和结果路径，首个失败停止；连续拉起多组进程
-属于有限验收矩阵。各用例独立保留在 `commit-<id>/cases/`，总报告为同目录 `summary.json`。
-维护时须同时记录当前批次、总数和独立结果路径，避免把串行矩阵误认成无限重试；
-Host 替身通过不代表 A5 多轮通过，须等待完整 16 个 rank 的设备验收结果。
+`bash run_commit_validation.sh` 当前交付 Combine C6（`ep-sdedup-combine-p1-profile`）：
+独立 `install/validation-combine-c6` 分 profiling OFF/ON 两次构建，每次完成 11 项 Host 回归后，
+使用 hostfile 前两台各 8 卡分别执行 dispatch/combine/both。OFF 跑 msprof performance，
+ON 跑 breakdown，共 6 个串行设备用例，每例 2 轮预热 + 5 轮正式调用。Combine 保持非量化空算子和 50μs 等待。
+终端以 `[i/6] START/PASS/FAIL` 标明当前用例、build_id 和结果路径，首个失败停止；
+各用例独立保留在 `commit-<id>/cases/`，两份构建 manifest 保留在 `builds/`，总报告为同目录 `summary.json`。
+联合模式独立保留 Dispatch/Combine trace；单跑只导出、解析启用算子的区。空 Combine 只报告框架延迟，
+算法字节为 0，算法带宽为 N/A。Host 替身与编译通过不替代 A5 设备验收；C5 仍需独立回传验证。
+维护时须隔离记录路径、报告目录及算子身份，并保留两次构建的 manifest，防止 ON 重建覆盖后
+把 OFF 性能结果关联到错误的 kernel 哈希。有限矩阵应始终显示当前批次及总数，避免误认成无限重试。
 
 ## Environment Setup
 

@@ -1,0 +1,14 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "tilexr_ep_combine_memory_server_dedup",
+  "cycles_per_us": 1000,
+  "stages": [
+    {
+      "name": "kernel_total",
+      "category": "total",
+      "critical": true,
+      "begin": 12289,
+      "end": 12290
+    }
+  ]
+}

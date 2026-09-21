@@ -150,6 +150,13 @@ struct CommArgs {
     GM_ADDR tilexrProfilingDroppedCountsGM = nullptr;
     uint32_t tilexrProfilingRecordsPerCore = 0U;
     uint32_t tilexrProfilingCoreCapacity = 0U;
+    // Independent Combine capture; append to preserve existing field offsets.
+    GM_ADDR tilexrCombineProfilingTimestampsGM = nullptr;
+    GM_ADDR tilexrCombineProfilingEventIdsGM = nullptr;
+    GM_ADDR tilexrCombineProfilingRecordCountsGM = nullptr;
+    GM_ADDR tilexrCombineProfilingDroppedCountsGM = nullptr;
+    uint32_t tilexrCombineProfilingRecordsPerCore = 0U;
+    uint32_t tilexrCombineProfilingCoreCapacity = 0U;
 };
 
 struct LcclDumpBlockInfo {

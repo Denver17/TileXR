@@ -22,6 +22,7 @@ import threading
 import time
 import uuid
 import measurements
+import operator_measurements as operator_measure
 import run_summary
 
 from source import inventory
@@ -44,7 +45,13 @@ COMBINE_DRY_RUN_MARKER = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS "
 COMBINE_CHAIN_CHECKPOINT = "ep-sdedup-combine-p1-chain-single"
 COMBINE_MULTI_CHECKPOINT = "ep-sdedup-combine-p1-chain-multi"
 COMBINE_MULTI_TEST = "test_tilexr_ep_server_dedup_combine_multi"
-COMBINE_DEVICE_CHECKPOINTS = (COMBINE_CHAIN_CHECKPOINT, COMBINE_MULTI_CHECKPOINT)
+COMBINE_PROFILE_CHECKPOINT = "ep-sdedup-combine-p1-profile"
+COMBINE_PROFILE_TEST = "test_tilexr_ep_server_dedup_combine_profile"
+COMBINE_PROFILE_KERNEL_TEST = "test_tilexr_ep_server_dedup_combine_profile_kernel"
+COMBINE_PROFILE_LAUNCH_TEST = "test_tilexr_ep_server_dedup_combine_profile_launch"
+COMBINE_PROFILE_REGIONS_TEST = "test_tilexr_ep_server_dedup_combine_profile_regions"
+COMBINE_CONTINUOUS_CHECKPOINTS = (COMBINE_MULTI_CHECKPOINT, COMBINE_PROFILE_CHECKPOINT)
+COMBINE_DEVICE_CHECKPOINTS = (COMBINE_CHAIN_CHECKPOINT, *COMBINE_CONTINUOUS_CHECKPOINTS)
 COMBINE_CHAIN_TEST = "test_tilexr_ep_server_dedup_combine_chain"
 COMBINE_DELAY_TEST = "test_tilexr_ep_server_dedup_combine_delay"
 COMBINE_CHAIN_MARKER = "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS "
@@ -55,6 +62,7 @@ COMBINE_TESTS = {
     COMBINE_CHAIN_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST},
     COMBINE_MULTI_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST, COMBINE_MULTI_TEST},
 }
+COMBINE_TESTS[COMBINE_PROFILE_CHECKPOINT] = COMBINE_TESTS[COMBINE_MULTI_CHECKPOINT] | {COMBINE_PROFILE_TEST, COMBINE_PROFILE_REGIONS_TEST, COMBINE_PROFILE_LAUNCH_TEST, COMBINE_PROFILE_KERNEL_TEST}
 COMBINE_ABI = {"launch_bytes": 88, "tiling_bytes": 16, "runtime_args_bytes": 88,
                "block_dim": 64, "kernel_scope": "combine-empty"}
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
@@ -75,6 +83,7 @@ CHAIN_CHECKPOINTS = (DISPATCH_CHECKPOINT, MEMORY_BOUNDARY_CHECKPOINT, *COMBINE_D
 CHAIN_PROGRAM = "test_tilexr_ep_server_dedup_chain"
 CHAIN_MARKER = "EP_SERVER_DEDUP_CHAIN_PASS "
 BREAKDOWN_MARKER = "EP_SERVER_DEDUP_BREAKDOWN_PASS "
+OPERATOR_BREAKDOWN_MARKER = "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS "
 RANK_CHECKPOINTS = (DRY_RUN_CHECKPOINT, *CHAIN_CHECKPOINTS)
 REGISTRATION_TEST = "test_tilexr_ep_server_dedup_registration"
 CHECKS = ("protocol", "layout", "host_validation", "public_abi")
@@ -318,7 +327,7 @@ class Config:
         if self.checkpoint in (COMBINE_ABI_HOST_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT) and self.mode != "host":
             raise ValueError("Combine C1/C3 仅验证 Host ABI/layout/configuration；请使用 host 模式")
         if action == "commit-validate" and self.checkpoint not in COMBINE_TESTS:
-            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3/C4/C5")
+            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3/C4/C5/C6")
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, COMBINE_EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -522,7 +531,8 @@ def validation_directory(checkpoint):
             COMBINE_EMPTY_KERNEL_CHECKPOINT: "validation-combine-c2",
             COMBINE_DRY_RUN_CHECKPOINT: "validation-combine-c3",
             COMBINE_CHAIN_CHECKPOINT: "validation-combine-c4",
-            COMBINE_MULTI_CHECKPOINT: "validation-combine-c5"}.get(checkpoint, "validation")
+            COMBINE_MULTI_CHECKPOINT: "validation-combine-c5",
+            COMBINE_PROFILE_CHECKPOINT: "validation-combine-c6"}.get(checkpoint, "validation")
 
 
 def runtime_check(config, install, log):
@@ -612,8 +622,21 @@ def verify_build(config, *, check_run_mode=True):
     return manifest
 
 
+def validation_build_directory(config):
+    name = validation_directory(config.checkpoint)
+    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        name += "-profile-on" if config.profiling else "-profile-off"
+    return config.root / "build" / name
+
+
+def source_content_sha256(root, source):
+    # inventory excludes deployment settings, generated metadata and build/results.
+    files = {name: digest(Path(root) / name) for name in source["files"]}
+    return hashlib.sha256(json.dumps(files, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def clean_build_directory(config):
-    work = config.root / "build" / validation_directory(config.checkpoint)
+    work = validation_build_directory(config)
     # 只删除用户授权的本工具构建目录；先检查路径，不能跟随 build symlink。
     for path in (work.parent, work, config.install.parent, config.install):
         if path.is_symlink():
@@ -650,6 +673,8 @@ def build(config):
     work = clean_build_directory(config)
     require_tools(["cmake", "ctest", "g++", "make"])
     source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
+    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        source["content_sha256"] = source_content_sha256(config.root, source)
     stage = work / "install"
     log = config.logs / ("build-" + build_id)
     print(f"开始构建 {config.checkpoint}，mode={config.mode}，日志：{log}", flush=True)
@@ -692,7 +717,7 @@ def build(config):
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     build_targets = combine_tests
     if config.checkpoint in (COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
-        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
+        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
     if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         build_targets = build_targets | {CHAIN_PROGRAM}
     targets = ["--target", *sorted(build_targets)] if build_targets else []
@@ -718,7 +743,7 @@ def build(config):
     tests = []
     for test in listing["tests"]:
         command = test["command"]
-        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST):
+        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST):
             if (len(command) != 4 or not command[1].endswith(".py") or command[2] != "--consumer"
                     or Path(command[3]).name != COMBINE_DRY_RUN_PROGRAM):
                 raise ValueError(f"无法导出 C3 consumer 测试命令：{command}")
@@ -754,6 +779,11 @@ def build(config):
             if not (stage / artifact).is_file():
                 raise ValueError("缺少通信域边界测试产物：" + artifact)
     runtime_check(config, stage, log)
+    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        final_source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
+        if (final_source["commit"] != source["commit"] or
+                source_content_sha256(config.root, final_source) != source["content_sha256"]):
+            raise Failure("BUILD_FAILED", "C6构建期间源码发生变化，拒绝关联不确定产物")
     manifest = {"build_id": build_id, "source": source, "mode": config.mode,
                 "checkpoint": config.checkpoint, "architecture": platform.machine(),
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
@@ -763,6 +793,10 @@ def build(config):
         manifest["build_timeout_seconds"] = 900
     if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         manifest["server_dedup_combine_contract"] = dict(COMBINE_ABI)
+    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        for operator, filename in (("dispatch", "server_dedup.mapping.json"), ("combine", "server_dedup_combine.mapping.json")):
+            if not (stage / "share/tilexr/profiling" / filename).is_file():
+                raise ValueError("C6缺少独立profiling mapping：" + operator)
     if config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         manifest["server_dedup_contract"] = dict(DISPATCH_ABI)
         manifest["server_dedup_profiling"] = config.profiling
@@ -1006,7 +1040,7 @@ def validate_combine_dispatch_record(dispatch, chain, mapping, run_id, manifest,
     adapted = dict(dispatch, checkpoint=DISPATCH_CHECKPOINT,
                    chain=dict(chain, checkpoint=DISPATCH_CHECKPOINT))
     validate_rank_records([adapted], [mapping], run_id, dict(manifest, checkpoint=DISPATCH_CHECKPOINT),
-                          dict(config, kernel_scope="dispatch"))
+                          dict(config, kernel_scope="dispatch"), check_measurements=False)
 
 
 def validate_multi_magic(record, config, *, dispatch_only=False):
@@ -1072,7 +1106,7 @@ def validate_combine_chain_record(record, mapping, run_id, manifest, config):
                     "fp8_format", "run_mode", "loops", "warmup"):
             if type(marker.get(key)) is not type(config[key]) or marker[key] != config[key]:
                 raise Failure("RESULT_FAILED", "Combine 配置回显不一致", rank=mapping["rank"], field=key)
-    if manifest["checkpoint"] == COMBINE_MULTI_CHECKPOINT:
+    if manifest["checkpoint"] in COMBINE_CONTINUOUS_CHECKPOINTS:
         validate_combine_multi_record(record, mapping, run_id, manifest, config)
         return
     if config["operator_mode"] == "dispatch":
@@ -1130,7 +1164,13 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
             linked = record["chain"]
             if manifest["checkpoint"] in COMBINE_DEVICE_CHECKPOINTS:
                 validate_combine_chain_record(record, mapping, run_id, manifest, chain_config)
-            loops = chain_config["loops"] if manifest["checkpoint"] == COMBINE_MULTI_CHECKPOINT else 1
+                if manifest["checkpoint"] == COMBINE_PROFILE_CHECKPOINT and check_measurements:
+                    try:
+                        operator_measure.validate_operator_measurements(record, chain_config, run_id=run_id,
+                            kernel_shas=operator_kernel_shas(manifest, chain_config))
+                    except (ValueError, TypeError, KeyError) as error:
+                        raise Failure("RESULT_FAILED", f"C6算子测量记录无效：{error}", rank=mapping["rank"]) from error
+            loops = chain_config["loops"] if manifest["checkpoint"] in COMBINE_CONTINUOUS_CHECKPOINTS else 1
             if manifest["checkpoint"] == DISPATCH_CHECKPOINT:
                 if chain_config is None:
                     raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
@@ -1208,6 +1248,39 @@ def parse_rank_marker(output, prefix):
         raise Failure("LOG_PARSE_FAILED", "无法解析 rank marker：" + prefix.strip()) from error
 
 
+def operator_kernel_shas(manifest, config):
+    return {operator: manifest["artifacts"][f"lib/tilexr/kernels/tilexr_ep_{operator}_memory_server_dedup_kernel.o"]
+            for operator in operator_measure.active_operators(config)}
+
+
+def parse_operator_breakdowns(output, mapping, run_id, manifest, record, config, records_paths, capture_id):
+    expected = set(operator_measure.active_operators(config)) if config["run_mode"] == "breakdown" else set()
+    markers = {}
+    for line in output.splitlines():
+        if line.startswith(BREAKDOWN_MARKER):
+            raise Failure("LOG_PARSE_FAILED", "C6不接受未区分算子的旧breakdown marker")
+        if not line.startswith(OPERATOR_BREAKDOWN_MARKER):
+            continue
+        try:
+            marker = json.loads(line[len(OPERATOR_BREAKDOWN_MARKER):])
+        except ValueError as error:
+            raise Failure("LOG_PARSE_FAILED", "C6算子breakdown marker不是有效JSON") from error
+        operator = marker.get("operator") if isinstance(marker, dict) else None
+        if not isinstance(operator, str) or operator not in expected or operator in markers:
+            raise Failure("LOG_PARSE_FAILED", "C6算子breakdown marker重复或包含未启用算子")
+        wanted = dict(rank_record(mapping, run_id, manifest), pid=record["pid"], operator=operator,
+                      schema=measurements.RECORDS_SCHEMA, records_path=str(records_paths[operator]),
+                      capture_id=capture_id, launches=config["warmup"] + config["loops"],
+                      capture_mode="latest_launch", captured_launches=1,
+                      captured_launch=config["warmup"] + config["loops"] - 1)
+        if any(type(marker.get(key)) is not type(value) or marker[key] != value for key, value in wanted.items()):
+            raise Failure("RESULT_FAILED", "C6算子breakdown身份/路径/批次不匹配", rank=mapping["rank"], operator=operator)
+        markers[operator] = marker
+    if set(markers) != expected:
+        raise Failure("LOG_PARSE_FAILED", "C6缺少启用算子的breakdown marker", rank=mapping["rank"])
+    return markers
+
+
 def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
     def launch(mapping):
         rank = mapping["rank"]
@@ -1239,13 +1312,22 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if config.chain["block_dim"] != "auto":
                     env[block_dim] = config.chain["block_dim"]
                 env["LD_LIBRARY_PATH"] = str(config.install / "lib") + ":" + env.get("LD_LIBRARY_PATH", "")
-                env.pop("TILEXR_PROFILING_RECORDS_PATH", None)
+                for key in ("TILEXR_PROFILING_RECORDS_PATH", "TILEXR_PROFILING_COMBINE_RECORDS_PATH",
+                            "TILEXR_PROFILING_CAPTURE_ID", "TILEXR_PROFILING_RECORDS_PER_CORE"):
+                    env.pop(key, None)
+                records_paths = {}
                 if config.chain["run_mode"] == "breakdown":
                     records_path = log.parent / f"rank-{rank}.records.v1"
                     env.update(TILEXR_PROFILING_CAPTURE_ID=str(uuid.uuid5(uuid.NAMESPACE_URL, "tilexr-validation:" + run_id)),
-                               TILEXR_PROFILING_RECORDS_PATH=str(records_path),
                                TILEXR_PROFILING_RECORDS_PER_CORE=str(measurements.capture_capacity(
                                    config.chain["loops"], config.chain["warmup"])))
+                    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+                        for operator in operator_measure.active_operators(config.chain):
+                            records_paths[operator] = log.parent / f"rank-{rank}.{operator}.records.v1"
+                            key = "TILEXR_PROFILING_RECORDS_PATH" if operator == "dispatch" else "TILEXR_PROFILING_COMBINE_RECORDS_PATH"
+                            env[key] = str(records_paths[operator])
+                    else:
+                        env["TILEXR_PROFILING_RECORDS_PATH"] = str(records_path)
                 if config.chain["run_mode"] == "performance":
                     profile_dir = log.parent / f"msprof-rank-{rank}"
                     argv = [config.chain["msprof"], "--application=" + shlex.join([str(arg) for arg in argv]),
@@ -1284,7 +1366,35 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                     validate_rank_records([record], [mapping], run_id, manifest, config.chain,
                                           check_measurements=False, allow_invalid_output=True)
                     communication_completed = True
-                if config.chain["run_mode"] == "performance":
+                if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+                    validate_rank_records([record], [mapping], run_id, manifest, config.chain, check_measurements=False)
+                    communication_completed = True
+                    parse_operator_breakdowns(output, mapping, run_id, manifest, record, config.chain,
+                                              records_paths, env.get("TILEXR_PROFILING_CAPTURE_ID"))
+                    record["operator_measurements"] = {}
+                    kernel_shas = operator_kernel_shas(manifest, config.chain)
+                    capture_errors = []
+                    for operator in operator_measure.active_operators(config.chain):
+                        if config.chain["run_mode"] == "functional":
+                            continue
+                        try:
+                            if config.chain["run_mode"] == "performance":
+                                evidence = operator_measure.performance_record(profile_dir, config.chain["loops"],
+                                    config.chain["warmup"], operator=operator, run_id=run_id, rank=rank,
+                                    kernel_sha=kernel_shas[operator])
+                            else:
+                                with profiling_lock:
+                                    evidence = operator_measure.breakdown_record(records_paths[operator], config.chain, rank,
+                                        env["TILEXR_PROFILING_CAPTURE_ID"], log.parent / f"profile-rank-{rank}" / operator,
+                                        operator=operator, run_id=run_id, kernel_sha=kernel_shas[operator],
+                                        mapping_path=config.install / ("share/tilexr/profiling/server_dedup.mapping.json" if operator == "dispatch"
+                                            else "share/tilexr/profiling/server_dedup_combine.mapping.json"))
+                            record["operator_measurements"][operator] = {config.chain["run_mode"]: evidence}
+                        except (ValueError, TypeError, KeyError, OSError) as error:
+                            capture_errors.extend(failure_records(error, "RESULT_FAILED", rank=rank, operator=operator))
+                    if capture_errors:
+                        raise Failure("RESULT_FAILED", "C6算子测量采集失败；保留其他算子已完成报告", additional_failures=capture_errors)
+                elif config.chain["run_mode"] == "performance":
                     try:
                         record["performance"] = measurements.performance_record(profile_dir,
                             config.chain["loops"], config.chain["warmup"])
@@ -1320,8 +1430,12 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
         except Exception as error:
             capture = dict(communication_completed=True) if communication_completed else {}
             if communication_completed and config.chain["run_mode"] == "breakdown":
-                capture.update(profile_status=record.get("breakdown", {}).get("status", "unavailable"),
-                               records_path=str(records_path), report_dir=str(log.parent / f"profile-rank-{rank}"))
+                if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+                    capture.update(operator_records_paths={operator: str(path) for operator, path in records_paths.items()},
+                                   report_dir=str(log.parent / f"profile-rank-{rank}"))
+                else:
+                    capture.update(profile_status=record.get("breakdown", {}).get("status", "unavailable"),
+                                   records_path=str(records_path), report_dir=str(log.parent / f"profile-rank-{rank}"))
             failures = failure_records(error, "LAUNCH_FAILED", rank=rank, log=str(log), **capture)
             # 保留第一个观察到的失败；其他 rank 的取消/清理错误作为后续证据。
             with error_lock:
@@ -1377,6 +1491,14 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_", " test=" + name.removeprefix(prefix + "combine_")
     elif name in (COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST):
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_CHAIN_", " test=" + ("delay" if name == COMBINE_DELAY_TEST else "lifecycle")
+    elif name == COMBINE_PROFILE_KERNEL_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_", ""
+    elif name == COMBINE_PROFILE_LAUNCH_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_", " test=launch"
+    elif name == COMBINE_PROFILE_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_PROFILE_", " test=lifecycle"
+    elif name == COMBINE_PROFILE_REGIONS_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_PROFILE_REGIONS_", ""
     elif name == COMBINE_MULTI_TEST:
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_MULTI_", " test=lifecycle"
     elif name == COMBINE_DRY_RUN_TEST:
@@ -1412,6 +1534,8 @@ def host_validate(config, run_id=None):
         result.update(scope="Combine C4 Host回归：C1/C3、同consumer链路替身及空kernel等待；不含真实NPU提交。")
     if config.checkpoint == COMBINE_MULTI_CHECKPOINT:
         result.update(scope="Combine C5 Host回归：C1/C3/C4、连续批次/预热/选窗/生命周期及空kernel等待；不含真实NPU提交。")
+    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        result.update(scope="Combine C6 Host回归：C1/C3/C4/C5、独立记录区及三模式profiling；不含真实NPU提交。")
     if config.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
         result.update(scope="Combine C3：C1回归、同一consumer的三种算子模式、独立量化开关及rank映射；无CANN/SSH/设备分配/communicator/launch。")
     started = time.monotonic()
@@ -1585,9 +1709,124 @@ def combine_chain_commit_validate(config, run_id):
     return 0 if summary["status"] == "PASS" else FAILURE_CODES[summary["errors"][0]["type"]]
 
 
+def combine_profile_commit_validate(config, run_id):
+    """Keep OFF/ON builds and all six case reports under one acceptance run."""
+    log = config.logs / run_id
+    summary = dict(run_id=run_id, checkpoint=config.checkpoint, mode=config.mode, status="FAIL",
+                   phases=[], cases=[], expected_cases=6, errors=[], build_timeout_seconds=900,
+                   validation_timeout_seconds=config.timeout, per_case_timeout_seconds=config.timeout,
+                   scope="Combine C6：独立profiling OFF/ON构建，各跑dispatch/combine/both；共6组16P，"
+                         "每组2轮预热+5轮正式调用；独立测量/trace，空Combine算法字节0且带宽N/A；不验Combine通信或业务数值。")
+    original_environment = dict(os.environ)
+    stage = "build-performance"
+    active_config = None
+    try:
+        # The gate owns the case matrix; deployment and msprof paths remain caller configuration.
+        for key in ("RUN_MODE", "LOOPS", "WARMUP", "BS", "H", "TOPK", "MOE_EXPERT_NUM", "DTYPE",
+                    "QUANT_MODE", "DISPATCH_QUANT_MODE", "COMBINE_QUANT_MODE", "OPERATOR_MODE", "FP8_FORMAT",
+                    "BLOCK_DIM", "CASE_ANALYSIS", "ROUTE_MODE", "SEED", "SERVERS"):
+            os.environ.pop("TILEXR_VALIDATION_" + key, None)
+        os.environ.pop("TILEXR_DIRECT_HOSTS_JSON", None)
+        os.environ.update(TILEXR_VALIDATION_LOOPS="5", TILEXR_VALIDATION_WARMUP="2", TILEXR_VALIDATION_SERVERS="2",
+                          TILEXR_VALIDATION_TIMEOUT=str(config.timeout), TILEXR_VALIDATION_BS="96",
+                          TILEXR_VALIDATION_H="7168", TILEXR_VALIDATION_TOPK="6", TILEXR_VALIDATION_MOE_EXPERT_NUM="96",
+                          TILEXR_VALIDATION_DTYPE="bf16", TILEXR_VALIDATION_QUANT_MODE="0",
+                          TILEXR_VALIDATION_DISPATCH_QUANT_MODE="0", TILEXR_VALIDATION_COMBINE_QUANT_MODE="0",
+                          TILEXR_VALIDATION_FP8_FORMAT="e4m3", TILEXR_VALIDATION_BLOCK_DIM="auto",
+                          TILEXR_VALIDATION_ROUTE_MODE="balance_shift", TILEXR_VALIDATION_SEED="2026",
+                          TILEXR_VALIDATION_CASE_ANALYSIS="0")
+        for mode in ("performance", "breakdown"):
+            stage = "build-" + mode
+            os.environ.update(TILEXR_VALIDATION_RESULT_ROOT=str(config.logs), TILEXR_VALIDATION_RUN_MODE=mode,
+                              TILEXR_VALIDATION_OPERATOR_MODE="dispatch",
+                              TILEXR_VALIDATION_BREAKDOWN="1" if mode == "breakdown" else "0")
+            active_config = Config("build")
+            phase = dict(run_mode=mode, profiling=active_config.profiling, status="FAIL")
+            summary["phases"].append(phase)
+            try:
+                build(active_config)
+            finally:
+                phase.update(build_id=getattr(active_config, "build_id", None),
+                             build_logs=str(config.logs / ("build-" + getattr(active_config, "build_id", "unknown"))))
+            manifest = verify_build(active_config, check_run_mode=False)
+            fingerprint = manifest["source"].get("content_sha256")
+            if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+                raise Failure("BUILD_FAILED", "C6构建缺少源码内容摘要")
+            identity = dict(commit=manifest["source"]["commit"], content_sha256=fingerprint)
+            if "source_identity" in summary and summary["source_identity"] != identity:
+                raise Failure("BUILD_FAILED", "C6 OFF/ON源码或commit不一致，拒绝混合版本验收")
+            summary["source_identity"] = identity
+            phase["source_identity"] = identity
+            phase["build_directory"] = str(validation_build_directory(active_config))
+            phase["manifest"] = str(log / "builds" / (mode + ".manifest.json"))
+            write_json(Path(phase["manifest"]), manifest)
+            summary.update(commit=manifest["source"]["commit"], source_provenance=manifest["source"]["provenance"])
+            stage = "host-" + mode
+            host_id = run_id + "/host-" + mode
+            phase["host_regression"] = str(config.logs / host_id / "summary.json")
+            if host_validate(active_config, run_id=host_id):
+                raise Failure("RESULT_FAILED", "C6 Host回归失败；未启动本phase设备用例")
+            stage = "sync-" + mode
+            active_config = Config("run")
+            hosts = active_config.hosts()
+            summary.update(expected_hosts=hosts, rank_size=len(hosts) * 8)
+            sync(active_config)
+            for operator in ("dispatch", "combine", "both"):
+                name = mode + "-" + operator
+                index = len(summary["cases"]) + 1
+                stage = name
+                os.environ.update(TILEXR_VALIDATION_OPERATOR_MODE=operator,
+                                  TILEXR_VALIDATION_RESULT_ROOT=str(log / "cases" / name))
+                active_config = Config("run")
+                print(f"[{index}/6] START {name} dtype=bf16 dispatch_quant=0 combine_quant=0 "
+                      f"loops=5 warmup=2 build_id={manifest['build_id']} 结果目录：{active_config.logs}", flush=True)
+                try:
+                    code = run(active_config)
+                except (Exception, KeyboardInterrupt) as error:
+                    active_config.last_summary_path = active_config.logs / "failure.json"
+                    write_json(active_config.last_summary_path, dict(status="FAIL", checkpoint=config.checkpoint,
+                        build_id=manifest["build_id"], errors=failure_records(error, "RESULT_FAILED", stage=stage)))
+                    code = 1
+                report = read_json(active_config.last_summary_path)
+                passed = (code == 0 and report.get("status") == "PASS" and report.get("rank_size") == 16
+                          and report.get("completed_ranks") == 16 and report.get("build_id") == manifest["build_id"])
+                summary["cases"].append(dict(name=name, status="PASS" if passed else "FAIL",
+                    build_id=manifest["build_id"], summary=str(active_config.last_summary_path),
+                    configuration=dict(active_config.chain), completed_ranks=report.get("completed_ranks", 0)))
+                print(f"[{index}/6] {'PASS' if passed else 'FAIL'} {name} 结果：{active_config.last_summary_path}", flush=True)
+                if not passed:
+                    raise Failure("RESULT_FAILED", "C6用例失败、构建不匹配或缺少完整16 rank：" + name)
+            phase["status"] = "PASS"
+        summary["status"] = "PASS"
+    except (Exception, KeyboardInterrupt) as error:
+        summary["errors"] = failure_records(error, "BUILD_FAILED" if stage.startswith("build-") else "RESULT_FAILED", stage=stage)
+        if "commit" not in summary:
+            try:
+                source = inventory(config.root)
+            except Exception:
+                source = dict(commit=None, provenance="unavailable")
+            summary.update(commit=source["commit"], source_provenance=source["provenance"])
+        for failure in summary["errors"]:
+            report_failure(failure)
+    finally:
+        os.environ.clear()
+        os.environ.update(original_environment)
+        config.cleanup_failed = (getattr(config, "cleanup_failed", False) or getattr(active_config, "cleanup_failed", False)
+                                 or any(error["type"] == "CLEANUP_FAILED" for error in summary["errors"]))
+        summary["cleanup"] = "failed" if config.cleanup_failed else "complete"
+        write_json(log / "summary.json", summary)
+    print(f"结果：{log / 'summary.json'}\n范围：{summary['scope']}", flush=True)
+    return 0 if summary["status"] == "PASS" else FAILURE_CODES[summary["errors"][0]["type"]]
+
+
 def commit_validate(config):
     """Build and validate one delivered checkpoint; never advance the gate."""
     run_id = "commit-" + uuid.uuid4().hex
+    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        code = combine_profile_commit_validate(config, run_id)
+        print(f"{'成功' if code == 0 else '失败'} COMMIT_VALIDATION_{'PASS' if code == 0 else 'FAIL'} "
+              f"checkpoint={config.checkpoint}\n结果：{config.logs / run_id / 'summary.json'}", flush=True)
+        return code
     try:
         build(config)
     except (Exception, KeyboardInterrupt) as error:
@@ -1831,7 +2070,16 @@ def rebase_node_breakdown_reports(result, node_log, host, *, local_records=False
     """Keep failed-capture source evidence while relocating only collected reports."""
     if not isinstance(result, dict):
         return
+    def relocate_operators(record):
+        if not isinstance(record, dict) or type(record.get("rank")) is not int:
+            return
+        for operator, evidence in record.get("operator_measurements", {}).items():
+            if operator in ("dispatch", "combine") and isinstance(evidence, dict) and isinstance(evidence.get("breakdown"), dict):
+                evidence["breakdown"] = operator_measure.relocate_operator_breakdown_report(
+                    evidence["breakdown"], node_log, record["rank"], host, operator=operator, local_records=local_records)
+
     for record in result.get("ranks", []):
+        relocate_operators(record)
         if (isinstance(record, dict) and type(record.get("rank")) is int
                 and isinstance(record.get("breakdown"), dict)):
             record["breakdown"] = measurements.relocate_breakdown_report(
@@ -1845,6 +2093,7 @@ def rebase_node_breakdown_reports(result, node_log, host, *, local_records=False
         item["records_collected"] = local_records
         item["report_dir"] = str(Path(node_log) / f"profile-rank-{item['rank']}")
         communication = item.get("communication")
+        relocate_operators(communication)
         if isinstance(communication, dict) and isinstance(communication.get("breakdown"), dict):
             communication["breakdown"] = measurements.relocate_breakdown_report(
                 communication["breakdown"], node_log, item["rank"], host, local_records=local_records)
@@ -2045,6 +2294,9 @@ def run(config):
     if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
+    elif config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+        scope = (f"Combine C6：{len(mappings)}P {config.chain['operator_mode']} {config.chain['run_mode']}，"
+                 "连续预热/正式调用、各算子独立采集和trace；空Combine等待50us，算法字节0/带宽N/A；不验Combine通信。")
     elif config.checkpoint == COMBINE_MULTI_CHECKPOINT:
         scope = (f"Combine C5：{len(mappings)}P {config.chain['operator_mode']}，{config.chain['warmup']}轮预热＋"
                  f"{config.chain['loops']}轮正式调用，同stream连续提交、批末同步、各算子magic/选窗及生命周期；"
@@ -2085,6 +2337,30 @@ def run(config):
                     errors.append(failure)
                     primary_error = failure
                     report.update(status="FAIL", primary_error=failure)
+            if config.checkpoint == COMBINE_PROFILE_CHECKPOINT and config.chain["run_mode"] != "functional":
+                records = node_profile_records(nodes, run_id, manifest, mappings, config.chain)
+                full_config = dict(config.chain, rank_size=len(mappings))
+                kernel_shas = operator_kernel_shas(manifest, config.chain)
+                try:
+                    report["operator_measurements"] = operator_measure.summarize_operator_measurements(
+                        records, full_config, run_id, kernel_shas)
+                except (ValueError, TypeError, KeyError, OSError) as error:
+                    errors.append(Failure("RESULT_FAILED", f"C6算子测量汇总失败：{error}").record())
+                if config.chain["run_mode"] == "breakdown":
+                    try:
+                        report["operator_traces"] = operator_measure.collect_operator_breakdown_reports(
+                            records, full_config, log / "traces", run_id, kernel_shas)
+                        for operator, traces in report["operator_traces"].items():
+                            for error in traces["errors"]:
+                                errors.append(Failure("LOG_COLLECT_FAILED", f"{operator} profiling report: " + error["message"],
+                                    **({"rank": error["rank"]} if "rank" in error else {})).record())
+                            if traces.get("status") != "complete":
+                                report.get("operator_measurements", {}).pop(operator, None)
+                    except (ValueError, TypeError, KeyError, OSError) as error:
+                        errors.append(Failure("LOG_COLLECT_FAILED", f"C6独立trace汇总失败：{error}").record())
+                if errors:
+                    primary_error = primary_error or errors[0]
+                    report.update(status="FAIL", primary_error=primary_error)
             if config.checkpoint == DISPATCH_CHECKPOINT:
                 records = node_profile_records(nodes, run_id, manifest, mappings, config.chain)
                 full_config = dict(config.chain, rank_size=len(mappings))
@@ -2154,6 +2430,10 @@ def run(config):
     print(measurements.render_case_description(report), flush=True)
     if "measurements" in report:
         print(measurements.render_measurements(report["measurements"]), flush=True)
+    if "operator_measurements" in report:
+        print(operator_measure.render_operator_measurements(report["operator_measurements"]), flush=True)
+    for operator, traces in report.get("operator_traces", {}).items():
+        print(f"{operator} Chrome tracing JSON 目录: {traces['trace_dir']}", flush=True)
     if "traces" in report:
         print("Chrome tracing JSON 目录（每 rank 一份）: " + report["traces"]["trace_dir"], flush=True)
         for role, path in report["traces"]["selected"].items():

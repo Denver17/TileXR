@@ -87,6 +87,7 @@ public:
     int FinalizeProfiling();
     int ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
     int ReserveLatestProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
+    int ReserveLatestCombineProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
     int GetKernelTiling(const void *data, uint32_t bytes, GM_ADDR *deviceData);
     int FinalizeKernelTilings();
     int GetInternalResource(void **resource) const;
@@ -168,13 +169,19 @@ private:
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     std::unique_ptr<TileXRSDMATransport> sdmaTransport_;
-    TileXRProfilingRuntimeConfig profilingConfig_ {};
-    TileXRProfilingLaunchState profilingLaunchState_;
-    GM_ADDR profilingTimestampsDev_ = nullptr;
-    GM_ADDR profilingEventIdsDev_ = nullptr;
-    GM_ADDR profilingRecordCountsDev_ = nullptr;
-    GM_ADDR profilingDroppedCountsDev_ = nullptr;
-    bool profilingFinalized_ = false;
+    struct ProfilingRegion {
+        TileXRProfilingRuntimeConfig config {};
+        TileXRProfilingLaunchState launches;
+        GM_ADDR timestamps = nullptr;
+        GM_ADDR eventIds = nullptr;
+        GM_ADDR recordCounts = nullptr;
+        GM_ADDR droppedCounts = nullptr;
+        bool finalized = false;
+    };
+    int InitProfilingRegion(ProfilingRegion &region);
+    int FinalizeProfilingRegion(ProfilingRegion &region);
+    ProfilingRegion profiling_;
+    ProfilingRegion combineProfiling_;
     void *internalResource_ = nullptr;
     std::unique_ptr<KernelTilingCache> kernelTilings_;
     TileXRInternalResourceDestroyFn internalResourceDestroy_ = nullptr;

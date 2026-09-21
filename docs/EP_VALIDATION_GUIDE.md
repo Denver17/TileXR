@@ -1,6 +1,51 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C5：当前交付
+## Combine 第一阶段 C6：当前交付，待设备验证
+
+2026-09-21：验证环境暂不可用，用户授权提前开发 C6/C7，但分别提交。
+C5 `4ef0439640b016727287bebec84ef5cc0a521445` 仍为**待验证**；C6/C7 不自动继承或宣称设备通过。
+恢复环境后切换各目标 commit，再执行该提交自己的入口：
+
+```bash
+bash run_commit_validation.sh
+```
+
+C6 checkpoint=`ep-sdedup-combine-p1-profile`。脚本使用 hostfile 前两台、每台 0..7，共 16P，
+按以下顺序执行两个构建批次，每批先完成 11 项 Host 检查，再同步并运行三个算子模式：
+
+| 批次 | 打点 | 运行模式 | 用例 |
+| --- | --- | --- | --- |
+| 1 | OFF | performance（msprof） | dispatch、combine、both |
+| 2 | ON | breakdown | dispatch、combine、both |
+
+六组均为 BF16、D quant=0、C quant=0、BS96/H7168/K6/E96、warmup=2/loops=5。
+显示 `[i/6]`，首次失败停止；每次构建 900 秒、Host 总期限 180 秒/单项 120 秒，每个设备用例 180 秒。
+分别使用 `build/validation-combine-c6-profile-off`、`build/validation-combine-c6-profile-on`，
+安装到 `install/validation-combine-c6`；总报告保留两份 manifest、build_id 和源码内容摘要，
+不接受构建中源码变化或两阶段源码不一致。旧阶段报告不因后续安装更新丢失。
+成功终端结论为 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-profile`。
+
+D/C 使用独立 GM 记录地址、计数器及 latest 状态，未启用算子不分配、不导出、不解析。
+每 rank 的记录分别为 `rank-R.dispatch.records.v1`、`rank-R.combine.records.v1`，
+报告分别位于 `profile-rank-R/dispatch` 和 `profile-rank-R/combine`，联合模式保留两份 trace。
+两区共用 run/capture UUID，各自绑定 operator、kernel SHA、rank 与最后一次 launch；
+某区解析失败时保留另一有效区的报告，整体仍判失败。
+performance 从同一 msprof 采集分别匹配启用算子；Combine 报告 `empty/framework`、
+算法字节 0、算法带宽 N/A，延迟包含 50μs 空等待，不代表 Combine 算法性能。
+
+16B Combine tiling 原保留字节 13 现为 profilingEnabled，14/15 仍为零；27 参数 API、88B launch 不变。
+CommArgs 在尾部追加 Combine capture 字段，旧字段 offset 保持；主机库和 kernel 必须使用同一构建安装包。
+开发验证和设备验收分开记录；C5 多轮、C6 profile、C7 边界各自需要对应提交的外部结果。
+
+2026-09-21 C6 开发验证：CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5
+`dav-c310-vec`，OFF/ON 分开构建生产 Host/runtime/Kernel 和安装包 consumer，均通过。
+OFF build_id=`4d07c76f2bce494da0f545d615a9c476`，ON build_id=`5814b6b13ed840599ec0652478cf96a6`；
+各自安装包 Host 验收 11/11 通过。控制脚本执行 312 项，311 通过，1 项因缺 Windows transport harness 跳过；
+既有 Dispatch consumer 25 项通过。独立审查后的故障路径保留另一算子有效报告，Shell/diff 检查通过。
+blue 使用无 `.git` 源码快照；manifest 如实记录 commit 未知，源码与产物哈希、工具链及日志
+保留在开发工作区 `build/combine-c6-verification/`。这些是编译和 Host 证据，六组真实 16P 用例仍待外部验收。
+
+## Combine C5：已交付，待设备验证
 
 已登记 C4 用户回传通过（交付 `c86e1ef`）；报告与验证边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 拉取本次提交后执行：
@@ -33,7 +78,7 @@ Combine 单跑比较七输入和 yOut 全容量快照；both 校验最后 Dispat
 并比较 yOut 及独立 BF16/FP16 expertOut（D4）。共享五表由 Dispatch 每轮重写，
 报告明确标记最终参考校验，不宣称逐轮输入快照保持；C4 Host 回归继续覆盖完整空行为。
 空 Combine 的 50μs 等待保持；本点不验证 Combine 通信或 yOut 业务数值，不输出性能结论。
-双算子 profiling 分区与 trace 留给 C6，需 C5 用户回传通过后再开始。
+双算子 profiling 分区与 trace 属于 C6；2026-09-21 用户授权在 C5 待验证时提前开发。
 详见[验收流程 C5](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c5-当前交付连续批次各算子-magic-和生命周期)。
 
 2026-09-20 C5 开发验证：基于 `c86e1efe8fd598119112074df420fc1cce7ee4aa` 加本次改动，

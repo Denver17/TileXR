@@ -305,15 +305,15 @@ void TileXRProfilingLaunchState::Reset()
     incomplete_ = false;
 }
 
-bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
-    TileXRProfilingRuntimeConfig *config, std::string *error)
+static bool LoadProfilingRegionConfig(int rank, int device, int commDomain,
+    const char *pathVariable, TileXRProfilingRuntimeConfig *config, std::string *error)
 {
     if (config == nullptr) {
         SetError(error, "profiling runtime config output is null");
         return false;
     }
     *config = TileXRProfilingRuntimeConfig {};
-    const char *recordsPath = std::getenv("TILEXR_PROFILING_RECORDS_PATH");
+    const char *recordsPath = std::getenv(pathVariable);
     if (recordsPath == nullptr || recordsPath[0] == '\0') {
         return true;
     }
@@ -335,6 +335,20 @@ bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
     config->coreCapacity = TILEXR_PROFILING_MAX_CORE_COUNT;
     config->enabled = true;
     return true;
+}
+
+bool LoadTileXRProfilingRuntimeConfig(int rank, int device, int commDomain,
+    TileXRProfilingRuntimeConfig *config, std::string *error)
+{
+    return LoadProfilingRegionConfig(rank, device, commDomain,
+        "TILEXR_PROFILING_RECORDS_PATH", config, error);
+}
+
+bool LoadTileXRCombineProfilingRuntimeConfig(int rank, int device, int commDomain,
+    TileXRProfilingRuntimeConfig *config, std::string *error)
+{
+    return LoadProfilingRegionConfig(rank, device, commDomain,
+        "TILEXR_PROFILING_COMBINE_RECORDS_PATH", config, error);
 }
 
 bool WriteTileXRProfilingRecords(const TileXRProfilingRuntimeConfig &config,

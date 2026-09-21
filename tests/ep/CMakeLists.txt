@@ -389,6 +389,37 @@ add_test(NAME test_tilexr_ep_server_dedup_combine_delay
 set_tests_properties(test_tilexr_ep_server_dedup_combine_delay PROPERTIES TIMEOUT 30)
 install(TARGETS test_tilexr_ep_server_dedup_combine_delay RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# C6 reuses the consumer and separately validates production profile regions.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_profile
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_profile.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_profile PROPERTIES
+        LABELS ep-sdedup-combine-p1-profile TIMEOUT 120)
+endif()
+add_executable(test_tilexr_ep_server_dedup_combine_profile_regions
+    unit/test_tilexr_ep_server_dedup_combine_profile_regions.cpp
+    ${TILEXR_ROOT}/src/comm/tilexr_profiling_runtime.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_combine_profile_regions BEFORE PRIVATE
+    "${TILEXR_ROOT}/tests/profiling/unit/stubs" "${TILEXR_ROOT}/src/comm" ${TILEXR_EP_TEST_INCLUDE_DIRS})
+target_compile_definitions(test_tilexr_ep_server_dedup_combine_profile_regions PRIVATE
+    __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
+target_link_libraries(test_tilexr_ep_server_dedup_combine_profile_regions PRIVATE Threads::Threads)
+add_test(NAME test_tilexr_ep_server_dedup_combine_profile_regions COMMAND test_tilexr_ep_server_dedup_combine_profile_regions)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_profile_regions PROPERTIES TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_combine_profile_regions RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(test_tilexr_ep_server_dedup_combine_profile_kernel
+    unit/test_tilexr_ep_server_dedup_combine_profile_kernel.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_combine_profile_kernel BEFORE PRIVATE
+    "${TILEXR_ROOT}/tests/profiling/unit/stubs" ${TILEXR_EP_TEST_INCLUDE_DIRS})
+target_compile_definitions(test_tilexr_ep_server_dedup_combine_profile_kernel PRIVATE
+    __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
+add_test(NAME test_tilexr_ep_server_dedup_combine_profile_kernel COMMAND test_tilexr_ep_server_dedup_combine_profile_kernel)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_profile_kernel PROPERTIES TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_combine_profile_kernel RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
 foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile)
@@ -504,6 +535,16 @@ add_test(NAME test_tilexr_ep_server_dedup_combine_launch COMMAND test_tilexr_ep_
 set_tests_properties(test_tilexr_ep_server_dedup_combine_launch PROPERTIES
     LABELS ep-sdedup-combine-p1-empty-kernel TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_combine_launch RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(test_tilexr_ep_server_dedup_combine_profile_launch
+    $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
+target_include_directories(test_tilexr_ep_server_dedup_combine_profile_launch BEFORE PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS})
+target_compile_definitions(test_tilexr_ep_server_dedup_combine_profile_launch PRIVATE
+    TILEXR_EP_TEST_COMBINE_C2=1 TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
+add_test(NAME test_tilexr_ep_server_dedup_combine_profile_launch COMMAND test_tilexr_ep_server_dedup_combine_profile_launch)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_profile_launch PROPERTIES TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_combine_profile_launch RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_ep_kernel_launch_profile
     $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)

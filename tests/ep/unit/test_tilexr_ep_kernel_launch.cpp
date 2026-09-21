@@ -36,6 +36,7 @@ struct LaunchCapture {
 int gFailures = 0;
 int gMagicCalls = 0;
 uint32_t gProfilingCalls = 0U;
+uint32_t gCombineProfilingCalls = 0U;
 bool gProfilingExhausted = false;
 constexpr int64_t kNextMagic = 0x123456781234LL;
 std::string gSocName = "Ascend950PR_9589";
@@ -79,6 +80,7 @@ void ResetCapture()
     gTilingMallocResult = gTilingCopyResult = ACL_SUCCESS;
     gMagicCalls = 0;
     gProfilingCalls = 0U;
+    gCombineProfilingCalls = 0U;
     gProfilingExhausted = false;
     gBinaryRegisterCalls = 0;
     gBinaryUnregisterCalls = 0;
@@ -316,6 +318,10 @@ void TestCombineServerDedupLaunch()
     std::vector<uint8_t> tiling(16, 0);
     tiling[0] = 4; tiling[4] = 13; tiling[8] = 192; tiling[10] = 6;
     tiling[11] = static_cast<uint8_t>(TileXR::TILEXR_DATA_TYPE_BFP16);
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    tiling[13] = 1;
+    Check(gCombineProfilingCalls == 1, "Combine reserves its independent latest region");
+#endif
     Check(gLaunches[0].name == "tilexr_ep_combine_memory_server_dedup_kernel" &&
         gLaunches[0].blockDim == 64 && gLaunches[0].stream == params.combine.stream &&
         gLaunches[0].submittedBytes == 88 && gLaunches[0].args == expected && gLaunches[0].tiling == tiling,
@@ -331,6 +337,7 @@ void TestCombineServerDedupLaunch()
     Check(launch() == TileXR::TILEXR_SUCCESS, "wide shapes and FP16 are not narrowed prematurely");
     std::vector<uint8_t> wide(16, 0);
     wide[2] = 1; wide[6] = 2; wide[9] = 4; wide[10] = 32; wide[11] = static_cast<uint8_t>(TileXR::TILEXR_DATA_TYPE_FP16);
+    wide[13] = tiling[13];
     Check(gLaunches.back().tiling == wide && gLaunches.back().args[9] != firstAddress &&
         std::memcmp(reinterpret_cast<void *>(firstAddress), tiling.data(), tiling.size()) == 0,
         "new shape leaves earlier asynchronous Combine tiling unchanged");
@@ -343,7 +350,15 @@ void TestCombineServerDedupLaunch()
     const int magicCalls = gMagicCalls;
     Check(launch() == TileXR::TILEXR_ERROR_MKIRT && gMagicCalls == magicCalls + 1,
         "runtime submit failure is propagated after exactly one magic allocation");
-    Check(gProfilingCalls == 0, "C2 never touches Dispatch profiling reservation");
+    Check(gProfilingCalls == 0, "Combine never touches Dispatch profiling reservation");
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    gLaunchResult = RT_ERROR_NONE;
+    gProfilingExhausted = true;
+    Check(launch() == TileXR::TILEXR_SUCCESS && gLaunches.back().tiling[13] == 0,
+        "unavailable Combine capture disables writes without replacing earlier immutable tiling");
+#else
+    Check(gCombineProfilingCalls == 0, "profiling OFF never reserves Combine records");
+#endif
 }
 
 void TestServerDedupCompileTimeLaunch()
@@ -710,6 +725,14 @@ int TileXRCommGetKernelTiling(TileXRCommPtr comm, const void *data, uint32_t byt
 }
 
 extern "C" {
+
+int TileXRProfilingReserveLatestCombineLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
+{
+    Check(recordsPerLaunch == 8U, "Combine has an independent eight-record latest budget");
+    *slot = gProfilingExhausted ? UINT32_MAX : 0U;
+    ++gCombineProfilingCalls;
+    return TileXR::TILEXR_SUCCESS;
+}
 
 int TileXRProfilingReserveLatestLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
 {

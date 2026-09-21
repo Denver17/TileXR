@@ -1,8 +1,12 @@
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_combine_tiling.h"
+#if defined(TILEXR_ENABLE_PROFILING)
+#include "ep_memory_server_dedup_combine_profile.h"
+#include "tilexr_profiling.h"
+#endif
 
-// Phase-one empty operator: no tensor, CommArgs or peer-memory reads/writes.
-// No profiling writes until C6 provides a separate Combine record region.
+// Phase-one empty operator: no business tensor or peer-memory reads/writes.
+// C6 optionally writes only the independent Combine profiling region.
 extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_server_dedup_kernel(
     GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR sendCounts,
     GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex, GM_ADDR sourceMask,
@@ -21,6 +25,15 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_ser
     const uint8_t quantMode = tiling->quantMode;
     (void)bs; (void)h; (void)experts; (void)topK; (void)dtype; (void)quantMode;
 
+#if defined(TILEXR_ENABLE_PROFILING)
+    TileXR::DirectProfilingWriter profile;
+    if (tiling->profilingEnabled != 0U) {
+        profile.InitializeLatestCombine(commArgs, AscendC::GetBlockIdx(), 0U,
+            TileXREp::kEpServerDedupCombineProfilingRecordsPerLaunch);
+    }
+    profile.Record(TileXREp::kEpServerDedupCombineProfileStart);
+#endif
+
     // A5 / Ascend950 SYS_CNT runs at 1 GHz: 50 us is 50,000 ticks.
     // Keep every core in the empty operator for this interval before the next
     // Dispatch round. This delay is not a cross-rank synchronization barrier.
@@ -28,6 +41,10 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_ser
     const uint64_t begin = static_cast<uint64_t>(AscendC::GetSystemCycle());
     while (static_cast<uint64_t>(AscendC::GetSystemCycle()) - begin < kEmptyCombineDelayTicks) {}
 
+#if defined(TILEXR_ENABLE_PROFILING)
+    profile.Record(TileXREp::kEpServerDedupCombineProfileEnd);
+    profile.Publish();
+#endif
     (void)commArgs; (void)expertOut; (void)assistInfoForCombine; (void)sendCounts;
     (void)expertScales; (void)tokenType; (void)relayReadIndex; (void)sourceMask;
     (void)yOut; (void)magic;

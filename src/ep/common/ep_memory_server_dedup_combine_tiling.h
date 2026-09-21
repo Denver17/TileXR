@@ -9,7 +9,7 @@ namespace TileXREp {
 constexpr uint32_t kEpServerDedupCombineCoreNum = 64;
 
 // Independent Host/AICore wire contract. Host validates before narrowing.
-// No profiling slot is allocated until C6 introduces isolated Combine records.
+// C6 uses a separate latest-record region; byte 13 enables its fixed slot 0.
 struct EpServerDedupCombineTilingData {
     uint32_t bs;
     uint32_t h;
@@ -17,7 +17,8 @@ struct EpServerDedupCombineTilingData {
     uint8_t topK;
     uint8_t dtype;
     uint8_t quantMode;
-    uint8_t reserved[3];
+    uint8_t profilingEnabled;
+    uint8_t reserved[2];
 };
 static_assert(std::is_standard_layout<EpServerDedupCombineTilingData>::value, "standard layout tiling");
 static_assert(sizeof(EpServerDedupCombineTilingData) == 16, "Combine tiling is 16 bytes");
@@ -28,6 +29,7 @@ static_assert(offsetof(EpServerDedupCombineTilingData, moeExpertNum) == 8, "E of
 static_assert(offsetof(EpServerDedupCombineTilingData, topK) == 10, "K offset");
 static_assert(offsetof(EpServerDedupCombineTilingData, dtype) == 11, "dtype offset");
 static_assert(offsetof(EpServerDedupCombineTilingData, quantMode) == 12, "quantMode offset");
-static_assert(offsetof(EpServerDedupCombineTilingData, reserved) == 13, "reserved zeros offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, profilingEnabled) == 13, "profiling enabled offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, reserved) == 14, "reserved zeros offset");
 } // namespace TileXREp
 #endif

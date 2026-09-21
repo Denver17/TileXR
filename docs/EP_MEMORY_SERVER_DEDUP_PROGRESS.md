@@ -1,10 +1,10 @@
 # EP Memory Server Dedup 进度
 
-## 当前状态（2026-09-20）
+## 当前状态（2026-09-21）
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；当前交付 C5 连续多轮，等待外部验收。
+Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 已交付、待设备验证；按用户授权提前交付 C6/C7，分别提交。
 下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
@@ -33,9 +33,11 @@ C4 交付 commit 为 `c86e1efe8fd598119112074df420fc1cce7ee4aa`；用户回传�
 Combine 独跑/Dispatch→空 Combine 用例；验证同步、输入/yOut 保持、五表/count 连接及各自 magic 选窗，
 不包含 Combine 通信或 yOut 业务数值验证。
 
-当前点 `ep-sdedup-combine-p1-chain-multi`；入口仍为 `bash run_commit_validation.sh`。
+C5 交付点 `ep-sdedup-combine-p1-chain-multi`；入口仍为 `bash run_commit_validation.sh`。
 C5 连续提交 warmup/正式轮次，批末同步，分别检查各算子计数和 magic/窗口；保留空 Combine 50μs 等待。
-**C5 外部验收待回传，C6 未开始。**
+**C5 待验证**：交付 `4ef0439640b016727287bebec84ef5cc0a521445`。2026-09-21 用户通知验证环境暂不可用，
+授权继续 C6/C7 并要求分批提交，后续切换目标 commit 执行同一入口。本授权仅调整开发顺序，不代表 C5 通过。
+当前开发 C6 `ep-sdedup-combine-p1-profile`，C7 将单独提交；两点设备验收同样等待服务器恢复。
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，

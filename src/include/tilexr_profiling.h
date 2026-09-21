@@ -159,7 +159,7 @@ private:
 class DirectProfilingWriter {
 public:
     // Pair with TileXRProfilingReserveLatestLaunch. Every launch must use the
-    // same logical cores and execute in order, with no other capture writers.
+    // same logical cores and execute in order, with no other writers in that region.
     // Reset metadata only: the exporter ignores the stale tail beyond count.
     __attribute__((always_inline)) inline __aicore__ void InitializeLatest(
         GM_ADDR commArgsGM, uint32_t logicalCore,
@@ -173,53 +173,24 @@ public:
         }
     }
 
+    // Select Combine bases directly; never rewrite the shared CommArgs.
+    __attribute__((always_inline)) inline __aicore__ void InitializeLatestCombine(
+        GM_ADDR commArgsGM, uint32_t logicalCore,
+        uint32_t launchSlot, uint32_t recordsPerLaunch)
+    {
+        InitializeRegion(commArgsGM, logicalCore,
+            launchSlot == 0U ? 0U : static_cast<uint32_t>(-1), recordsPerLaunch, true);
+        if (enabled_) {
+            recordCount_[0] = 0U;
+            droppedCount_[0] = 0U;
+        }
+    }
+
     __attribute__((always_inline)) inline __aicore__ void Initialize(
         GM_ADDR commArgsGM, uint32_t logicalCore,
         uint32_t launchSlot, uint32_t recordsPerLaunch)
     {
-        enabled_ = false;
-        cursor_ = 0U;
-        dropped_ = 0U;
-        if (commArgsGM == nullptr) {
-            return;
-        }
-        __gm__ CommArgs *args = reinterpret_cast<__gm__ CommArgs *>(commArgsGM);
-        if ((args->extraFlag & ExtraFlag::PROFILING) == 0U ||
-            args->tilexrProfilingTimestampsGM == nullptr ||
-            args->tilexrProfilingEventIdsGM == nullptr ||
-            args->tilexrProfilingRecordCountsGM == nullptr ||
-            args->tilexrProfilingDroppedCountsGM == nullptr ||
-            logicalCore >= args->tilexrProfilingCoreCapacity ||
-            args->tilexrProfilingRecordsPerCore == 0U ||
-            args->tilexrProfilingRecordsPerCore %
-                TILEXR_PROFILING_CORE_ALIGNMENT_RECORDS != 0U ||
-            recordsPerLaunch == 0U ||
-            recordsPerLaunch % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U) {
-            return;
-        }
-
-        const uint32_t recordsPerCore = args->tilexrProfilingRecordsPerCore;
-        if (launchSlot >= recordsPerCore / recordsPerLaunch) {
-            return;
-        }
-        const uint32_t launchBase = launchSlot * recordsPerLaunch;
-        __gm__ uint32_t *recordCount =
-            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingRecordCountsGM) +
-            static_cast<uint64_t>(logicalCore) * TILEXR_PROFILING_COUNT_STRIDE;
-
-        timestamps_ =
-            reinterpret_cast<__gm__ uint64_t *>(args->tilexrProfilingTimestampsGM) +
-            static_cast<uint64_t>(logicalCore) * recordsPerCore + launchBase;
-        eventIds_ =
-            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingEventIdsGM) +
-            static_cast<uint64_t>(logicalCore) * recordsPerCore + launchBase;
-        recordCount_ = recordCount;
-        droppedCount_ =
-            reinterpret_cast<__gm__ uint32_t *>(args->tilexrProfilingDroppedCountsGM) +
-            static_cast<uint64_t>(logicalCore) * TILEXR_PROFILING_COUNT_STRIDE;
-        launchBase_ = launchBase;
-        capacity_ = recordsPerLaunch;
-        enabled_ = true;
+        InitializeRegion(commArgsGM, logicalCore, launchSlot, recordsPerLaunch, false);
     }
 
     __attribute__((always_inline)) inline __aicore__ void Record(uint32_t eventId)
@@ -280,6 +251,66 @@ public:
     }
 
 private:
+    __attribute__((always_inline)) inline __aicore__ void InitializeRegion(
+        GM_ADDR commArgsGM, uint32_t logicalCore,
+        uint32_t launchSlot, uint32_t recordsPerLaunch, bool combine)
+    {
+        enabled_ = false;
+        cursor_ = 0U;
+        dropped_ = 0U;
+        if (commArgsGM == nullptr) {
+            return;
+        }
+        __gm__ CommArgs *args = reinterpret_cast<__gm__ CommArgs *>(commArgsGM);
+        __gm__ uint8_t * const timestampsGM = combine ? args->tilexrCombineProfilingTimestampsGM :
+            args->tilexrProfilingTimestampsGM;
+        __gm__ uint8_t * const eventIdsGM = combine ? args->tilexrCombineProfilingEventIdsGM :
+            args->tilexrProfilingEventIdsGM;
+        __gm__ uint8_t * const recordCountsGM = combine ? args->tilexrCombineProfilingRecordCountsGM :
+            args->tilexrProfilingRecordCountsGM;
+        __gm__ uint8_t * const droppedCountsGM = combine ? args->tilexrCombineProfilingDroppedCountsGM :
+            args->tilexrProfilingDroppedCountsGM;
+        const uint32_t coreCapacity = combine ? args->tilexrCombineProfilingCoreCapacity :
+            args->tilexrProfilingCoreCapacity;
+        const uint32_t recordsPerCore = combine ? args->tilexrCombineProfilingRecordsPerCore :
+            args->tilexrProfilingRecordsPerCore;
+        if ((args->extraFlag & ExtraFlag::PROFILING) == 0U ||
+            timestampsGM == nullptr ||
+            eventIdsGM == nullptr ||
+            recordCountsGM == nullptr ||
+            droppedCountsGM == nullptr ||
+            logicalCore >= coreCapacity ||
+            recordsPerCore == 0U ||
+            recordsPerCore %
+                TILEXR_PROFILING_CORE_ALIGNMENT_RECORDS != 0U ||
+            recordsPerLaunch == 0U ||
+            recordsPerLaunch % TILEXR_PROFILING_GM_ALIGNMENT_RECORDS != 0U) {
+            return;
+        }
+
+        if (launchSlot >= recordsPerCore / recordsPerLaunch) {
+            return;
+        }
+        const uint32_t launchBase = launchSlot * recordsPerLaunch;
+        __gm__ uint32_t *recordCount =
+            reinterpret_cast<__gm__ uint32_t *>(recordCountsGM) +
+            static_cast<uint64_t>(logicalCore) * TILEXR_PROFILING_COUNT_STRIDE;
+
+        timestamps_ =
+            reinterpret_cast<__gm__ uint64_t *>(timestampsGM) +
+            static_cast<uint64_t>(logicalCore) * recordsPerCore + launchBase;
+        eventIds_ =
+            reinterpret_cast<__gm__ uint32_t *>(eventIdsGM) +
+            static_cast<uint64_t>(logicalCore) * recordsPerCore + launchBase;
+        recordCount_ = recordCount;
+        droppedCount_ =
+            reinterpret_cast<__gm__ uint32_t *>(droppedCountsGM) +
+            static_cast<uint64_t>(logicalCore) * TILEXR_PROFILING_COUNT_STRIDE;
+        launchBase_ = launchBase;
+        capacity_ = recordsPerLaunch;
+        enabled_ = true;
+    }
+
     __gm__ uint64_t *timestamps_ = nullptr;
     __gm__ uint32_t *eventIds_ = nullptr;
     __gm__ uint32_t *recordCount_ = nullptr;
@@ -325,6 +356,11 @@ class DirectProfilingWriter {
 public:
 #if TILEXR_PROFILING_AICORE
     __attribute__((always_inline)) inline __aicore__ void InitializeLatest(
+        GM_ADDR, uint32_t, uint32_t, uint32_t)
+    {
+    }
+
+    __attribute__((always_inline)) inline __aicore__ void InitializeLatestCombine(
         GM_ADDR, uint32_t, uint32_t, uint32_t)
     {
     }

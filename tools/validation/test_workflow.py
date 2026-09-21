@@ -526,7 +526,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         tool_root = self.root / "tools/validation"
         tool_root.mkdir(parents=True)
-        for name in ("workflow.py", "source.py", "measurements.py", "run_summary.py", "case_analysis.py"):
+        for name in ("workflow.py", "source.py", "measurements.py", "operator_measurements.py", "run_summary.py", "case_analysis.py"):
             shutil.copy2(Path(workflow.__file__).with_name(name), tool_root / name)
         profiler_source = Path(workflow.__file__).resolve().parents[1] / "ep/msprof_kernel_stats.py"
         profiler_target = self.root / "tools/ep/msprof_kernel_stats.py"
@@ -556,7 +556,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
             "          (' unexpected-suffix' if behavior == 'decorated-marker' else ''))\n", encoding="utf-8")
         source = {"commit": "a" * 40, "provenance": "manifest-unverified",
                   "files": [str(path.relative_to(self.root))
-                            for path in (self.script, tool_root / "source.py", tool_root / "measurements.py", tool_root / "run_summary.py",
+                            for path in (self.script, tool_root / "source.py", tool_root / "measurements.py", tool_root / "operator_measurements.py", tool_root / "run_summary.py",
                                          profiler_target, self.root / "set_env.sh", helper)]}
         source["files"].extend(str(path.relative_to(self.root)) for path in profiling_target.rglob("*") if path.is_file())
         source["files"].append("tools/validation/test_profiling_fixture.py")
@@ -1767,7 +1767,7 @@ class EnvironmentEntryTests(TemporaryRoot):
     def source_real_entry(self, hostfile=None):
         repo = Path(workflow.__file__).resolve().parents[2]
         for name in ("set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
-                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py", "tools/validation/run_summary.py",
+                     "tools/validation/workflow.py", "tools/validation/source.py", "tools/validation/measurements.py", "tools/validation/operator_measurements.py", "tools/validation/run_summary.py",
                      "tools/ep/msprof_kernel_stats.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)

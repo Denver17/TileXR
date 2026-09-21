@@ -66,14 +66,14 @@ int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic);
 // must be a nonzero multiple of 8. UINT32_MAX means disabled/exhausted; this is
 // success, and the operator should still launch. Exhaustion marks export as
 // incomplete. All launches sharing a capture must be ordered by the caller.
-// Every direct writer in that communicator capture must use this allocator;
+// Every direct writer in the default capture region must use this allocator;
 // do not mix it with legacy collectives' own slots or append ProfilingRecorder.
 int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
     uint32_t *launchSlot);
 
 // Reuse slot zero for every ordered launch, retaining each core's final launch
 // only. Pair exclusively with DirectProfilingWriter::InitializeLatest. Keep the
-// launch budget and logical core set fixed for the communicator capture; do not
+// launch budget and logical core set fixed for that capture region; do not
 // mix with ReserveLaunch, legacy slots, or append ProfilingRecorder. The two
 // reservation APIs reject mixing; legacy writers cannot be detected by Host.
 // Budget is a nonzero multiple of 8. UINT32_MAX means disabled/insufficient GM
@@ -82,6 +82,14 @@ int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
 // incomplete. Reserve at least this budget in TILEXR_PROFILING_RECORDS_PER_CORE;
 // total allocation and record processing need not scale with launch count.
 int TileXRProfilingReserveLatestLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot);
+
+// Independent Combine region with the same latest-launch reservation contract.
+// Enable it with TILEXR_PROFILING_COMBINE_RECORDS_PATH and pair exclusively with
+// DirectProfilingWriter::InitializeLatestCombine. Its width, counters and failure
+// state are independent of the default region. Both regions share capture UUID
+// and per-core capacity configuration, but must have different output paths.
+int TileXRProfilingReserveLatestCombineLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
     uint32_t *launchSlot);
 
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);

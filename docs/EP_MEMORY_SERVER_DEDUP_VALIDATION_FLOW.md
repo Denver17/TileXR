@@ -36,7 +36,9 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 
 每次只开发当前一个检查点：开发/对应检查 → commit 并推送 `codex/SilentEmotion` →
 用户在验证环境拉取该 commit，执行 `bash run_commit_validation.sh` → 回传结果 →
-记录 SHA、环境、命令、结果及验证边界 → **通过后才开始下一点**。
+记录 SHA、环境、命令、结果及验证边界 → 默认通过后才开始下一点。
+2026-09-21 用户授权例外：验证服务器暂不可用，C5 标记待验证，允许提前完成 C6/C7，
+但两点必须分批提交；用户恢复环境后按对应 commit 逐点执行同一入口，未回传不得标记设备通过。
 开发环境通过、提交成功或脚本返回 0 均不能替代用户回传的检查点验收；失败只修当前点。
 回传至少包含终端结论和 `summary.json`；失败同时提供 summary 指向的构建/测试日志。
 不需要为每个检查点建立新的测试脚本，入口随当前交付点更新；不会自动推进下一点。
@@ -236,7 +238,7 @@ D 为 1/3/5…、C 为 2/4/6…；实际 bufferIndex 始终按各自 magic%2 取
 8GiB 通信域；读取在设备批次完成后进行，不进入 kernel 计时区间或逐轮热路径。
 联合模式按两算子的角色分别检查各自窗口，不把 Combine 窗口交给 Dispatch 校验器。
 
-### C6：两算子记录区及 trace 隔离
+### C6：两算子记录区及 trace 隔离（当前交付）
 
 breakdown 扩充标准 profiling 记录区，以不同 base 分隔 D/C 的记录、有效计数、丢弃计数和
 latest-launch 状态；记录区不占通信窗口。Dispatch 单测只解析 D 区，Combine 单测只解析 C 区，
@@ -244,6 +246,33 @@ latest-launch 状态；记录区不占通信窗口。Dispatch 单测只解析 D 
 沿用现有跨 rank trace 组织，两套输出明确标注 operator，并绑定各自 kernel/launch 身份。
 不能用同一个 latest 记录槽先后覆盖两算子的记录，也不以在 D/C 之间导出同一槽代替分区。
 完整要求见[Combine breakdown 设计](specs/ep-memory-server-dedup-combine-design.md#第一阶段-breakdown-记录隔离已确认)。
+
+C6 执行约定（2026-09-21）：
+
+- checkpoint=`ep-sdedup-combine-p1-profile`，独立 C6 安装包；functional/performance 使用
+  profiling OFF，breakdown 使用 profiling ON。沿用 C5 连续批次/计数/选窗判据。
+- 公共 27 参数及 88B launch 不变；16B Combine tiling 消费原保留字节 13 作为 profilingEnabled，
+  其余保留字节仍置零。Combine 独立 latest reservation 固定 slot=0，不增加业务 tensor。
+- CommArgs 保留旧 Dispatch profiling 字段和 API，末尾扩充 Combine 独立四个 GM base 与容量；
+  每区有独立 Host config/reservation/latest/overflow 状态。原 RECORDS_PATH 为 Dispatch，
+  新 TILEXR_PROFILING_COMBINE_RECORDS_PATH 为 Combine；未启用区不分配、不导出、不解析。
+  combine capture 与原标准 records.v1 同格式，按各自路径独立导出，不在两算子间排空导出。
+- 空 Combine 在 50μs 等待前后记录 start/end，latest 只保留最后一轮，各核记录独立；
+  标准 parser 使用独立 Combine mapping。两份 trace 明确 operator、run_id、rank、kernel 哈希和最终 launch。
+- performance 从同一 msprof 采集分别匹配启用算子，严格要求各自 warmup+loops 数；
+  Combine 报告 scope=empty/framework、algorithm_bytes=0、algorithm_bandwidth=N/A，保留延迟。
+- 一键验收分 OFF/ON 两次构建：各执行三个 operator 模式（BF16、D0、C0、loops=5/warmup=2），
+  OFF 跑 performance，ON 跑 breakdown，共六组 16P；functional 由 C5 Host/consumer 回归覆盖，
+  C5 硬件验收仍独立待验证。每组显示批次并首错停止，产物与 report 绑定各自 build_id。
+- 分工边界：runtime/CommArgs/API/writer 及 runtime 单测；标准测量解析/报告及 mapping 与 Python 单测；
+  workflow/入口/安装和控制脚本测试；主任务负责 Combine kernel/Host tiling、consumer、端到端替身及文档。
+  CANN9.1 A5 profiling OFF/ON 均需编译；所有开发侧通过均不替代用户设备验收。
+
+维护经验：联合 profiling 共用 run/capture UUID 时仍要分别绑定 operator、kernel SHA、rank、
+最终 launch 和各自原始记录/summary/trace。逐区捕获解析错误后再汇总失败，避免 Dispatch 失败
+提前中断而丢失有效 Combine 报告。OFF/ON 分目录构建并比较源码内容摘要，禁止把两个版本合并验收。
+writer 的 occupied count 必须按 8 条记录对齐，只有两个有效事件也需发布 8 槽；尾部零事件不作为有效数据。
+CPU 时钟/导出测试仅验证记录契约，设备缓存可见性和 profile 时序由用户 A5 验证。
 
 ### Flag 遗留范围
 
@@ -755,3 +784,7 @@ checkpoint 是验证阶段名称，具体尝试用完整 commit SHA 标识；失
 - 真实通信旧 ready 隔离、后续完整 workspace 预算、Combine 生命周期或未确认的并发/量化支持。
 
 本文只记录流程规划。实际通过情况必须以对应 Git checkpoint 的服务器日志为准，并在后续实现提交中更新验证记录。
+
+维护经验（C6）：CANN 的 `GM_ADDR` 可能是指针宏，`const GM_ADDR` 会限定所指数据，
+与 Host typedef 替身的语义不同；记录区可写地址使用明确的 `__gm__ uint8_t * const`。
+Host 编译通过不能替代 profiling ON 的真实 A5 编译，OFF/ON 必须分别构建。

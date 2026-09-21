@@ -146,7 +146,8 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p1-dry-run" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-multi",
+        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
+        c.checkpoint == "ep-sdedup-combine-p1-profile",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     Require(c.checkpoint != "ep-sdedup-combine-p1-dry-run" || c.dryRun,
         "Combine C3 requires --dry-run");
@@ -155,8 +156,9 @@ Config Parse(int argc, char **argv)
         "operator_mode must be dispatch/combine/both");
     Require(c.dryRun || c.operatorMode == "dispatch" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-multi",
-        "Combine and joint device execution require C4/C5 checkpoint");
+        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
+        c.checkpoint == "ep-sdedup-combine-p1-profile",
+        "Combine and joint device execution require C4/C5/C6 checkpoint");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
     Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
@@ -204,7 +206,8 @@ Config Parse(int argc, char **argv)
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
     if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" || c.dryRun) && c.operatorMode != "combine") {
+        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
+        c.checkpoint == "ep-sdedup-combine-p1-profile" || c.dryRun) && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
         if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
@@ -256,21 +259,34 @@ Config Parse(int argc, char **argv)
 
 // The standard runtime owns allocation and export. No profiling data uses the
 // communication window; capture configuration must precede communicator init.
-std::string ConfigureProfiling(const Config &c)
+struct ProfilePaths {
+    std::string dispatch, combine;
+};
+
+ProfilePaths ConfigureProfiling(const Config &c)
 {
-    if (c.runMode != "breakdown") {
-        Check(unsetenv("TILEXR_PROFILING_RECORDS_PATH"), "disable kernel capture");
-        return {};
+    ProfilePaths paths;
+    const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile";
+    const bool dispatch = c.runMode == "breakdown" && c.operatorMode != "combine";
+    const bool combine = c.runMode == "breakdown" && split && c.operatorMode != "dispatch";
+    const auto configure = [&](const char *name, bool enabled, std::string &path) {
+        if (!enabled) {
+            Check(unsetenv(name), "disable inactive operator capture");
+            return;
+        }
+        const char *value = std::getenv(name);
+        Require(value && *value, std::string("breakdown requires ") + name);
+        path = value;
+    };
+    configure("TILEXR_PROFILING_RECORDS_PATH", dispatch, paths.dispatch);
+    configure("TILEXR_PROFILING_COMBINE_RECORDS_PATH", combine, paths.combine);
+    if (dispatch || combine) {
+        const char *capture = std::getenv("TILEXR_PROFILING_CAPTURE_ID");
+        Require(capture && *capture, "breakdown requires TILEXR_PROFILING_CAPTURE_ID");
+        Require(!dispatch || !combine || paths.dispatch != paths.combine, "operator capture paths must differ");
+        Check(setenv("TILEXR_PROFILING_RECORDS_PER_CORE", "65536", 1), "configure profiling capacity");
     }
-    constexpr uint32_t capacity = 65536U;
-    // The coordinator supplies one UUID and a unique output path per rank.
-    const char *capture = std::getenv("TILEXR_PROFILING_CAPTURE_ID");
-    const char *path = std::getenv("TILEXR_PROFILING_RECORDS_PATH");
-    Require(capture && *capture && path && *path,
-        "breakdown requires TILEXR_PROFILING_CAPTURE_ID and TILEXR_PROFILING_RECORDS_PATH");
-    Check(setenv("TILEXR_PROFILING_RECORDS_PER_CORE", std::to_string(capacity).c_str(), 1),
-        "configure profiling capacity");
-    return path;
+    return paths;
 }
 
 std::string Json(const std::string &text)
@@ -493,7 +509,8 @@ int Run(const Config &c)
         throw std::runtime_error("memory-boundary test kernel was not built");
 #endif
     }
-    const bool multi = c.checkpoint == "ep-sdedup-combine-p1-chain-multi";
+    const bool multi = c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
+        c.checkpoint == "ep-sdedup-combine-p1-profile";
     const bool runDispatch = c.operatorMode != "combine";
     const bool runCombine = c.operatorMode != "dispatch";
     TileXREp::EpMemoryServerDedupLayout layout {};
@@ -511,7 +528,7 @@ int Run(const Config &c)
     std::string validationError, validationStage, combineDetails;
     OperatorProgress dispatchProgress, combineProgress;
     int64_t sequenceMagic = 0;
-    const std::string profilePath = ConfigureProfiling(c);
+    const auto profilePaths = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
         stage = name;
         // Flush before a potentially blocking call: an external timeout cannot
@@ -767,12 +784,19 @@ int Run(const Config &c)
         std::string details = ",\"submitted\":" + std::to_string(submitted) + ",\"completed\":" +
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
-        if (!profilePath.empty()) Marker(c, "EP_SERVER_DEDUP_BREAKDOWN_PASS",
-            ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(profilePath) +
-            ",\"capture_id\":" + Json(std::getenv("TILEXR_PROFILING_CAPTURE_ID")) +
-            ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops) +
-            ",\"capture_mode\":\"latest_launch\",\"captured_launches\":1,\"captured_launch\":" +
-            std::to_string(uint64_t(c.warmup) + c.loops - 1U));
+        const auto profileMarker = [&](const char *op, const std::string &path) {
+            if (path.empty()) return;
+            const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile";
+            Marker(c, split ? "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS" : "EP_SERVER_DEDUP_BREAKDOWN_PASS",
+                (split ? ",\"operator\":" + Json(op) : "") +
+                ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(path) +
+                ",\"capture_id\":" + Json(std::getenv("TILEXR_PROFILING_CAPTURE_ID")) +
+                ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops) +
+                ",\"capture_mode\":\"latest_launch\",\"captured_launches\":1,\"captured_launch\":" +
+                std::to_string(uint64_t(c.warmup) + c.loops - 1U));
+        };
+        profileMarker("dispatch", profilePaths.dispatch);
+        profileMarker("combine", profilePaths.combine);
         if (validationError.empty()) {
             if (runDispatch) Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
             if (runCombine) Marker(c, "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS",
