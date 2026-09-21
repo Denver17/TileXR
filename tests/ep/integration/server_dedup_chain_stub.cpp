@@ -31,10 +31,15 @@ std::vector<void *> firstBuffers;
 std::vector<const void *> firstCombineBuffers;
 uint64_t sharedMagic = 0;
 uint64_t lastDispatchMagic = 0;
+bool IsM5()
+{
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m5") == 0;
+}
 bool IsM4()
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m4") == 0;
+    return IsM5() || (checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m4") == 0);
 }
 bool IsM3()
 {
@@ -567,6 +572,9 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
     if (result != 0) return result;
     ++sharedMagic;
     if (IsM12()) {
+        std::map<uint64_t, std::vector<float>> unroundedPartials;
+        const char *m5Fault = std::getenv("TEST_M5_FAULT");
+        const bool bypassPartialRounding = IsM5() && m5Fault && std::strcmp(m5Fault, "unrounded-partial") == 0;
         const uintptr_t base = reinterpret_cast<uintptr_t>(args.peerMems[rankId]) +
             (sharedMagic % 2U) * (args.peerMemBytes / 2U);
         const char *fault = std::getenv("TEST_M12_FAULT");
@@ -628,6 +636,8 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                     std::vector<size_t> memberRows;
                     if (row.FirstHop()) for (const auto &member : row.packet.members)
                         memberRows.push_back(routeRows.at(Identity(row.source, row.token, member.expert, member.k)));
+                    if (bypassPartialRounding && row.FirstHop())
+                        unroundedPartials[offset / packetBytes].resize(h);
                     std::vector<uint8_t> payload(packetBytes / 512U * 480U, 0xabU);
                     for (uint32_t col = 0; col < uint32_t(h); ++col) {
                         const uint16_t one = shape.bf16 ? 0x3f80U : 0x3c00U;
@@ -647,6 +657,7 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                                 if (member == 0U) sum = product;
                                 else { volatile float rounded = sum + product; sum = rounded; }
                             }
+                            if (bypassPartialRounding) unroundedPartials[offset / packetBytes][col] = sum;
                             bits = CombineM4Reference::Encode(sum, shape.bf16);
                         }
                         std::memcpy(payload.data() + col * 2U, &bits, 2U);
@@ -675,6 +686,55 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                         break;
                     }
                 }
+            }
+        }
+        if (IsM5()) {
+            const uint64_t packetBytes = ((h * 2U + 479U) / 480U) * 512U;
+            const bool bf16 = dtype == TileXR::TILEXR_DATA_TYPE_BFP16;
+            auto result = M12Address(base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, resultBytes);
+            if (!result) return 92;
+            for (uint32_t token = 0; token < uint32_t(bs); ++token) {
+                if (sourceMask[token] == 0U) return 92;
+                for (uint32_t col = 0; col < uint32_t(h); ++col) {
+                    float sum = 0.0f;
+                    bool first = true;
+                    for (uint32_t k = 0; k < uint32_t(topK); ++k) {
+                        if (!(sourceMask[token] & (1U << k))) continue;
+                        const uint64_t elementByte = uint64_t(col) * 2U;
+                        const uint64_t offset = (uint64_t(token) * topK + k) * packetBytes +
+                            elementByte / 480U * 512U + elementByte % 480U;
+                        uint16_t bits;
+                        std::memcpy(&bits, result + offset, 2U);
+                        const auto partial = unroundedPartials.find(uint64_t(token) * topK + k);
+                        const float value = partial == unroundedPartials.end() ? CombineM4Reference::Decode(bits, bf16) : partial->second[col];
+                        volatile float product = value * weights[uint64_t(token) * topK + k];
+                        if (first) { sum = product; first = false; }
+                        else { volatile float rounded = sum + product; sum = rounded; }
+                    }
+                    const uint16_t output = CombineM4Reference::Encode(sum, bf16);
+                    std::memcpy(static_cast<uint8_t *>(yOut) + (uint64_t(token) * h + col) * 2U, &output, 2U);
+                }
+            }
+            // Simulate only the final state of production M5 cleanup. The CPU
+            // kernel tests, not this transport substitute, exercise ownership.
+            for (uint64_t block = 0; block < resultBytes / 512U; ++block)
+                std::memset(result + block * 512U + 480U, 0, 32U);
+            if (Call("m5-result-clear") != 0) return 92;
+            const char *fault = std::getenv("TEST_M5_FAULT");
+            const auto isFault = [&](const char *name) { return fault && std::strcmp(fault, name) == 0; };
+            if (isFault("yout")) static_cast<uint8_t *>(yOut)[0] ^= 1U;
+            if (isFault("yout-tail")) static_cast<uint8_t *>(yOut)[uint64_t(bs) * h * 2U - 1U] ^= 1U;
+            if (isFault("flag-first")) result[480U] = 1U;
+            if (isFault("flag-tail")) result[resultBytes - 1U] = 1U;
+            if (isFault("payload-clobber")) result[0] ^= 1U;
+            if (isFault("inactive-flag")) {
+                bool changed = false;
+                for (uint32_t token = 0; token < uint32_t(bs) && !changed; ++token)
+                    for (uint32_t k = 0; k < uint32_t(topK) && !changed; ++k)
+                        if (!(sourceMask[token] & (1U << k))) {
+                            result[(uint64_t(token) * topK + k) * packetBytes + 511U] = 1U;
+                            changed = true;
+                        }
             }
         }
         auto control = M12Address(base + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET,
@@ -724,6 +784,7 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                     else {
                         events.insert(events.end(), {0x3019, 0x301a});
                         if (IsM4()) events.insert(events.end(), {0x301d, 0x301e});
+                        if (IsM5()) events.insert(events.end(), {0x301f, 0x3020});
                     }
                     events.insert(events.end(), {0x3013, 0x3014, 0x3002});
                     for (size_t index = 0; index < events.size(); ++index) {

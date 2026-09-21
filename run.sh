@@ -22,8 +22,8 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
                     combine_fixture=balanced|sparse|empty (P2.1 combine-only fixtures)
                     combine_observation=batch|per-round (P2.1 functional diagnostics)
   dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
-  Dry-run requires the C3 package; real combine/both defaults to P2.3 M4.
-  P2.3 requires loops=1 warmup=0 in every mode; isolated OFF functional/performance and ON breakdown.
+  Dry-run requires the C3 package; real combine/both defaults to P2.4 M5.
+  P2.4 supports one/two/repeated calls; isolated OFF functional/performance and ON breakdown.
   Earlier checkpoints remain available via TILEXR_VALIDATION_CHECKPOINT override.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
@@ -117,10 +117,10 @@ if [[ $dry_run == 0 && $operator_mode != dispatch ]]; then
             [[ $run_mode == functional && $loops == 1 && $warmup == 0 ]] || fail 'C4 requires functional, loops=1, warmup=0';;
         ep-sdedup-combine-p1-chain-multi)
             [[ $run_mode == functional ]] || fail 'C5 requires functional mode';;
-        ep-sdedup-combine-p1-profile|ep-sdedup-combine-p2-m12|ep-sdedup-combine-p2-m3|ep-sdedup-combine-p2-m4) ;;
+        ep-sdedup-combine-p1-profile|ep-sdedup-combine-p2-m12|ep-sdedup-combine-p2-m3|ep-sdedup-combine-p2-m4|ep-sdedup-combine-p2-m5) ;;
         ep-sdedup-combine-p1-memory-boundary)
             [[ $run_mode == functional ]] || fail 'C7 requires functional mode; select C6 for profiling';;
-        *) export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m4;;
+        *) export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m5;;
     esac
     export TILEXR_VALIDATION_BUILD_MODE=production
 fi

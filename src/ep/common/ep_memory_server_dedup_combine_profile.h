@@ -34,5 +34,7 @@ constexpr uint32_t kEpServerDedupCombineProfileDirectBegin = 0x301bU;
 constexpr uint32_t kEpServerDedupCombineProfileDirectEnd = 0x301cU;
 constexpr uint32_t kEpServerDedupCombineProfilePartialBegin = 0x301dU;
 constexpr uint32_t kEpServerDedupCombineProfilePartialEnd = 0x301eU;
+constexpr uint32_t kEpServerDedupCombineProfileFinalBegin = 0x301fU;
+constexpr uint32_t kEpServerDedupCombineProfileFinalEnd = 0x3020U;
 } // namespace TileXREp
 #endif

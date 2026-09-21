@@ -91,6 +91,55 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4OutputLaneCount(uint32_t tokens,
     const uint32_t lanes = free / (((h * 2U + 479U) / 480U) * 512U);
     return lanes > 8U ? 8U : lanes;
 }
+// M5 reserves event 7 for the shared flag probe/clear, independently of both
+// payload rings (events 0..6). M4 releases every event before this arena reuse.
+constexpr uint32_t kEpServerDedupCombineM5MaxLanes = 7U;
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5TokenCount(uint32_t bs)
+{
+    return bs / kEpServerDedupCombineRecvCoreNum + (bs % kEpServerDedupCombineRecvCoreNum != 0U);
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5FlagBytes(uint32_t h, uint32_t k)
+{
+    // CANN 9.1 dav_3510 ReduceSum(mask=1, stride=1) loads a full 256B
+    // vector at every 32B step. Reserve its final vector beyond the flags.
+    return k * ((h * 2U + 479U) / 480U) * 32U + 256U;
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5WorkBytes(uint32_t h, uint32_t k)
+{
+    // The intermediate B floats are reduced with full 256B vector loads.
+    return EpCombineAlign(k * ((h * 2U + 479U) / 480U) * 4U, 256U);
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint64_t EpCombineM5FixedUbBytes(uint32_t bs, uint32_t h, uint32_t k)
+{
+    const uint64_t owned = EpCombineM5TokenCount(bs);
+    return kEpServerDedupCombineResidentUbBytes +
+        2U * ((owned * 4U + 31U) / 32U * 32U) +
+        (owned * k * 4U + 31U) / 32U * 32U + EpCombineM5FlagBytes(h, k) +
+        EpCombineM5WorkBytes(h, k) + 32U + 3U * EpCombineAlign(h * 4U, 256U);
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5InputLaneCount(uint32_t bs, uint32_t h, uint32_t k)
+{
+    if (bs == 0U || h == 0U || h > kEpServerDedupCombineUbBytes / 2U || k == 0U || k > 32U) return 0U;
+    const uint64_t fixed = EpCombineM5FixedUbBytes(bs, h, k);
+    const uint32_t output = EpCombineAlign(h * 2U, 32U);
+    if (fixed + output > kEpServerDedupCombineUbBytes) return 0U;
+    const uint32_t lanes = uint32_t((kEpServerDedupCombineUbBytes - fixed - output) /
+        (((h * 2U + 479U) / 480U) * 480U));
+    return lanes > kEpServerDedupCombineM5MaxLanes ? kEpServerDedupCombineM5MaxLanes : lanes;
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5OutputLaneCount(uint32_t bs, uint32_t h, uint32_t k)
+{
+    const uint32_t input = EpCombineM5InputLaneCount(bs, h, k);
+    if (input == 0U) return 0U;
+    const uint64_t free = kEpServerDedupCombineUbBytes - EpCombineM5FixedUbBytes(bs, h, k) -
+        input * (((h * 2U + 479U) / 480U) * 480U);
+    const uint32_t lanes = uint32_t(free / EpCombineAlign(h * 2U, 32U));
+    return lanes > kEpServerDedupCombineM5MaxLanes ? kEpServerDedupCombineM5MaxLanes : lanes;
+}
+// Three FP32 H buffers alone bound H, and therefore K*N. The admitted
+// per-token flag clear fits CANN's 12-bit DataCopyPad blockCount (4095).
+static_assert(32U * ((2U * (kEpServerDedupCombineUbBytes / 12U) + 479U) / 480U) <= 4095U,
+    "M5 flag clear blockCount budget");
 #undef TILEXR_EP_COMBINE_CONSTEXPR
 } // namespace TileXREp
 #endif

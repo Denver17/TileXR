@@ -25,7 +25,28 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 适用平台为 Ascend 910A5/Ascend950 A5 环境，目标工具链为 CANN 9.1.0，保持 C++14。
 910B Host 或 simulator 只能验证 Host/构建边界，不能作为 A5 kernel 执行证据。
 
-### P2.3 当前交付契约：M4 无预热单轮
+### P2.4 当前交付契约：M5 完整归约及多轮复用
+
+checkpoint=`ep-sdedup-combine-p2-m5`，`implemented_through=M5`、`scope=full`。
+Read 核在本核 M4 Event 排空及 PIPE_ALL 后进入 M5，按 BS 连续分工，局部缓存表 4/5，
+使用密排原始 TokenId pending 表；未到齐继续扫描，完成指令提交后末项替换删除。
+按非零 mask 搬入有效 k 的 Flag，一次 ReduceSum 检测到齐；按 k 升序 FP32 加权，
+包含 M4 已经舍入的低精度 partial，最终 RNE 写 yOut。
+本核最后一次 probe 成功后，复用整 K*N Flag UB 为零值源，逐原始 Token 清全部 K 槽的
+完整 32B Flag，保留 payload；与最后 Token 读取/计算重叠，退出前保证输出及清理完成。
+不增加 Host 逐轮清理、固定等待、全核结束屏障或公共 stop-stage 参数。
+
+`run_commit_validation.sh` 共 24 个串行 16P 用例（BF16/FP16 × combine/both）：
+F1=1 轮/0 预热、F2=2/0、Fmulti=5/2、P=5/2、B=5/2，各 4 例；另有 Dispatch 回归 2 例、
+D quant4→独立低精度 expertOut 连接 2 例（均 5/2）。OFF 20 例、ON 4 例使用隔离安装包、同一源码摘要。
+检查最终 yOut、DIRECT/partial payload、所有已用窗口的完整结果 Flag 清理、未写槽和边界保护；
+性能确认采集，breakdown 含 M5，记录最后一次调用，不加内部细打点、压力矩阵或性能阈值。
+数值政策固定 FP32 分步乘加与两级低精度 RNE、有效值逐位比较；数值失败但执行完成时仍导出可用性能/trace。
+P2.3 已按回传通过；P2.4 设备验收待回传，不将前序通过记录外推为完整多轮正确性。
+下文初始拆解若仍出现空 mask、M3/M4 清理助手、逐轮变化数据或内部细分打点的候选要求，
+以本节当前交付契约和最新 CB05/CB06 确认为准：非零 mask、无清理助手、固定输入批末校验及模块级打点。
+
+### P2.3 历史交付契约：M4 无预热单轮
 
 checkpoint=`ep-sdedup-combine-p2-m4`，`implemented_through=M4`、`scope=partial`。
 在 M1/M2/M3 基础上，Read 核按类型 2 密排任务均分，表 2/3 共用原行号批次，
@@ -37,7 +58,7 @@ self 读 expertOut，成员（含同卡）按 source/expert/q 读 stage，依表
 有效 payload 固定逐位比较（atol=rtol=0），失败后不放宽；尾部 padding 不参与数值比较。
 模块 trace 增加 Read 核 M4，流量区分 stage、DIRECT、partial 及 payload/wire。
 数值失败但执行已正常完成时仍保存可用性能/trace，最终 FAIL。
-M4 设备验收待用户回传，不能用 M3 已通过结果或开发侧 Host 测试代替。
+M4 设备验收已按用户回传登记 16/16 通过，详细结果见调试进度；不能外推至 M5。
 
 ### P2.2 历史交付契约：M3 无预热单轮
 
@@ -60,12 +81,12 @@ M3 设备验收已按用户回传登记 16/16 通过，详细结果见调试进�
 <a id="combine-phase2-modular-acceptance"></a>
 ## Combine 第二阶段：按模块递进验收（2026-09-21）
 
-本节为第二阶段开发/验收计划。P2.1 的 M1/M2 已完成开发，设备验收已按用户回传登记通过；P2.2 的 M3 已通过，P2.3 的 M4 开发交付、待设备验收；M5 在设计完成后再启动。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
+本节为第二阶段开发/验收计划。P2.1 的 M1/M2 已完成开发，设备验收已按用户回传登记通过；P2.2 的 M3 已通过，P2.3 的 M4 已按用户回传通过；P2.4 的 M5 开发交付、待设备验收。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
 每个模块交付点都须完成单轮功能、多轮功能、多轮 performance、多轮 breakdown 四类确认，
 全部通过后才开发下一模块。共四个模块交付点、十六项子验收；按模块分别提交，不将四类确认默认拆成十六次代码提交。
 沿用同一 `run_commit_validation.sh`、`build_all.sh/sync.sh/run.sh`、workflow 和 chain consumer，
 保留 dispatch/combine/both 三种模式、独立 D/C quantMode、共享输入 dtype/量化格式配置。
-P2.1/P2.2 保留在历史提交；当前入口为 `ep-sdedup-combine-p2-m4`，M5 checkpoint 为后续契约。
+P2.1–P2.3 保留在历史提交；当前入口为 `ep-sdedup-combine-p2-m5`。
 
 权威模块语义见[Combine 设计](specs/ep-memory-server-dedup-combine-design.md)，
 接口/五表/共享布局见[联合设计](specs/ep-memory-server-dedup-dispatch-combine-design.md)。
@@ -254,7 +275,7 @@ M3 前落实 CB03-01 与上述测试后处理；M4 前落实 CB04-01/02 与数�
 每个模块的交付闭环：本地 Host/脚本回归及 blue CANN 9.1 A5 OFF/ON 编译 → 独立提交并推送 →
 用户切换对应 SHA 执行 `bash run_commit_validation.sh` → 回传四类子结果及总 summary → 登记后进入下一模块。
 报告保留环境身份、源码状态/摘要、build_id、Host/Kernel 哈希、命令和各 rank 证据；复用已存在的匹配环境 HCCL 资格记录。
-未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及设备验收证据已单独登记，设备部分按用户回传通过；P2.2 已按回传通过，P2.3 已开发、待设备验收，P2.4 未开发、未验收。
+未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及设备验收证据已单独登记，设备部分按用户回传通过；P2.2 已按回传通过，P2.3 已按回传通过，P2.4 已开发、待设备验收。
 
 
 <a id="combine-phase1-confirmed"></a>

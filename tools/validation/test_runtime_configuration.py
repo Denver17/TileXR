@@ -212,7 +212,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
                 self.assertEqual(len(result.stdout.splitlines()), 1)
 
-    def test_commit_entry_selects_p23_production_before_workflow_preflight(self):
+    def test_commit_entry_selects_p24_production_before_workflow_preflight(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json,sys; print(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n")
         cann = self.root / "cann-env.sh"
@@ -226,7 +226,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(values["action"], "commit-validate")
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_M4_CHECKPOINT)
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_M5_CHECKPOINT)
         self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "production")
         self.assertEqual(values["env"]["TILEXR_VALIDATION_ACTION"], "commit-validate")
         self.assertNotIn("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", values["env"])
@@ -253,7 +253,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                                     env=self.env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 2)
 
-    def test_combine_run_selects_p23_and_preserves_prior_gates(self):
+    def test_combine_run_selects_p24_and_preserves_prior_gates(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json\nfrom pathlib import Path\nfrom run_summary import write_result\n"
             "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
@@ -287,7 +287,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 if accepted:
                     values = json.loads((output / "config.json").read_text())
                     self.assertEqual(values["TILEXR_VALIDATION_BOUNDARY_PROBE"], "0")
-                    self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], checkpoint or workflow.COMBINE_M4_CHECKPOINT)
+                    self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], checkpoint or workflow.COMBINE_M5_CHECKPOINT)
                     self.assertEqual((values["TILEXR_VALIDATION_LOOPS"], values["TILEXR_VALIDATION_WARMUP"]), (loops, warmup))
 
     def test_case_dry_run_resolves_new_modes_before_loading_runtime(self):

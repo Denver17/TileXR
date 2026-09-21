@@ -7,6 +7,7 @@
 #include "ep_memory_server_dedup_combine_config.h"
 #include "ep_memory_server_dedup_combine_profile.h"
 #include "tilexr_ep_server_dedup_partial.h"
+#include "tilexr_ep_server_dedup_source_aggregate.h"
 #if defined(TILEXR_ENABLE_PROFILING)
 #include "tilexr_profiling.h"
 #endif
@@ -14,16 +15,16 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// P2.3: local stage, readiness, DIRECT and FP32-weighted partial return.
-// M5 and yOut arithmetic are intentionally not executed.
+// Local stage, readiness, DIRECT/partial return and source-token aggregation.
 class CombineMemoryServerDedupKernel {
+    friend struct CombineModuleTestAccess;
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine,
         GM_ADDR sendCounts, GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex,
         GM_ADDR sourceMask, GM_ADDR yOut, uint32_t bs, uint32_t h, uint32_t topK,
         uint32_t experts, uint8_t dtype, uint8_t quantMode, int64_t magic, uint8_t profilingEnabled)
     {
-        (void)expertScales; (void)sourceMask; (void)yOut; (void)quantMode; (void)profilingEnabled;
+        (void)quantMode; (void)profilingEnabled;
         core_ = GetBlockIdx();
 #if defined(TILEXR_ENABLE_PROFILING)
         if (profilingEnabled != 0U) profile_.InitializeLatestCombine(commArgs, core_, 0U,
@@ -34,6 +35,7 @@ public:
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         h_ = h; topK_ = topK; bs_ = bs; experts_ = experts; dtype_ = dtype;
         expertAddr_ = expertOut; tableAddr_ = assistInfoForCombine; relayAddr_ = relayReadIndex;
+        weightsAddr_ = expertScales; masksAddr_ = sourceMask; outputAddr_ = yOut;
         // Load the device-produced prefix through MTE2 rather than caching a
         // mutable GM scalar across launches. This 32B temporary becomes the
         // independent M2 prepare sum only after the scalar count is consumed.
@@ -55,7 +57,8 @@ public:
         tokens_ = uint32_t(tokens);
         lanes_ = EpCombinePayloadLaneCount(tokens_, h_);
         if (lanes_ == 0U || EpCombineM4InputLaneCount(tokens_, h_, topK_) == 0U ||
-            EpCombineM4OutputLaneCount(tokens_, h_, topK_) == 0U) { Trap(); return; } // Also enforced by Host for the maximum valid count.
+            EpCombineM4OutputLaneCount(tokens_, h_, topK_) == 0U ||
+            EpCombineM5InputLaneCount(bs_, h_, topK_) == 0U || EpCombineM5OutputLaneCount(bs_, h_, topK_) == 0U) { Trap(); return; } // Also enforced by Host for the maximum valid count.
         blocks_ = (h_ * 2U + 479U) / 480U;
         laneBytes_ = blocks_ * 480U;
         resultStride_ = blocks_ * 512U;
@@ -100,6 +103,9 @@ public:
             Mark(kEpServerDedupCombineProfilePartialBegin);
             ReturnPartialTokens();
             Mark(kEpServerDedupCombineProfilePartialEnd);
+            Mark(kEpServerDedupCombineProfileFinalBegin);
+            AggregateSourceTokens();
+            Mark(kEpServerDedupCombineProfileFinalEnd);
         } else {
             Mark(kEpServerDedupCombineProfileDirectBegin);
             ReturnDirectTokens();
@@ -117,6 +123,18 @@ public:
     }
 
 private:
+    __aicore__ inline void AggregateSourceTokens()
+    {
+        // Every M4 event is paired before overwriting its arena views. This
+        // boundary also covers empty-M4 cores that still own source tokens.
+        PipeBarrier<PIPE_ALL>();
+        ServerDedupSourceAggregate aggregate;
+        aggregate.Init(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
+            args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
+            masksAddr_, weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
+            core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum);
+        aggregate.Process();
+    }
     __aicore__ inline void Mark(uint32_t event)
     {
 #if defined(TILEXR_ENABLE_PROFILING)
@@ -329,6 +347,9 @@ private:
     GM_ADDR expertAddr_ = nullptr;
     GM_ADDR tableAddr_ = nullptr;
     GM_ADDR relayAddr_ = nullptr;
+    GM_ADDR weightsAddr_ = nullptr;
+    GM_ADDR masksAddr_ = nullptr;
+    GM_ADDR outputAddr_ = nullptr;
     uint32_t bs_ = 0, experts_ = 0;
     uint8_t dtype_ = 0;
     uint32_t core_ = 0, h_ = 0, topK_ = 0, blocks_ = 0, resultStride_ = 0, tokens_ = 0, lanes_ = 0, laneBytes_ = 0, usedBytes_ = 0;

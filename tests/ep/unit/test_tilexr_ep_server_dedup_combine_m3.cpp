@@ -75,7 +75,7 @@ void DirectRows(uint32_t count, uint32_t h, bool sparse, uint32_t window, uint8_
             reinterpret_cast<GM_ADDR>(f.table.data()), reinterpret_cast<GM_ADDR>(f.counts.data()),
             f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()), f.untouched.data(),
             f.untouched.data(), f.untouched.data(), f.tiling.bs, f.h, 3U, 320U, dtype, 0U, window, 0U);
-        kernel.Process();
+        TileXREp::CombineModuleTestAccess::ThroughM4(kernel);
         Check(AscendC::PendingMte3().empty(), "M3 locally drains all outstanding sends");
         const uint32_t sendCores = TileXREp::kEpServerDedupCombineSendCoreNum;
         const uint32_t base = uint32_t(selected.size()) / sendCores, extra = uint32_t(selected.size()) % sendCores;

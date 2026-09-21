@@ -331,7 +331,12 @@ template<class T> void Mins(LocalTensor<T> dst, LocalTensor<T> src, T value, uin
 template<class T> void ReduceSum(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<T>, uint32_t n) {
     T sum = 0; for (uint32_t i = 0; i < n; ++i) sum += src.GetValue(i); dst.SetValue(0, sum);
 }
+inline std::function<void(uint32_t, uint32_t, uint32_t)> &ReduceSumObserver() {
+    static std::function<void(uint32_t, uint32_t, uint32_t)> observer;
+    return observer;
+}
 template<class T> void ReduceSum(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<T>, uint32_t mask, uint32_t repeats, uint32_t stride) {
+    if (ReduceSumObserver()) ReduceSumObserver()(mask, repeats, stride);
     T sum = 0;
     for (uint32_t r = 0; r < repeats; ++r) for (uint32_t i = 0; i < mask; ++i)
         sum += src.GetValue(r * stride * 32 / sizeof(T) + i);

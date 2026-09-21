@@ -252,20 +252,22 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
 
 def combine_breakdown_timeline(run, config=None):
     """Keep real module intervals; retained C6 captures contain only the total."""
-    if config and config.get("implemented_through") in ("M3", "M4"):
-        if config["loops"] != 1 or config["warmup"] != 0:
+    if config and config.get("implemented_through") in ("M3", "M4", "M5"):
+        if config["implemented_through"] != "M5" and (config["loops"] != 1 or config["warmup"] != 0):
             raise ValueError("M3/M4 captures exactly one launch without warmup")
         for launch in run.launches:
             for lane in launch.lanes:
                 expected = {"kernel_total", "m1_init", "m1_stage", "m6_drain"}
                 expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
-                if config["implemented_through"] == "M4" and lane.core >= config.get("combine_send_core_num", 32):
+                if config["implemented_through"] in ("M4", "M5") and lane.core >= config.get("combine_send_core_num", 32):
                     expected.add("m4_partial")
+                    if config["implemented_through"] == "M5":
+                        expected.add("m5_final")
                 actual = [sample.name for sample in lane.samples if sample.kind == "interval"]
                 if set(actual) != expected or len(actual) != len(expected):
-                    raise ValueError("M3/M4 module/core role coverage mismatch: " + str(lane.core))
-        return replace(run, attributes={**run.attributes, "scope": "partial", "implemented_through": config["implemented_through"],
-            "timing": "single launch, module intervals; no fixed wait, no performance baseline"})
+                    raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))
+        return replace(run, attributes={**run.attributes, "scope": "full" if config["implemented_through"] == "M5" else "partial", "implemented_through": config["implemented_through"],
+            "timing": "latest launch, module intervals; no fixed wait, no performance threshold"})
     if config and config.get("implemented_through") == "M2":
         common = {"kernel_total", "m1_init", "m1_select", "m1_stage_copy", "m1_prepare_publish", "m6_drain", "p21_delay_50us"}
         for launch in run.launches:
@@ -615,7 +617,7 @@ def validate_report_artifacts(evidence, rank, chain_config):
                 "stages_us", "dropped_records", "artifact_manifest", "operator", "kernel", "run_id", "kernel_sha256",
                 "last_launch", "scope", "native_status", "algorithm_bytes", "algorithm_bandwidth_gbps", "algorithm_bandwidth",
                 "implemented_through", "stage_copy_bytes", "control_publish_bytes", "wait_us",
-                "stage_payload_bytes", "direct_payload_bytes", "direct_wire_bytes", "partial_payload_bytes", "partial_wire_bytes", "partial_self_read_bytes", "partial_stage_read_bytes", "performance_scope")
+                "stage_payload_bytes", "direct_payload_bytes", "direct_wire_bytes", "partial_payload_bytes", "partial_wire_bytes", "partial_self_read_bytes", "partial_stage_read_bytes", "final_read_bytes", "y_out_bytes", "flag_clear_bytes", "traffic_scope", "performance_scope")
     if any(summary.get(key) != evidence.get(key) for key in identity):
         raise ValueError("profiling report summary disagrees with node scalar result")
     if (summary.get("loops") != chain_config["loops"] or summary.get("warmup") != chain_config["warmup"]

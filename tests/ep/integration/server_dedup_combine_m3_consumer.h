@@ -26,7 +26,7 @@ struct CombineM3Validation : CombineM12Validation {
         using namespace ServerDedupReference;
         auto shape = SourceSendShape(c);
         shape.quantized = false;
-        if (c.operatorMode == "combine" && c.checkpoint != "ep-sdedup-combine-p2-m4") shape.routeMode = TileXREpDemo::RouteMode::Balance;
+        if (c.operatorMode == "combine" && (c.checkpoint != "ep-sdedup-combine-p2-m4" && c.checkpoint != "ep-sdedup-combine-p2-m5")) shape.routeMode = TileXREpDemo::RouteMode::Balance;
         const bool generated = c.operatorMode == "combine" || c.quantMode != 0;
         expectedResult = initialResult;
         ignoredResult.assign(expectedResult.size(), 0);
@@ -49,7 +49,7 @@ struct CombineM3Validation : CombineM12Validation {
                 std::vector<uint16_t> values(c.h);
                 for (uint32_t column = 0; column < uint32_t(c.h); ++column) {
                     const uint16_t one = shape.bf16 ? 0x3f80U : 0x3c00U;
-                    values[column] = generated ? (c.checkpoint == "ep-sdedup-combine-p2-m4" ?
+                    values[column] = generated ? ((c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5") ?
                         CombineM4Reference::ExpertBits(shape.bf16, producer, originalRow, column, c.operatorMode == "both") :
                         static_cast<uint16_t>(one + (originalRow * 17U + column * 3U + producer * 11U) % 113U)) :
                         HiddenBits(shape, row.source, row.token, column);
@@ -81,14 +81,15 @@ struct CombineM3Validation : CombineM12Validation {
         const OperatorProgress &combine, uint64_t synchronizations, bool valid = true) const
     {
         const bool both = c.operatorMode == "both";
-        const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4";
+        const bool m5 = c.checkpoint == "ep-sdedup-combine-p2-m5";
+        const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4" || m5;
+        const char *native = m5 ? "combine-m5" : m4 ? "combine-m4" : "combine-m3";
         const char *checked = valid ? "true" : "false";
         std::ostringstream out;
         out << dispatch.Details("dispatch", peerBytes) << combine.Details("combine", peerBytes)
             << ",\"stream_synchronizations\":" << synchronizations
-            << ",\"kernel_scope\":" << Json(m4 ? (both ? "dispatch-combine-m4" : "combine-m4") :
-                (both ? "dispatch-combine-m3" : "combine-m3"))
-            << ",\"native_status\":" << Json(m4 ? "combine-m4" : "combine-m3")
+            << ",\"kernel_scope\":" << Json(both ? std::string("dispatch-") + native : native)
+            << ",\"native_status\":" << Json(native)
             << ",\"combine_empty\":false,\"combine_delay_us\":0"
             << ",\"combine_observed_rounds\":" << observations
             << ",\"combine_checked_window_mask\":" << launchedWindows
@@ -98,19 +99,25 @@ struct CombineM3Validation : CombineM12Validation {
             << ",\"combine_unwritten_results_unchanged\":" << checked
             << ",\"combine_token_num\":" << validatedTokenNum << ",\"combine_type3_rows\":" << type3Rows
             << ",\"combine_type1_rows\":" << directRows << ",\"combine_direct_received_rows\":" << receivedRows
-            << ",\"combine_algorithm_bytes\":" << (type3Rows + directRows + partialRows) * c.h * 2U
+            << ",\"combine_algorithm_bytes\":" << (type3Rows + directRows + partialRows + (m5 ? uint64_t(c.bs) : 0U)) * c.h * 2U
             << ",\"combine_stage_copy_bytes\":" << type3Rows * c.h * 4U
             << ",\"combine_direct_payload_bytes\":" << directRows * c.h * 2U
             << ",\"combine_direct_wire_bytes\":" << directRows * ((c.h * 2U + 479U) / 480U) * 512U
             << ",\"combine_control_publish_bytes\":" << (64U * 8U + 8U * TileXREp::kEpServerDedupCombineRecvCoreNum) * 32U
             << ",\"combine_input_check\":" << Json(both ? "dispatch-final-reference" : "full-snapshot")
             << ",\"combine_inputs_unchanged\":" << (!both && valid ? "true" : "false")
-            << ",\"y_out_unchanged\":" << checked << ",\"independent_expert_out_unchanged\":"
+            << ",\"independent_expert_out_unchanged\":"
             << ((!both || c.quantMode != 0) && valid ? "true" : "false")
             << ",\"five_tables_linked\":" << (both ? "true" : "false")
             << ",\"send_counts_linked\":" << (both ? "true" : "false")
             << ",\"expert_out_source\":" << Json(!both ? "standalone_expert_out" :
                 c.quantMode == 0 ? "dispatch_expand_x" : "separate_expert_out");
+        if (!m5) out << ",\"y_out_unchanged\":" << checked;
+        if (m5) out << ",\"combine_y_out_validated\":" << checked
+            << ",\"combine_result_flags_cleared\":" << checked
+            << ",\"combine_final_read_bytes\":" << (receivedRows + partialReceivedRows) * c.h * 2U
+            << ",\"combine_y_out_bytes\":" << uint64_t(c.bs) * c.h * 2U
+            << ",\"combine_flag_clear_bytes\":" << uint64_t(c.bs) * c.topK * ((c.h * 2U + 479U) / 480U) * 32U;
         if (m4) out << ",\"combine_type2_rows\":" << partialRows
             << ",\"combine_partial_received_rows\":" << partialReceivedRows
             << ",\"combine_partial_member_rows\":" << partialMembers

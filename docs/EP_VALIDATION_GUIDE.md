@@ -1,11 +1,88 @@
 # EP 验证与人工测试
 
-## 当前入口：Combine P2.3（M4）
+## 当前入口：Combine P2.4（M5）
+
+M4/P2.3 已按用户回传通过 F/P/B 各 4/4、regression/connection 各 2/2，共 16/16。
+结果：`/home/h00580772/TileXR-git-check/run/validation/commit-c44caafd510d495e9c2eb67e5cef2604/summary.json`。
+该目录后缀为验证运行标识，M4 独立代码提交为 `f770c829202f1b41dcb2bee502c173c7dd419b0d`。
+M5 增加 source 端完整 yOut 归约及结果 Flag 清理，恢复连续多轮；设备验收待回传。
+
+```bash
+bash run_commit_validation.sh
+```
+
+当前 checkpoint 为 `ep-sdedup-combine-p2-m5`。前两台各 8P，共 16P，
+BS96/H7168/K6/E96，Send/Read=32/32；24 个串行用例如下。
+
+| 分组 | 用例数 | 正式/预热轮数 |
+| --- | --- | --- |
+| F1：单轮功能 | 4 | 1/0 |
+| F2：双轮复用 | 4 | 2/0 |
+| Fmulti：多轮功能 | 4 | 5/2 |
+| P：多轮性能 | 4 | 5/2 |
+| B：多轮模块耗时/trace | 4 | 5/2 |
+| Dispatch 回归 | 2 | 5/2 |
+| Dispatch quant4 → Combine quant0 接线 | 2 | 5/2 |
+
+前五组均为 BF16/FP16 × combine/both。OFF 20 例与 ON 4 例分别构建安装到
+`install/validation-combine-p24-profile-off/on`，要求同一源码摘要，不复用旧 checkpoint 记录。
+量化接线保留 Dispatch 五表/count，Combine 使用独立低精度 expertOut；Combine 不支持量化。
+
+人工性能和 trace 使用相同包：
+
+```bash
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m5
+bash build_all.sh breakdown=0
+TILEXR_VALIDATION_BREAKDOWN=0 bash sync.sh
+bash run.sh -n 2 -e 96 -m 1 -l 5 2 operator_mode=combine
+bash build_all.sh breakdown=1
+TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh
+bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=combine
+```
+
+`operator_mode=both` 测联合调用；D/C 分别输出 trace，Combine 包含 M5 final 区间。
+统计区分单次、正式轮累计、含预热累计字节；trace 保存最后一次调用（7 次调用时 index=6）。
+性能及模块拆解仅确认采集链路，无耗时阈值。数值校验失败但执行完成时仍保留测量和 trace，最终 FAIL。
+
+数值判据预先固定为本次有限正常数/零 fixture 的逐位一致：先模拟 M4 self 后成员顺序
+FP32 乘加和通信 dtype 舍入，再按原 token 有效 k 升序做 M5 FP32 乘加及 ties-to-even 输出。
+首乘积直接初始化累加区，保留 signed zero；零权重仍等 Flag 和读取 payload。
+不得以全 K 一次 FP32 累加替代两级舍入，失败后不放宽容差。
+检查最终 yOut、有效 DIRECT/partial payload、未写槽、输入、stage、控制区和各已使用窗口。
+结果区全部 K*N 个 32B Flag 均须为零；Host 只在初始分配时清零，不插入逐轮清理助手。
+
+实现边界：Read 核按 BS 连续均分原 token；pending 列表保存实际 TokenId，移除后交换末项，
+表 4/5 索引始终使用原 token。每次探测有效 k 的所有 Flag，只调用一次 ReduceSum；
+最后一个 token 就绪后，对原始整个负责区间的全部 Flag 发起清理，再完成最后的 payload/yOut。
+M4 末尾排空后才复用 UB，退出前排空 MTE3，不再保留 50μs。
+190KiB UB 保留默认 7488B M2 常驻区，先预算表、Flag、归约工作区和三份 FP32 工作区，
+再分配输入/输出 lane；默认 BS96/H7168/K6 为输入 5 / 输出 1，K32 为输入 3 / 输出 1。
+Host 与 kernel 共享预算准入；探测使用 Event 7，payload lane 仅使用 0..6，避免事件串扰。
+
+开发教训：CANN 9.1 dav_3510 ReduceSum 即使每个 32B block 只取首个 float，底层仍可能整段
+256B 向量加载。Flag UB 须预留尾部读取余量，工作区须按 256B 向上对齐，不能只按有效标量数分配。
+数值 fixture 必须传 TileXR 命名 dtype 枚举，不能假设 FP16/BF16 为 0/1；本次数值测试捕获并修正了此类测试构造错误。
+多轮验收必须由生产 M5 清理全部结果 Flag；测试侧清零会掩盖窗口复用错误。
+CPU 替身只能验证调度/地址/数值约定，跨 rank 可见性与并发清理时序仍须 A5 16P 验收。
+
+开发侧最终验证（2026-09-21）：blue CANN 9.1、ccec/Clang 15.0.5，A5 `dav-c310-vec`，
+正式 workflow OFF/ON 构建安装成功，安装包 Host 各 10/10，额外 M1–M5/config/profile/Host 准入 8/8。
+OFF build_id=`b9b89471b6ca40408a0234ebc1553148`，ON build_id=`3fd025ab4cbf428198106939de816766`；
+两包源码摘要均为 `f1b3cef371ce35c89de77ff33cc208dde57ae7d75e1405b592ac6241a35306a4`。
+本次为冻结文件快照构建，manifest commit 为空；待提交生产/测试/脚本与快照逐文件一致，随后仅补文档。
+Python 验收工具 366 项中 365 通过、1 项 Windows 专属检查跳过；M3/M4/M5 consumer 替身各 4/4。
+主 shape 六组 16-rank consumer 替身各 2 预热+5 正式调用通过，覆盖 N=1..5 与同卡成员，
+检查完整双窗/最终 yOut，并实际确认本次 fixture 数值域为有限正常数或零。
+证据保留在开发工作区 `build/combine-p24-verification/`，包括编译配置、退出码、产物哈希和源码 provenance。
+以上不证明真实 A5 跨 rank 可见性、连续调用时序或设备数值；P2.4 的 24 例设备验收仍待用户回传。
+
+<a id="当前入口combine-p23m4"></a>
+### P2.3（M4）历史开发及验收证据
 
 P2.2 已按用户回传通过 F/P/B 各 4 项、regression/connection 各 2 项，共 16/16。
 结果：`/home/h00580772/TileXR-git-check/run/validation/commit-f59416872bdb49aa9387c398c779c522/summary.json`。
 P2.3 累计 M1/M2/M3，增加 Read 核 self + stage 成员 FP32 加权及 BF16/FP16 partial 返回。
-M5 未接入、yOut 保持；不保留 50μs，不清结果 Flag。M4 设备验收待回传。
+M5 未接入、yOut 保持；不保留 50μs，不清结果 Flag。M4 已按用户回传通过 16/16，结果见下文 P2.4 入口。
 
 ```bash
 bash run_commit_validation.sh

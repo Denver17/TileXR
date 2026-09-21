@@ -90,7 +90,7 @@ struct PartialFixture : Fixture {
             reinterpret_cast<GM_ADDR>(types.data()), reinterpret_cast<GM_ADDR>(relay.data()), untouched.data(),
             untouched.data(), bs, h, k, 32U, bf16 ? TileXR::TILEXR_DATA_TYPE_BFP16 : TileXR::TILEXR_DATA_TYPE_FP16,
             0U, window, 0U);
-        kernel.Process();
+        TileXREp::CombineModuleTestAccess::ThroughM4(kernel);
     }
 };
 

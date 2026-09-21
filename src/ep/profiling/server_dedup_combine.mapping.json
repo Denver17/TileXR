@@ -46,6 +46,13 @@
       "end": 12318
     },
     {
+      "name": "m5_final",
+      "category": "compute",
+      "critical": false,
+      "begin": 12319,
+      "end": 12320
+    },
+    {
       "name": "m6_drain",
       "category": "finalize",
       "critical": false,

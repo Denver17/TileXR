@@ -61,7 +61,11 @@ COMBINE_M12_CHECKPOINT = "ep-sdedup-combine-p2-m12"
 COMBINE_M3_CHECKPOINT = "ep-sdedup-combine-p2-m3"
 COMBINE_M4_CHECKPOINT = "ep-sdedup-combine-p2-m4"
 COMBINE_SINGLE_MODULE_CHECKPOINTS = (COMBINE_M3_CHECKPOINT, COMBINE_M4_CHECKPOINT)
-COMBINE_MODULE_CHECKPOINTS = (COMBINE_M12_CHECKPOINT, *COMBINE_SINGLE_MODULE_CHECKPOINTS)
+COMBINE_M5_CHECKPOINT = "ep-sdedup-combine-p2-m5"
+COMBINE_RETURN_CHECKPOINTS = (*COMBINE_SINGLE_MODULE_CHECKPOINTS, COMBINE_M5_CHECKPOINT)
+COMBINE_MODULE_CHECKPOINTS = (COMBINE_M12_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)
+COMBINE_M5_TEST = "test_tilexr_ep_server_dedup_combine_m5"
+COMBINE_M5_CONSUMER_TEST = "test_tilexr_ep_server_dedup_combine_m5_consumer"
 COMBINE_M4_TEST = "test_tilexr_ep_server_dedup_combine_m4"
 COMBINE_M4_CONSUMER_TEST = "test_tilexr_ep_server_dedup_combine_m4_consumer"
 COMBINE_M3_TEST = "test_tilexr_ep_server_dedup_combine_m3"
@@ -93,6 +97,8 @@ COMBINE_TESTS[COMBINE_M3_CHECKPOINT] = COMBINE_ABI_HOST_TESTS | {
     COMBINE_PROFILE_KERNEL_TEST, COMBINE_CONFIG_TEST, COMBINE_M3_TEST, COMBINE_M3_CONSUMER_TEST}
 COMBINE_TESTS[COMBINE_M4_CHECKPOINT] = (COMBINE_TESTS[COMBINE_M3_CHECKPOINT] - {
     COMBINE_M3_TEST, COMBINE_M3_CONSUMER_TEST}) | {COMBINE_M4_TEST, COMBINE_M4_CONSUMER_TEST}
+COMBINE_TESTS[COMBINE_M5_CHECKPOINT] = (COMBINE_TESTS[COMBINE_M4_CHECKPOINT] - {
+    COMBINE_M4_TEST, COMBINE_M4_CONSUMER_TEST}) | {COMBINE_M5_TEST, COMBINE_M5_CONSUMER_TEST}
 COMBINE_ABI = {"launch_bytes": 88, "tiling_bytes": 16, "runtime_args_bytes": 88,
                "block_dim": 64, "kernel_scope": "combine-empty"}
 COMBINE_M12_ABI = dict(COMBINE_ABI, kernel_scope="combine-m12", implemented_through="M2",
@@ -101,8 +107,10 @@ COMBINE_M3_ABI = dict(COMBINE_M12_ABI, kernel_scope="combine-m3", implemented_th
 
 COMBINE_M4_ABI = dict(COMBINE_M3_ABI, kernel_scope="combine-m4", implemented_through="M4")
 
+COMBINE_M5_ABI = dict(COMBINE_M4_ABI, kernel_scope="combine-m5", implemented_through="M5", scope="full")
+
 def combine_contract(checkpoint):
-    return {COMBINE_M12_CHECKPOINT: COMBINE_M12_ABI, COMBINE_M3_CHECKPOINT: COMBINE_M3_ABI, COMBINE_M4_CHECKPOINT: COMBINE_M4_ABI}.get(checkpoint, COMBINE_ABI)
+    return {COMBINE_M12_CHECKPOINT: COMBINE_M12_ABI, COMBINE_M3_CHECKPOINT: COMBINE_M3_ABI, COMBINE_M4_CHECKPOINT: COMBINE_M4_ABI, COMBINE_M5_CHECKPOINT: COMBINE_M5_ABI}.get(checkpoint, COMBINE_ABI)
 
 
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
@@ -526,9 +534,11 @@ def chain_configuration(checkpoint, default_host=None):
             raise ValueError("M1/M2逐轮观察仅支持functional")
         if checkpoint in COMBINE_SINGLE_MODULE_CHECKPOINTS and (loops != 1 or warmup != 0 or observation != "batch" or fixture != "balanced"):
             raise ValueError("M3/M4 requires one launch, zero warmup, balanced fixture and batch observation in every mode")
+        if checkpoint == COMBINE_M5_CHECKPOINT and (observation != "batch" or fixture != "balanced"):
+            raise ValueError("M5 requires balanced fixture and batch observation; no test-side preconditioning")
         chain.update(combine_fixture=fixture, combine_observation=observation,
                      implemented_through=combine_contract(checkpoint)["implemented_through"],
-                     scope="partial", combine_send_core_num=32)
+                     scope="full" if checkpoint == COMBINE_M5_CHECKPOINT else "partial", combine_send_core_num=32)
     if checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
         return chain
 
@@ -604,7 +614,7 @@ def validation_directory(checkpoint):
             COMBINE_MULTI_CHECKPOINT: "validation-combine-c5",
             COMBINE_PROFILE_CHECKPOINT: "validation-combine-c6",
             COMBINE_BOUNDARY_CHECKPOINT: "validation-combine-c7",
-            COMBINE_M12_CHECKPOINT: "validation-combine-p21", COMBINE_M3_CHECKPOINT: "validation-combine-p22", COMBINE_M4_CHECKPOINT: "validation-combine-p23"}.get(checkpoint, "validation")
+            COMBINE_M12_CHECKPOINT: "validation-combine-p21", COMBINE_M3_CHECKPOINT: "validation-combine-p22", COMBINE_M4_CHECKPOINT: "validation-combine-p23", COMBINE_M5_CHECKPOINT: "validation-combine-p24"}.get(checkpoint, "validation")
 
 
 def runtime_check(config, install, log):
@@ -803,7 +813,7 @@ def build(config):
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     build_targets = combine_tests
     if config.checkpoint in (COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
-        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST, COMBINE_M12_CONSUMER_TEST, COMBINE_M3_CONSUMER_TEST, COMBINE_M4_CONSUMER_TEST, COMBINE_CONFIG_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
+        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST, COMBINE_M12_CONSUMER_TEST, COMBINE_M3_CONSUMER_TEST, COMBINE_M4_CONSUMER_TEST, COMBINE_M5_CONSUMER_TEST, COMBINE_CONFIG_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
     if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         build_targets = build_targets | {CHAIN_PROGRAM}
     targets = ["--target", *sorted(build_targets)] if build_targets else []
@@ -829,7 +839,7 @@ def build(config):
     tests = []
     for test in listing["tests"]:
         command = test["command"]
-        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST, COMBINE_M12_CONSUMER_TEST, COMBINE_M3_CONSUMER_TEST, COMBINE_M4_CONSUMER_TEST):
+        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST, COMBINE_M12_CONSUMER_TEST, COMBINE_M3_CONSUMER_TEST, COMBINE_M4_CONSUMER_TEST, COMBINE_M5_CONSUMER_TEST):
             if (len(command) != 4 or not command[1].endswith(".py") or command[2] != "--consumer"
                     or Path(command[3]).name != COMBINE_DRY_RUN_PROGRAM):
                 raise ValueError(f"无法导出 C3 consumer 测试命令：{command}")
@@ -1158,7 +1168,7 @@ def validate_multi_magic(record, config, *, dispatch_only=False):
                 for state in ("submitted", "completed"):
                     numbers[operator + "_" + kind + state] = count if active else 0
     if not dispatch_only:
-        numbers.update(warmup_submitted=config["warmup"], warmup_completed=config["warmup"], combine_delay_us=0 if config.get("implemented_through") in ("M3", "M4") else 50)
+        numbers.update(warmup_submitted=config["warmup"], warmup_completed=config["warmup"], combine_delay_us=0 if config.get("implemented_through") in ("M3", "M4", "M5") else 50)
     for key, value in numbers.items():
         if type(record.get(key)) is not int or record[key] != value:
             raise Failure("RESULT_FAILED", "C5 提交/完成、预热、magic/选窗或同步记录不一致", field=key)
@@ -1175,14 +1185,17 @@ def validate_combine_multi_record(record, mapping, run_id, manifest, config, *, 
         if both:
             dispatch = record.get("dispatch")
             if not isinstance(dispatch, dict):
-                raise Failure("LOG_PARSE_FAILED", "M3/M4 invalid result lacks completed Dispatch identity", rank=mapping["rank"])
+                raise Failure("LOG_PARSE_FAILED", "Combine invalid result lacks completed Dispatch identity", rank=mapping["rank"])
             validate_combine_dispatch_record(dispatch, record["chain"], mapping, run_id, manifest, config,
                                             allow_invalid_output=True)
             validate_multi_magic(dispatch, config, dispatch_only=True)
         return
     independent = not both or config["dispatch_quant_mode"] == 4
-    flags = dict(combine_empty=config.get("implemented_through") not in ("M2", "M3", "M4"), combine_inputs_unchanged=not both, y_out_unchanged=True,
+    flags = dict(combine_empty=config.get("implemented_through") not in ("M2", "M3", "M4", "M5"), combine_inputs_unchanged=not both, y_out_unchanged=True,
                  independent_expert_out_unchanged=independent, five_tables_linked=both, send_counts_linked=both)
+    if config.get("implemented_through") == "M5":
+        flags.pop("y_out_unchanged")
+        flags["combine_y_out_validated"] = True
     source = ("separate_expert_out" if independent else "dispatch_expand_x") if both else "standalone_expert_out"
     if (any(record.get(key) is not value for key, value in flags.items()) or
             record.get("kernel_scope") != config["kernel_scope"] or
@@ -1238,42 +1251,44 @@ def validate_combine_return_record(record, mapping, config, *, invalid_output=Fa
     for marker in (record, record["chain"]):
         for key in ("implemented_through", "scope", "combine_fixture", "combine_observation"):
             if marker.get(key) != config[key]:
-                raise Failure("RESULT_FAILED", "M3/M4 module/configuration identity mismatch", field=key, rank=mapping["rank"])
-    if config["loops"] != 1 or config["warmup"] != 0:
+                raise Failure("RESULT_FAILED", "Combine module/configuration identity mismatch", field=key, rank=mapping["rank"])
+    if module != "M5" and (config["loops"] != 1 or config["warmup"] != 0):
         raise Failure("RESULT_FAILED", "M3/M4 only qualifies one launch without warmup")
     if config["operator_mode"] == "dispatch":
         return
     if record.get("native_status") != "combine-" + module.lower():
-        raise Failure("RESULT_FAILED", "M3/M4 native implementation identity mismatch", rank=mapping["rank"])
+        raise Failure("RESULT_FAILED", "Combine native implementation identity mismatch", rank=mapping["rank"])
     if invalid_output:
         if (record.get("execution_completed") is not True or
                 not isinstance(record.get("validation_error"), str) or not record["validation_error"] or
                 not isinstance(record.get("validation_stage"), str) or not record["validation_stage"]):
-            raise Failure("LOG_PARSE_FAILED", "M3/M4 invalid output lacks execution completion/error evidence", rank=mapping["rank"])
+            raise Failure("LOG_PARSE_FAILED", "Combine invalid output lacks execution completion/error evidence", rank=mapping["rank"])
     else:
         flags = ("combine_stage_validated", "combine_control_validated", "combine_control_reserved_unchanged",
-                 "combine_result_validated", "combine_result_flags_validated", "combine_unwritten_results_unchanged")
-        if module == "M4":
+                 "combine_result_validated", "combine_unwritten_results_unchanged")
+        flags += (("combine_y_out_validated", "combine_result_flags_cleared") if module == "M5" else
+                  ("combine_result_flags_validated",))
+        if module in ("M4", "M5"):
             flags += ("combine_partial_validated",)
         if any(record.get(key) is not True for key in flags):
-            raise Failure("RESULT_FAILED", "M3/M4 stage/control/DIRECT payload/Flag/protection validation missing", rank=mapping["rank"])
+            raise Failure("RESULT_FAILED", "Combine stage/control/return payload/Flag/protection validation missing", rank=mapping["rank"])
     values = [record.get(key) for key in ("combine_type3_rows", "combine_type1_rows", "combine_token_num", "combine_direct_received_rows")]
     if (any(type(value) is not int or not 0 <= value <= 10000 for value in values[:3]) or
             type(values[3]) is not int or not 0 <= values[3] <= config["bs"] * config["topk"]):
-        raise Failure("RESULT_FAILED", "M3/M4 row counts invalid", rank=mapping["rank"])
+        raise Failure("RESULT_FAILED", "Combine row counts invalid", rank=mapping["rank"])
     stage_rows, direct_rows, tokens, received = values
     if stage_rows + direct_rows > tokens:
-        raise Failure("RESULT_FAILED", "M3/M4 disjoint row counts exceed TokenNum", rank=mapping["rank"])
-    if module == "M4":
+        raise Failure("RESULT_FAILED", "Combine disjoint row counts exceed TokenNum", rank=mapping["rank"])
+    if module in ("M4", "M5"):
         partial = record.get("combine_type2_rows")
         partial_received = record.get("combine_partial_received_rows")
         if (type(partial) is not int or not 0 <= partial <= tokens - stage_rows - direct_rows or
                 type(partial_received) is not int or not 0 <= partial_received <= config["bs"] * config["topk"] or
                 received + partial_received > config["bs"] * config["topk"]):
-            raise Failure("RESULT_FAILED", "M4 partial row counts invalid", rank=mapping["rank"])
+            raise Failure("RESULT_FAILED", "Combine partial row counts invalid", rank=mapping["rank"])
         if (record.get("combine_numeric_policy") != "fp32-sequential-rne-bit-exact" or
                 record.get("combine_numeric_atol") != 0 or record.get("combine_numeric_rtol") != 0):
-            raise Failure("RESULT_FAILED", "M4 numerical policy mismatch", rank=mapping["rank"])
+            raise Failure("RESULT_FAILED", "Combine numerical policy mismatch", rank=mapping["rank"])
     try:
         operator_measure.return_traffic(record, config)
     except ValueError as error:
@@ -1281,9 +1296,9 @@ def validate_combine_return_record(record, mapping, config, *, invalid_output=Fa
     numbers = dict(combine_checked_window_mask=record.get("combine_window_mask"))
     observed = record.get("combine_observed_rounds")
     if type(observed) is not int or observed not in ((0, 1) if invalid_output else (1,)):
-        raise Failure("RESULT_FAILED", "M3/M4 observation count does not match result status", rank=mapping["rank"])
+        raise Failure("RESULT_FAILED", "Combine observation count does not match result status", rank=mapping["rank"])
     if any(type(record.get(key)) is not int or record[key] != value for key, value in numbers.items()):
-        raise Failure("RESULT_FAILED", "M3/M4 traffic/observation/window evidence mismatch", rank=mapping["rank"])
+        raise Failure("RESULT_FAILED", "Combine traffic/observation/window evidence mismatch", rank=mapping["rank"])
 
 
 def validate_combine_boundary_record(record, mapping):
@@ -1329,7 +1344,7 @@ def validate_combine_chain_record(record, mapping, run_id, manifest, config, *, 
                 raise Failure("RESULT_FAILED", "Combine 配置回显不一致", rank=mapping["rank"], field=key)
     if manifest["checkpoint"] == COMBINE_M12_CHECKPOINT:
         validate_combine_m12_record(record, mapping, config)
-    if manifest["checkpoint"] in COMBINE_SINGLE_MODULE_CHECKPOINTS:
+    if manifest["checkpoint"] in COMBINE_RETURN_CHECKPOINTS:
         validate_combine_return_record(record, mapping, config, invalid_output=invalid_output)
     if config.get("boundary_probe"):
         validate_combine_boundary_record(record, mapping)
@@ -1373,7 +1388,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         raise Failure("RESULT_FAILED", "rank 缺失、重复或不属于本节点")
     for record, mapping in zip(sorted(records, key=lambda item: item["rank"]), expected):
         wanted = rank_record(mapping, run_id, manifest)
-        invalid_output = (allow_invalid_output and manifest["checkpoint"] in (DISPATCH_CHECKPOINT, *COMBINE_SINGLE_MODULE_CHECKPOINTS)
+        invalid_output = (allow_invalid_output and manifest["checkpoint"] in (DISPATCH_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)
                           and chain_config is not None
                           and record.get("validation_status") == "FAIL")
         chain = manifest["checkpoint"] in CHAIN_CHECKPOINTS
@@ -1577,14 +1592,14 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 dispatch_invalid = any(line.startswith(DISPATCH_INVALID_MARKER) for line in output.splitlines())
                 combine_invalid = any(line.startswith(COMBINE_INVALID_MARKER) for line in output.splitlines())
                 if dispatch_invalid:
-                    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and config.checkpoint not in COMBINE_SINGLE_MODULE_CHECKPOINTS:
+                    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and config.checkpoint not in COMBINE_RETURN_CHECKPOINTS:
                         raise Failure("RESULT_FAILED", "Dispatch 输出校验失败")
                     if any(line.startswith(DISPATCH_MARKER) for line in output.splitlines()):
                         raise Failure("LOG_PARSE_FAILED", "Dispatch 同时报告 PASS 和 INVALID")
                     if config.chain["operator_mode"] == "dispatch":
                         marker = DISPATCH_INVALID_MARKER
                 if combine_invalid:
-                    if config.checkpoint not in COMBINE_SINGLE_MODULE_CHECKPOINTS or config.chain["operator_mode"] == "dispatch":
+                    if config.checkpoint not in COMBINE_RETURN_CHECKPOINTS or config.chain["operator_mode"] == "dispatch":
                         raise Failure("RESULT_FAILED", "unexpected Combine INVALID marker")
                     if any(line.startswith(COMBINE_CHAIN_MARKER) for line in output.splitlines()):
                         raise Failure("LOG_PARSE_FAILED", "Combine reports both PASS and INVALID")
@@ -1753,6 +1768,8 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_PROFILE_", " test=lifecycle"
     elif name == COMBINE_PROFILE_REGIONS_TEST:
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_PROFILE_REGIONS_", ""
+    elif name in (COMBINE_M5_TEST, COMBINE_M5_CONSUMER_TEST):
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_M5_", " test=lifecycle" if name == COMBINE_M5_CONSUMER_TEST else ""
     elif name in (COMBINE_M4_TEST, COMBINE_M4_CONSUMER_TEST):
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_M4_", " test=lifecycle" if name == COMBINE_M4_CONSUMER_TEST else ""
     elif name == COMBINE_M3_CONSUMER_TEST:
@@ -1804,7 +1821,9 @@ def host_validate(config, run_id=None):
         result.update(scope="Combine C6 Host回归：C1/C3/C4/C5、独立记录区及三模式profiling；不含真实NPU提交。")
     if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
         result.update(scope="Combine C7 Host回归：C1/C3/C4/C5/C6、边界探针注册/kernel与consumer；不含真实NPU提交。")
-    if config.checkpoint == COMBINE_M4_CHECKPOINT:
+    if config.checkpoint == COMBINE_M5_CHECKPOINT:
+        result.update(scope="Combine P2.4 Host: M1-M5 full oracle, result reuse and module profiling; no device execution.")
+    elif config.checkpoint == COMBINE_M4_CHECKPOINT:
         result.update(scope="Combine P2.3 Host: M4 partial oracle, module profiling and public contracts; no device execution.")
     elif config.checkpoint == COMBINE_M3_CHECKPOINT:
         result.update(scope="Combine P2.2 Host: M3 single-launch oracle, module profiling and public contracts; no device execution.")
@@ -2131,6 +2150,21 @@ def combine_m3_cases():
     return sorted(cases, key=lambda case: case["run_mode"] == "breakdown")
 
 
+def combine_m5_cases():
+    """Full Combine qualifies one, two and repeated calls without test-side Flag cleanup."""
+    cases = []
+    for gate, mode, loops, warmup in (("F1", "functional", 1, 0), ("F2", "functional", 2, 0),
+            ("Fmulti", "functional", 5, 2), ("P", "performance", 5, 2), ("B", "breakdown", 5, 2)):
+        for operator in ("combine", "both"):
+            for dtype in ("bf16", "fp16"):
+                cases.append(dict(name=f"{gate}-{operator}-{dtype}", gate=gate, run_mode=mode,
+                    operator_mode=operator, dtype=dtype, loops=loops, warmup=warmup))
+    for case in combine_m3_cases():
+        if case["gate"] in ("regression", "connection"):
+            cases.append(dict(case, loops=5, warmup=2))
+    return sorted(cases, key=lambda case: case["run_mode"] == "breakdown")
+
+
 def combine_m4_cases():
     """M4 keeps the single-launch M3 matrix; M5 owns result consumption."""
     return combine_m3_cases()
@@ -2262,19 +2296,24 @@ def combine_m4_commit_validate(config, run_id):
     return combine_module_commit_validate(config, run_id)
 
 
+def combine_m5_commit_validate(config, run_id):
+    return combine_module_commit_validate(config, run_id)
+
+
 def combine_module_commit_validate(config, run_id):
+    full = config.checkpoint == COMBINE_M5_CHECKPOINT
     single = config.checkpoint in COMBINE_SINGLE_MODULE_CHECKPOINTS
     module = combine_contract(config.checkpoint)["implemented_through"]
-    point = {"M2": "P2.1", "M3": "P2.2", "M4": "P2.3"}[module]
+    point = {"M2": "P2.1", "M3": "P2.2", "M4": "P2.3", "M5": "P2.4"}[module]
     log = config.logs / run_id
-    cases = combine_m3_cases() if single else combine_m12_cases()
+    cases = combine_m5_cases() if full else combine_m3_cases() if single else combine_m12_cases()
     summary = dict(run_id=run_id, checkpoint=config.checkpoint, mode=config.mode, status="FAIL",
-                   implemented_through=module, scope="partial", cases=[], case_manifest=cases,
-                   expected_cases=len(cases), base_cases=12 if single else 18, phases=[], gates={
+                   implemented_through=module, scope="full" if full else "partial", cases=[], case_manifest=cases,
+                   expected_cases=len(cases), base_cases=20 if full else 12 if single else 18, phases=[], gates={
                        gate: dict(status="NOT_RUN", expected_cases=sum(case["gate"] == gate for case in cases))
-                       for gate in (("F", "P", "B", "regression", "connection") if single else ("F1", "F2", "P", "B", "regression", "connection", "edges"))},
+                       for gate in (("F1", "F2", "Fmulti", "P", "B", "regression", "connection") if full else ("F", "P", "B", "regression", "connection") if single else ("F1", "F2", "P", "B", "regression", "connection", "edges"))},
                    errors=[], build_timeout_seconds=900, per_case_timeout_seconds=config.timeout,
-                   coverage=(f"M1 through {module} single launch, DIRECT" + ("/partial" if module == "M4" else "") + " payload/Flag and module profiling; no delay, M5 or yOut arithmetic" if single else "M0/M1/M2 stage/control/protection and 50us wait; no M3-M5 or yOut arithmetic"))
+                   coverage=("Full M1-M5: one/two/repeated calls, final yOut and production result-Flag cleanup; performance acquisition and module breakdown, no threshold" if full else f"M1 through {module} single launch, DIRECT" + ("/partial" if module == "M4" else "") + " payload/Flag and module profiling; no delay, M5 or yOut arithmetic" if single else "M0/M1/M2 stage/control/protection and 50us wait; no M3-M5 or yOut arithmetic"))
     original_environment = dict(os.environ)
     active_config = None
     stage = "manifest"
@@ -2294,7 +2333,7 @@ def combine_module_commit_validate(config, run_id):
             defaults.update(loops=1, warmup=0)
         resume = os.environ.get("TILEXR_VALIDATION_RESUME_SUMMARY")
         retained = {}
-        if resume and single:
+        if resume and (single or full):
             raise Failure("RESULT_FAILED", f"{point} historical resume cannot qualify a new {module} implementation")
         if resume:
             stage = "resume-preflight"
@@ -2414,7 +2453,7 @@ def commit_validate(config):
     """Build and validate one delivered checkpoint; never advance the gate."""
     run_id = "commit-" + uuid.uuid4().hex
     if config.checkpoint in COMBINE_MEASUREMENT_CHECKPOINTS:
-        code = (combine_module_commit_validate(config, run_id) if config.checkpoint in COMBINE_SINGLE_MODULE_CHECKPOINTS else
+        code = (combine_module_commit_validate(config, run_id) if config.checkpoint in COMBINE_RETURN_CHECKPOINTS else
                 combine_m12_commit_validate(config, run_id) if config.checkpoint == COMBINE_M12_CHECKPOINT
                 else combine_profile_commit_validate(config, run_id))
         print(f"{'成功' if code == 0 else '失败'} COMMIT_VALIDATION_{'PASS' if code == 0 else 'FAIL'} "
@@ -2836,7 +2875,7 @@ def run(config):
             failures.extend(result_errors(result, run_id, manifest, expected_ranks(index), config.chain))
             # Launches have all finished. Fold output mismatches into the final
             # result now, after the cancellation decision, while retaining traces.
-            if not failures and config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_SINGLE_MODULE_CHECKPOINTS):
+            if not failures and config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS):
                 failures.extend(Failure("RESULT_FAILED", "输出校验失败：" + rank["validation_error"],
                                         rank=rank["rank"], stage=rank["validation_stage"],
                                         validation_status="FAIL", communication_completed=True).record()
@@ -2891,6 +2930,10 @@ def run(config):
         scope = (f"Combine C7：{len(mappings)}P 双窗8点独立边界探针，避开runtime；不提交业务算子。"
                  if config.chain["boundary_probe"] else f"Combine C7：{len(mappings)}P {config.chain['operator_mode']} "
                  "连续预热/正式调用回归，保留真实Dispatch输出/五表/Flag校验；不验Combine业务数据。")
+    elif config.checkpoint == COMBINE_M5_CHECKPOINT:
+        scope = (f"{len(mappings)}P M1-M5 full Combine: final yOut, Flag cleanup and used windows; "
+                 f"{config.chain['warmup']} warmup + {config.chain['loops']} measured launches; "
+                 "functional/performance/module breakdown; no fixed wait or performance threshold.")
     elif config.checkpoint == COMBINE_M4_CHECKPOINT:
         scope = (f"{len(mappings)}P M4 single launch with no warmup: M1/M2/M3 plus weighted partial payload/Flag; "
                  "functional/performance/module breakdown; scope=partial implemented_through=M4; no M5 or yOut arithmetic.")
@@ -2928,7 +2971,7 @@ def run(config):
     rank_summary = ""
     if mappings is not None:
         completed = len(node_profile_records(nodes, run_id, manifest, mappings, config.chain)) if (
-            config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_SINGLE_MODULE_CHECKPOINTS)) else sum(
+            config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)) else sum(
             len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:

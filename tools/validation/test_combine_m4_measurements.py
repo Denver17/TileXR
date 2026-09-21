@@ -27,7 +27,15 @@ class M4MeasurementTests(unittest.TestCase):
         self.row.update(combine_type2_rows=1, combine_partial_payload_bytes=1032,
                         combine_partial_wire_bytes=1536, combine_partial_self_read_bytes=1032,
                         combine_partial_member_rows=2, combine_partial_local_members=1, combine_partial_stage_read_bytes=2064, combine_algorithm_bytes=6192)
-        self.mapping = Path(__file__).resolve().parents[2] / "src/ep/profiling/server_dedup_combine.mapping.json"
+        self.mapping = self.root / "m4.mapping.json"
+        stages = (("kernel_total", "total", 0x3001), ("m1_init", "setup", 0x3003),
+                  ("m1_stage", "copy", 0x3017), ("m2_control", "wait", 0x3019),
+                  ("m3_direct", "issue", 0x301b), ("m4_partial", "compute", 0x301d),
+                  ("m6_drain", "finalize", 0x3013))
+        self.mapping.write_text(json.dumps(dict(schema="tilexr_profiling_mapping.v1",
+            operator="tilexr_ep_combine_memory_server_dedup", cycles_per_us=1000,
+            stages=[dict(name=name, category=category, critical=name == "kernel_total", begin=event, end=event+1)
+                    for name, category, event in stages])))
 
     def events(self):
         events = {}

@@ -9,6 +9,25 @@
 #include "ep_memory_server_dedup_combine_tiling.h"
 #include "server_dedup_test_checks.h"
 
+#include "../../../src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
+
+namespace TileXREp {
+// Earlier module tests intentionally own only their stage fixtures. Exercise
+// those production methods without introducing a runtime stop-stage contract.
+struct CombineModuleTestAccess {
+    static void ThroughM4(CombineMemoryServerDedupKernel &kernel)
+    {
+        kernel.CopyLocalPendingTokens();
+        if (kernel.core_ >= kEpServerDedupCombineSendCoreNum) {
+            if (kernel.core_ >= 56U) kernel.NotifyServerCard();
+            kernel.WaitServerReady();
+            kernel.ReturnPartialTokens();
+        } else kernel.ReturnDirectTokens();
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
+};
+} // namespace TileXREp
+
 namespace CombineM12Test {
 inline std::vector<uint64_t> &ClockSamples() { static std::vector<uint64_t> samples; return samples; }
 inline size_t &ClockIndex() { static size_t index = 0; return index; }

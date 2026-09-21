@@ -5,8 +5,8 @@
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
 Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6 独立 profiling/trace 已收到用户通过确认；C7 双窗边界及 Dispatch 回归已收到用户通过确认。Combine 第一阶段 C1–C7 已全部按用户回传登记通过。
-当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 已按用户回传通过；P2.2（M3）已按用户回传通过 16/16；P2.3（M4）增加成员 FP32 加权及 partial 返回，设备验收待回传。M5 尚未实现。
-P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。P2.1 的 23 个串行 16P 用例已按用户回传登记通过；当前一键入口切换为 P2.3 的 16 例无预热单轮验收，详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
+当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 已按用户回传通过；P2.2（M3）已按用户回传通过 16/16；P2.3（M4）已按用户回传通过 16/16；P2.4（M5）增加最终 yOut 与结果 Flag 清理，完整多轮设备验收待回传。
+P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。P2.1 的 23 个串行 16P 用例已按用户回传登记通过；当前一键入口切换为 P2.4 的 24 例单轮/两轮/多轮验收，详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
 下文 Dispatch 阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 **P2.1 已验收（用户回传，续跑汇总）**：用户回传
@@ -21,7 +21,17 @@ P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 
 沿用续跑记录的历史 OFF/ON 源码摘要差异，不将本结果表述为两包摘要一致或当前 checkout 重新构建后的全量运行。
 通过范围：M0/M1/M2 的 stage 原始数据、控制通知/消费清理、保护区和各自 magic/选窗，以及保留的 50μs 等待；
 不包含 M3–M5 返回/归约、yOut 业务数值，不据四项性能模式通过推断具体性能指标达标。
-P2.3（M4）已启动交付：按最新 CB06-04，功能、性能、breakdown 均只调用一次且无预热，不增加测试侧结果清理；详见[当前入口及开发证据](EP_VALIDATION_GUIDE.md#当前入口combine-p23m4)。
+P2.4（M5）已启动交付：功能覆盖 1/2/普通多轮，性能与 breakdown 恢复多轮，结果 Flag 由生产 kernel 清理；详见[当前入口及开发证据](EP_VALIDATION_GUIDE.md#当前入口combine-p24m5)。
+
+### P2.3 设备验收已通过（2026-09-21，用户回传）
+
+用户回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p2-m4`：
+F/P/B 各 4/4，Dispatch regression 2/2，量化 connection 2/2，共 16/16。
+结果：`/home/h00580772/TileXR-git-check/run/validation/commit-c44caafd510d495e9c2eb67e5cef2604/summary.json`。
+目录后缀为验收运行标识；M4 独立交付提交为 `f770c82`。
+通过范围为 M1–M4 无预热单轮、DIRECT/weighted partial payload/Flag、功能/性能/模块 trace，
+无 50μs 等待；不包含 M5、最终 yOut 或完整多轮复用。M5 单独按 P2.4 验收。
+
 
 ### P2.2 设备验收已通过（2026-09-21，用户回传）
 

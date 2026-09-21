@@ -52,7 +52,9 @@ int TileXREpValidateMemoryServerDedupCombineConfig(const EpMemoryServerDedupComb
         next.capacityRows : kEpServerDedupCombineMaxTokenNum);
     if (EpCombinePayloadLaneCount(maxTokens, static_cast<uint32_t>(p.h)) == 0U ||
         EpCombineM4InputLaneCount(maxTokens, static_cast<uint32_t>(p.h), static_cast<uint32_t>(p.topK)) == 0U ||
-        EpCombineM4OutputLaneCount(maxTokens, static_cast<uint32_t>(p.h), static_cast<uint32_t>(p.topK)) == 0U) {
+        EpCombineM4OutputLaneCount(maxTokens, static_cast<uint32_t>(p.h), static_cast<uint32_t>(p.topK)) == 0U ||
+        EpCombineM5InputLaneCount(static_cast<uint32_t>(p.bs), static_cast<uint32_t>(p.h), static_cast<uint32_t>(p.topK)) == 0U ||
+        EpCombineM5OutputLaneCount(static_cast<uint32_t>(p.bs), static_cast<uint32_t>(p.h), static_cast<uint32_t>(p.topK)) == 0U) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
     if ((p.globalBs != 0 && (p.globalBs < 0 || uint64_t(p.globalBs) != next.globalBs)) ||

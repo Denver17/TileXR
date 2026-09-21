@@ -1,4 +1,4 @@
-// Production M1/M2/M3/M4 plus production DirectProfilingWriter; the CPU scheduler
+// Production M1/M2/M3/M4/M5 plus production DirectProfilingWriter; the CPU scheduler
 // supplies peer arrivals and does not model AICore visibility or timings.
 #include "combine_m12_test_fixture.h"
 #include "tilexr_profiling.h"
@@ -23,21 +23,33 @@ int main()
         f.args.tilexrCombineProfilingCoreCapacity = 64U;
         f.tiling.profilingEnabled = 1U;
         const auto originalArgs = f.args;
+        std::vector<uint32_t> sourceMask(f.tiling.bs, 1U);
+        std::vector<float> weights(f.tiling.bs * f.tiling.topK, 1.0f);
+        std::vector<uint16_t> output(f.tiling.bs * f.h, 0U);
         auto invoke = [&]() {
             tilexr_ep_combine_memory_server_dedup_kernel(reinterpret_cast<GM_ADDR>(&f.args),
                 reinterpret_cast<GM_ADDR>(f.expert.data()), reinterpret_cast<GM_ADDR>(f.table.data()),
-                reinterpret_cast<GM_ADDR>(f.counts.data()), f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()),
-                f.untouched.data(), f.untouched.data(), f.untouched.data(), reinterpret_cast<GM_ADDR>(&f.tiling), 0);
+                reinterpret_cast<GM_ADDR>(f.counts.data()), reinterpret_cast<GM_ADDR>(weights.data()), reinterpret_cast<GM_ADDR>(f.types.data()),
+                f.untouched.data(), reinterpret_cast<GM_ADDR>(sourceMask.data()), reinterpret_cast<GM_ADDR>(output.data()), reinterpret_cast<GM_ADDR>(&f.tiling), 0);
         };
         for (uint32_t round = 0; round < 3U; ++round) for (uint32_t core : {0U, kEpServerDedupCombineSendCoreNum, 63U}) {
             f.Hooks(core, 0U); dropped[core * 16U] = 9U;
+            // Remote return arrivals for all source slots, renewed each round.
+            const uint32_t blocks = (f.h * 2U + 479U) / 480U;
+            for (uint32_t p = 0; p < f.tiling.bs; ++p) for (uint32_t b = 0; b < blocks; ++b) {
+                auto slot = f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
+                    (uint64_t(p) * f.tiling.topK * blocks + b) * 512U;
+                std::memset(slot, 0, 480U); const float one = 1.0f;
+                std::memcpy(slot + 480U, &one, 4U);
+            }
             invoke();
             std::vector<uint32_t> expected {kEpServerDedupCombineProfileStart,
                 kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd,
                 kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd};
             if (core >= kEpServerDedupCombineSendCoreNum) expected.insert(expected.end(), {
                 kEpServerDedupCombineProfileControlBegin, kEpServerDedupCombineProfileControlEnd,
-                kEpServerDedupCombineProfilePartialBegin, kEpServerDedupCombineProfilePartialEnd});
+                kEpServerDedupCombineProfilePartialBegin, kEpServerDedupCombineProfilePartialEnd,
+                kEpServerDedupCombineProfileFinalBegin, kEpServerDedupCombineProfileFinalEnd});
             else expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
                 kEpServerDedupCombineProfileDirectEnd});
             expected.insert(expected.end(), {kEpServerDedupCombineProfileDrainBegin, kEpServerDedupCombineProfileDrainEnd,
@@ -51,7 +63,7 @@ int main()
         const auto savedTimes = times; const auto savedEvents = events;
         f.tiling.profilingEnabled = 0U;
         f.Hooks(0U, 0U); invoke(); f.ResetHooks();
-        Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3/M4 without profile writes");
+        Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3/M4/M5 without profile writes");
         Check(std::memcmp(&originalArgs, &f.args, sizeof(f.args)) == 0, "kernel never mutates shared CommArgs");
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     if (ServerDedupTest::Failures() != 0) return 1;

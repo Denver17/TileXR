@@ -34,17 +34,19 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream);
 
 // Server Dedup Combine: A5 only, FP16/BFP16, quantMode=0, fixed 64 AIV.
-// P2.3 stages unweighted type3 rows, completes server readiness (M1/M2),
+// P2.4 stages unweighted type3 rows, completes server readiness (M1/M2),
 // returns raw type1 rows (M3) and FP32-weighted type2 partials (M4) to source
 // result slots, without a fixed wait. Partials round back to the input dtype.
-// Success means asynchronous submission; M5 and numerical yOut are not
-// implemented. Inputs and yOut stay unchanged. Validate one call without warmup
-// until M5 supplies result-Flag cleanup for reuse.
+// M5 receives SourceMask-selected slots, weights them in FP32 and rounds yOut
+// to the input dtype. It clears all result Flags while preserving payload.
+// Success means asynchronous submission; input tensors remain unchanged.
+// Repeated calls require the initial zeroed buffer and the same shape/layout.
 // C=R*bs*min(topK,moeExpertNum/R); expertOut[C,h], assistInfoForCombine[C,3],
 // tokenType[C], relayReadIndex[C,topK,2] (raw 32-bit pairs), sourceMask[bs],
 // expertScales[bs,topK]. sendCounts is the full int32[moeExpertNum] prefix;
 // its last item is the device-side valid row count, in [0,min(C,10000)].
-// Host never reads tensors and rejects shapes that cannot fit the M1-M4 UB budget.
+// SourceMask has at least one valid bit per token; zero weights still receive.
+// Host never reads tensors and rejects shapes that cannot fit the M1-M5 UB budget.
 // yOut[bs,h] has dtype. Tensor capacity/device ownership are caller obligations.
 // Table pointers retain Dispatch row order and remain alive through completion.
 // epWorldSize/epRankId/globalBs accept 0 as the existing infer-from-comm sentinel.

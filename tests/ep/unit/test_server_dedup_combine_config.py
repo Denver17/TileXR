@@ -33,6 +33,14 @@ static_assert(EpCombineM4FixedUbBytes(10000, 7168, 32) +
     EpCombineM4InputLaneCount(10000, 7168, 32) * EpCombineAlign(7168 * 2, 32) +
     EpCombineM4OutputLaneCount(10000, 7168, 32) * ((7168 * 2 + 479) / 480 * 512) <=
     kEpServerDedupCombineUbBytes, "simultaneous resources fit the arena");
+static_assert(EpCombineM5InputLaneCount(96, 7168, 1) > 0, "M5 K1");
+static_assert(EpCombineM5InputLaneCount(96, 7168, 6) > 0, "M5 default");
+static_assert(EpCombineM5OutputLaneCount(96, 7168, 6) > 0, "M5 output");
+static_assert(EpCombineM5InputLaneCount(96, 7168, 32) > 0, "M5 K32");
+static_assert(EpCombineM5OutputLaneCount(96, 7168, 32) > 0, "M5 K32 output");
+static_assert(EpCombineM5InputLaneCount(UINT32_MAX, 7168, 32) == 0, "BS metadata does not wrap");
+static_assert(EpCombineM5InputLaneCount(96, 0, 1) == 0, "M5 zero width");
+static_assert(EpCombineM5InputLaneCount(96, 7168, 33) == 0, "M5 bad K");
 int main() { return 0; }
 ''')
         for send in (16, 24, 32, 40, 48, 56, 0, 8, 20, 57, 64):

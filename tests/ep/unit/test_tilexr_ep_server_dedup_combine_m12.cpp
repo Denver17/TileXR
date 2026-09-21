@@ -11,7 +11,7 @@ void Run(Fixture &f, uint32_t core, uint32_t window)
         reinterpret_cast<GM_ADDR>(f.table.data()), reinterpret_cast<GM_ADDR>(f.counts.data()),
         f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()), f.untouched.data(),
         f.untouched.data(), f.untouched.data(), f.tiling.bs, f.h, 3U, 320U, 0U, 0U, window, 0U);
-    kernel.Process();
+    TileXREp::CombineModuleTestAccess::ThroughM4(kernel);
     Check(AscendC::PendingMte3().empty(), "all DMA retired before local completion");
     Check(f.observedPrepare == 8U, "every core publishes all eight prepare copies");
     if (core >= 56U) {
