@@ -1,6 +1,7 @@
-"""Terminal verdict followed by one measurement line per active operator."""
+"""Terminal verdict, per-operator measurements/traces and workflow wall times."""
 
 from pathlib import Path
+import math
 
 
 def failure_label(report):
@@ -52,6 +53,29 @@ def _measurement_line(operator, measured):
     return _terminal_line(parts)
 
 
+def _wall_time_lines(report):
+    timing = report.get("wall_time")
+    if not timing:
+        return []
+    lines = ["WORKFLOW_WALL(s) " + " ".join(
+        f"{name}={seconds:.3f}" for name, seconds in timing["stages"].items()) +
+        f" total={timing['total']:.3f}"]
+    ranks = [row for node in report.get("nodes", [])
+             for row in (node.get("reported_result") or {}).get("rank_wall_times", [])]
+    maxima = []
+    for phase in ("process", "profile_wait", "profile_decode", "validate"):
+        samples = [(row.get("stages", {}).get(phase), row.get("rank")) for row in ranks]
+        samples = [(seconds, rank) for seconds, rank in samples
+                   if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0
+                   and type(rank) is int]
+        if samples:
+            seconds, rank = max(samples)
+            maxima.append(f"{phase}={seconds:.3f}(rank={rank})")
+    if maxima:
+        lines.append(f"RANK_WALL_MAX(s,observed={len(ranks)}) " + " ".join(maxima))
+    return lines
+
+
 def render_result(report, summary_path):
     status = report["status"]
     parts = ["VALIDATION_PASS" if status == "PASS" else "VALIDATION_FAIL " + failure_label(report)]
@@ -65,13 +89,6 @@ def render_result(report, summary_path):
         parts.append("dedup(%) min/max/avg=" + "/".join(f"{analysis[key]:.2f}" for key in ("min", "max", "avg")))
     elif analysis:
         parts.append("case_analysis=failed")
-    traces = report.get("traces")
-    if traces:
-        parts.append(f"trace={traces['trace_dir']}")
-        selected = traces.get("selected_ranks", {})
-        for role in ("fastest", "slowest"):
-            if role in selected:
-                parts.append(f"{role}_rank={selected[role]}")
     parts.append(f"result={summary_path}")
     lines = [_terminal_line(parts)]
     summaries = dict(report.get("operator_measurements", {}))
@@ -83,6 +100,22 @@ def render_result(report, summary_path):
             measured = summaries.get(operator)
             if measured and operator_mode in (operator, "both"):
                 lines.append(_measurement_line(operator, measured))
+    traces_by_operator = dict(report.get("operator_traces", {}))
+    if report.get("traces"):
+        traces_by_operator.setdefault("dispatch", report["traces"])
+    if config.get("run_mode") in (None, "breakdown"):
+        for operator in ("dispatch", "combine"):
+            traces = traces_by_operator.get(operator)
+            if not traces or operator_mode not in (operator, "both"):
+                continue
+            parts = [f"TRACE {operator}", f"trace={traces['trace_dir']}"]
+            if "status" in traces:
+                parts.append(f"status={traces['status']}")
+            for role in ("fastest", "slowest"):
+                if role in traces.get("selected_ranks", {}):
+                    parts.append(f"{role}_rank={traces['selected_ranks'][role]}")
+            lines.append(_terminal_line(parts))
+    lines.extend(_wall_time_lines(report))
     return "\n".join(lines)
 
 

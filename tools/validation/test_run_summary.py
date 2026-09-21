@@ -8,6 +8,49 @@ import run_summary
 
 
 class RunSummaryTests(unittest.TestCase):
+    def test_wall_times_keep_failure_and_report_maxima_without_summing_parallel_ranks(self):
+        report = dict(status="FAIL", wall_time=dict(total=25.5, stages=dict(nodes=20.25, collect=5.25)),
+                      nodes=[dict(reported_result=dict(rank_wall_times=[
+                          dict(rank=0, stages=dict(process=10, profile_wait=3, profile_decode=2)),
+                          dict(rank=1, stages=dict(process=12, profile_wait=1, profile_decode=4))])),
+                          dict(reported_result=None)])
+        lines = run_summary.render_result(report, "/summary.json").splitlines()
+        self.assertTrue(lines[0].startswith("VALIDATION_FAIL"))
+        self.assertEqual(lines[1], "WORKFLOW_WALL(s) nodes=20.250 collect=5.250 total=25.500")
+        self.assertEqual(lines[2], "RANK_WALL_MAX(s,observed=2) process=12.000(rank=1) "
+                         "profile_wait=3.000(rank=0) profile_decode=4.000(rank=1)")
+
+    def test_preflight_failure_has_partial_wall_time_without_rank_statistics(self):
+        report = dict(status="FAIL", wall_time=dict(total=2, stages=dict(local_check=2)))
+        lines = run_summary.render_result(report, "/failure.json").splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(lines[1], "WORKFLOW_WALL(s) local_check=2.000 total=2.000")
+
+    def test_breakdown_trace_lines_support_both_schemas_and_incomplete_reports(self):
+        for operator in ("dispatch", "combine", "both"):
+            for legacy in (False, True):
+                with self.subTest(operator=operator, legacy=legacy):
+                    traces = {op: dict(trace_dir=f"/traces/{op}/chrome", status="complete",
+                                       selected_ranks=dict(fastest=0, slowest=8))
+                              for op in ("dispatch", "combine")}
+                    report = dict(status="FAIL", chain_configuration=dict(run_mode="breakdown",
+                        operator_mode=operator, bs=96, loops=100, warmup=50))
+                    if legacy:
+                        report["traces"] = traces["dispatch"]
+                    else:
+                        traces["combine"]["status"] = "incomplete"
+                        report.update(operator_traces=traces, traces=traces["dispatch"])
+                    lines = run_summary.render_result(report, "/summary.json").splitlines()
+                    expected = [op for op in ("dispatch", "combine")
+                                if operator in (op, "both") and (not legacy or op == "dispatch")]
+                    self.assertEqual(len(lines), 1 + len(expected))
+                    self.assertNotIn("trace=", lines[0])
+                    self.assertTrue(lines[0].startswith("VALIDATION_FAIL"))
+                    for line, op in zip(lines[1:], expected):
+                        self.assertTrue(line.startswith(f"TRACE {op} | trace=/traces/{op}/chrome"))
+                        self.assertIn("fastest_rank=0 | slowest_rank=8", line)
+                        self.assertIn("status=" + ("incomplete" if op == "combine" else "complete"), line)
+
     def test_case_analysis_is_optional_and_prints_percentages(self):
         report = dict(status="PASS")
         self.assertNotIn("dedup", run_summary.render_result(report, "/summary.json"))
@@ -47,8 +90,9 @@ class RunSummaryTests(unittest.TestCase):
             self.assertIn("latency(us) min/median/max=1.000/2.000/3.000", line)
             self.assertIn("bytes=N/A | bandwidth=N/A", line)
             self.assertIn("trace=/run/case/traces", line)
-            self.assertEqual(len(line.splitlines()), 2)
+            self.assertEqual(len(line.splitlines()), 3)
             self.assertTrue(line.splitlines()[1].startswith("dispatch:"))
+            self.assertEqual(line.splitlines()[2], "TRACE dispatch | trace=/run/case/traces")
 
     def test_performance_prints_server_min_mean_max_and_selected_sample_count(self):
         stats = dict(maximum_us=9, minimum_us=1, mean_us=4, median_us=2, samples_per_rank=50)

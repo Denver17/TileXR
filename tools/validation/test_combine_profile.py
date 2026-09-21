@@ -128,6 +128,13 @@ class CombineProfileTests(c5.CombineMultiTests):
                                        threading.Event(), result)
                 self.assertEqual(result["errors"], [], (operator, mode, result))
                 self.assertEqual(len(result["ranks"]), 8)
+                self.assertEqual([row["rank"] for row in result["rank_wall_times"]], list(range(8)))
+                for timing in result["rank_wall_times"]:
+                    phases = timing["stages"]
+                    self.assertGreaterEqual(phases["process"], 0)
+                    self.assertEqual("profile_decode" in phases, mode != "functional")
+                    self.assertEqual("profile_wait" in phases, mode == "breakdown")
+                    self.assertAlmostEqual(sum(phases.values()), timing["total"])
                 self.assertEqual(performance.call_count, 8 * len(active) if mode == "performance" else 0)
                 self.assertEqual(breakdown.call_count, 8 * len(active) if mode == "breakdown" else 0)
                 self.assertEqual(validate.call_count, 8)
@@ -167,6 +174,8 @@ class CombineProfileTests(c5.CombineMultiTests):
             workflow.run_ranks(config, "run", self.manifest, [mapping], time.monotonic() + 60,
                                threading.Event(), result)
         self.assertTrue(result["errors"])
+        self.assertEqual(len(result["rank_wall_times"]), 1)
+        self.assertIn("profile_decode", result["rank_wall_times"][0]["stages"])
         failure = result["profiling_failures"][0]
         self.assertTrue(failure["communication_completed"])
         self.assertEqual(set(failure["communication"]["operator_measurements"]), {"dispatch", "combine"} - {failed_operator})

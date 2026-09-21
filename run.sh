@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Single public case entry. Build and distribution are separate manual actions.
 set -euo pipefail
+launcher_started=$SECONDS
 cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 usage() {
     cat <<'HELP'
@@ -131,9 +132,19 @@ export TILEXR_VALIDATION_RESULT_ROOT="$result_root"
 # Clear the previous result when an explicit result root is reused.
 : >"$result_root/result.txt"
 exec 3>&1
+declare -A launcher_seconds=([setup]=0 [host_tests]=0 [environment]=0 [workflow]=0)
+launcher_phase=setup
+launcher_phase_started=$launcher_started
+launcher_next() {
+    launcher_seconds[$launcher_phase]=$(( SECONDS - launcher_phase_started ))
+    launcher_phase=$1
+    launcher_phase_started=$SECONDS
+}
 finish() {
     local status=$?
     trap - EXIT
+    launcher_next finished
+    local total=$(( SECONDS - launcher_started ))
     if [[ -s $result_root/result.txt ]]; then
         cat -- "$result_root/result.txt" >&3
     else
@@ -141,14 +152,24 @@ finish() {
         # Missing a workflow result cannot certify a successful case.
         (( status != 0 )) || status=1
     fi
+    printf 'RUN_WALL(s,1s-resolution) total=%s setup=%s host_tests=%s env=%s workflow=%s\n' \
+        "$total" "${launcher_seconds[setup]}" \
+        "${launcher_seconds[host_tests]}" "${launcher_seconds[environment]}" "${launcher_seconds[workflow]}" >&3
+    printf '{"unit":"seconds","resolution_seconds":1,"total":%s,"setup":%s,"host_tests":%s,"environment":%s,"workflow":%s}\n' \
+        "$total" "${launcher_seconds[setup]}" \
+        "${launcher_seconds[host_tests]}" "${launcher_seconds[environment]}" "${launcher_seconds[workflow]}" \
+        >"$result_root/launcher_timing.json" || true
     exit "$status"
 }
 trap finish EXIT
 exec >"$result_root/launcher.log" 2>&1
 if [[ $host_validation == 1 && $dry_run == 0 ]]; then
+    launcher_next host_tests
     bash ./run_host_validation.sh >"$result_root/host-validation.log" 2>&1
 fi
 # Source in this shell so the configured environment reaches the workflow.
+launcher_next environment
 source ./set_env.sh >"$result_root/environment.log" 2>&1
 for assignment in "${assignments[@]}"; do export "$assignment"; done
+launcher_next workflow
 "$TILEXR_VALIDATION_PYTHON" -u tools/validation/workflow.py "$TILEXR_VALIDATION_ACTION" >"$result_root/workflow.log" 2>&1

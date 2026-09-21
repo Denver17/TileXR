@@ -19,6 +19,21 @@ from unittest import mock
 import workflow
 
 
+class PhaseTimerTests(unittest.TestCase):
+    def test_revisited_phase_accumulates_without_double_counting_snapshots(self):
+        with mock.patch.object(workflow.time, "perf_counter", side_effect=[10, 12, 15, 17, 19, 20]):
+            timer = workflow.PhaseTimer("check")
+            timer.next("process")
+            first = timer.snapshot()
+            timer.next("check")
+            second = timer.snapshot()
+            final = timer.snapshot()
+        self.assertEqual(first, dict(unit="seconds", total=5, stages=dict(check=2, process=3)))
+        self.assertEqual(second, dict(unit="seconds", total=9, stages=dict(check=4, process=5)))
+        self.assertEqual(final, dict(unit="seconds", total=10, stages=dict(check=5, process=5)))
+        self.assertEqual(sum(final["stages"].values()), final["total"])
+
+
 class TemporaryRoot(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="tilexr-validation-test-")
@@ -1287,6 +1302,8 @@ with output.open('w', newline='') as f:
         mismatch = self.invoke("run", environment=ordinary_mode)
         self.assertNotEqual(mismatch.returncode, 0)
         self.assertIn("设备打点开关", mismatch.stderr)
+        failure = workflow.read_json(self.config_instance.logs / "failure.json")
+        self.assertEqual(set(failure["wall_time"]["stages"]), {"local_check"})
         # run.sh forwards case arguments independently of the configuration used to sync.
         self.assert_success(self.invoke("run", environment={"TILEXR_DIRECT_RUN": "1", "TEST_PROGRAM_BEHAVIOR": "nonzero"}))
         summary = self.summary()
@@ -1298,6 +1315,15 @@ with output.open('w', newline='') as f:
         self.assertEqual(len(summary["traces"]["ranks"]), 16)
         self.assertNotIn("all_ranks", summary["traces"])
         trace_dir = Path(summary["traces"]["trace_dir"])
+        terminal = (self.config_instance.logs / "result.txt").read_text().splitlines()
+        self.assertTrue(any(line.startswith(f"TRACE dispatch | trace={trace_dir}") for line in terminal))
+        self.assertNotIn("trace=", terminal[0])
+        self.assertEqual(set(summary["wall_time"]["stages"]),
+                         {"local_check", "remote_check", "nodes", "collect", "summary"})
+        for node in summary["nodes"]:
+            timing = node["reported_result"]["wall_time"]
+            self.assertEqual(set(timing["stages"]), {"verify", "host_tests", "ranks"})
+            self.assertAlmostEqual(timing["total"], sum(timing["stages"].values()))
         self.assertEqual({path.name for path in trace_dir.glob("*.json")},
                          {f"rank-{rank}.json" for rank in range(16)})
         self.assertTrue(all(Path(path).parent == trace_dir for path in summary["traces"]["ranks"].values()))
@@ -1372,8 +1398,10 @@ with output.open('w', newline='') as f:
         self.assertNotIn("bandwidth_gbps", measured)
         self.assertEqual([(error["type"], error["rank"]) for error in summary["errors"]], [("RESULT_FAILED", 8)])
         line = (self.config_instance.logs / "result.txt").read_text()
-        self.assertEqual(len(line.splitlines()), 2)
+        self.assertEqual(len(line.splitlines()), 4)
         self.assertTrue(line.splitlines()[1].startswith("dispatch:"))
+        self.assertIn("WORKFLOW_WALL(s)", line)
+        self.assertIn("RANK_WALL_MAX(s,observed=16)", line)
         self.assertIn("VALIDATION_FAIL 结果校验失败", line)
         self.assertIn("server_latency(us) min/mean/max=", line)
         self.assertIn("bandwidth=N/A", line)

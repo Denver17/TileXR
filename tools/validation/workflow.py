@@ -179,6 +179,25 @@ exec "$TILEXR_VALIDATION_PYTHON" tools/validation/workflow.py "$@"
 '''
 
 
+class PhaseTimer:
+    """Disjoint wall-clock intervals within one process; never device timings."""
+    def __init__(self, phase):
+        self.started = self.previous = time.perf_counter()
+        self.phase = phase
+        self.seconds = {}
+
+    def next(self, phase):
+        now = time.perf_counter()
+        self.seconds[self.phase] = self.seconds.get(self.phase, 0.0) + now - self.previous
+        self.previous, self.phase = now, phase
+
+    def snapshot(self):
+        now = time.perf_counter()
+        seconds = dict(self.seconds)
+        seconds[self.phase] = seconds.get(self.phase, 0.0) + now - self.previous
+        return dict(unit="seconds", total=now - self.started, stages=seconds)
+
+
 class Failure(RuntimeError):
     def __init__(self, kind, message, **details):
         super().__init__(message)
@@ -1538,6 +1557,7 @@ def parse_operator_breakdowns(output, mapping, run_id, manifest, record, config,
 def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
     def launch(mapping):
         rank = mapping["rank"]
+        timer = PhaseTimer("prepare")
         log = config.logs / run_id / f"rank-{rank}.log"
         record, communication_completed = None, False
         try:
@@ -1590,7 +1610,9 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                     profile_dir = log.parent / f"msprof-rank-{rank}"
                     argv = [config.chain["msprof"], "--application=" + shlex.join([str(arg) for arg in argv]),
                             "--output=" + str(profile_dir)]
+            timer.next("process")
             output = execute(argv, log, timeout=remaining, cwd=config.root, env=env, cancelled=cancelled)
+            timer.next("validate")
             if config.checkpoint in CHAIN_CHECKPOINTS:
                 marker = DISPATCH_MARKER
                 if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
@@ -1652,12 +1674,15 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                             continue
                         try:
                             if config.chain["run_mode"] == "performance":
+                                timer.next("profile_decode")
                                 evidence = operator_measure.performance_record(profile_dir, config.chain["loops"],
                                     config.chain["warmup"], operator=operator, run_id=run_id, rank=rank,
                                     kernel_sha=kernel_shas[operator],
                                     **(dict(config=config.chain, record=record) if config.checkpoint in COMBINE_MODULE_CHECKPOINTS else {}))
                             else:
+                                timer.next("profile_wait")
                                 with profiling_lock:
+                                    timer.next("profile_decode")
                                     evidence = operator_measure.breakdown_record(records_paths[operator], config.chain, rank,
                                         env["TILEXR_PROFILING_CAPTURE_ID"], log.parent / f"profile-rank-{rank}" / operator,
                                         operator=operator, run_id=run_id, kernel_sha=kernel_shas[operator],
@@ -1671,6 +1696,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         raise Failure("RESULT_FAILED", "C6算子测量采集失败；保留其他算子已完成报告", additional_failures=capture_errors)
                 elif config.chain["run_mode"] == "performance":
                     try:
+                        timer.next("profile_decode")
                         record["performance"] = measurements.performance_record(profile_dir,
                             config.chain["loops"], config.chain["warmup"])
                     except (ValueError, OSError) as error:
@@ -1691,7 +1717,9 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         raise Failure("RESULT_FAILED", "breakdown capture identity mismatch", rank=rank)
                     try:
                         # Device processes run concurrently; decode one large capture at a time.
+                        timer.next("profile_wait")
                         with profiling_lock:
+                            timer.next("profile_decode")
                             record["breakdown"] = measurements.breakdown_record(records_path, config.chain, rank,
                                 env["TILEXR_PROFILING_CAPTURE_ID"], log.parent / f"profile-rank-{rank}",
                                 config.install / "share/tilexr/profiling/server_dedup.mapping.json")
@@ -1700,6 +1728,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                                       rank=rank) from error
             else:
                 record = parse_rank_marker(output, DRY_RUN_MARKER)
+            timer.next("validate")
             validate_rank_records([record], [mapping], run_id, manifest, config.chain, allow_invalid_output=True)
             return record
         except Exception as error:
@@ -1719,7 +1748,11 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 result["errors"].extend(failures)
                 cancelled.set()
             return None
+        finally:
+            with error_lock:
+                result["rank_wall_times"].append(dict(rank=rank, **timer.snapshot()))
 
+    result["rank_wall_times"] = []
     result["ranks"] = []
     error_lock = threading.Lock()
     profiling_lock = threading.Lock()
@@ -1730,6 +1763,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
             if record is not None:
                 result["ranks"].append(record)
     result["ranks"].sort(key=lambda record: record["rank"])
+    result["rank_wall_times"].sort(key=lambda record: record["rank"])
     # Node status describes execution/capture; output correctness is reported
     # separately so a completed experiment cannot cancel the other nodes.
     result["validation_status"] = "FAIL" if any(
@@ -2551,6 +2585,7 @@ def case_dry_run(config):
 
 
 def node(config, run_id, build_id, execution_budget=None, device=None, host_index=None):
+    timer = PhaseTimer("verify")
     log = config.logs / identifier(run_id)
     log.mkdir(parents=True, exist_ok=True)
     result = {"run_id": run_id, "build_id": build_id, "host": socket.gethostname(),
@@ -2578,6 +2613,7 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
         manifest = verify_build(config)
         if manifest["build_id"] != build_id:
             raise Failure("RESULT_FAILED", "远端 build_id 与本次请求不一致")
+        timer.next("host_tests")
         for test in node_tests(manifest):
             current_test = test["name"]
             if cancelled.is_set():
@@ -2591,6 +2627,7 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
                 result["device"] = int(device)
             result["tests"].append({"name": test["name"], "status": "PASS"})
         current_test = None
+        timer.next("ranks")
         if config.checkpoint in RANK_CHECKPOINTS:
             mappings = rank_mapping(config.hosts())
             index = int(host_index) if host_index is not None else -1
@@ -2611,6 +2648,7 @@ def node(config, run_id, build_id, execution_budget=None, device=None, host_inde
     finally:
         config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in result["errors"])
         result["cleanup"] = "failed" if config.cleanup_failed else "complete"
+        result["wall_time"] = timer.snapshot()
         write_json(log / "result.json", result)
         if not config.cleanup_failed:
             (log / "pid.json").unlink(missing_ok=True)
@@ -2769,6 +2807,7 @@ def node_profile_records(nodes, run_id, manifest, mappings, chain_config):
 
 
 def run(config):
+    timer = config.wall_timer = PhaseTimer("local_check")
     deadline = time.monotonic() + config.timeout
     execution_deadline = min(deadline - 20, time.monotonic() + 120)
     hosts = config.hosts()
@@ -2781,6 +2820,7 @@ def run(config):
     log = config.logs / run_id
     manifest = verify_build(config)
 
+    timer.next("remote_check")
     # Verify actual installations on this run's subset before launching any rank.
     # A sync receipt is provenance, not a signature of the requested case.
     def verify_selected(host):
@@ -2823,6 +2863,7 @@ def run(config):
             execution_error = error
         return launch_outcome(launch_log, execution_error, run_id, manifest, expected_ranks(index), config.chain)
 
+    timer.next("nodes")
     errors = []
     cleanup_errors = []
     primary_error = None
@@ -2868,6 +2909,7 @@ def run(config):
                         if failure:
                             cleanup_errors.append(failure)
 
+    timer.next("collect")
     def collect(index, host):
         node_log = log if index == 0 else log / "nodes" / str(index)
         failures = list(launched[index])
@@ -2928,6 +2970,7 @@ def run(config):
     if primary_error is None and errors:
         primary_error = errors[0]
     config.cleanup_failed = any(error["type"] == "CLEANUP_FAILED" for error in errors)
+    timer.next("summary")
     scope = "ABI/Host"
     if config.checkpoint == EMPTY_KERNEL_CHECKPOINT:
         scope = "A5 空 kernel 安装与设备注册"
@@ -2979,8 +3022,15 @@ def run(config):
               "expected_hosts": hosts, "server_count": len(hosts), "nodes": nodes, "primary_error": primary_error, "errors": errors,
               "scope": scope}
     rank_summary = ""
+    # Reuse one validated selection for counts, measurements, traces and analysis.
+    needs_records = (config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)
+                     or (config.checkpoint in COMBINE_MEASUREMENT_CHECKPOINTS
+                         and config.chain["run_mode"] != "functional")
+                     or (config.chain and config.chain.get("case_analysis")))
+    records = node_profile_records(nodes, run_id, manifest, mappings, config.chain) if (
+        mappings is not None and needs_records) else []
     if mappings is not None:
-        completed = len(node_profile_records(nodes, run_id, manifest, mappings, config.chain)) if (
+        completed = len(records) if (
             config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)) else sum(
             len(node["reported_result"].get("ranks", [])) for node in nodes if node["status"] == "PASS")
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
@@ -2999,7 +3049,6 @@ def run(config):
                     primary_error = failure
                     report.update(status="FAIL", primary_error=failure)
             if config.checkpoint in COMBINE_MEASUREMENT_CHECKPOINTS and config.chain["run_mode"] != "functional":
-                records = node_profile_records(nodes, run_id, manifest, mappings, config.chain)
                 full_config = dict(config.chain, rank_size=len(mappings))
                 kernel_shas = operator_kernel_shas(manifest, config.chain)
                 try:
@@ -3023,7 +3072,6 @@ def run(config):
                     primary_error = primary_error or errors[0]
                     report.update(status="FAIL", primary_error=primary_error)
             if config.checkpoint == DISPATCH_CHECKPOINT:
-                records = node_profile_records(nodes, run_id, manifest, mappings, config.chain)
                 full_config = dict(config.chain, rank_size=len(mappings))
                 kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
                 if not errors:
@@ -3056,7 +3104,7 @@ def run(config):
                 try:
                     kernel_sha = manifest["artifacts"]["lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"]
                     report["traces"] = measurements.collect_breakdown_reports(
-                        node_profile_records(nodes, run_id, manifest, mappings, config.chain),
+                        records,
                         dict(config.chain, rank_size=len(mappings)), log / "traces", run_id, kernel_sha)
                     for item in report["traces"]["errors"]:
                         errors.append(Failure("LOG_COLLECT_FAILED", "profiling report: " + item["message"],
@@ -3077,13 +3125,14 @@ def run(config):
                 raise ValueError("NPU process cleanup is unconfirmed; case analysis skipped")
             from case_analysis import analyze_case
             report["case_analysis"] = analyze_case(log, dict(config.chain, rank_size=len(mappings)),
-                node_profile_records(nodes, run_id, manifest, mappings, config.chain))
+                records)
         except (ValueError, TypeError, KeyError, OSError) as error:
             failure = Failure("RESULT_FAILED", f"case 分析失败：{error}").record()
             errors.append(failure)
             primary_error = primary_error or failure
             report.update(status="FAIL", primary_error=primary_error,
                           case_analysis=dict(status="failed", error=str(error)))
+    report["wall_time"] = timer.snapshot()
     config.last_summary_path = log / "summary.json"
     write_json(config.last_summary_path, report)
     run_summary.write_result(config.logs, report, log / "summary.json")
@@ -3177,6 +3226,9 @@ def main():
         if args.action in ("run", "case-dry-run"):
             directory = Path(os.environ.get("TILEXR_VALIDATION_RESULT_ROOT", "run/validation"))
             report = dict(status="FAIL", primary_error=records[0], errors=records)
+            timer = getattr(locals().get("config"), "wall_timer", None)
+            if timer is not None:
+                report["wall_time"] = timer.snapshot()
             write_json(directory / "failure.json", report)
             run_summary.write_result(directory, report, directory / "failure.json")
         for record in records:

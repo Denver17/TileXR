@@ -14,6 +14,17 @@ import workflow
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
+    def assert_launcher_timing(self, result, output):
+        timing = json.loads((output / "launcher_timing.json").read_text())
+        self.assertEqual(timing["unit"], "seconds")
+        self.assertEqual(timing["resolution_seconds"], 1)
+        phases = ("setup", "host_tests", "environment", "workflow")
+        for phase in phases:
+            self.assertIs(type(timing[phase]), int)
+            self.assertGreaterEqual(timing[phase], 0)
+        self.assertGreaterEqual(timing["total"], sum(timing[phase] for phase in phases))
+        self.assertTrue(result.stdout.splitlines()[-1].startswith("RUN_WALL(s,1s-resolution)"))
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="tilexr case config ")
         self.addCleanup(self.temp.cleanup)
@@ -213,7 +224,8 @@ sys.exit(int(os.environ['INJECT_EXIT']))
                 self.assertEqual([call['action'] for call in calls], [action])
                 self.assertIsNone(calls[0]['comm_id'])
                 if entry == 'run':
-                    self.assertEqual(len(result.stdout.splitlines()), 1)
+                    self.assertEqual(len(result.stdout.splitlines()), 2)
+                    self.assert_launcher_timing(result, output)
                     self.assertEqual(result.stderr, '')
                     self.assertNotIn('detail', result.stdout)
                     self.assertIn(str(output / 'summary.json'), result.stdout)
@@ -268,7 +280,8 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertIn('host-validate stderr detail', log)
             if expected_code:
                 self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
-                self.assertEqual(len(result.stdout.splitlines()), 1)
+                self.assertEqual(len(result.stdout.splitlines()), 2)
+                self.assert_launcher_timing(result, output)
 
     def test_commit_entry_selects_p24_production_before_workflow_preflight(self):
         (self.root / "tools/validation/workflow.py").write_text(
@@ -465,9 +478,10 @@ write_result(root, report, root/'summary.json')
                     cwd=self.root, env=dict(self.env, TILEXR_CANN_ENV_SCRIPT=str(cann),
                         TILEXR_VALIDATION_RESULT_ROOT=str(output)), capture_output=True, text=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertEqual(result.stdout, (output / "result.txt").read_text())
+                self.assertTrue(result.stdout.startswith((output / "result.txt").read_text()))
+                self.assert_launcher_timing(result, output)
                 lines = result.stdout.splitlines()
-                self.assertEqual(len(lines), len(expected) + 1)
+                self.assertEqual(len(lines), len(expected) + 2)
                 self.assertTrue(lines[0].startswith("VALIDATION_PASS"))
                 self.assertNotIn("latency", lines[0])
                 for line, op in zip(lines[1:], expected):
@@ -475,6 +489,33 @@ write_result(root, report, root/'summary.json')
                     value = "10.000" if op == "dispatch" else "60.000"
                     self.assertIn("server_latency(us) min/mean/max=" + "/".join([value] * 3), line)
                 self.assertNotIn("rank details", result.stdout)
+
+    def test_run_prints_breakdown_trace_paths_on_terminal_for_all_operator_modes(self):
+        (self.root / "tools/validation/workflow.py").write_text("""
+import os
+from pathlib import Path
+from run_summary import write_result
+root = Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])
+operator = os.environ['TILEXR_VALIDATION_OPERATOR_MODE']
+active = ('dispatch', 'combine') if operator == 'both' else (operator,)
+report = dict(status='PASS', chain_configuration=dict(operator_mode=operator,
+    run_mode='breakdown', bs=96, loops=100, warmup=50),
+    operator_traces={op: dict(trace_dir=str(root/op/'chrome'), status='complete') for op in active})
+write_result(root, report, root/'summary.json')
+""")
+        for operator in ("dispatch", "combine", "both"):
+            with self.subTest(operator=operator):
+                output = self.root / "run" / operator
+                result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", "-m", "2",
+                    "operator_mode=" + operator], cwd=self.root,
+                    env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                traces = [line for line in result.stdout.splitlines() if line.startswith("TRACE ")]
+                active = ("dispatch", "combine") if operator == "both" else (operator,)
+                self.assertEqual(traces, [f"TRACE {op} | trace={output / op / 'chrome'} | status=complete"
+                                          for op in active])
+                self.assert_launcher_timing(result, output)
 
     def test_environment_failure_shows_reason_and_log_without_running_workflow(self):
         (self.root / 'tools/validation/workflow.py').write_text("raise AssertionError('must not run')\n")
@@ -486,7 +527,8 @@ write_result(root, report, root/'summary.json')
             text=True, capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertIn('VALIDATION_FAIL 执行阶段失败', result.stdout)
-        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        self.assert_launcher_timing(result, output)
         self.assertEqual(result.stderr, '')
         self.assertIn(str(output), result.stdout)
         self.assertIn(str(missing), (output / 'environment.log').read_text())
@@ -502,7 +544,8 @@ write_result(root, report, root/'summary.json')
             text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
         self.assertNotIn('workflow finished', result.stdout)
-        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        self.assert_launcher_timing(result, output)
         self.assertIn('VALIDATION_FAIL 执行阶段失败', result.stdout)
         self.assertIn('workflow.log', (output / 'launcher.log').read_text())
 
@@ -515,7 +558,8 @@ write_result(root, report, root/'summary.json')
             env=dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output)),
             text=True, capture_output=True, timeout=10)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(len(result.stdout.splitlines()), 1)
+        self.assertEqual(len(result.stdout.splitlines()), 2)
+        self.assert_launcher_timing(result, output)
         self.assertIn('VALIDATION_FAIL 执行阶段失败', result.stdout)
         self.assertNotIn('PASS', result.stdout)
         self.assertIn('unfinished workflow', (output / 'workflow.log').read_text())

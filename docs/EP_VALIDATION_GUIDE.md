@@ -43,6 +43,48 @@ bash run.sh -m 2 -n 8 -e 384 -l 100 50 bs=96 operator_mode=both
 证据保留在开发工作区 `build/normal-workflow-verification/`。上述未启动真实 NPU 集群，
 不外推为本次入口修改已完成设备性能或跨机通信验收。
 
+### run.sh 墙钟耗时与 trace 路径
+
+日常命令不变，每次运行自动追加三类耗时（单位为秒，不是设备 kernel 延迟）：
+
+- `RUN_WALL(s,1s-resolution)`：shell 总耗时，以及参数准备 `setup`、可选 Host 回归
+  `host_tests`、环境加载 `env` 和 Python 工作流 `workflow`。以整秒统计。
+- `WORKFLOW_WALL(s)`：本机包检查 `local_check`、所选节点检查 `remote_check`、
+  节点运行 `nodes`、结果收集 `collect`、汇总/导出 `summary`，使用单调时钟。
+- `RANK_WALL_MAX(s,observed=N)`：已取得记录的 rank 中，每阶段最大耗时及其 rank。
+  `process` 包含 consumer/msprof 的初始化、预热、正式调用、校验和退出；
+  `profile_wait` 是等待本机 trace 解析锁，`profile_decode` 是解析/导出，`validate` 是 Python 结果校验。
+  各 rank、各节点相互并行，最大值不可相加作为总耗时，节点运行也包含 trace 解析。
+
+shell 统计保存在 case 根目录的 `launcher_timing.json`；工作流统计保存在
+本轮 `summary.json` 的 `wall_time`，逐节点/逐 rank 统计位于
+`nodes[].reported_result.wall_time` / `rank_wall_times`。正常失败退出仍保留已经历阶段的耗时；
+启动前检查失败写入 `failure.json`。强制杀死进程时可能没有完整统计。
+Python 统计截止最终 `summary.json` 写出前；最终结果文件写入及终端渲染包含在 shell 的 `workflow` 中。
+`dry_run=1` 仅有 shell 统计。终端原有算子微秒级性能数据的统计口径不变。
+
+breakdown 每个启用算子的 trace 目录单独一行，例如（路径为格式示例）：
+
+```text
+TRACE dispatch | trace=/.../traces/dispatch/chrome | status=complete | fastest_rank=0 | slowest_rank=8
+TRACE combine | trace=/.../traces/combine/chrome | status=complete | fastest_rank=3 | slowest_rank=9
+```
+
+目录下每个 rank 一份 JSON。解析不完整时仍显示已有目录并标记 `status=incomplete`，
+不能据此认为所有 trace 已生成；没有 trace 汇总时不虚构路径。
+维护教训：Combine 接入后结果从 `traces` 扩展为 `operator_traces`，终端摘要漏读新字段会使
+路径仅留在 `workflow.log`。渲染同时兼容旧 Dispatch 字段和新字段，并按当前算子模式显示，避免重复。
+
+运行阶段目前复用汇总所需的同一批已校验 rank 记录，减少重复校验；不跨运行缓存结果。
+breakdown 保留每台机器一次解析一个 rank 的锁以控制内存，用上述计时判断它是否为当前瓶颈。
+此版本仅修改脚本，无需重新编译算子；更新后同步脚本即可。Host 替身测试不能证明实际 64P 提速，
+需回传上述计时后再决定下一步优化。
+
+开发侧验证（2026-09-21）：Python 工作流回归 379 项中 378 通过、1 项 Windows 专属检查跳过，
+`bash -n run.sh` 通过。覆盖计时分段累计、异常退出保留耗时、三算子模式独立 trace 行、
+旧 Dispatch 字段兼容及不完整 trace；含替身多节点采集/汇总，未执行真实 NPU。
+证据保留在开发工作区 `build/run-wall-timing-verification/validation.log`。
+
 ## 提交验收入口：Combine P2.4（M5）
 
 M4/P2.3 已按用户回传通过 F/P/B 各 4/4、regression/connection 各 2/2，共 16/16。
