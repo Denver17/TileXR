@@ -174,6 +174,7 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
     "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
     DEFINITIONS $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_partial.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_config.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"

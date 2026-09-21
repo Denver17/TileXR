@@ -1,11 +1,78 @@
 # EP 验证与人工测试
 
-## 当前入口：Combine P2.2（M3）
+## 当前入口：Combine P2.3（M4）
+
+P2.2 已按用户回传通过 F/P/B 各 4 项、regression/connection 各 2 项，共 16/16。
+结果：`/home/h00580772/TileXR-git-check/run/validation/commit-f59416872bdb49aa9387c398c779c522/summary.json`。
+P2.3 累计 M1/M2/M3，增加 Read 核 self + stage 成员 FP32 加权及 BF16/FP16 partial 返回。
+M5 未接入、yOut 保持；不保留 50μs，不清结果 Flag。M4 设备验收待回传。
+
+```bash
+bash run_commit_validation.sh
+```
+
+当前 checkpoint 为 `ep-sdedup-combine-p2-m4`。前两台各 8P，共 16P，BS96/H7168/K6/E96、
+Send/Read=32/32；共 16 例：F/P/B 各 4（BF16/FP16 × combine/both）、Dispatch 回归 2、
+D quant4 → C quant0 独立低精度 expertOut 连接 2。**全部 0 预热 + 1 正式调用**。
+OFF 12 例与 ON 4 例分别安装到 `install/validation-combine-p23-profile-off/on`，源码摘要须一致。
+不复用前序 checkpoint 的通过记录。性能只确认数据可获取，breakdown 只验模块解析，均无达标阈值。
+DIRECT、partial 的有效 payload 和每块 ready Flag、未写槽、M1 stage、M2 控制清理、输入/yOut、
+地址边界同时校验；数值失败但 kernel 正常完成时继续保存可用性能/trace，最终 FAIL。
+
+手动性能/trace 使用相同编译、同步、运行包：
+
+```bash
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m4
+bash build_all.sh breakdown=0
+TILEXR_VALIDATION_BREAKDOWN=0 bash sync.sh
+bash run.sh -n 2 -e 96 -m 1 -l 1 0 operator_mode=combine
+bash build_all.sh breakdown=1
+TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh
+bash run.sh -n 2 -e 96 -m 2 -l 1 0 operator_mode=combine
+```
+
+`operator_mode=both` 测联合调用；D/C 独立 trace，M4 记录 Read 核模块区间，
+stage、DIRECT、partial 分别统计逻辑 payload 与实际 wire 字节。单次数据不能外推为稳定性能基线。
+
+M4 数值判据在上机前固定：有限正常数/零输入，以 self 后成员顺序，独立执行 FP32 乘法、
+FP32 加法（self 乘积直接初始化累加区，保留 signed zero），最后 ties-to-even 转为通信 dtype；
+有效 payload 逐位相同（atol=rtol=0）。
+standalone 包含正负非整数/零权重以及不同 expert 值，both 保留真实 Dispatch 五表及权重；
+padding 不参与数值比较，不将 M4 partial 与全 K 一次 FP32 最终和混比，失败后不临时放宽误差。
+
+实现与复用边界：190KiB UB 中 M2 常驻资源默认 7488B；M4 筛选后压缩为本 Read 核任务行号，
+重用其余筛选空间，表 2/3 各缓存相同原行号跨度最多 32 行。三份 FP32 工作区、低精度打包区、
+至少一个独立输出 lane 先入预算，再分配最多 8 个输入 lane，余量分配最多 8 个输出 lane。
+默认 tokens10000/H7168/K6 使用输入 4 / 输出 1，Host/kernel 共用准入预算。
+输入释放取决于 Vector 最后读取，输出仅在重用对应 lane 前等待 MTE3；换表不统一排空发送。
+M4 末尾 Event 收尾及 PIPE_ALL 为未来 M5 复用建立边界，M5 具体预算仍不在本次实现范围。
+
+开发教训：CANN 的 `GM_ADDR` 是带指针的宏，多个成员不能写为同一句逗号声明；
+后续名字会被解析为带 GM 地址空间的非指针字段，CPU 替身可能掩盖此问题。
+每个 GM 地址字段单独声明，并以真实 CANN 9.1 A5 OFF/ON 编译确认。
+
+开发侧最终验证（2026-09-21）：blue CANN 9.1、ccec/Clang 15.0.5、A5 `dav-c310-vec`，
+正式 workflow OFF/ON 构建及安装成功，安装包 Host 各 10/10 通过。
+OFF build_id=`051af7a2dd5b45999a5f31eed12463a0`，ON build_id=`5cc236965b9b42b182f868af587df41e`；
+两包源码摘要均为 `94559804fe08720eb843b08be7d5bb89984de1ea5b9aeb147bd0eb4e5c9f9276`。
+构建采用冻结文件快照，manifest commit 为空；生产及测试文件与快照逐文件一致，之后仅补本文证据。
+`python3 -m unittest discover -s tools/validation -p 'test_*.py' -q`：357 项中 356 通过，
+1 项 Windows PowerShell/MSYS 专属检查跳过。额外 M1/M2/M3/M4、准入/config/profile 聚焦 Host 7/7 通过；
+最终 M4 测试包含 L=2 寻址及完整 uint32 N 解析，由两包 Host 再次验证通过。
+同一主 shape 六组 16-rank consumer Host 替身全部通过（两 dtype × combine/both，以及两 dtype Dquant4），
+额外成员 N 覆盖 1..5、同卡成员共 361，逐元素确认本次 fixture 的 FP32/低精度 partial 为有限正常数或零。
+standalone 覆盖正负/零与非整数权重；量化连接的独立专家结果使用正值，避免无关的 subnormal 数值域。
+源码 provenance、编译器/配置/退出码、产物哈希、构建与 Host 日志保存在开发工作区
+`build/combine-p23-verification/`。以上不证明 M4 的 A5 跨 rank 可见性或设备数值正确；
+这些仍由用户在本次提交执行 16P P2.3 矩阵确认，不将 M3 通过记录外推到 M4。
+
+<a id="当前入口combine-p22m3"></a>
+### P2.2（M3）历史开发及验收证据
 
 P2.1 的 M1/M2 已按用户回传登记通过。P2.2 增加 M3：Send 核将 type1 的原始
 BF16/FP16 expertOut 按表 2 返回 source/token/k 结果槽，每块 480B payload + 32B Flag；
 保留 M1/M2，移除所有核末尾 50μs 等待。M4/M5 尚未实现，type2 不生成 partial，yOut 保持。
-P2.2 设备验收待用户回传；开发侧构建和 Host 证据见下文。
+P2.2 已按 2026-09-21 用户回传通过 16/16；结果见调试进度，以下命令须在 M3 历史提交执行。
 
 最新 CB06-04 覆盖原“四类多轮”计划：M3/M4 的功能、性能、breakdown 均为 **0 预热 + 1 正式调用**。
 检查到达数据/Flag 后结束，不增加测试侧结果 Flag 清理助手；M5 接入生产结果清理后再验证完整多轮复用。

@@ -20,7 +20,7 @@ void DirectRows(uint32_t count, uint32_t h, bool sparse, uint32_t window, uint8_
     std::vector<uint32_t> selected;
     for (uint32_t row = 0; row < count; ++row) {
         bool direct = sparse ? (row < 32U || (row >= 9500U && row < 9533U)) : row % 3U != 1U;
-        f.types[row] = direct ? 1 : (sparse ? 2 : 3);
+        f.types[row] = direct ? 1 : (sparse ? 0 : 3);
         const uint32_t source = row / slots;
         const uint32_t slot = row % slots;
         f.table[row * 3U] = int32_t(f.types[row] == 3 ? count - 1U - row : source);
@@ -108,7 +108,7 @@ void DirectRows(uint32_t count, uint32_t h, bool sparse, uint32_t window, uint8_
                 Check(flag == 1.0f, "every DataAsFlag block publishes ready first float");
             }
         } else Check(std::all_of(dst, dst + resultStride, [](uint8_t v) { return v == 0xa5; }),
-            "type2, unused and non-produced result slots remain unchanged");
+            "inactive, unused and non-produced result slots remain unchanged");
     }
     Check(f.expert == expertBefore && f.table == tableBefore && f.types == typesBefore,
         "M3 does not alter input tensors");

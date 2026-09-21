@@ -33,7 +33,7 @@ void Rows(uint32_t count, uint32_t h, bool sparse)
 {
     Fixture f(count, h);
     if (count == 1U) f.types[0] = 3;
-    if (sparse) for (uint32_t row = 0; row < count; ++row) f.types[row] = (row == 0U || (row >= 600U && row < 728U)) ? 3 : 2;
+    if (sparse) for (uint32_t row = 0; row < count; ++row) f.types[row] = (row == 0U || (row >= 600U && row < 728U)) ? 3 : 0;
     f.delayed = true;
     const auto expertBefore = f.expert;
     const auto tableBefore = f.table;

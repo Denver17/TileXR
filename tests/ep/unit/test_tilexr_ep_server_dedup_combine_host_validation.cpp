@@ -133,14 +133,19 @@ int main()
     auto unsupportedLane = valid;
     unsupportedLane.combine.h = 100000;
     Rejected(unsupportedLane, TILEXR_ERROR_NOT_SUPPORT);
-    // At capacityRows=768 the independent fixed/index buffers leave 171456B.
-    // One DIRECT lane needs ceil(2H/480)*(480+512), including input tail space.
-    // 172 blocks fit; the next block must be rejected before launch.
+    // At capacityRows=768/K=6, M4's resident controls, compact task list,
+    // tables, three FP32 workspaces and one independent input/output lane
+    // admit H=10144. The next 32B input allocation exceeds the 190KiB budget.
     g_args.peerMemBytes = 8ULL * 1024U * 1024U * 1024U;
     auto laneBoundary = valid;
-    laneBoundary.combine.h = 41280;
-    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last complete DIRECT lane fits UB");
-    laneBoundary.combine.h = 41281;
+    laneBoundary.combine.h = 10144;
+    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last complete M4 lane fits UB");
+    laneBoundary.combine.h = 10145;
+    Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
+    laneBoundary.combine.topK = 32;
+    laneBoundary.combine.h = 9792;
+    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "larger table3 cache fits at its H boundary");
+    laneBoundary.combine.h = 9793;
     Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
     g_args.peerMemBytes = 2ULL * (1048576ULL + TILEXR_FLAG_BUFF_BYTES);
     Rejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);

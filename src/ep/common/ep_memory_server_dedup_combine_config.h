@@ -54,6 +54,43 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombinePayloadLaneCount(uint32_t tokens, 
     const uint32_t lanes = available / (blocks * (480U + 512U));
     return lanes > 8U ? 8U : lanes;
 }
+// M2 controls retain independent storage throughout Read-core stage reuse.
+constexpr uint32_t kEpServerDedupCombineResidentUbBytes =
+    kEpServerDedupCombineFixedUbBytes - kEpServerDedupCombineTableRows * 12U;
+constexpr uint32_t kEpServerDedupCombineM4TableRows = 32U;
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4TaskBytes(uint32_t tokens)
+{
+    return EpCombineAlign(((tokens + kEpServerDedupCombineRecvCoreNum - 1U) /
+        kEpServerDedupCombineRecvCoreNum) * 4U, 32U);
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4FixedUbBytes(uint32_t tokens, uint32_t h, uint32_t k)
+{
+    return kEpServerDedupCombineResidentUbBytes + EpCombineM4TaskBytes(tokens) +
+        EpCombineAlign(kEpServerDedupCombineM4TableRows * 12U, 32U) +
+        EpCombineAlign(kEpServerDedupCombineM4TableRows * k * 8U, 32U) +
+        3U * EpCombineAlign(h * 4U, 256U) + ((h * 2U + 479U) / 480U) * 480U;
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4InputLaneCount(uint32_t tokens, uint32_t h, uint32_t k)
+{
+    if (tokens > kEpServerDedupCombineMaxTokenNum || h == 0U ||
+        h > kEpServerDedupCombineUbBytes / 2U || k == 0U || k > 32U) return 0U;
+    const uint32_t fixed = EpCombineM4FixedUbBytes(tokens, h, k);
+    const uint32_t output = ((h * 2U + 479U) / 480U) * 512U;
+    if (fixed + output > kEpServerDedupCombineUbBytes) return 0U;
+    // Reserve an independent output lane first, then use remaining UB for
+    // prefetch lanes up to the eight event IDs in each pipeline direction.
+    const uint32_t lanes = (kEpServerDedupCombineUbBytes - fixed - output) / EpCombineAlign(h * 2U, 32U);
+    return lanes > 8U ? 8U : lanes;
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4OutputLaneCount(uint32_t tokens, uint32_t h, uint32_t k)
+{
+    const uint32_t input = EpCombineM4InputLaneCount(tokens, h, k);
+    if (input == 0U) return 0U;
+    const uint32_t free = kEpServerDedupCombineUbBytes - EpCombineM4FixedUbBytes(tokens, h, k) -
+        input * EpCombineAlign(h * 2U, 32U);
+    const uint32_t lanes = free / (((h * 2U + 479U) / 480U) * 512U);
+    return lanes > 8U ? 8U : lanes;
+}
 #undef TILEXR_EP_COMBINE_CONSTEXPR
 } // namespace TileXREp
 #endif

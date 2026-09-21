@@ -23,8 +23,10 @@
 #define __ubuf__
 #define __mix__(a, b)
 #define GM_ADDR __gm__ uint8_t *
+#if !defined(TILEXR_TEST_DISTINCT_FLOAT16_TYPES)
 using half = uint16_t;
 using bfloat16_t = uint16_t;
+#endif
 
 namespace AscendC {
 extern uint32_t testCore;
@@ -112,7 +114,7 @@ template<class T> inline T AtomicAdd(__gm__ T *address, T value) {
     *mapped += value;
     return old;
 }
-enum class RoundMode { CAST_TRUNC, CAST_RINT };
+enum class RoundMode { CAST_TRUNC, CAST_RINT, CAST_NONE };
 struct fp8_e4m3fn_t {};
 struct fp8_e5m2_t {};
 

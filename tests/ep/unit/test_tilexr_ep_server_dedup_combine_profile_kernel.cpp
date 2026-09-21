@@ -1,4 +1,4 @@
-// Production M1/M2/M3 plus production DirectProfilingWriter; the CPU scheduler
+// Production M1/M2/M3/M4 plus production DirectProfilingWriter; the CPU scheduler
 // supplies peer arrivals and does not model AICore visibility or timings.
 #include "combine_m12_test_fixture.h"
 #include "tilexr_profiling.h"
@@ -36,7 +36,8 @@ int main()
                 kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd,
                 kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd};
             if (core >= kEpServerDedupCombineSendCoreNum) expected.insert(expected.end(), {
-                kEpServerDedupCombineProfileControlBegin, kEpServerDedupCombineProfileControlEnd});
+                kEpServerDedupCombineProfileControlBegin, kEpServerDedupCombineProfileControlEnd,
+                kEpServerDedupCombineProfilePartialBegin, kEpServerDedupCombineProfilePartialEnd});
             else expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
                 kEpServerDedupCombineProfileDirectEnd});
             expected.insert(expected.end(), {kEpServerDedupCombineProfileDrainBegin, kEpServerDedupCombineProfileDrainEnd,
@@ -50,7 +51,7 @@ int main()
         const auto savedTimes = times; const auto savedEvents = events;
         f.tiling.profilingEnabled = 0U;
         f.Hooks(0U, 0U); invoke(); f.ResetHooks();
-        Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3 without profile writes");
+        Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3/M4 without profile writes");
         Check(std::memcmp(&originalArgs, &f.args, sizeof(f.args)) == 0, "kernel never mutates shared CommArgs");
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     if (ServerDedupTest::Failures() != 0) return 1;

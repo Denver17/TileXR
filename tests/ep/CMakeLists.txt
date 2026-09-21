@@ -368,6 +368,12 @@ endif()
 
 # C4 reuses the same Host consumer for lifecycle/fault-injection coverage.
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_m4_consumer
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m4.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_m4_consumer PROPERTIES
+        LABELS ep-sdedup-combine-p2-m4 TIMEOUT 180)
     add_test(NAME test_tilexr_ep_server_dedup_combine_m3_consumer
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m3.py"
@@ -482,6 +488,15 @@ target_include_directories(test_tilexr_ep_server_dedup_combine_m3 BEFORE PRIVATE
 add_test(NAME test_tilexr_ep_server_dedup_combine_m3 COMMAND test_tilexr_ep_server_dedup_combine_m3)
 set_tests_properties(test_tilexr_ep_server_dedup_combine_m3 PROPERTIES LABELS ep-sdedup-combine-p2-m3 TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_combine_m3 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(test_tilexr_ep_server_dedup_combine_m4
+    unit/test_tilexr_ep_server_dedup_combine_m4.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_combine_m4 BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
+    "${TILEXR_ROOT}/src/include" "${TILEXR_ROOT}/src/ep/common")
+add_test(NAME test_tilexr_ep_server_dedup_combine_m4 COMMAND test_tilexr_ep_server_dedup_combine_m4)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_m4 PROPERTIES LABELS ep-sdedup-combine-p2-m4 TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_combine_m4 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.

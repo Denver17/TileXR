@@ -35,6 +35,8 @@
 #include "tilexr_profiling.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "server_dedup_dispatch_reference.h"
+#include "server_dedup_combine_m4_reference.h"
+#include <map>
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_test.h"
 #endif
@@ -157,7 +159,7 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p2-m12" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m3",
+        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
     if (const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE")) {
         Require(std::strcmp(probe, "0") == 0 || std::strcmp(probe, "1") == 0,
@@ -177,7 +179,7 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p2-m12" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m3",
+        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4",
         "Combine device execution requires a Combine acceptance checkpoint");
     if (const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_FIXTURE")) c.combineFixture = value;
     if (const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_OBSERVATION")) c.combineObservation = value;
@@ -203,9 +205,9 @@ Config Parse(int argc, char **argv)
     Require(warmup <= UINT32_MAX, "TILEXR_VALIDATION_WARMUP must be in [0, UINT32_MAX]");
     c.loops = static_cast<uint32_t>(loops);
     c.warmup = static_cast<uint32_t>(warmup);
-    Require(c.checkpoint != "ep-sdedup-combine-p2-m3" ||
+    Require((c.checkpoint != "ep-sdedup-combine-p2-m3" && c.checkpoint != "ep-sdedup-combine-p2-m4") ||
         (c.loops == 1 && c.warmup == 0 && c.combineObservation == "batch"),
-        "P2.2 requires loops=1, warmup=0 and batch observation in every mode");
+        "M3/M4 require loops=1, warmup=0 and batch observation in every mode");
     Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-single" ||
         (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
         "C4 requires functional mode, loops=1, warmup=0");
@@ -246,7 +248,7 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.dryRun) &&
+        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.dryRun) &&
         !c.boundaryProbe && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
@@ -307,7 +309,7 @@ ProfilePaths ConfigureProfiling(const Config &c)
 {
     ProfilePaths paths;
     const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3";
+        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4";
     const bool dispatch = c.runMode == "breakdown" && c.operatorMode != "combine";
     const bool combine = c.runMode == "breakdown" && split && c.operatorMode != "dispatch";
     const auto configure = [&](const char *name, bool enabled, std::string &path) {
@@ -361,8 +363,9 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
         << Json(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16");
-    if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3") {
-        std::cout << ",\"implemented_through\":" << Json(c.checkpoint == "ep-sdedup-combine-p2-m3" ? "M3" : "M2") << ",\"scope\":\"partial\""
+    if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4") {
+        std::cout << ",\"implemented_through\":" << Json(c.checkpoint == "ep-sdedup-combine-p2-m4" ? "M4" :
+            c.checkpoint == "ep-sdedup-combine-p2-m3" ? "M3" : "M2") << ",\"scope\":\"partial\""
             << ",\"combine_fixture\":" << Json(c.combineFixture)
             << ",\"combine_observation\":" << Json(c.combineObservation);
     }
@@ -513,6 +516,7 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 #include "server_dedup_combine_consumer.h"
 #include "server_dedup_combine_m12_consumer.h"
 #include "server_dedup_combine_m3_consumer.h"
+#include "server_dedup_combine_m4_consumer.h"
 
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_consumer.h"
@@ -571,8 +575,9 @@ int Run(const Config &c)
     }
     const bool m12 = c.checkpoint == "ep-sdedup-combine-p2-m12";
     const bool m3 = c.checkpoint == "ep-sdedup-combine-p2-m3";
+    const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4";
     const bool observeRounds = c.combineObservation == "per-round";
-    const bool multi = m12 || m3 || c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
+    const bool multi = m12 || m3 || m4 || c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary";
     const bool runDispatch = c.operatorMode != "combine";
@@ -594,6 +599,7 @@ int Run(const Config &c)
     int64_t sequenceMagic = 0;
     CombineM12Validation m12Validation;
     CombineM3Validation m3Validation;
+    CombineM4Validation m4Validation;
     uint64_t streamSynchronizations = 0;
     const auto profilePaths = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
@@ -692,6 +698,7 @@ int Run(const Config &c)
         }
         if (m12 && runCombine) m12Validation.Initialize(c, *host);
         if (m3 && runCombine) m3Validation.Initialize(c, *host);
+        if (m4 && runCombine) m4Validation.Initialize(c, *host);
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
             "caller allocation validation");
         enterStage("chain-barrier");
@@ -746,6 +753,7 @@ int Run(const Config &c)
             }
             if (multi && runCombine) {
                 launchCombine(warming);
+                if (m4) m4Validation.NoteLaunch(combineProgress.lastMagic, 0U);
                 if (m3) m3Validation.NoteLaunch(combineProgress.lastMagic, 0U);
                 if (m12) m12Validation.NoteLaunch(combineProgress.lastMagic, observeRounds && !runDispatch ? call + 1U : 0U);
             }
@@ -825,7 +833,11 @@ int Run(const Config &c)
             }
             enterStage("combine-read");
             ValidateCombineTensors(snapshots);
-            if (m3) {
+            if (m4) {
+                m4Validation.Validate(c, *host, combineLayout, buffers);
+                combineDetails = m4Validation.Details(c, host->peerMemBytes, dispatchProgress,
+                    combineProgress, streamSynchronizations);
+            } else if (m3) {
                 m3Validation.Validate(c, *host, combineLayout, buffers);
                 combineDetails = m3Validation.Details(c, host->peerMemBytes, dispatchProgress,
                     combineProgress, streamSynchronizations);
@@ -840,6 +852,8 @@ int Run(const Config &c)
     } catch (const OutputValidationFailure &error) {
         validationError = error.what();
         validationStage = stage;
+        if (m4 && runCombine) combineDetails = m4Validation.Details(c, kServerDedupDataMiB * 1024ULL * 1024ULL,
+            dispatchProgress, combineProgress, streamSynchronizations, false);
         if (m3 && runCombine) combineDetails = m3Validation.Details(c, kServerDedupDataMiB * 1024ULL * 1024ULL,
             dispatchProgress, combineProgress, streamSynchronizations, false);
         std::cerr << "EP_SERVER_DEDUP_VALIDATION_FAIL rank=" << c.rank << " stage=" << stage
@@ -888,7 +902,7 @@ int Run(const Config &c)
         const auto profileMarker = [&](const char *op, const std::string &path) {
             if (path.empty()) return;
             const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-                c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3";
+                c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4";
             Marker(c, split ? "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS" : "EP_SERVER_DEDUP_BREAKDOWN_PASS",
                 (split ? ",\"operator\":" + Json(op) : "") +
                 ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(path) +
@@ -908,7 +922,7 @@ int Run(const Config &c)
                 ",\"warmup_completed\":" + std::to_string(combineProgress.warmupCompleted) +
                 ",\"cleanup\":\"complete\"" + combineDetails);
         } else if (runCombine) {
-            if (m3 && runDispatch) {
+            if ((m3 || m4) && runDispatch) {
                 if (!dispatch.empty()) Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
                 else Marker(c, "EP_SERVER_DEDUP_DISPATCH_INVALID", details +
                     dispatchProgress.Details("dispatch", kServerDedupDataMiB * 1024ULL * 1024ULL) +
@@ -927,10 +941,10 @@ int Run(const Config &c)
                 Json(validationStage) + ",\"validation_error\":" + Json(validationError), "FAIL");
         }
     }
-    // M3 mirrors Dispatch's capture contract: a completed execution emits a
+    // M3/M4 mirror Dispatch's capture contract: a completed execution emits a
     // structured INVALID result for the coordinator, which exports available
     // measurements/trace and then returns validation FAIL.
-    return executionSucceeded && (m3 || !runCombine || validationError.empty()) ? 0 : 1;
+    return executionSucceeded && (m3 || m4 || !runCombine || validationError.empty()) ? 0 : 1;
 }
 } // namespace
 

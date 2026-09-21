@@ -6,7 +6,13 @@ void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes, uint64
     std::vector<uint16_t> chunk(512U * 1024U, one);
     for (uint64_t offset = 0; offset < bytes;) {
         const uint64_t count = std::min<uint64_t>(bytes - offset, chunk.size() * sizeof(uint16_t));
-        if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3") {
+        if (c.checkpoint == "ep-sdedup-combine-p2-m4") {
+            for (uint64_t i = 0; i < count / 2U; ++i) {
+                const uint64_t element = offset / 2U + i;
+                chunk[i] = CombineM4Reference::ExpertBits(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16,
+                    c.rank, element / c.h, element % c.h, c.operatorMode == "both");
+            }
+        } else if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3") {
             for (uint64_t i = 0; i < count / 2U; ++i) {
                 const uint64_t element = offset / 2U + i;
                 // Finite, exact dtype bits distinguish rank, original row, column and round.
@@ -27,7 +33,7 @@ void InitializeStandaloneCombine(const Config &c,
     auto shape = SourceSendShape(c);
     // Standalone Combine has no Dispatch route generator. Its synthetic tables
     // use a balanced fixture that also supports incomplete global epochs.
-    shape.routeMode = TileXREpDemo::RouteMode::Balance;
+    if (c.checkpoint != "ep-sdedup-combine-p2-m4") shape.routeMode = TileXREpDemo::RouteMode::Balance;
     shape.quantized = false;
     const auto rows = DispatchRows(shape, c.rank);
     Require(rows.size() <= layout.capacityRows, "standalone Combine row capacity");
@@ -37,6 +43,10 @@ void InitializeStandaloneCombine(const Config &c,
     std::vector<uint32_t> relay(layout.relayReadIndexBytes / 4U, 0);
     std::vector<uint32_t> mask(c.bs, 0);
     auto weights = Weights(shape, c.rank);
+    if (c.checkpoint == "ep-sdedup-combine-p2-m4")
+        for (uint32_t token = 0; token < uint32_t(c.bs); ++token)
+            for (uint32_t k = 0; k < uint32_t(c.topK); ++k)
+                weights[token * c.topK + k] = CombineM4Reference::Weight(c.rank, token, k);
     for (size_t i = 0; i < rows.size(); ++i) {
         const auto &row = rows[i];
         ++prefix[(row.expert % (c.experts / c.rankSize)) * c.rankSize + row.source];
@@ -44,7 +54,11 @@ void InitializeStandaloneCombine(const Config &c,
         const auto address = DestinationIndex(shape, row);
         std::copy(address.begin(), address.end(), assist.begin() + i * 3U);
         if (row.FirstHop()) {
-            const auto words = RelayReadIndex(row);
+            auto words = RelayReadIndex(row);
+            if (c.checkpoint == "ep-sdedup-combine-p2-m4")
+                for (size_t member = 0; member < row.packet.members.size(); ++member)
+                    words[member * 2U + 1U] = FloatBits(CombineM4Reference::Weight(
+                        row.source, row.token, row.packet.members[member].k));
             std::copy(words.begin(), words.end(), relay.begin() + i * c.topK * 2U);
         }
     }

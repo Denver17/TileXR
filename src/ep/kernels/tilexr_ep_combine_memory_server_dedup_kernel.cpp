@@ -1,7 +1,7 @@
 #include "tilexr_ep_combine_memory_server_dedup_kernel.h"
 #include "ep_memory_server_dedup_combine_tiling.h"
 
-// P2.1 implements M1/M2; the public launch signature remains unchanged.
+// P2.3 implements M1/M2/M3/M4; the public launch signature remains unchanged.
 extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_server_dedup_kernel(
     GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR sendCounts,
     GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex, GM_ADDR sourceMask,

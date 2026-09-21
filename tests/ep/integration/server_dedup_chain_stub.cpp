@@ -18,6 +18,7 @@
 #include "combine_memory_boundary_test.h"
 #include "tilexr_profiling_runtime.h"
 #include "server_dedup_dispatch_reference.h"
+#include "server_dedup_combine_m4_reference.h"
 
 namespace {
 int deviceId = 0;
@@ -30,10 +31,15 @@ std::vector<void *> firstBuffers;
 std::vector<const void *> firstCombineBuffers;
 uint64_t sharedMagic = 0;
 uint64_t lastDispatchMagic = 0;
+bool IsM4()
+{
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m4") == 0;
+}
 bool IsM3()
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m3") == 0;
+    return IsM4() || (checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m3") == 0);
 }
 bool IsM12()
 {
@@ -543,7 +549,7 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
             dtype == TileXR::TILEXR_DATA_TYPE_BFP16, false, true};
         if (const char *route = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
             shape.routeMode = TileXREpDemo::ParseRouteMode(route);
-        if (!both) shape.routeMode = TileXREpDemo::RouteMode::Balance;
+        if (!both && !IsM4()) shape.routeMode = TileXREpDemo::RouteMode::Balance;
         if (const char *seed = std::getenv("TILEXR_VALIDATION_SEED"))
             shape.seed = static_cast<uint32_t>(std::strtoull(seed, nullptr, 10));
         std::vector<int32_t> counts(experts, 0);
@@ -590,33 +596,69 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                 dtype == TileXR::TILEXR_DATA_TYPE_BFP16, false, true};
             if (const char *route = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
                 shape.routeMode = TileXREpDemo::ParseRouteMode(route);
-            if (!both) shape.routeMode = TileXREpDemo::RouteMode::Balance;
+            if (!both && !IsM4()) shape.routeMode = TileXREpDemo::RouteMode::Balance;
             if (const char *seed = std::getenv("TILEXR_VALIDATION_SEED"))
                 shape.seed = static_cast<uint32_t>(std::strtoull(seed, nullptr, 10));
             const bool generated = !both || firstBuffers.size() == 12U;
             const uint64_t packetBytes = ((h * 2U + 479U) / 480U) * 512U;
             const char *m3Fault = std::getenv("TEST_M3_FAULT");
             const auto faultIs = [&](const char *name) { return m3Fault && std::strcmp(m3Fault, name) == 0; };
-            bool corrupted = false;
+            bool corrupted = false, partialCorrupted = false;
+            const char *m4Fault = std::getenv("TEST_M4_FAULT");
+            const auto partialFault = [&](const char *name) { return m4Fault && std::strcmp(m4Fault, name) == 0; };
+            std::vector<std::vector<DispatchRow>> allRows;
+            using Identity = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>;
+            std::map<Identity, size_t> routeRows;
             for (uint32_t producer = 0; producer < uint32_t(world); ++producer) {
-                const auto rows = DispatchRows(shape, producer);
+                allRows.push_back(DispatchRows(shape, producer));
+                for (size_t index = 0; index < allRows.back().size(); ++index) {
+                    const auto &row = allRows.back()[index];
+                    routeRows.emplace(Identity(row.source, row.token, row.expert, row.k), index);
+                }
+            }
+            for (uint32_t producer = 0; producer < uint32_t(world); ++producer) {
+                const auto &rows = allRows[producer];
                 for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
                     const auto &row = rows[rowIndex];
-                    if (!row.Direct() || row.source != uint32_t(rank)) continue;
+                    if (row.source != uint32_t(rank) || (!row.Direct() && !(IsM4() && row.FirstHop()))) continue;
                     const uint64_t offset = (row.token * topK + row.k) * packetBytes;
                     auto target = M12Address(base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + offset, packetBytes);
                     if (!target) return 92;
-                    if (faultIs("missing-packet")) continue;
+                    if (faultIs("missing-packet") || (row.FirstHop() && partialFault("missing-packet"))) continue;
+                    std::vector<size_t> memberRows;
+                    if (row.FirstHop()) for (const auto &member : row.packet.members)
+                        memberRows.push_back(routeRows.at(Identity(row.source, row.token, member.expert, member.k)));
                     std::vector<uint8_t> payload(packetBytes / 512U * 480U, 0xabU);
                     for (uint32_t col = 0; col < uint32_t(h); ++col) {
                         const uint16_t one = shape.bf16 ? 0x3f80U : 0x3c00U;
-                        const uint16_t bits = generated ? static_cast<uint16_t>(one +
-                            (rowIndex * 17U + col * 3U + producer * 11U) % 113U) :
+                        uint16_t bits = generated ? (IsM4() ? CombineM4Reference::ExpertBits(shape.bf16,
+                            producer, rowIndex, col, both) : static_cast<uint16_t>(one +
+                            (rowIndex * 17U + col * 3U + producer * 11U) % 113U)) :
                             HiddenBits(shape, row.source, row.token, col);
+                        if (row.FirstHop()) {
+                            float sum = 0.0f;
+                            for (size_t member = 0; member < row.packet.members.size(); ++member) {
+                                const auto &route = row.packet.members[member];
+                                const uint16_t contribution = generated ? CombineM4Reference::ExpertBits(shape.bf16,
+                                    route.expert / uint32_t(experts / world), memberRows[member], col, both) :
+                                    HiddenBits(shape, row.source, row.token, col);
+                                const float weight = both ? route.weight : CombineM4Reference::Weight(row.source, row.token, route.k);
+                                volatile float product = CombineM4Reference::Decode(contribution, shape.bf16) * weight;
+                                if (member == 0U) sum = product;
+                                else { volatile float rounded = sum + product; sum = rounded; }
+                            }
+                            bits = CombineM4Reference::Encode(sum, shape.bf16);
+                        }
                         std::memcpy(payload.data() + col * 2U, &bits, 2U);
                     }
                     const auto packet = Pack(payload);
                     std::memcpy(target, packet.data(), packet.size());
+                    if (row.FirstHop() && !partialCorrupted) {
+                        if (partialFault("payload")) target[0] ^= 1U;
+                        if (partialFault("tail")) target[(h * 2U - 1U) / 480U * 512U + (h * 2U - 1U) % 480U] ^= 1U;
+                        if (partialFault("flag")) target[packetBytes - 32U] ^= 1U;
+                        partialCorrupted = true;
+                    }
                     if (!corrupted) {
                         if (faultIs("payload")) target[0] ^= 1U;
                         if (faultIs("tail")) target[(h * 2U - 1U) / 480U * 512U + (h * 2U - 1U) % 480U] ^= 1U;
@@ -679,7 +721,10 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                     events = {0x3001, 0x3003, 0x3004, 0x3017, 0x3018};
                     if (core < TileXREp::kEpServerDedupCombineSendCoreNum)
                         events.insert(events.end(), {0x301b, 0x301c});
-                    else events.insert(events.end(), {0x3019, 0x301a});
+                    else {
+                        events.insert(events.end(), {0x3019, 0x301a});
+                        if (IsM4()) events.insert(events.end(), {0x301d, 0x301e});
+                    }
                     events.insert(events.end(), {0x3013, 0x3014, 0x3002});
                     for (size_t index = 0; index < events.size(); ++index) {
                         combineProfileEvents[base + index] = events[index];

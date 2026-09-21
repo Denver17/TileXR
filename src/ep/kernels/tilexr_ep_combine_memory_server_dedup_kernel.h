@@ -6,6 +6,7 @@
 #include "ep_memory_server_dedup_buffer_layout.h"
 #include "ep_memory_server_dedup_combine_config.h"
 #include "ep_memory_server_dedup_combine_profile.h"
+#include "tilexr_ep_server_dedup_partial.h"
 #if defined(TILEXR_ENABLE_PROFILING)
 #include "tilexr_profiling.h"
 #endif
@@ -13,8 +14,8 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// P2.2: local type-3 staging, server readiness and DIRECT type-1 return.
-// M4/M5 and yOut arithmetic are intentionally not executed.
+// P2.3: local stage, readiness, DIRECT and FP32-weighted partial return.
+// M5 and yOut arithmetic are intentionally not executed.
 class CombineMemoryServerDedupKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine,
@@ -22,8 +23,7 @@ public:
         GM_ADDR sourceMask, GM_ADDR yOut, uint32_t bs, uint32_t h, uint32_t topK,
         uint32_t experts, uint8_t dtype, uint8_t quantMode, int64_t magic, uint8_t profilingEnabled)
     {
-        (void)expertScales; (void)relayReadIndex; (void)sourceMask; (void)yOut;
-        (void)dtype; (void)quantMode; (void)profilingEnabled;
+        (void)expertScales; (void)sourceMask; (void)yOut; (void)quantMode; (void)profilingEnabled;
         core_ = GetBlockIdx();
 #if defined(TILEXR_ENABLE_PROFILING)
         if (profilingEnabled != 0U) profile_.InitializeLatestCombine(commArgs, core_, 0U,
@@ -32,7 +32,8 @@ public:
         Mark(kEpServerDedupCombineProfileStart);
         Mark(kEpServerDedupCombineProfileInitBegin);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
-        h_ = h; topK_ = topK;
+        h_ = h; topK_ = topK; bs_ = bs; experts_ = experts; dtype_ = dtype;
+        expertAddr_ = expertOut; tableAddr_ = assistInfoForCombine; relayAddr_ = relayReadIndex;
         // Load the device-produced prefix through MTE2 rather than caching a
         // mutable GM scalar across launches. This 32B temporary becomes the
         // independent M2 prepare sum only after the scalar count is consumed.
@@ -53,7 +54,8 @@ public:
         }
         tokens_ = uint32_t(tokens);
         lanes_ = EpCombinePayloadLaneCount(tokens_, h_);
-        if (lanes_ == 0U) { Trap(); return; } // Also enforced by Host for the maximum valid count.
+        if (lanes_ == 0U || EpCombineM4InputLaneCount(tokens_, h_, topK_) == 0U ||
+            EpCombineM4OutputLaneCount(tokens_, h_, topK_) == 0U) { Trap(); return; } // Also enforced by Host for the maximum valid count.
         blocks_ = (h_ * 2U + 479U) / 480U;
         laneBytes_ = blocks_ * 480U;
         resultStride_ = blocks_ * 512U;
@@ -65,12 +67,6 @@ public:
         table_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(assistInfoForCombine));
         types_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(tokenType));
         stage_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(args_->peerMems[args_->rank] + stageBase_));
-        const uint32_t rowBytes = EpCombineAlign(tokens_ == 0U ? 4U : tokens_ * 4U, 256U);
-        typeUb_ = Allocate<int32_t>(rowBytes);
-        indexUb_ = Allocate<int32_t>(rowBytes);
-        packedUb_ = Allocate<int32_t>(rowBytes);
-        maskUb_ = Allocate<uint8_t>(EpCombineAlign((tokens_ + 7U) / 8U + 32U, 256U));
-        tableUb_ = Allocate<int32_t>(kEpServerDedupCombineTableRows * 12U);
         preparePublish_ = Allocate<float>(256U);
         prepareInput_ = Allocate<float>(2304U);
         prepareWork_ = Allocate<float>(512U);
@@ -80,6 +76,12 @@ public:
         readySum_ = Allocate<float>(32U);
         readyZero_ = Allocate<float>(512U);
         notifyUb_ = Allocate<float>(kEpServerDedupCombineRecvCoreNum * 32U);
+        const uint32_t rowBytes = EpCombineAlign(tokens_ == 0U ? 4U : tokens_ * 4U, 256U);
+        typeUb_ = Allocate<int32_t>(rowBytes);
+        indexUb_ = Allocate<int32_t>(rowBytes);
+        packedUb_ = Allocate<int32_t>(rowBytes);
+        maskUb_ = Allocate<uint8_t>(EpCombineAlign((tokens_ + 7U) / 8U + 32U, 256U));
+        tableUb_ = Allocate<int32_t>(kEpServerDedupCombineTableRows * 12U);
         payloadUb_ = Allocate<uint16_t>(lanes_ * laneBytes_);
         resultUb_ = Allocate<uint8_t>(lanes_ * resultStride_);
         Mark(kEpServerDedupCombineProfileInitEnd);
@@ -95,6 +97,9 @@ public:
             if (core_ >= 56U) NotifyServerCard();
             WaitServerReady();
             Mark(kEpServerDedupCombineProfileControlEnd);
+            Mark(kEpServerDedupCombineProfilePartialBegin);
+            ReturnPartialTokens();
+            Mark(kEpServerDedupCombineProfilePartialEnd);
         } else {
             Mark(kEpServerDedupCombineProfileDirectBegin);
             ReturnDirectTokens();
@@ -257,6 +262,27 @@ private:
             WaitFlag<HardEvent::MTE3_V>(lane);
         }
     }
+    __aicore__ inline void ReturnPartialTokens()
+    {
+        // M1 payload lanes are retired; complete this core's M2 publications
+        // before reusing scratch. Independent control buffers remain resident.
+        PipeBarrier<PIPE_ALL>();
+        SelectRows(2);
+        const uint32_t readers = kEpServerDedupCombineRecvCoreNum;
+        const uint32_t localCore = core_ - kEpServerDedupCombineSendCoreNum;
+        const uint32_t base = uint32_t(selected_) / readers, extra = uint32_t(selected_) % readers;
+        const uint32_t count = base + (localCore < extra ? 1U : 0U);
+        const uint32_t start = localCore * base + (localCore < extra ? localCore : extra);
+        if (count == 0U) return;
+        // The compact destination lies in the old type array, disjoint from
+        // packedUb_. Only this core's rows survive subsequent scratch reuse.
+        for (uint32_t task = 0; task < count; ++task)
+            typeUb_.SetValue(task, packedUb_.GetValue(start + task));
+        ServerDedupPartial partial;
+        partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
+            expertAddr_, tableAddr_, relayAddr_, tokens_, count, bs_, h_, topK_, experts_, dtype_, window_);
+        partial.Process();
+    }
     __aicore__ inline void WaitFlags(GlobalTensor<float> gm, LocalTensor<float> input,
         LocalTensor<float> work, LocalTensor<float> sum, uint32_t flags)
     {
@@ -300,6 +326,11 @@ private:
     TPipe pipe_;
     TBuf<> arena_;
     const __gm__ TileXR::CommArgs *args_ = nullptr;
+    GM_ADDR expertAddr_ = nullptr;
+    GM_ADDR tableAddr_ = nullptr;
+    GM_ADDR relayAddr_ = nullptr;
+    uint32_t bs_ = 0, experts_ = 0;
+    uint8_t dtype_ = 0;
     uint32_t core_ = 0, h_ = 0, topK_ = 0, blocks_ = 0, resultStride_ = 0, tokens_ = 0, lanes_ = 0, laneBytes_ = 0, usedBytes_ = 0;
     uint64_t selected_ = 0, window_ = 0, control_ = 0, stageBase_ = 0, stageStride_ = 0;
     GlobalTensor<uint16_t> expert_, stage_;

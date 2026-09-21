@@ -25,7 +25,21 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 适用平台为 Ascend 910A5/Ascend950 A5 环境，目标工具链为 CANN 9.1.0，保持 C++14。
 910B Host 或 simulator 只能验证 Host/构建边界，不能作为 A5 kernel 执行证据。
 
-### P2.2 当前交付契约：M3 无预热单轮
+### P2.3 当前交付契约：M4 无预热单轮
+
+checkpoint=`ep-sdedup-combine-p2-m4`，`implemented_through=M4`、`scope=partial`。
+在 M1/M2/M3 基础上，Read 核按类型 2 密排任务均分，表 2/3 共用原行号批次，
+self 读 expertOut，成员（含同卡）按 source/expert/q 读 stage，依表内顺序 FP32 乘加，
+整体转换 BF16/FP16 后返回 partial；M5 未接入，yOut 保持，不增加等待或结果 Flag 清理。
+`run_commit_validation.sh` 沿用 16 例矩阵：F/P/B 各 4、Dispatch 回归 2、量化连接 2，
+均为 0 预热 + 1 正式调用；OFF 12 例、ON 4 例使用独立包和同一源码摘要。
+数值参考使用有限正常数/零，逐步 FP32 乘法与加法、最终 ties-to-even 转换，
+有效 payload 固定逐位比较（atol=rtol=0），失败后不放宽；尾部 padding 不参与数值比较。
+模块 trace 增加 Read 核 M4，流量区分 stage、DIRECT、partial 及 payload/wire。
+数值失败但执行已正常完成时仍保存可用性能/trace，最终 FAIL。
+M4 设备验收待用户回传，不能用 M3 已通过结果或开发侧 Host 测试代替。
+
+### P2.2 历史交付契约：M3 无预热单轮
 
 本段按最新已确认 CB03-01/02、CB06-04 固定当前提交的范围，覆盖历史“四类多轮”计划中对 M3 的要求。
 checkpoint=`ep-sdedup-combine-p2-m3`，`implemented_through=M3`、`scope=partial`。
@@ -41,17 +55,17 @@ OFF 12 例与 ON 4 例采用独立安装包、同一源码摘要，不能续用 
 数值错误但 kernel 正常结束时继续保存可用性能/trace，最终标记失败。
 
 开发证据及手动运行命令见[EP 验证指南](EP_VALIDATION_GUIDE.md#当前入口combine-p22m3)；
-设备验收仍待用户回传，不将 Host 替身或 A5 编译结果作为跨卡数据正确性证明。
+M3 设备验收已按用户回传登记 16/16 通过，详细结果见调试进度；通过范围不外推至 M4/M5。
 
 <a id="combine-phase2-modular-acceptance"></a>
 ## Combine 第二阶段：按模块递进验收（2026-09-21）
 
-本节为第二阶段开发/验收计划。P2.1 的 M1/M2 已完成开发，设备验收已按用户回传登记通过；M3–M5 在各自设计完成后再启动。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
+本节为第二阶段开发/验收计划。P2.1 的 M1/M2 已完成开发，设备验收已按用户回传登记通过；P2.2 的 M3 已通过，P2.3 的 M4 开发交付、待设备验收；M5 在设计完成后再启动。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
 每个模块交付点都须完成单轮功能、多轮功能、多轮 performance、多轮 breakdown 四类确认，
 全部通过后才开发下一模块。共四个模块交付点、十六项子验收；按模块分别提交，不将四类确认默认拆成十六次代码提交。
 沿用同一 `run_commit_validation.sh`、`build_all.sh/sync.sh/run.sh`、workflow 和 chain consumer，
 保留 dispatch/combine/both 三种模式、独立 D/C quantMode、共享输入 dtype/量化格式配置。
-P2.1 入口为 `ep-sdedup-combine-p2-m12`；其余三个 checkpoint 仍是后续契约。
+P2.1/P2.2 保留在历史提交；当前入口为 `ep-sdedup-combine-p2-m4`，M5 checkpoint 为后续契约。
 
 权威模块语义见[Combine 设计](specs/ep-memory-server-dedup-combine-design.md)，
 接口/五表/共享布局见[联合设计](specs/ep-memory-server-dedup-dispatch-combine-design.md)。
@@ -240,7 +254,7 @@ M3 前落实 CB03-01 与上述测试后处理；M4 前落实 CB04-01/02 与数�
 每个模块的交付闭环：本地 Host/脚本回归及 blue CANN 9.1 A5 OFF/ON 编译 → 独立提交并推送 →
 用户切换对应 SHA 执行 `bash run_commit_validation.sh` → 回传四类子结果及总 summary → 登记后进入下一模块。
 报告保留环境身份、源码状态/摘要、build_id、Host/Kernel 哈希、命令和各 rank 证据；复用已存在的匹配环境 HCCL 资格记录。
-未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及设备验收证据已单独登记，设备部分按用户回传通过；P2.2–P2.4 未开发、未验收。
+未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及设备验收证据已单独登记，设备部分按用户回传通过；P2.2 已按回传通过，P2.3 已开发、待设备验收，P2.4 未开发、未验收。
 
 
 <a id="combine-phase1-confirmed"></a>

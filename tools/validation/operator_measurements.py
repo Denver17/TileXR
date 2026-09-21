@@ -45,30 +45,46 @@ def m12_stage_counts(config):
     return counts
 
 
-def m3_stage_counts(config):
+def return_stage_counts(config):
     send = config.get("combine_send_core_num", 32)
-    return dict(kernel_total=64, m1_init=64, m1_stage=64, m2_control=64 - send,
-                m3_direct=send, m6_drain=64)
+    stages = dict(kernel_total=64, m1_init=64, m1_stage=64, m2_control=64 - send,
+                  m3_direct=send, m6_drain=64)
+    if config.get("implemented_through") == "M4":
+        stages["m4_partial"] = 64 - send
+    return stages
 
 
-def m3_traffic(record, config):
+def return_traffic(record, config):
     if not isinstance(record, dict):
-        raise ValueError("M3 measurement requires rank traffic")
+        raise ValueError("M3/M4 measurement requires rank traffic")
     stage = measure._integer(record.get("combine_type3_rows"), "combine_type3_rows")
     direct = measure._integer(record.get("combine_type1_rows"), "combine_type1_rows")
     tokens = measure._integer(record.get("combine_token_num"), "combine_token_num")
-    if stage + direct > tokens or tokens > 10000:
-        raise ValueError("M3 disjoint rows exceed supported TokenNum")
+    partial = measure._integer(record.get("combine_type2_rows"), "combine_type2_rows") if config.get("implemented_through") == "M4" else 0
+    if stage + direct + partial > tokens or tokens > 10000:
+        raise ValueError("M3/M4 disjoint rows exceed supported TokenNum")
     payload = direct * config["h"] * 2
     wire = direct * ((config["h"] * 2 + 479) // 480) * 512
-    expected = dict(algorithm_bytes=(stage + direct) * config["h"] * 2,
+    expected = dict(algorithm_bytes=(stage + direct + partial) * config["h"] * 2,
                     stage_copy_bytes=stage * config["h"] * 4,
                     direct_payload_bytes=payload, direct_wire_bytes=wire,
                     control_publish_bytes=(64 * 8 + 8 * (64 - config.get("combine_send_core_num", 32))) * 32)
+    if config.get("implemented_through") == "M4":
+        members = measure._integer(record.get("combine_partial_member_rows"), "combine_partial_member_rows")
+        local_members = measure._integer(record.get("combine_partial_local_members"), "combine_partial_local_members")
+        member_bytes = measure._integer(record.get("combine_partial_stage_read_bytes"), "combine_partial_stage_read_bytes")
+        row_bytes = config["h"] * 2
+        if (not partial <= members <= partial * (config["topk"] - 1) or local_members > members or
+                member_bytes != members * row_bytes):
+            raise ValueError("M4 stage member reads exceed row member bounds")
+        expected.update(partial_payload_bytes=partial * row_bytes,
+                        partial_wire_bytes=partial * ((row_bytes + 479) // 480) * 512,
+                        partial_self_read_bytes=partial * row_bytes,
+                        partial_stage_read_bytes=member_bytes)
     for key, value in expected.items():
         if type(record.get("combine_" + key)) is not int or record["combine_" + key] != value:
-            raise ValueError("M3 traffic mismatch: " + key)
-    return dict(rank=record["rank"], type3_rows=stage, type1_rows=direct,
+            raise ValueError("M3/M4 traffic mismatch: " + key)
+    return dict(rank=record["rank"], type3_rows=stage, type1_rows=direct, **({"type2_rows": partial} if config.get("implemented_through") == "M4" else {}),
                 stage_payload_bytes=stage * config["h"] * 2, **expected)
 
 
@@ -89,20 +105,24 @@ def m12_traffic(record, config):
 
 
 def _operator_scope(evidence, operator, config=None, record=None, *, duration=None):
-    if operator != "combine" or not config or config.get("implemented_through") not in ("M2", "M3"):
+    if operator != "combine" or not config or config.get("implemented_through") not in ("M2", "M3", "M4"):
         return _empty_scope(evidence, operator)
-    m3 = config.get("implemented_through") == "M3"
-    traffic = (m3_traffic if m3 else m12_traffic)(record, config)
+    m3 = config.get("implemented_through") in ("M3", "M4")
+    traffic = (return_traffic if m3 else m12_traffic)(record, config)
     measured = duration if duration is not None else evidence
     us = measured["mean_us"] if config["run_mode"] == "performance" else measured["sample_us"][0]
     if m3:
-        evidence.update(scope="partial", implemented_through="M3", native_status="combine-m3",
+        evidence.update(scope="partial", implemented_through=config["implemented_through"], native_status="combine-" + config["implemented_through"].lower(),
                         algorithm_bytes=traffic["algorithm_bytes"], stage_payload_bytes=traffic["stage_payload_bytes"],
                         stage_copy_bytes=traffic["stage_copy_bytes"], direct_payload_bytes=traffic["direct_payload_bytes"],
                         direct_wire_bytes=traffic["direct_wire_bytes"], control_publish_bytes=traffic["control_publish_bytes"],
                         wait_us=0, performance_scope="single-launch acquisition; no baseline or performance threshold",
                         algorithm_bandwidth_gbps=traffic["algorithm_bytes"] / (us * 1000) if traffic["algorithm_bytes"] else None,
                         algorithm_bandwidth="effective M1 stage + M3 DIRECT logical payload GB/s / full kernel" if traffic["algorithm_bytes"] else "N/A")
+        if config["implemented_through"] == "M4":
+            evidence.update({key: traffic[key] for key in ("partial_payload_bytes", "partial_wire_bytes",
+                            "partial_self_read_bytes", "partial_stage_read_bytes")})
+            evidence["algorithm_bandwidth"] = "effective stage + DIRECT + partial logical payload GB/s / full kernel" if traffic["algorithm_bytes"] else "N/A"
         return evidence
     evidence.update(scope="partial", implemented_through="M2", native_status="combine-m12",
                     algorithm_bytes=traffic["algorithm_bytes"], stage_copy_bytes=traffic["stage_copy_bytes"],
@@ -149,7 +169,7 @@ def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha, rec
             raise ValueError(operator + " capture dropped records")
         if operator == "combine":
             stages = evidence.get("stages_us", {})
-            expected = (m3_stage_counts(config) if config.get("implemented_through") == "M3" else
+            expected = (return_stage_counts(config) if config.get("implemented_through") in ("M3", "M4") else
                         m12_stage_counts(config) if config.get("implemented_through") == "M2"
                         else dict(kernel_total=64, empty_wait=64))
             if set(stages) != set(expected) or any(stages[name].get("sample_count") != count
@@ -213,7 +233,7 @@ def summarize_operator_measurements(rank_records, config, run_id, kernel_shas):
     for operator in active_operators(config):
         rows = _operator_rows(rank_records, operator, config["run_mode"])
         op_config = dict(config, kernel_scope="dispatch" if operator == "dispatch" else
-                         "combine-m3" if config.get("implemented_through") == "M3" else
+                         "combine-" + config["implemented_through"].lower() if config.get("implemented_through") in ("M3", "M4") else
                          "combine-m12" if config.get("implemented_through") == "M2" else "combine-empty")
         summary = measure.summarize_measurements(rows, op_config, kernel_shas[operator], operator=operator)
         durations = [row[config["run_mode"]]["mean_us"] if config["run_mode"] == "performance"
@@ -222,12 +242,12 @@ def summarize_operator_measurements(rank_records, config, run_id, kernel_shas):
             latency_us=measure._statistics(durations), rank_latency_us=durations,
             latency_reduction="statistics across ranks of measured-launch mean" if config["run_mode"] == "performance"
             else "statistics across ranks of last-launch slowest core")
-        if operator == "combine" and config.get("implemented_through") == "M3":
-            traffic = [m3_traffic(row, config) for row in sorted(rows, key=lambda row: row["rank"])]
+        if operator == "combine" and config.get("implemented_through") in ("M3", "M4"):
+            traffic = [return_traffic(row, config) for row in sorted(rows, key=lambda row: row["rank"])]
             rates = [row["algorithm_bytes"] / (us * 1000) if row["algorithm_bytes"] else None
                      for row, us in zip(traffic, durations)]
             nonzero = [rate for rate in rates if rate is not None]
-            summary.update(scope="partial", implemented_through="M3", native_status="combine-m3", wait_us=0,
+            summary.update(scope="partial", implemented_through=config["implemented_through"], native_status="combine-" + config["implemented_through"].lower(), wait_us=0,
                 rank_traffic=traffic, rank_algorithm_bandwidth_gbps=rates,
                 algorithm_bandwidth_gbps=measure._statistics(nonzero) if nonzero else None,
                 algorithm_bandwidth="effective stage + DIRECT logical payload rate; not link bandwidth" if nonzero else "N/A",
@@ -236,7 +256,12 @@ def summarize_operator_measurements(rank_records, config, run_id, kernel_shas):
             for key in ("algorithm_bytes", "stage_payload_bytes", "stage_copy_bytes", "direct_payload_bytes",
                         "direct_wire_bytes", "control_publish_bytes"):
                 summary[key] = sum(row[key] for row in traffic)
-            summary["algorithm_communication_bytes"] = summary["direct_wire_bytes"]
+            if config["implemented_through"] == "M4":
+                for key in ("partial_payload_bytes", "partial_wire_bytes", "partial_self_read_bytes", "partial_stage_read_bytes"):
+                    summary[key] = sum(row[key] for row in traffic)
+                summary["algorithm_bandwidth"] = "effective stage + DIRECT + partial logical payload rate; not link bandwidth" if nonzero else "N/A"
+                summary["communication_scope"] = "M1 local stage; M3 DIRECT and M4 partial to all targets (including self); M4 member reads and M2 control separate"
+            summary["algorithm_communication_bytes"] = summary["direct_wire_bytes"] + summary.get("partial_wire_bytes", 0)
         elif operator == "combine" and config.get("implemented_through") == "M2":
             traffic = [m12_traffic(row, config) for row in sorted(rows, key=lambda row: row["rank"])]
             bandwidth = [row["algorithm_bytes"] / (us * 1000) if row["algorithm_bytes"] else None
@@ -266,10 +291,13 @@ def render_operator_measurements(summaries):
         text = (f"{operator}: backend={summary['backend']} native={summary['native_status']} "
                 f"min={stats['minimum']:.3f} us median={stats['median']:.3f} us max={stats['maximum']:.3f} us\n"
                 f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}")
-        if operator == "combine" and summary.get("implemented_through") == "M3":
-            text += (f"\nscope=partial implemented_through=M3 stage_payload={summary['stage_payload_bytes']}B "
+        if operator == "combine" and summary.get("implemented_through") in ("M3", "M4"):
+            text += (f"\nscope=partial implemented_through={summary['implemented_through']} stage_payload={summary['stage_payload_bytes']}B "
                      f"stage_read_write={summary['stage_copy_bytes']}B direct_payload={summary['direct_payload_bytes']}B "
                      f"direct_wire={summary['direct_wire_bytes']}B control_publish={summary['control_publish_bytes']}B")
+            if summary["implemented_through"] == "M4":
+                text += (f" partial_payload={summary['partial_payload_bytes']}B partial_wire={summary['partial_wire_bytes']}B"
+                         f" partial_self_read={summary['partial_self_read_bytes']}B partial_stage_read={summary['partial_stage_read_bytes']}B")
             rates = summary["algorithm_bandwidth_gbps"]
             text += (f"\nlogical_payload_GB/s min={rates['minimum']:.3f} median={rates['median']:.3f} max={rates['maximum']:.3f}"
                      if rates else "\nlogical_payload_GB/s=N/A")

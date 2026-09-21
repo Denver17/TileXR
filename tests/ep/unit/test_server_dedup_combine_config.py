@@ -20,6 +20,19 @@ static_assert(kEpServerDedupCombineSendCoreNum + kEpServerDedupCombineRecvCoreNu
 static_assert(kEpServerDedupCombineRecvCoreNum >= 8, "eight notifier cores are Read cores");
 static_assert(56 - kEpServerDedupCombineSendCoreNum == kEpServerDedupCombineRecvCoreNum - 8,
     "notifier LocalID");
+static_assert(EpCombineM4InputLaneCount(10000, 7168, 1) > 0, "K1 budget");
+static_assert(EpCombineM4InputLaneCount(10000, 7168, 6) > 0, "main shape input budget");
+static_assert(EpCombineM4OutputLaneCount(10000, 7168, 6) > 0, "main shape output budget");
+static_assert(EpCombineM4InputLaneCount(10000, 7168, 32) > 0, "K32 budget");
+static_assert(EpCombineM4OutputLaneCount(10000, 7168, 32) > 0, "K32 output budget");
+static_assert(EpCombineM4InputLaneCount(10001, 7168, 6) == 0, "too many rows");
+static_assert(EpCombineM4InputLaneCount(10000, 0, 6) == 0, "zero width");
+static_assert(EpCombineM4InputLaneCount(10000, 7168, 0) == 0, "zero topk");
+static_assert(EpCombineM4InputLaneCount(10000, 7168, 33) == 0, "unsupported topk");
+static_assert(EpCombineM4FixedUbBytes(10000, 7168, 32) +
+    EpCombineM4InputLaneCount(10000, 7168, 32) * EpCombineAlign(7168 * 2, 32) +
+    EpCombineM4OutputLaneCount(10000, 7168, 32) * ((7168 * 2 + 479) / 480 * 512) <=
+    kEpServerDedupCombineUbBytes, "simultaneous resources fit the arena");
 int main() { return 0; }
 ''')
         for send in (16, 24, 32, 40, 48, 56, 0, 8, 20, 57, 64):

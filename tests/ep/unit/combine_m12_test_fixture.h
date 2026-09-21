@@ -44,7 +44,7 @@ struct Fixture {
         table.resize(uint64_t(n) * 3U, -1); types.resize(n);
         counts.resize(320U, int32_t(n)); untouched.fill(0x69);
         for (uint32_t row = 0; row < n; ++row) {
-            types[row] = row % 5U == 0U ? 2 : 3; // M1/M2 fixture excludes DIRECT routes.
+            types[row] = row % 5U == 0U ? 0 : 3; // Synthetic inactive rows isolate the M1/M2 protocol.
             table[row * 3U] = int32_t(n - 1U - row); // reversed slots detect packed-index misuse
             for (uint32_t col = 0; col < h; ++col) expert[uint64_t(row) * h + col] = uint16_t(row * 31U + col);
         }
