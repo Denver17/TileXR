@@ -4,7 +4,7 @@
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6 独立 profiling/trace 已收到用户通过确认；C7 已交付，待设备验证。
+Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6 独立 profiling/trace 已收到用户通过确认；C7 双窗边界及 Dispatch 回归已收到用户通过确认。Combine 第一阶段 C1–C7 已全部按用户回传登记通过。
 下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
@@ -53,8 +53,19 @@ C5 连续提交 warmup/正式轮次，批末同步，分别检查各算子计数
 每组 2 轮预热 + 5 轮正式调用，验证各算子独立测量/采集及 trace。
 空 Combine 保留 50μs 等待，算法字节 0、算法带宽 N/A；不包含 Combine 通信或业务数值，也不替代 C7 边界验收。
 
-C7 `ep-sdedup-combine-p1-memory-boundary` 已交付 `5ce1a927802a05ab5455a55ec30fe449d99e3d0d`，**待设备验证**。
-下一验收点为 C7：切换到 `5ce1a92` 后执行 `bash run_commit_validation.sh`。
+**C7 已验收（用户回传）**：交付 `5ce1a927802a05ab5455a55ec30fe449d99e3d0d`。
+用户回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-memory-boundary`，末例
+`[3/3] PASS dispatch-fp16`，总报告：`/home/h00580772/TileXR-git-check/run/validation/commit-93bd127f77944513acd404a57c244c76/summary.json`。
+末例报告：`/home/h00580772/TileXR-git-check/run/validation/commit-93bd127f77944513acd404a57c244c76/cases/dispatch-fp16/82411664c32b42b1ba2c53a3e43b51c3/summary.json`。
+按用户回传登记通过，未独立读取 summary 或核对实际运行 SHA、工具链及产物哈希；报告目录为 run 标识，不是 Git SHA。
+范围：C1–C6 Host 回归及边界探针；前两台固定 8P，共 16P，独立 8GiB 双窗八点探针、
+BF16/FP16 真实 Dispatch 多轮回归共 3 例，保留真实 Dispatch 输出/五表/Flag 校验，避开 runtime 保留区。
+不包含 Combine 跨卡通信、ready/Flag 协议、yOut 业务数值或超出当前 shape 的业务容量验证。
+
+**第一阶段收口**：C1–C7 均已获用户通过确认，公共接口、空 kernel、三种测试模式、
+单轮/多轮接线、独立 profiling/trace 和双窗边界已完成各自范围的验收。
+Combine 仍为保留 50μs 等待的空算子；真实非量化业务逻辑属于第二阶段，Flag 复用继续作为重点遗留单独处理。
+`run_commit_validation.sh` 保留 C7 入口；复验其他点需切换各自交付提交，C7 的 Host 回归不替代此前各点的独立设备验收。
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，

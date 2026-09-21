@@ -18,7 +18,7 @@ Dispatch 阶段历史规划保留如下；当前新增 Combine 第一阶段的�
 
 专家数约束按最新主设计同步：总专家数不超过 1024 且能被 R 整除，不设独立单卡上限，允许 L=1。
 当前 cnt/cumsum 增量已适配 Host/layout/调度器限制；可执行步骤与数值判据见[当前提交验收](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收)。
-Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runtime Flag）；以 `magic % 2` 选择两个固定 4 GiB 窗口，后续 Combine 共用该域但尚未实现。历史 Dispatch 布局曾在每窗前留 2 MiB；当前联合布局为 764KiB Dispatch 控制区、52KiB Combine 控制区及 208KiB 间隙，共享数据从 1MiB 开始。Token 区不得越过 4092 MiB 相对偏移；第一窗尾部留空以保持两窗容量一致。
+Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runtime Flag）；以 `magic % 2` 选择两个固定 4 GiB 窗口，Combine 空算子已接入该域，真实通信数据面尚未实现。历史 Dispatch 布局曾在每窗前留 2 MiB；当前联合布局为 764KiB Dispatch 控制区、52KiB Combine 控制区及 208KiB 间隙，共享数据从 1MiB 开始。Token 区不得越过 4092 MiB 相对偏移；第一窗尾部留空以保持两窗容量一致。
 开发阶段 1～4 统一先用 16P、每卡 6 专家（总计 96）、BS=96、TopK=6、balance_shift 主场景验证流程及性能；边界条件检查留到完整流程的最终验收，不在各增量默认扫描。
 下文保留阶段规划，空 kernel 辅助打点及完整数据路径的布局/ABI 不代表当前计数实现；既有通过记录不作为新范围已经验证的证据。
 
@@ -43,6 +43,9 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 回传至少包含终端结论和 `summary.json`；失败同时提供 summary 指向的构建/测试日志。
 不需要为每个检查点建立新的测试脚本，入口随当前交付点更新；不会自动推进下一点。
 
+当前 C1–C7 均已按用户回传登记通过，第一阶段空算子验收收口；各点报告和边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+真实 Combine 非量化数据面及 Flag 复用遗留仍需后续实现和独立验收。
+
 所有检查点名称前缀为 `ep-sdedup-combine-p1-`：
 
 | 点 | 后缀 | 交付范围与验收边界 |
@@ -50,10 +53,10 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 | C1 | `abi-host` | 27 参数 ABI、独立 Host 参数/配置校验、五表/tensor 容量及固定控制区/双窗边界；错误不提交、不消耗 magic。用户回传通过，交付 `01c9b1d` |
 | C2 | `empty-kernel` | 独立 A5 artifact、安装/注册、独立 16B GM tiling/88B launch ABI、固定 64 核空入口；不读写业务数据。用户回传通过，交付 `3b27062` |
 | C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域。用户回传通过，交付 `b68b56e` |
-| C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值 |
+| C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值。用户回传通过，交付 `c86e1ef` |
 | C5 | `chain-multi` | warmup/多轮、各自 magic/选窗、同步与生命周期；联合模式 D/C 固定使用不同窗口符合预期。用户回传 8/8 通过，交付 `4ef0439` |
 | C6 | `profile` | functional/performance/breakdown 共用 consumer；分离记录 base/counter/latest，两算子独立 trace；空算子算法字节 0、算法带宽 N/A。用户回传 6/6 通过，交付 `abee43c` |
-| C7 | `memory-boundary` | 两半区分别执行合法区边界与保护区探针，避开 runtime；保留真实 Dispatch 回归，不冒充 Combine 数据面验证 |
+| C7 | `memory-boundary` | 两半区分别执行合法区边界与保护区探针，避开 runtime；保留真实 Dispatch 回归，不冒充 Combine 数据面验证。用户回传 3/3 通过，交付 `5ce1a92` |
 
 C1 历史入口一次完成构建和三项 Host 测试，不要求 CANN/hostfile/SSH/NPU；
 使用独立 `build/validation-combine-c1` / `install/validation-combine-c1`，不覆盖 Dispatch 安装包。
@@ -175,13 +178,13 @@ Host 受控时钟测试覆盖 49999/50000 阈值和溢出；不能把它当作�
 单算子 fixture 也必须隔离停用算子的约束：BS=1/E32/K3 的 Combine 单跑不能因 Dispatch balance_shift epoch 不完整而失败。
 每组用例采用独立结果目录时，远端取消操作必须收到相同 RESULT_ROOT，才能定位当前 PID 并保留清理失败状态。
 
-### C5 当前交付：连续批次、各算子 magic 和生命周期
+### C5 历史交付：连续批次、各算子 magic 和生命周期
 
 C5 已收到用户 `COMMIT_VALIDATION_PASS` 和 8/8 通过回传；总报告及边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
-C6/C7 已提前分批交付；C6 已获用户通过回传，C7 仍待设备验收。下文保留 C5 交付契约。
+C6/C7 已提前分批交付，现均已获用户通过回传。下文保留 C5 交付契约。
 
 C4 已获用户 `COMMIT_VALIDATION_PASS` 回传，交付 commit `c86e1ef`，报告见进度文档。
-本次只实现 `ep-sdedup-combine-p1-chain-multi`，保留 C4 单轮快照回归；C6/C7 不提前实现。
+C5 交付时只实现 `ep-sdedup-combine-p1-chain-multi`，保留 C4 单轮快照回归；C6/C7 后续按授权分别提交。
 
 1. 同一 consumer 保留三种算子模式；C5 只接受 functional。同一 comm/stream/tensor
    连续提交 warmup 和正式轮次，both 每轮为 D→C；仅批末一次 stream 同步和 Host barrier，
@@ -244,7 +247,7 @@ D 为 1/3/5…、C 为 2/4/6…；实际 bufferIndex 始终按各自 magic%2 取
 ### C6：两算子记录区及 trace 隔离（用户回传验收通过）
 
 C6 已收到用户 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-profile` 及 6/6 通过回传，
-总报告及验收边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。C7 仍需独立验收。
+总报告及验收边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。C7 也已单独获用户通过回传。
 
 breakdown 扩充标准 profiling 记录区，以不同 base 分隔 D/C 的记录、有效计数、丢弃计数和
 latest-launch 状态；记录区不占通信窗口。Dispatch 单测只解析 D 区，Combine 单测只解析 C 区，
@@ -284,7 +287,11 @@ CPU 时钟/导出测试仅验证记录契约，设备缓存可见性和 profile 
 与 Host typedef 替身的语义不同；记录区可写地址使用明确的 `__gm__ uint8_t * const`。
 Host 编译通过不能替代 profiling ON 的真实 A5 编译，OFF/ON 必须分别构建。
 
-### C7：双窗合法边界探针与 Dispatch 回归（当前交付）
+### C7：双窗合法边界探针与 Dispatch 回归（用户回传验收通过）
+
+C7 交付 `5ce1a927802a05ab5455a55ec30fe449d99e3d0d`，已收到用户
+`COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-memory-boundary` 及 3/3 通过回传。
+总报告、末例报告及验收边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 C6 交付为 `abee43c70502de88c18ddd0700b0afde528ecc93`，现已按用户回传登记通过；此前按 2026-09-21
 用户授权单独开发并提交 C7，不把 C5/C6 的开发检查或 Git 交付当作上机通过。
@@ -324,7 +331,7 @@ selector 只由 C7 验收 workflow 的专用用例启用，Host 参数回归须�
 每次测试新建通信 buffer 并在执行前清零，当前第一阶段不受首次 Flag 初值问题阻塞。
 未重新清零的已用域、shape/数据布局变化后的结果 Flag 复用为[重点遗留](specs/ep-memory-server-dedup-combine-design.md#deferred-result-flags)，
 后续单独讨论；不新增每轮 Host 清零，不取消真实 kernel 已确认的用后清理职责。
-本节只记录设计和验收要求，不表示 Combine 或 profiling 分区已经实现或通过设备验证。
+该 Flag 遗留未因 C1–C7 空算子验收通过而关闭；独立 profiling 分区的实现及验收记录见 C6。
 
 ## 总体验证策略
 

@@ -1,14 +1,20 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C7：当前交付，待设备验证
+## Combine 第一阶段：C1–C7 用户回传验收通过
 
-C5/C6 已按用户回传登记通过，下一点切换到 C7 提交验收。各点的通过结论仅覆盖对应验收范围：
+C1–C7 均已按用户回传登记通过，第一阶段空算子验收收口。各点的通过结论仅覆盖对应验收范围；
+真实 Combine 通信、业务数值及 Flag 复用遗留不在通过范围内。完整七点记录见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+C7 回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-memory-boundary`，3/3 用例通过。
+总报告：`/home/h00580772/TileXR-git-check/run/validation/commit-93bd127f77944513acd404a57c244c76/summary.json`。
+按用户回传登记，未独立读取外部报告或核对实际运行身份；末例报告及详细边界见进度文档。
 
 | 点 | 提交 | 验收范围 | 状态 |
 | --- | --- | --- | --- |
 | C5 | `4ef0439640b016727287bebec84ef5cc0a521445` | 连续预热/多轮、三种算子模式、magic/生命周期 | 用户回传通过 |
 | C6 | `abee43c70502de88c18ddd0700b0afde528ecc93` | OFF performance / ON breakdown、独立记录区和双 trace | 用户回传通过 |
-| C7 | `5ce1a927802a05ab5455a55ec30fe449d99e3d0d` | 双窗合法边界探针、真实 Dispatch 回归 | 待设备验证 |
+| C7 | `5ce1a927802a05ab5455a55ec30fe449d99e3d0d` | 双窗合法边界探针、真实 Dispatch 回归 | 用户回传通过 |
+
+当前入口保留 C7；如需复验 C7：
 
 ```bash
 git fetch origin
@@ -38,7 +44,7 @@ C7 checkpoint=`ep-sdedup-combine-p1-memory-boundary`，使用独立
 普通 `run.sh` 强制为 0，保持 dispatch/combine/both 的正常算子调用。
 
 C7 不包含 Combine 数据面、Flag 协议或 yOut 业务数值验收；空 Combine 的 50μs 等待不变。
-C5 多轮及 C6 profile 均已获用户通过确认；C7 边界仍需独立验收。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
+C5 多轮、C6 profile 及 C7 边界均已分别获用户通过确认。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
 
 2026-09-21 C7 开发验证：CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5
 `dav-c310-vec`、profiling OFF，通过正式生产构建、安装及真实 consumer 编译链接。
@@ -50,7 +56,7 @@ C5 多轮及 C6 profile 均已获用户通过确认；C7 边界仍需独立验�
 probe 注册/Kernel 及最终代码审阅无剩余发现；Shell 语法和 diff 检查通过。
 blue 为无 `.git` 源码快照，manifest 如实记录 commit 未知；构建源码摘要、最终文件 SHA256、
 工具链和构建/Host/脚本日志保留在开发工作区 `build/combine-c7-verification/`。
-这些仅证明编译及 Host 测试行为；三组真实 16P 用例尚未执行，C7 继续等待用户设备验收。
+这些是开发侧编译及 Host 证据；后续用户已回传三组真实 16P 用例通过，见上文验收记录。
 
 ## Combine 第一阶段 C6：用户回传验收通过
 
