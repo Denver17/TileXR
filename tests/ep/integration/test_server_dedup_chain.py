@@ -68,7 +68,8 @@ class ChainConsumerTests(unittest.TestCase):
         (include / "acl.h").write_text(ACL_HEADER)
         cls.executable = cls.folder / "consumer"
         result = subprocess.run([
-            compiler, "-std=c++14", "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
+            compiler, "-std=c++14", "-O2", "-fno-fast-math", "-ffp-contract=off",
+            "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
             "-DTILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1",
             "-I", str(include.parent), "-I", str(ROOT / "src/include"),
             "-I", str(ROOT / "src/comm"), "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
@@ -105,7 +106,9 @@ class ChainConsumerTests(unittest.TestCase):
             self.environment.pop("TILEXR_VALIDATION_" + key, None)
         self.environment.pop("TILEXR_VALIDATION_ROUTE_MODE", None)
         self.environment.pop("TILEXR_VALIDATION_SEED", None)
-        self.environment.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE", None)
+        # This suite asserts the historical Dispatch marker/contract. Ordinary
+        # no-checkpoint runs are covered separately by CombineM5Tests.
+        self.environment["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = "ep-sdedup-p2-dispatch"
         self.environment.pop("TILEXR_VALIDATION_LOOPS", None)
         self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
         self.environment.pop("TILEXR_VALIDATION_RUN_MODE", None)
@@ -664,6 +667,10 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertIn("ret=91", errors)
                 self.assertNotIn("free", self.trace_lines(1))
                 self.assertNotIn("comm-destroy", self.trace_lines(1))
+                timing, = self.records(errors, "EP_SERVER_DEDUP_WALL")
+                self.assertEqual(timing["rank"], 1)
+                self.assertNotIn("cleanup-communicator", timing["stages"])
+                self.assertIn("submission", timing["stages"])
                 self.stop(); self.processes.clear()
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 

@@ -116,7 +116,8 @@ class CombineProfileTests(c5.CombineMultiTests):
                         for marker in self.breakdown_markers(mappings[rank], record, config, paths,
                                                               env["TILEXR_PROFILING_CAPTURE_ID"]):
                             output += workflow.OPERATOR_BREAKDOWN_MARKER + json.dumps(marker) + "\n"
-                    return output
+                    return output + 'EP_SERVER_DEDUP_WALL ' + json.dumps(dict(
+                        rank=rank, unit="seconds", total=0, stages={"reference-build": 0})) + '\n'
                 result = dict(errors=[])
                 with self.subTest(operator=operator, mode=mode), mock.patch.dict(os.environ, {
                         "TILEXR_PROFILING_RECORDS_PATH": "/stale/dispatch", "TILEXR_PROFILING_COMBINE_RECORDS_PATH": "/stale/combine"}), \
@@ -130,6 +131,8 @@ class CombineProfileTests(c5.CombineMultiTests):
                 self.assertEqual(len(result["ranks"]), 8)
                 self.assertEqual([row["rank"] for row in result["rank_wall_times"]], list(range(8)))
                 for timing in result["rank_wall_times"]:
+                    self.assertEqual(timing["consumer"]["status"], "recorded")
+                    self.assertEqual(timing["consumer"]["rank"], timing["rank"])
                     phases = timing["stages"]
                     self.assertGreaterEqual(phases["process"], 0)
                     self.assertEqual("profile_decode" in phases, mode != "functional")
@@ -152,6 +155,22 @@ class CombineProfileTests(c5.CombineMultiTests):
             with self.subTest(failed_operator=operator):
                 self.check_partial_capture_failure(operator)
 
+    def test_failed_process_keeps_partial_consumer_timing_without_changing_failure(self):
+        config, mappings, _ = self.profile_records()
+        def execute(argv, log, **kwargs):
+            log.parent.mkdir(parents=True, exist_ok=True)
+            log.write_text('EP_SERVER_DEDUP_WALL {"rank":0,"unit":"seconds","total":0,'
+                           '"stages":{"communicator":0}}\n')
+            raise workflow.Failure("EXIT_FAILED", "communicator failed", returncode=1)
+        result = dict(errors=[])
+        with mock.patch.object(workflow, "execute", side_effect=execute):
+            workflow.run_ranks(config, "run", self.manifest, mappings[:1], time.monotonic() + 60,
+                               threading.Event(), result)
+        self.assertEqual(result["ranks"], [])
+        self.assertEqual(result["errors"][0]["type"], "EXIT_FAILED")
+        self.assertEqual(result["rank_wall_times"][0]["consumer"]["status"], "recorded")
+        self.assertEqual(result["rank_wall_times"][0]["consumer"]["stages"], dict(communicator=0))
+
     def check_partial_capture_failure(self, failed_operator):
         config, mappings, records = self.profile_records()
         mapping = mappings[0]
@@ -163,7 +182,8 @@ class CombineProfileTests(c5.CombineMultiTests):
             markers = self.breakdown_markers(mapping, record, config, paths, kwargs["env"]["TILEXR_PROFILING_CAPTURE_ID"])
             return (workflow.CHAIN_MARKER + json.dumps(chain) + "\n" + workflow.DISPATCH_MARKER + json.dumps(dispatch) + "\n"
                     + workflow.COMBINE_CHAIN_MARKER + json.dumps(record) + "\n" + "".join(
-                        workflow.OPERATOR_BREAKDOWN_MARKER + json.dumps(marker) + "\n" for marker in markers))
+                    workflow.OPERATOR_BREAKDOWN_MARKER + json.dumps(marker) + "\n" for marker in markers) +
+                    'EP_SERVER_DEDUP_WALL {"rank":0,"unit":"seconds","total":0,"stages":{"reference-build":0}}\n')
         def parse(*args, **kwargs):
             if kwargs["operator"] == failed_operator:
                 raise ValueError(failed_operator + " capture corrupt")
@@ -176,6 +196,7 @@ class CombineProfileTests(c5.CombineMultiTests):
         self.assertTrue(result["errors"])
         self.assertEqual(len(result["rank_wall_times"]), 1)
         self.assertIn("profile_decode", result["rank_wall_times"][0]["stages"])
+        self.assertEqual(result["rank_wall_times"][0]["consumer"]["status"], "recorded")
         failure = result["profiling_failures"][0]
         self.assertTrue(failure["communication_completed"])
         self.assertEqual(set(failure["communication"]["operator_measurements"]), {"dispatch", "combine"} - {failed_operator})

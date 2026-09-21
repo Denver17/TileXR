@@ -73,6 +73,20 @@ def _wall_time_lines(report):
             maxima.append(f"{phase}={seconds:.3f}(rank={rank})")
     if maxima:
         lines.append(f"RANK_WALL_MAX(s,observed={len(ranks)}) " + " ".join(maxima))
+    consumers = [row["consumer"] for row in ranks if row.get("consumer", {}).get("status") == "recorded"]
+    if consumers:
+        groups = dict(startup=("setup", "acl-init", "device"), communicator=("communicator",),
+            allocation=("allocation",), inputs=("input-fixture", "expert-fixture"),
+            reference=("reference-build",), barriers=("chain-barrier", "batch-barrier", "combine-barrier"),
+            execution=("submission", "stream-sync", "combine-sync", "combine-round-sync"),
+            validation=("count-read", "dispatch-read", "combine-read", "combine-snapshot"),
+            cleanup=("cleanup-buffers", "cleanup-communicator", "cleanup-stream", "cleanup-device", "cleanup-acl", "report"))
+        maxima = []
+        for name in ("total", *groups, "outside_consumer"):
+            seconds, rank = max((sum(row["stages"].get(stage, 0.0) for stage in groups[name])
+                                 if name in groups else row[name], row["rank"]) for row in consumers)
+            maxima.append(f"{name}={seconds:.3f}(rank={rank})")
+        lines.append(f"CONSUMER_WALL_MAX(s,observed={len(consumers)}) " + " ".join(maxima))
     return lines
 
 

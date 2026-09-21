@@ -355,6 +355,9 @@ add_executable(test_tilexr_ep_server_dedup_chain_dry_run
 target_include_directories(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE
     ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/comm)
 target_link_libraries(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE Threads::Threads)
+# Global-route and numeric oracles run on the CPU even in performance mode.
+# Keep them optimized under the workflow's Debug build, with strict FP order.
+target_compile_options(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE -O2 -fno-fast-math -ffp-contract=off)
 target_compile_definitions(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1)
 install(TARGETS test_tilexr_ep_server_dedup_chain_dry_run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(Python3_Interpreter_FOUND)
@@ -821,6 +824,7 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)
         PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
     add_executable(test_tilexr_ep_server_dedup_chain
         integration/test_tilexr_ep_server_dedup_chain.cpp)
+    target_compile_options(test_tilexr_ep_server_dedup_chain PRIVATE -O2 -fno-fast-math -ffp-contract=off)
     # 内部 layout 声明供 caller 使用；实现和公共入口均链接已安装生产库。
     target_include_directories(test_tilexr_ep_server_dedup_chain PRIVATE
         "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}"

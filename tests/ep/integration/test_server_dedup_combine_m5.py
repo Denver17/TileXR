@@ -34,6 +34,13 @@ class CombineM5Tests(chain.CombineChainTests):
     def check_successful_m5(self, rank, process, mode, loops=1, warmup=0, checkpoint=CHECKPOINT):
         output, errors = process.communicate(timeout=30)
         self.assertEqual(process.returncode, 0, output + errors)
+        timing, = self.records(errors, "EP_SERVER_DEDUP_WALL")
+        self.assertEqual(timing["rank"], rank)
+        self.assertEqual(timing["unit"], "seconds")
+        self.assertAlmostEqual(timing["total"], sum(timing["stages"].values()), delta=1e-5)
+        for phase in ("communicator", "allocation", "reference-build", "chain-barrier", "submission",
+                      "stream-sync", "combine-read", "cleanup-communicator", "cleanup-acl"):
+            self.assertGreaterEqual(timing["stages"][phase], 0)
         record, = self.records(output, chain.MARKER)
         self.assertEqual(record["checkpoint"], checkpoint)
         self.assertEqual(record["native_status"], "combine-m5")

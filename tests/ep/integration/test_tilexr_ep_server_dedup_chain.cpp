@@ -47,6 +47,45 @@
 namespace {
 using Clock = std::chrono::steady_clock;
 using Deadline = Clock::time_point;
+// Host wall time only. No extra stream synchronization or per-launch output.
+class ConsumerWallTimer {
+public:
+    explicit ConsumerWallTimer(int rank) : rank_(rank), start_(Clock::now()), previous_(start_) {}
+    void Next(const std::string &phase)
+    {
+        if (phase == phase_) return;
+        const auto now = Clock::now();
+        seconds_[phase_] += std::chrono::duration<double>(now - previous_).count();
+        previous_ = now;
+        phase_ = phase;
+    }
+    ~ConsumerWallTimer()
+    {
+        // Diagnostics must never replace a validation/cleanup failure.
+        try {
+            const auto now = Clock::now();
+            seconds_[phase_] += std::chrono::duration<double>(now - previous_).count();
+            std::ostringstream out;
+            out << std::setprecision(9) << "EP_SERVER_DEDUP_WALL {\"rank\":" << rank_
+                << ",\"unit\":\"seconds\",\"total\":" << std::chrono::duration<double>(now - start_).count()
+                << ",\"stages\":{";
+            bool first = true;
+            for (const auto &entry : seconds_) {
+                if (!first) out << ',';
+                first = false;
+                out << '\"' << entry.first << "\":" << entry.second;
+            }
+            out << "}}";
+            std::cerr << out.str() << std::endl;
+        } catch (...) {}
+    }
+private:
+    int rank_;
+    Deadline start_, previous_;
+    std::string phase_ = "setup";
+    std::map<std::string, double> seconds_;
+};
+
 // Fixed validation capacity through Dispatch/Combine Server Dedup qualification.
 constexpr uint64_t kServerDedupPeerBytes = 8ULL * 1024U * 1024U * 1024U;
 constexpr int kServerDedupDataMiB = static_cast<int>(
@@ -576,6 +615,7 @@ int Run(const Config &c)
         throw std::runtime_error("memory-boundary test kernel was not built");
 #endif
     }
+    ConsumerWallTimer wall(c.rank);
     const bool m12 = c.checkpoint == "ep-sdedup-combine-p2-m12";
     const bool m3 = c.checkpoint == "ep-sdedup-combine-p2-m3";
     const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4";
@@ -609,6 +649,7 @@ int Run(const Config &c)
     const auto profilePaths = ConfigureProfiling(c);
     auto enterStage = [&](const char *name) {
         stage = name;
+        wall.Next(stage == "launch" || stage == "combine-launch" ? "submission" : stage);
         // Flush before a potentially blocking call: an external timeout cannot
         // report the in-memory stage through the exception handler.
         if (c.runMode == "breakdown") {
@@ -675,6 +716,7 @@ int Run(const Config &c)
             Check(aclrtGetDevice(&device), "aclrtGetDevice");
             allocations.push_back({data, sizes[i], sizes[i], alignments[i], device});
         }
+        wall.Next("input-fixture");
         const auto shape = SourceSendShape(c);
         std::vector<float> weightsHost;
         if (runDispatch) {
@@ -698,9 +740,11 @@ int Run(const Config &c)
             InitializeStandaloneCombine(c, combineLayout, buffers);
         }
         if (runCombine) {
+            wall.Next("expert-fixture");
             if (sizes[12]) InitializeCombineExpert(c, buffers[12], sizes[12]);
             Check(aclrtMemset(buffers[13], sizes[13], 0xa5, sizes[13]), "initialize combine yOut");
         }
+        wall.Next("reference-build");
         if (m12 && runCombine) m12Validation.Initialize(c, *host);
         if (m3 && runCombine) m3Validation.Initialize(c, *host);
         if (m4 && runCombine) m4Validation.Initialize(c, *host);
@@ -908,6 +952,7 @@ int Run(const Config &c)
     if (stream != nullptr) { enterStage("cleanup-stream"); cleanup(aclrtDestroyStream(stream), "aclrtDestroyStream"); }
     if (deviceSet) { enterStage("cleanup-device"); cleanup(aclrtResetDevice(c.device), "aclrtResetDevice"); }
     if (initialized) { enterStage("cleanup-acl"); cleanup(aclFinalize(), "aclFinalize"); }
+    wall.Next("report");
     if (executionSucceeded) {
         std::string details = ",\"submitted\":" + std::to_string(submitted) + ",\"completed\":" +
             std::to_string(completed) + ",\"warmup_submitted\":" + std::to_string(warmupSubmitted) +

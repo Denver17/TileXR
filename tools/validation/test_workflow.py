@@ -20,6 +20,22 @@ import workflow
 
 
 class PhaseTimerTests(unittest.TestCase):
+    def test_consumer_timing_separates_wrapper_time_and_accepts_old_consumers(self):
+        output = 'noise\nEP_SERVER_DEDUP_WALL {"rank":3,"unit":"seconds","total":7,' \
+                 '"stages":{"communicator":2,"reference-build":5}}\n'
+        result = workflow.consumer_wall_time(output, 3, 11)
+        self.assertEqual(result["status"], "recorded")
+        self.assertEqual(result["outside_consumer"], 4)
+        self.assertEqual(result["stages"], {"communicator": 2, "reference-build": 5})
+        self.assertIsNone(workflow.consumer_wall_time("old consumer\n", 3, 11))
+        for damaged, rank, elapsed in ((output, 4, 11), (output, 3, 6), (output + output, 3, 11),
+                (output.replace('"total":7', '"total":8'), 3, 11),
+                (output.replace('"total":7', '"total":NaN'), 3, 11),
+                (output.replace('"total":7', '"total":' + '1' * 400), 3, 11),
+                ('EP_SERVER_DEDUP_WALL {}\n', 3, 11), ('EP_SERVER_DEDUP_WALL broken\n', 3, 11)):
+            with self.subTest(damaged=damaged, rank=rank, elapsed=elapsed):
+                self.assertEqual(workflow.consumer_wall_time(damaged, rank, elapsed)["status"], "invalid")
+
     def test_revisited_phase_accumulates_without_double_counting_snapshots(self):
         with mock.patch.object(workflow.time, "perf_counter", side_effect=[10, 12, 15, 17, 19, 20]):
             timer = workflow.PhaseTimer("check")

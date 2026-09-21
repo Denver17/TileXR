@@ -1554,11 +1554,41 @@ def parse_operator_breakdowns(output, mapping, run_id, manifest, record, config,
     return markers
 
 
+def consumer_wall_time(output, rank, process_seconds):
+    """Optional diagnostics from this process only; never a correctness verdict."""
+    prefix = "EP_SERVER_DEDUP_WALL "
+    rows = [line[len(prefix):] for line in output.splitlines() if line.startswith(prefix)]
+    if not rows:
+        return None  # Older installed consumers and killed processes may omit it.
+    try:
+        if len(rows) != 1:
+            raise ValueError("duplicate consumer wall-time records")
+        timing = json.loads(rows[0])
+        if type(timing["rank"]) is not int or timing["rank"] != rank or timing["unit"] != "seconds":
+            raise ValueError("consumer wall-time identity mismatch")
+        stages = timing["stages"]
+        if not isinstance(stages, dict) or not stages or any(
+                not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name) for name in stages):
+            raise ValueError("invalid consumer wall-time stages")
+        values = [timing["total"], *stages.values()]
+        if any(type(value) not in (int, float) or not math.isfinite(value) or value < 0 for value in values):
+            raise ValueError("invalid consumer wall-time duration")
+        if not math.isclose(sum(stages.values()), timing["total"], rel_tol=1e-6, abs_tol=1e-6):
+            raise ValueError("consumer wall-time stages do not sum to total")
+        if timing["total"] > process_seconds + 0.001:
+            raise ValueError("consumer duration exceeds enclosing process")
+        timing.update(status="recorded", outside_consumer=max(0.0, process_seconds - timing["total"]))
+        return timing
+    except (ValueError, TypeError, KeyError, OverflowError) as error:
+        return dict(status="invalid", error=str(error))
+
+
 def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
     def launch(mapping):
         rank = mapping["rank"]
         timer = PhaseTimer("prepare")
         log = config.logs / run_id / f"rank-{rank}.log"
+        output = None
         record, communication_completed = None, False
         try:
             if cancelled.is_set():
@@ -1749,8 +1779,16 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 cancelled.set()
             return None
         finally:
+            timing = dict(rank=rank, **timer.snapshot())
+            try:
+                captured = output if output is not None else log.read_text(encoding="utf-8", errors="replace")
+                consumer = consumer_wall_time(captured, rank, timing["stages"].get("process", 0.0))
+                if consumer is not None:
+                    timing["consumer"] = consumer
+            except OSError:
+                pass  # Preserve the original launch/log error and partial timer.
             with error_lock:
-                result["rank_wall_times"].append(dict(rank=rank, **timer.snapshot()))
+                result["rank_wall_times"].append(timing)
 
     result["rank_wall_times"] = []
     result["ranks"] = []

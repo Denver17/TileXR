@@ -8,6 +8,20 @@ import run_summary
 
 
 class RunSummaryTests(unittest.TestCase):
+    def test_consumer_groups_sum_within_each_rank_before_taking_maximum(self):
+        consumers = [dict(status="recorded", rank=0, total=20, outside_consumer=5,
+                          stages={"input-fixture":8, "expert-fixture":1, "reference-build":11}),
+                     dict(status="recorded", rank=1, total=12, outside_consumer=7,
+                          stages={"input-fixture":1, "expert-fixture":6, "reference-build":5}),
+                     dict(status="invalid", error="duplicate")]
+        report = dict(status="FAIL", wall_time=dict(total=25, stages=dict(nodes=25)),
+                      nodes=[dict(reported_result=dict(rank_wall_times=[dict(consumer=row) for row in consumers]))])
+        line = run_summary.render_result(report, "/summary.json").splitlines()[-1]
+        self.assertTrue(line.startswith("CONSUMER_WALL_MAX(s,observed=2)"))
+        self.assertIn("inputs=9.000(rank=0)", line)
+        self.assertIn("reference=11.000(rank=0)", line)
+        self.assertIn("outside_consumer=7.000(rank=1)", line)
+
     def test_wall_times_keep_failure_and_report_maxima_without_summing_parallel_ranks(self):
         report = dict(status="FAIL", wall_time=dict(total=25.5, stages=dict(nodes=20.25, collect=5.25)),
                       nodes=[dict(reported_result=dict(rank_wall_times=[

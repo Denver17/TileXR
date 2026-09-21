@@ -77,13 +77,67 @@ TRACE combine | trace=/.../traces/combine/chrome | status=complete | fastest_ran
 
 运行阶段目前复用汇总所需的同一批已校验 rank 记录，减少重复校验；不跨运行缓存结果。
 breakdown 保留每台机器一次解析一个 rank 的锁以控制内存，用上述计时判断它是否为当前瓶颈。
-此版本仅修改脚本，无需重新编译算子；更新后同步脚本即可。Host 替身测试不能证明实际 64P 提速，
+首版仅修改脚本，无需重新编译算子；更新后同步脚本即可。Host 替身测试不能证明实际 64P 提速，
 需回传上述计时后再决定下一步优化。
 
 开发侧验证（2026-09-21）：Python 工作流回归 379 项中 378 通过、1 项 Windows 专属检查跳过，
 `bash -n run.sh` 通过。覆盖计时分段累计、异常退出保留耗时、三算子模式独立 trace 行、
 旧 Dispatch 字段兼容及不完整 trace；含替身多节点采集/汇总，未执行真实 NPU。
 证据保留在开发工作区 `build/run-wall-timing-verification/validation.log`。
+
+后续 consumer 计时与 Host 优化（2026-09-21）：用户回传 performance 模式
+workflow 121.540s，其中 nodes 112.892s、最慢 rank process 111.151s；
+profile_decode 最大 0.003s，算子 server 平均延迟 65.255μs。
+因此先检查 consumer / profiler 包裹阶段，不能将这 111s 归因于 kernel 或 trace 解析。
+
+consumer 在退出时追加 `EP_SERVER_DEDUP_WALL`，使用 Host 单调时钟，
+终端新增 `CONSUMER_WALL_MAX(s,observed=N)`，每个值仍是独立 rank 最大值：
+
+| 字段 | 覆盖范围 |
+| --- | --- |
+| startup / communicator | consumer setup、ACL/device 初始化 / communicator 创建及映射检查 |
+| allocation / inputs | 设备 buffer 分配 / 输入、五表及 expertOut 构造和拷贝 |
+| reference | M1–M5 Host 参考结果生成、通信窗口初始保护值写入、调用方分配检查 |
+| barriers | chain、batch、旧单轮 combine Host barrier 等待 |
+| execution | Host 提交及 stream 同步，**不是**设备 kernel 延迟 |
+| validation | 张量快照和最终 count、Dispatch、Combine 结果校验 |
+| cleanup | buffer、communicator、stream、device、ACL 清理及结果输出 |
+| outside_consumer | 同 rank process 减 consumer total；含进程加载/退出、msprof 外层工作及调度等，不能全部归为 profiler |
+
+逐 rank 原始分段保存在 `nodes[].reported_result.rank_wall_times[].consumer`。
+退出时才能得到总计；超时强杀可能无此记录，旧二进制也没有，均不伪造为零。
+不完整或非法诊断记录标记 `invalid` 且不参与统计，不改变原始功能/清理判定。
+边界探针和 dry-run 不产生此 consumer 统计。M1/M2 历史 per-round 诊断归并在 execution 中，
+日常完整 M5 使用 batch。
+
+已确认的 CPU 开销：workflow 的 Debug 构建原先使 consumer 的全局路由及数值 oracle
+不优化运行。仅两个 consumer target 启用 `-O2 -fno-fast-math -ffp-contract=off`，
+保留 Debug 符号和严格浮点运算顺序，生产库/kernel 构建参数不变。
+本机 GCC 12.2、64P/E384/BS96/K6 的三遍全 producer 路由构造，O0 23.0352s、O2 3.33968s；
+两者共 110592 行，路由及权重摘要相同。这是 CPU 子任务证据，不是服务器整体提速结果。
+维护教训：性能测试的 Host fixture/oracle 也需要合理优化；先分离初始化、参考构造和 profiler
+开销，不能通过省略数值/Flag 校验、关闭 profiler 或延长 timeout 来掩盖测试准备成本。
+
+此次涉及 consumer 二进制，需要重新构建并同步；性能模式示例：
+
+```bash
+git pull
+bash build_all.sh breakdown=0 && bash sync.sh
+bash run.sh -m 1 -n 8 -e 384 -l 100 50 bs=96 operator_mode=combine
+```
+
+breakdown 使用 `build_all.sh breakdown=1` 和 `run.sh -m 2`。重跑后比较上述 wall 统计；
+设备 kernel 微秒统计口径保持原样。
+
+开发侧验证：GCC 12.2/C++14 优化 consumer Host 替身回归 30/30；独立 CMake Debug
+consumer 构建及 C3/C4/C5/C6/M3/M4/M5 七组 CTest 7/7，编译命令确认
+`-g -O2 -fno-fast-math -ffp-contract=off`。Python 工作流 382 项中 381 通过、1 项跳过，
+覆盖旧 consumer 无计时、非法计时不改变判定、失败进程保留部分计时、同 rank 分组后再取最大值。
+证据在 `build/consumer-wall-verification/`。未执行本次 CANN 生产链接或真实 64P NPU 复测，
+不能将本机路由子任务加速倍数外推到服务器端到端耗时。
+本次还修正了历史 Dispatch 测试 fixture：普通入口去除 checkpoint 后，该套测试仍断言旧阶段的
+marker，须在测试内部显式选择旧验收阶段；无阶段普通运行由 M5 测试覆盖。
+旧 fixture 的失败已在前一提交 `700a70c` 复现，此调整不恢复普通入口的 checkpoint 参数。
 
 ## 提交验收入口：Combine P2.4（M5）
 
