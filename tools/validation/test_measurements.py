@@ -234,7 +234,7 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(summary["algorithm_communication_bytes"], 0)
         self.assertEqual(summary["native_status"], "empty")
         report = measure.render_measurements(summary)
-        self.assertIn("max=36.333 us min=7.333 us mean=21.833 us", report)
+        self.assertIn("min=7.333 us mean=21.833 us max=36.333 us", report)
         self.assertNotIn("Host 测量批", report)
         self.assertIn("backend=memory", report)
         self.assertIn("带宽=N/A", report)
@@ -285,7 +285,7 @@ class MeasurementTests(unittest.TestCase):
         report = measure.render_measurements(summary)
         self.assertIn("native=cnt_cumsum", report)
         self.assertIn("46080B", report)
-        self.assertIn("max=10.000 us min=10.000 us mean=10.000 us", report)
+        self.assertIn("min=10.000 us mean=10.000 us max=10.000 us", report)
 
     def test_corrupted_performance_evidence_is_rejected(self):
         original = self.performance_rank(0)

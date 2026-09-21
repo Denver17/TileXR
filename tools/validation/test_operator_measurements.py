@@ -204,7 +204,7 @@ class OperatorMeasurementTests(unittest.TestCase):
         self.assertIsNone(combine["algorithm_bandwidth_gbps"])
         self.assertNotIn("bandwidth_gbps", combine)
         report = operators.render_operator_measurements(summary)
-        for text in ("empty/framework", "N/A", "median=59.500 us", "min=52.000 us", "max=67.000 us", "c" * 64):
+        for text in ("empty/framework", "N/A", "min=52.000 us median=59.500 us max=67.000 us", "c" * 64):
             self.assertIn(text, report)
         for invalid in (records[:-1], records[:-1] + [records[0]]):
             with self.assertRaises(ValueError):

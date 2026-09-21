@@ -550,8 +550,8 @@ def render_measurements(summary):
              f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}"]
 
     def append(label, stats, unit, suffix="", server=False):
-        fields = (("max", "maximum"), ("min", "minimum"), ("mean", "mean")) if server else (
-            ("median", "median"), ("min", "minimum"), ("max", "maximum"))
+        fields = (("min", "minimum"), ("mean", "mean"), ("max", "maximum")) if server else (
+            ("min", "minimum"), ("median", "median"), ("max", "maximum"))
         lines.append(label + "：" + " ".join(
             f"{name}={stats[key + suffix]:.3f} {unit}" for name, key in fields))
 

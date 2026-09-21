@@ -210,14 +210,14 @@ def render_operator_measurements(summaries):
     for operator, summary in summaries.items():
         stats = summary["latency_us"]
         text = (f"{operator}: backend={summary['backend']} native={summary['native_status']} "
-                f"median={stats['median']:.3f} us min={stats['minimum']:.3f} us max={stats['maximum']:.3f} us\n"
+                f"min={stats['minimum']:.3f} us median={stats['median']:.3f} us max={stats['maximum']:.3f} us\n"
                 f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}")
         if operator == "combine" and summary.get("implemented_through") == "M2":
             rates = summary["algorithm_bandwidth_gbps"]
             text += (f"\nscope=partial implemented_through=M2 stage_payload={summary['algorithm_bytes']}B "
                      f"stage_read_write={summary['stage_copy_bytes']}B control_publish={summary['control_publish_bytes']}B")
-            text += (f"\nlocal_payload_GB/s(nonzero-work ranks) median={rates['median']:.3f} "
-                     f"min={rates['minimum']:.3f} max={rates['maximum']:.3f}" if rates else "\nlocal_payload_GB/s=N/A")
+            text += (f"\nlocal_payload_GB/s(nonzero-work ranks) min={rates['minimum']:.3f} "
+                     f"median={rates['median']:.3f} max={rates['maximum']:.3f}" if rates else "\nlocal_payload_GB/s=N/A")
             text += "（完整kernel时长含50us等待；控制流量不计业务带宽）"
         elif operator == "combine":
             text += "\nscope=empty/framework algorithm_bytes=0 algorithm_bandwidth=N/A（含空算子50us等待）"

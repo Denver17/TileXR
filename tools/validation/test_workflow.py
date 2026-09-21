@@ -1261,7 +1261,7 @@ with output.open('w', newline='') as f:
                 self.assertEqual(rank["performance"]["matched_samples"], 150)
         line = (self.config_instance.logs / "result.txt").read_text()
         self.assertIn("samples/card=50", line)
-        self.assertIn("server_latency(us) max/min/mean=125.500/125.500/125.500", line)
+        self.assertIn("server_latency(us) min/mean/max=125.500/125.500/125.500", line)
 
     def test_dispatch_performance_missing_profiler_samples_fails(self):
         self.enable_chain(workflow.DISPATCH_CHECKPOINT, "performance")
@@ -1371,9 +1371,10 @@ with output.open('w', newline='') as f:
         self.assertNotIn("bandwidth_gbps", measured)
         self.assertEqual([(error["type"], error["rank"]) for error in summary["errors"]], [("RESULT_FAILED", 8)])
         line = (self.config_instance.logs / "result.txt").read_text()
-        self.assertEqual(len(line.splitlines()), 1)
+        self.assertEqual(len(line.splitlines()), 2)
+        self.assertTrue(line.splitlines()[1].startswith("dispatch:"))
         self.assertIn("VALIDATION_FAIL 结果校验失败", line)
-        self.assertIn("server_latency(us) max/min/mean=", line)
+        self.assertIn("server_latency(us) min/mean/max=", line)
         self.assertIn("bandwidth=N/A", line)
 
     def test_collection_failure_retains_timing_but_cannot_certify_unchecked_tables(self):

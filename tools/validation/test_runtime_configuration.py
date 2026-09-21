@@ -374,6 +374,50 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], 'breakdown')
                 self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('3', '2'))
 
+    def test_run_prints_selected_operator_performance_on_separate_lines(self):
+        cann = self.root / "cann-env.sh"
+        cann.write_text("# CANN environment fixture\n")
+        (self.root / "tools/validation/workflow.py").write_text("""import os
+from pathlib import Path
+from run_summary import write_result
+root = Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])
+operator = os.environ['TILEXR_VALIDATION_OPERATOR_MODE']
+config = dict(operator_mode=operator, run_mode=os.environ['TILEXR_VALIDATION_RUN_MODE'],
+              bs=int(os.environ['TILEXR_VALIDATION_BS']), loops=int(os.environ['TILEXR_VALIDATION_LOOPS']),
+              warmup=int(os.environ['TILEXR_VALIDATION_WARMUP']))
+active = ('dispatch', 'combine') if operator == 'both' else (operator,)
+summaries = {op: dict(backend='memory', native_status=op, kernel_sha256='a'*64,
+    algorithm_communication_bytes=0, performance=dict(samples_per_rank=config['loops'],
+    maximum_us=10 if op == 'dispatch' else 60, minimum_us=10 if op == 'dispatch' else 60,
+    mean_us=10 if op == 'dispatch' else 60)) for op in active}
+report = dict(status='PASS', rank_size=16, completed_ranks=16, chain_configuration=config)
+if operator == 'dispatch':
+    report['measurements'] = summaries['dispatch']
+else:
+    report['operator_measurements'] = summaries
+print('rank details must stay in workflow.log')
+write_result(root, report, root/'summary.json')
+""")
+        for operator, expected in (("dispatch", ["dispatch"]), ("combine", ["combine"]),
+                                   ("both", ["dispatch", "combine"])):
+            with self.subTest(operator=operator):
+                output = self.root / "run" / operator
+                result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", "-m", "1",
+                                         "-l", "20", "5", "operator_mode=" + operator, "dtype=bf16"],
+                    cwd=self.root, env=dict(self.env, TILEXR_CANN_ENV_SCRIPT=str(cann),
+                        TILEXR_VALIDATION_RESULT_ROOT=str(output)), capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(result.stdout, (output / "result.txt").read_text())
+                lines = result.stdout.splitlines()
+                self.assertEqual(len(lines), len(expected) + 1)
+                self.assertTrue(lines[0].startswith("VALIDATION_PASS"))
+                self.assertNotIn("latency", lines[0])
+                for line, op in zip(lines[1:], expected):
+                    self.assertTrue(line.startswith(op + ":"), line)
+                    value = "10.000" if op == "dispatch" else "60.000"
+                    self.assertIn("server_latency(us) min/mean/max=" + "/".join([value] * 3), line)
+                self.assertNotIn("rank details", result.stdout)
+
     def test_environment_failure_shows_reason_and_log_without_running_workflow(self):
         (self.root / 'tools/validation/workflow.py').write_text("raise AssertionError('must not run')\n")
         output = self.root / 'run/environment-failure'
