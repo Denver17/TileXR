@@ -516,6 +516,18 @@ add_test(NAME test_tilexr_ep_server_dedup_combine_m5 COMMAND test_tilexr_ep_serv
 set_tests_properties(test_tilexr_ep_server_dedup_combine_m5 PROPERTIES LABELS ep-sdedup-combine-p2-m5 TIMEOUT 180)
 install(TARGETS test_tilexr_ep_server_dedup_combine_m5 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
+# Unequal groups catch an M5 owner/UB budget still tied to the Read core count.
+foreach(_m5_send_cores IN ITEMS 16 48)
+    set(_m5_split_target test_tilexr_ep_server_dedup_combine_m5_send${_m5_send_cores})
+    add_executable(${_m5_split_target} unit/test_tilexr_ep_server_dedup_combine_m5.cpp)
+    target_include_directories(${_m5_split_target} BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake" ${TILEXR_EP_TEST_INCLUDE_DIRS})
+    target_compile_definitions(${_m5_split_target} PRIVATE
+        TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=${_m5_send_cores})
+    add_test(NAME ${_m5_split_target} COMMAND ${_m5_split_target})
+    set_tests_properties(${_m5_split_target} PROPERTIES LABELS ep-sdedup-combine-p2-m5 TIMEOUT 180)
+endforeach()
+
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
 foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile)

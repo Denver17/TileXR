@@ -48,10 +48,10 @@ int main()
                 kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd};
             if (core >= kEpServerDedupCombineSendCoreNum) expected.insert(expected.end(), {
                 kEpServerDedupCombineProfileControlBegin, kEpServerDedupCombineProfileControlEnd,
-                kEpServerDedupCombineProfilePartialBegin, kEpServerDedupCombineProfilePartialEnd,
-                kEpServerDedupCombineProfileFinalBegin, kEpServerDedupCombineProfileFinalEnd});
+                kEpServerDedupCombineProfilePartialBegin, kEpServerDedupCombineProfilePartialEnd});
             else expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
-                kEpServerDedupCombineProfileDirectEnd});
+                kEpServerDedupCombineProfileDirectEnd,
+                kEpServerDedupCombineProfileFinalBegin, kEpServerDedupCombineProfileFinalEnd});
             expected.insert(expected.end(), {kEpServerDedupCombineProfileDrainBegin, kEpServerDedupCombineProfileDrainEnd,
                 kEpServerDedupCombineProfileEnd});
             Check(counts[core * 16U] == (expected.size() + 7U) / 8U * 8U && dropped[core * 16U] == 0U, "latest capture publishes actual padded count and resets dropped");

@@ -8,7 +8,7 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// M5 owns only the scratch beyond resident M2 controls. Its caller drains M4
+// M5 owns only the scratch beyond resident controls. Its caller drains M3
 // before Init; the zero flag source remains live until the final MTE3 drain.
 class ServerDedupSourceAggregate {
 public:
@@ -26,7 +26,7 @@ public:
         inputLanes_ = EpCombineM5InputLaneCount(bs, h, k);
         outputLanes_ = EpCombineM5OutputLaneCount(bs, h, k);
         if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
-        // The shared Host budget uses the largest contiguous Read-core segment.
+        // The shared Host budget uses the largest contiguous Send-core segment.
         const uint32_t owned = EpCombineM5TokenCount(bs);
         masks_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
         pending_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));

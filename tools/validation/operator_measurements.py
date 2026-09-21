@@ -52,7 +52,7 @@ def return_stage_counts(config):
     if config.get("implemented_through") in ("M4", "M5"):
         stages["m4_partial"] = 64 - send
     if config.get("implemented_through") == "M5":
-        stages["m5_final"] = 64 - send
+        stages["m5_final"] = send
     return stages
 
 

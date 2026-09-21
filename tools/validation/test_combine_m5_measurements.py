@@ -35,9 +35,9 @@ class M5MeasurementTests(unittest.TestCase):
     def events(self):
         events = {}
         for core in range(64):
-            pairs = [0x3003, 0x3017, 0x3019 if core >= 32 else 0x301b, 0x3013]
-            if core >= 32:
-                pairs[3:3] = [0x301d, 0x301f]
+            reader = core >= self.config["combine_send_core_num"]
+            pairs = [0x3003, 0x3017, 0x3019 if reader else 0x301b,
+                     0x301d if reader else 0x301f, 0x3013]
             rows = [(0, 0x3001)]
             for index, event in enumerate(pairs, 1):
                 rows.extend(((index * 1000, event), (index * 1000 + 500, event + 1)))
@@ -74,7 +74,7 @@ class M5MeasurementTests(unittest.TestCase):
             elif fault == "missing-module":
                 events[0] = [item for item in events[0] if item[1] not in (0x301b, 0x301c)]
             elif fault == "missing-final":
-                events[32] = [item for item in events[32] if item[1] not in (0x301f, 0x3020)]
+                events[0] = [item for item in events[0] if item[1] not in (0x301f, 0x3020)]
             else:
                 events[0].pop()
             with self.subTest(fault=fault), self.assertRaises(ValueError):
@@ -84,6 +84,23 @@ class M5MeasurementTests(unittest.TestCase):
             bad = copy.deepcopy(evidence); bad[key] = value
             with self.subTest(key=key), self.assertRaises(ValueError):
                 self.validate(bad)
+
+    def test_final_uses_send_cores_for_asymmetric_splits(self):
+        for send in (16, 24, 40, 48, 56):
+            with self.subTest(send=send):
+                self.config["combine_send_core_num"] = send
+                self.row["combine_control_publish_bytes"] = (64 * 8 + 8 * (64 - send)) * 32
+                evidence = self.capture(suffix="send-" + str(send))
+                self.validate(evidence)
+                self.assertEqual(evidence["stages_us"]["m5_final"]["sample_count"], send)
+                self.assertEqual(evidence["stages_us"]["m4_partial"]["sample_count"], 64 - send)
+                events = self.events()
+                # Move only M5 to a Read core; the old role rule must be rejected.
+                final = [item for item in events[0] if item[1] in (0x301f, 0x3020)]
+                events[0] = [item for item in events[0] if item not in final]
+                events[send] = sorted(events[send] + final)
+                with self.assertRaises(ValueError):
+                    self.capture(events, "bad-send-" + str(send))
 
     def test_multilaunch_statistics_distinguish_per_launch_and_total_bytes(self):
         path = self.root / "PROF_0/mindstudio_profiler_output/op_summary.csv"

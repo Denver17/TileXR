@@ -54,7 +54,7 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombinePayloadLaneCount(uint32_t tokens, 
     const uint32_t lanes = available / (blocks * (480U + 512U));
     return lanes > 8U ? 8U : lanes;
 }
-// M2 controls retain independent storage throughout Read-core stage reuse.
+// Control buffers retain independent storage throughout per-core stage reuse.
 constexpr uint32_t kEpServerDedupCombineResidentUbBytes =
     kEpServerDedupCombineFixedUbBytes - kEpServerDedupCombineTableRows * 12U;
 constexpr uint32_t kEpServerDedupCombineM4TableRows = 32U;
@@ -92,11 +92,11 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4OutputLaneCount(uint32_t tokens,
     return lanes > 8U ? 8U : lanes;
 }
 // M5 reserves event 7 for the shared flag probe/clear, independently of both
-// payload rings (events 0..6). M4 releases every event before this arena reuse.
+// payload rings (events 0..6). M3 releases every event before this arena reuse.
 constexpr uint32_t kEpServerDedupCombineM5MaxLanes = 7U;
 TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5TokenCount(uint32_t bs)
 {
-    return bs / kEpServerDedupCombineRecvCoreNum + (bs % kEpServerDedupCombineRecvCoreNum != 0U);
+    return bs / kEpServerDedupCombineSendCoreNum + (bs % kEpServerDedupCombineSendCoreNum != 0U);
 }
 TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5FlagBytes(uint32_t h, uint32_t k)
 {

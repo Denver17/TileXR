@@ -103,13 +103,13 @@ public:
             Mark(kEpServerDedupCombineProfilePartialBegin);
             ReturnPartialTokens();
             Mark(kEpServerDedupCombineProfilePartialEnd);
-            Mark(kEpServerDedupCombineProfileFinalBegin);
-            AggregateSourceTokens();
-            Mark(kEpServerDedupCombineProfileFinalEnd);
         } else {
             Mark(kEpServerDedupCombineProfileDirectBegin);
             ReturnDirectTokens();
             Mark(kEpServerDedupCombineProfileDirectEnd);
+            Mark(kEpServerDedupCombineProfileFinalBegin);
+            AggregateSourceTokens();
+            Mark(kEpServerDedupCombineProfileFinalEnd);
         }
         Mark(kEpServerDedupCombineProfileDrainBegin);
         // Retires prepare publication, both zero sources and server notification;
@@ -125,14 +125,14 @@ public:
 private:
     __aicore__ inline void AggregateSourceTokens()
     {
-        // Every M4 event is paired before overwriting its arena views. This
-        // boundary also covers empty-M4 cores that still own source tokens.
+        // Every M3 event is paired before overwriting its arena views. This
+        // boundary also covers empty-DIRECT cores that still own source tokens.
         PipeBarrier<PIPE_ALL>();
         ServerDedupSourceAggregate aggregate;
         aggregate.Init(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
             args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
             masksAddr_, weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
-            core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum);
+            core_, kEpServerDedupCombineSendCoreNum);
         aggregate.Process();
     }
     __aicore__ inline void Mark(uint32_t event)

@@ -261,8 +261,8 @@ def combine_breakdown_timeline(run, config=None):
                 expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
                 if config["implemented_through"] in ("M4", "M5") and lane.core >= config.get("combine_send_core_num", 32):
                     expected.add("m4_partial")
-                    if config["implemented_through"] == "M5":
-                        expected.add("m5_final")
+                if config["implemented_through"] == "M5" and lane.core < config.get("combine_send_core_num", 32):
+                    expected.add("m5_final")
                 actual = [sample.name for sample in lane.samples if sample.kind == "interval"]
                 if set(actual) != expected or len(actual) != len(expected):
                     raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))

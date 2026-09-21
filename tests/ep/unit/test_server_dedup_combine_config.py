@@ -38,6 +38,12 @@ static_assert(EpCombineM5InputLaneCount(96, 7168, 6) > 0, "M5 default");
 static_assert(EpCombineM5OutputLaneCount(96, 7168, 6) > 0, "M5 output");
 static_assert(EpCombineM5InputLaneCount(96, 7168, 32) > 0, "M5 K32");
 static_assert(EpCombineM5OutputLaneCount(96, 7168, 32) > 0, "M5 K32 output");
+static_assert(EpCombineM5TokenCount(0) == 0, "empty M5 partition budget");
+static_assert(EpCombineM5TokenCount(1) == 1, "M5 underfilled Send group");
+static_assert(EpCombineM5TokenCount(3 * kEpServerDedupCombineSendCoreNum) == 3,
+    "M5 partitions by Send cores");
+static_assert(EpCombineM5TokenCount(3 * kEpServerDedupCombineSendCoreNum + 1) == 4,
+    "M5 reserves the largest uneven Send segment");
 static_assert(EpCombineM5InputLaneCount(UINT32_MAX, 7168, 32) == 0, "BS metadata does not wrap");
 static_assert(EpCombineM5InputLaneCount(96, 0, 1) == 0, "M5 zero width");
 static_assert(EpCombineM5InputLaneCount(96, 7168, 33) == 0, "M5 bad K");

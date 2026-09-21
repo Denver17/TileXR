@@ -91,7 +91,7 @@ struct SourceFixture : CombineM12Test::Fixture {
             expected[uint64_t(p) * h + col] = Ref::Encode(sum, bf16);
         }
     }
-    void Run(uint32_t core, uint32_t w)
+    void Run(uint32_t core, uint32_t w, bool throughM4 = false)
     {
         CombineMemoryServerDedupKernel kernel;
         kernel.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(expert.data()),
@@ -99,7 +99,8 @@ struct SourceFixture : CombineM12Test::Fixture {
             reinterpret_cast<GM_ADDR>(weights.data()), reinterpret_cast<GM_ADDR>(types.data()),
             reinterpret_cast<GM_ADDR>(relay.data()), reinterpret_cast<GM_ADDR>(masks.data()),
             reinterpret_cast<GM_ADDR>(output.data()), bs, h, k, 32U, bf16 ? TileXR::TILEXR_DATA_TYPE_BFP16 : TileXR::TILEXR_DATA_TYPE_FP16, 0U, w, 0U);
-        kernel.Process();
+        if (throughM4) CombineModuleTestAccess::ThroughM4(kernel);
+        else kernel.Process();
     }
 };
 
@@ -111,12 +112,18 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
         const uint32_t w = round % 2U;
         f.Seed(w);
         const auto inactive = f.peers[f.rank];
-        if (partial) { f.Hooks(0U, w); f.Run(0U, w); f.ResetHooks(); }
-        for (uint32_t role = 0; role < kEpServerDedupCombineRecvCoreNum; ++role) {
-            const uint32_t core = kEpServerDedupCombineSendCoreNum + role;
+        // Schedule M1's local member before the Read producer. This Host model
+        // has no concurrent cores; later hooks supply delayed result arrivals.
+        if (partial) { f.Hooks(0U, w); f.Run(0U, w, true); f.ResetHooks(); }
+        for (uint32_t core = kEpServerDedupCombineSendCoreNum; core < 64U; ++core) {
+            f.Hooks(core, w); f.Run(core, w); f.ResetHooks();
+        }
+        Check(std::all_of(f.output.begin(), f.output.end(), [](uint16_t v) { return v == 0x6b6bU; }),
+            "Read cores never aggregate source tokens or write yOut");
+        for (uint32_t core = 0; core < kEpServerDedupCombineSendCoreNum; ++core) {
             f.Hooks(core, w);
-            const uint32_t base = bs / kEpServerDedupCombineRecvCoreNum, extra = bs % kEpServerDedupCombineRecvCoreNum;
-            const uint32_t begin = role * base + std::min(role, extra), count = base + (role < extra);
+            const uint32_t base = bs / kEpServerDedupCombineSendCoreNum, extra = bs % kEpServerDedupCombineSendCoreNum;
+            const uint32_t begin = core * base + std::min(core, extra), count = base + (core < extra);
             std::vector<uint32_t> probes, writes;
             uint32_t firstAttempts = 0U, clears = 0U, payloadReads = 0U, reductions = 0U, flagCopies = 0U;
             auto priorRead = AscendC::GmReadObserver();
@@ -169,6 +176,7 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
                 }
             };
             f.Run(core, w);
+            Check(f.prepareProbes == 0U && f.readyProbes == 0U, "M5 Send cores do not wait on M2");
             Check(AscendC::PendingMte3().empty(), "full Process M6 drains flag clears and yOut");
             Check(writes.size() == count && std::set<uint32_t>(writes.begin(), writes.end()).size() == count,
                 "pending swap deletes each true TokenId once");
@@ -211,6 +219,36 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
     }
 }
 
+void TestDirectThenFinal(bool bf16)
+{
+    SourceFixture f(1U, 257U, 6U, bf16, true);
+    // Reuse the two-row backing for one DIRECT and one stage row. Send core 0
+    // must return its real DIRECT before repurposing the scratch for M5.
+    f.partial = false; f.types[0] = 1;
+    f.masks[0] = 3U; f.weights[0] = 0.375f; f.weights[1] = -0.125f;
+    for (uint32_t col = 0; col < f.h; ++col) f.expert[col] = f.Bits(0U, 0U, col);
+    for (uint32_t round = 0; round < 3U; ++round) {
+        const uint32_t w = round % 2U;
+        f.Seed(w);
+        std::memset(f.Slot(w, 0U, 0U), 0, f.packet); // Only M3 may supply this slot.
+        f.Hooks(0U, w);
+        auto previousRead = AscendC::GmReadObserver();
+        uint32_t probes = 0U;
+        AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
+            previousRead(src, bytes);
+            if (src == f.Slot(w, 0U, 0U) + 480U) {
+                Check(++probes == 1U, "M3 DIRECT has retired before the first M5 probe");
+                if (probes > 1U) throw std::runtime_error("DIRECT missing at M5 entry");
+            }
+        };
+        f.Run(0U, w);
+        Check(probes == 1U && std::equal(f.expected.begin(), f.expected.end(), f.output.begin()),
+            "nonempty M3 followed by M5 preserves DIRECT payload and produces yOut");
+        Check(AscendC::PendingMte3().empty(), "Send core drains output and flag clear");
+        f.ResetHooks();
+    }
+}
+
 void TestBudget()
 {
     for (uint32_t k : {1U, 6U, 32U}) {
@@ -229,9 +267,10 @@ int main()
     try {
         TestBudget();
         for (bool bf16 : {true, false}) {
-            RunCase(1U, 17U, 1U, bf16, false); // zero-owned Read roles, single-bit mask
-            RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 6U, bf16, true);
-            RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 32U, bf16, false);
+            TestDirectThenFinal(bf16);
+            RunCase(1U, 17U, 1U, bf16, false); // zero-owned Send roles, single-bit mask
+            RunCase(3U * kEpServerDedupCombineSendCoreNum + 1U, 257U, 6U, bf16, true);
+            RunCase(3U * kEpServerDedupCombineSendCoreNum + 1U, 257U, 32U, bf16, false);
             RunCase(1U, 7168U, 32U, bf16, false); // >255 total flag repeats and wide tails
         }
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
