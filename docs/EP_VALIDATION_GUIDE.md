@@ -42,6 +42,11 @@ TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh
 bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=combine
 ```
 
+`build_all.sh`、`sync.sh` 和 `run.sh` 在独立 shell 中执行时，默认都选择当前
+`ep-sdedup-combine-p2-m5` 包，不依赖前一个 shell 的环境变量，也不会被旧的
+`install/validation/manifest.json` 覆盖。Dispatch 单跑仍可直接使用该包；若要切换到
+旧 Dispatch checkpoint，须在三个命令前都显式设置 `TILEXR_VALIDATION_CHECKPOINT`。
+
 `operator_mode=both` 测联合调用；D/C 分别输出 trace，Combine 包含 M5 final 区间。
 统计区分单次、正式轮累计、含预热累计字节；trace 保存最后一次调用（7 次调用时 index=6）。
 性能及模块拆解仅确认采集链路，无耗时阈值。数值校验失败但执行完成时仍保留测量和 trace，最终 FAIL。

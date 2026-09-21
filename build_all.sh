@@ -15,7 +15,9 @@ export TILEXR_VALIDATION_ACTION=build
 source "$(dirname -- "${BASH_SOURCE[0]}")/set_env.sh"
 # Production builds select the current increment; sync/run inherit its manifest.
 if [[ "$TILEXR_VALIDATION_BUILD_MODE" == production ]]; then
-    export TILEXR_VALIDATION_CHECKPOINT="${TILEXR_VALIDATION_CHECKPOINT:-ep-sdedup-p2-dispatch}"
+    # Combine P2.4 is the current production increment. Dispatch-only users
+    # can select its package explicitly with TILEXR_VALIDATION_CHECKPOINT.
+    export TILEXR_VALIDATION_CHECKPOINT="${TILEXR_VALIDATION_CHECKPOINT:-ep-sdedup-combine-p2-m5}"
 fi
 # Build options are explicit and independent of all runtime case parameters.
 export TILEXR_VALIDATION_BREAKDOWN="$breakdown"

@@ -80,6 +80,63 @@ class RuntimeConfigurationTests(unittest.TestCase):
                 self.assertEqual(json.loads((output / "endpoints.json").read_text()),
                                  ["192.0.2.3:12300", "192.0.2.3:12400"] if arguments else [None, None])
 
+    def test_manual_build_sync_run_select_same_production_package(self):
+        # Execute independent Bash processes, as users do. Child exports cannot
+        # select the next command's package. Use real Config, without CANN/SSH.
+        module_dir = str(Path(workflow.__file__).resolve().parent)
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import sys, json, os\nfrom pathlib import Path\n"
+            f"sys.path.insert(0, {module_dir!r})\n"
+            "from workflow import Config\nfrom run_summary import write_result\n"
+            "config = Config(sys.argv[1])\n"
+            "with Path('packages.jsonl').open('a') as log:\n"
+            "    print(json.dumps(dict(action=config.action, checkpoint=config.checkpoint, "
+            "install=str(config.install), hosts=len(config.hosts()), chain=config.chain)), file=log)\n"
+            "if config.action == 'run':\n"
+            "    write_result(config.logs, dict(status='PASS'), config.logs/'summary.json')\n")
+        cann = self.root / "cann-env.sh"
+        cann.write_text("# environment fixture\n")
+        with self.local.open("a") as local:
+            local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n")
+        (self.root / "hostfile").write_text("".join(f"192.0.2.{i}\n" for i in range(1, 9)))
+        # An older Dispatch install must not silently select a different package
+        # for sync or dispatch-only runs after the default build advances.
+        legacy = self.root / "install/validation/manifest.json"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text(json.dumps(dict(checkpoint=workflow.DISPATCH_CHECKPOINT)))
+        for mode in (0, 1, 2):
+            for operator in ("dispatch", "combine", "both"):
+                with self.subTest(mode=mode, operator=operator):
+                    calls = self.root / "packages.jsonl"
+                    calls.unlink(missing_ok=True)
+                    output = self.root / f"run/{mode}-{operator}"
+                    env = dict(self.env, TILEXR_VALIDATION_BUILD_MODE="production",
+                               TILEXR_VALIDATION_RESULT_ROOT=str(output))
+                    breakdown = int(mode == 2)
+                    command = (f"bash set_env.sh && bash build_all.sh breakdown={breakdown} && "
+                               f"TILEXR_VALIDATION_BREAKDOWN={breakdown} bash sync.sh && "
+                               f"bash run.sh -m {mode} -n 8 -e 384 -l 100 50 bs=96 operator_mode={operator}")
+                    result = subprocess.run([str(self.bash), "-c", command], cwd=self.root,
+                        env=env, text=True, capture_output=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    records = [json.loads(line) for line in calls.read_text().splitlines()]
+                    self.assertEqual([r["action"] for r in records], ["build", "sync", "run"])
+                    self.assertEqual({r["checkpoint"] for r in records}, {workflow.COMBINE_M5_CHECKPOINT})
+                    suffix = "on" if breakdown else "off"
+                    self.assertEqual({r["install"] for r in records},
+                        {str(self.root / f"install/validation-combine-p24-profile-{suffix}")})
+                    self.assertEqual([r["hosts"] for r in records], [8, 8, 8])
+                    self.assertEqual((records[-1]["chain"]["loops"], records[-1]["chain"]["warmup"]), (100, 50))
+
+    def test_production_environment_preserves_explicit_checkpoint(self):
+        command = 'source ./set_env.sh >/dev/null; printf "%s" "$TILEXR_VALIDATION_CHECKPOINT"'
+        for checkpoint in (workflow.DISPATCH_CHECKPOINT, workflow.COMBINE_M4_CHECKPOINT):
+            result = subprocess.run([str(self.bash), "-c", command], cwd=self.root,
+                env=dict(self.env, TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_VALIDATION_ACTION="sync",
+                         TILEXR_VALIDATION_CHECKPOINT=checkpoint), capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(result.stdout, checkpoint)
+
     def test_single_case_alias_changes_parameters_without_writing_environment_file(self):
         stub = self.root / "tools/validation/workflow.py"
         stub.write_text('''import json, os, sys
@@ -342,7 +399,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         self.assertIn("type=CONFIG_FAILED", result.stdout + result.stderr)
         self.assertNotIn("AssertionError", result.stdout + result.stderr)
 
-    def test_build_default_selects_dispatch_only_for_production(self):
+    def test_build_default_selects_current_combine_package_for_production(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json; print(json.dumps(dict(os.environ)))\n")
         # A prior installed boundary checkpoint must not select an obsolete build.
@@ -352,9 +409,9 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         cann = self.root / 'cann-env.sh'
         cann.write_text('# CANN environment fixture\n')
         for mode, override, arguments, expected, run_mode in (
-                ('production', None, [], workflow.DISPATCH_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=0'], workflow.DISPATCH_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=1'], workflow.DISPATCH_CHECKPOINT, 'breakdown'),
+                ('production', None, [], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=0'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
+                ('production', None, ['breakdown=1'], workflow.COMBINE_M5_CHECKPOINT, 'breakdown'),
                 ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
                 ('host', None, [], None, 'functional')):
             with self.subTest(mode=mode, override=override, arguments=arguments):

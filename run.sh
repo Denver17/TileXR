@@ -24,7 +24,8 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
   dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
   Dry-run requires the C3 package; real combine/both defaults to P2.4 M5.
   P2.4 supports one/two/repeated calls; isolated OFF functional/performance and ON breakdown.
-  Earlier checkpoints remain available via TILEXR_VALIDATION_CHECKPOINT override.
+  The current production default is Combine P2.4/M5; earlier checkpoints and
+  the Dispatch package remain available via TILEXR_VALIDATION_CHECKPOINT override.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
   Endpoints default to hostfile's first (local coordinator) IPv4, ports 10177/10274.
@@ -92,6 +93,10 @@ while (( $# )); do
 done
 [[ -n $servers && -n $experts ]] || fail '-n SERVERS and -e EXPERTS are required'
 (( experts % (servers * 8) == 0 )) || fail '-e must be divisible by 8 * -n'
+# Select the current production package explicitly. This prevents a stale
+# install/validation/manifest.json from switching a fresh manual run back to
+# the retired Dispatch package when build/sync/run are separate shells.
+export TILEXR_VALIDATION_CHECKPOINT="${TILEXR_VALIDATION_CHECKPOINT:-ep-sdedup-combine-p2-m5}"
 if [[ -n $legacy_quant && -n $dispatch_quant && $legacy_quant != "$dispatch_quant" ]]; then
     fail 'quant_mode conflicts with dispatch_quant_mode'
 fi
