@@ -49,8 +49,5 @@ int TileXREpBuildServerDedupCombineDataLayout(int64_t ranks, int64_t bs, int64_t
 int TileXREpValidateBasicMemoryServerDedupCombineParams(const EpMemoryServerDedupCombineParams &params);
 int TileXREpValidateMemoryServerDedupCombineConfig(const EpMemoryServerDedupCombineParams &params,
     const TileXR::CommArgs &args, EpMemoryServerDedupCombineLayout *layout);
-int TileXREpLaunchCombineMemoryServerDedupKernel(const EpMemoryServerDedupCombineParams &params,
-    const EpHostLaunchContext &context, const EpMemoryServerDedupCombineLayout &layout);
-
 } // namespace TileXREp
 #endif

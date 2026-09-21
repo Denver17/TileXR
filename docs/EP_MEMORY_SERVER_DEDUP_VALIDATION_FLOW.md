@@ -287,6 +287,21 @@ CPU 时钟/导出测试仅验证记录契约，设备缓存可见性和 profile 
 与 Host typedef 替身的语义不同；记录区可写地址使用明确的 `__gm__ uint8_t * const`。
 Host 编译通过不能替代 profiling ON 的真实 A5 编译，OFF/ON 必须分别构建。
 
+维护经验（Combine 结构对齐）：顶层 `Launch` 声明由 `combine_launch.h` 持有，
+公开接口实现显式包含该头，`combine_host.h` 只保留参数、布局与校验契约。
+Kernel `.cpp` 保留 ABI 入口和 GM tiling 解包，业务骨架放在同名 `.h` 的 `Init/Process`；
+拆出的头文件须加入 AICore 编译/链接依赖，避免增量构建使用旧二进制。
+第一阶段 `Init` 初始化独立 Combine writer 并记录 start，`Process` 保留 50μs 等待、end 和发布。
+两算子共用 profiling 开关、writer、latest 覆盖语义及解析格式，但区域、容量、事件和 mapping 独立；
+Dispatch 有阶段/细项打点，空 Combine 仅有 start/end。结构迁移必须保持关闭采集不访问记录区、
+空 tiling 直接返回、业务 tensor 不变及两区隔离；以现有延时/隔离回归和 A5 OFF/ON 编译核验。
+
+2026-09-21 结构对齐验证：blue 的 CANN 9.1.0 / ccec clang 15.0.5（2026-05-18），
+A5 `dav-c310-vec` profiling OFF/ON 分目录构建 Kernel 和 `tilexr-ep` 均通过；
+既有 ABI、Host/layout、D/C launch、延时和 profiling 隔离回归 10/10 通过。
+源码基线 `43ddbd2` 加本次变更的 SHA256、配置、工具链、返回码、日志及产物摘要保留在
+`build/combine-kernel-structure-verification/`。本次未运行 NPU，不把此前 C1–C7 回传当作重构后设备验收。
+
 ### C7：双窗合法边界探针与 Dispatch 回归（用户回传验收通过）
 
 C7 交付 `5ce1a927802a05ab5455a55ec30fe449d99e3d0d`，已收到用户
