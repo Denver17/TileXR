@@ -9,7 +9,7 @@ case "$#:${1:-}" in
         cat <<'EOF'
 Usage: bash run_commit_validation.sh
 Build and validate Combine P2.4: ep-sdedup-combine-p2-m5 (full M1-M5; no fixed delay).
-Builds isolated profiling OFF/ON packages with identical source and Host regressions.
+Builds without profiling, tests, then rebuilds with profiling in the same directory; source must match.
 First two configured hosts, fixed8P each: 24 serial cases: one, two and repeated calls; production result-Flag cleanup.
 F1=1/0, F2=2/0, Fmulti/P/B=5/2 launches/warmup; BF16/FP16 combine/both (20 cases).
 Plus BF16/FP16 Dispatch regression and two Dispatch-quant4/Combine-nonquant connections (5/2).

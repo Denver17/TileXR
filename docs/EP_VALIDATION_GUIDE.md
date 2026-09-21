@@ -26,19 +26,19 @@ BS96/H7168/K6/E96，Send/Read=32/32；24 个串行用例如下。
 | Dispatch 回归 | 2 | 5/2 |
 | Dispatch quant4 → Combine quant0 接线 | 2 | 5/2 |
 
-前五组均为 BF16/FP16 × combine/both。OFF 20 例与 ON 4 例分别构建安装到
-`install/validation-combine-p24-profile-off/on`，要求同一源码摘要，不复用旧 checkpoint 记录。
+前五组均为 BF16/FP16 × combine/both。先关闭打点构建并完成 20 例，再开启打点重新构建并完成 4 例；
+两次构建更新同一个安装目录 `install/validation-combine-p24`，要求同一源码摘要，逐次保存 manifest 和结果。
 量化接线保留 Dispatch 五表/count，Combine 使用独立低精度 expertOut；Combine 不支持量化。
 
-人工性能和 trace 使用相同包：
+人工性能和 trace 共用安装目录，切换模式时重新构建并同步：
 
 ```bash
 export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m5
 bash build_all.sh breakdown=0
-TILEXR_VALIDATION_BREAKDOWN=0 bash sync.sh
+bash sync.sh
 bash run.sh -n 2 -e 96 -m 1 -l 5 2 operator_mode=combine
 bash build_all.sh breakdown=1
-TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh
+bash sync.sh
 bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=combine
 ```
 
@@ -838,6 +838,13 @@ bash sync.sh                     # 清理同步回执后，重新同步再运行
 同一 A5 产物同步到 8 台服务器后，可以连续运行 16P/32P/48P/64P 和不同专家数。
 `hostfile` 是分发清单；`sync.sh` 使用完整清单，`run.sh -n N` 只选择前 N 台。
 每台固定使用 0..7 卡，按清单顺序分配连续 rank。未选中节点不执行本次用例。
+
+当前生产构建仅维护一个安装目录，`breakdown=0/1` 更新同一份产物；同步不选择打点模式，
+只分发该目录及 manifest。运行前检查 `server_dedup_profiling`：`-m 2` 要求开启，`-m 0/1`
+要求关闭，不匹配时在启动任何 NPU 进程前失败并提示重建/同步。每次重建清除旧 manifest
+和同步凭据，构建失败不能回退到旧产物。历史带模式后缀的目录不参与当前生产包选择。
+子 shell 的 export 不会影响后续独立脚本，不能再依赖构建脚本的环境变量传递来选同步目录。
+Host 回归覆盖独立 Bash 调用、模式切换、同步清单及错误模式在启动前被拒绝；不替代设备验证。
 
 `sync.sh` 保留跨主机并发，只增量更新安装产物、验证/性能解析工具和环境加载脚本，
 不删除远端安装目录或退休文件。Host 检查点还携带 Python 测试及其现场编译所需的源码。

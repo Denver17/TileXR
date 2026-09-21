@@ -38,7 +38,7 @@ Read 核在本核 M4 Event 排空及 PIPE_ALL 后进入 M5，按 BS 连续分工
 
 `run_commit_validation.sh` 共 24 个串行 16P 用例（BF16/FP16 × combine/both）：
 F1=1 轮/0 预热、F2=2/0、Fmulti=5/2、P=5/2、B=5/2，各 4 例；另有 Dispatch 回归 2 例、
-D quant4→独立低精度 expertOut 连接 2 例（均 5/2）。OFF 20 例、ON 4 例使用隔离安装包、同一源码摘要。
+D quant4→独立低精度 expertOut 连接 2 例（均 5/2）。先关闭打点完成 20 例，再开启打点重建完成 4 例；共用构建/安装目录，保持同一源码摘要并分别保存 manifest 和结果。
 检查最终 yOut、DIRECT/partial payload、所有已用窗口的完整结果 Flag 清理、未写槽和边界保护；
 性能确认采集，breakdown 含 M5，记录最后一次调用，不加内部细打点、压力矩阵或性能阈值。
 数值政策固定 FP32 分步乘加与两级低精度 RNE、有效值逐位比较；数值失败但执行完成时仍导出可用性能/trace。

@@ -114,7 +114,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
                                TILEXR_VALIDATION_RESULT_ROOT=str(output))
                     breakdown = int(mode == 2)
                     command = (f"bash set_env.sh && bash build_all.sh breakdown={breakdown} && "
-                               f"TILEXR_VALIDATION_BREAKDOWN={breakdown} bash sync.sh && "
+                               "bash sync.sh && "
                                f"bash run.sh -m {mode} -n 8 -e 384 -l 100 50 bs=96 operator_mode={operator}")
                     result = subprocess.run([str(self.bash), "-c", command], cwd=self.root,
                         env=env, text=True, capture_output=True, timeout=15)
@@ -122,9 +122,8 @@ class RuntimeConfigurationTests(unittest.TestCase):
                     records = [json.loads(line) for line in calls.read_text().splitlines()]
                     self.assertEqual([r["action"] for r in records], ["build", "sync", "run"])
                     self.assertEqual({r["checkpoint"] for r in records}, {workflow.COMBINE_M5_CHECKPOINT})
-                    suffix = "on" if breakdown else "off"
                     self.assertEqual({r["install"] for r in records},
-                        {str(self.root / f"install/validation-combine-p24-profile-{suffix}")})
+                        {str(self.root / "install/validation-combine-p24")})
                     self.assertEqual([r["hosts"] for r in records], [8, 8, 8])
                     self.assertEqual((records[-1]["chain"]["loops"], records[-1]["chain"]["warmup"]), (100, 50))
 

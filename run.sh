@@ -23,7 +23,7 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
                     combine_observation=batch|per-round (P2.1 functional diagnostics)
   dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
   Dry-run requires the C3 package; real combine/both defaults to P2.4 M5.
-  P2.4 supports one/two/repeated calls; isolated OFF functional/performance and ON breakdown.
+  P2.4 supports one/two/repeated calls; rebuild without profiling for functional/performance, with profiling for breakdown.
   The current production default is Combine P2.4/M5; earlier checkpoints and
   the Dispatch package remain available via TILEXR_VALIDATION_CHECKPOINT override.
   host_validation=1 runs local Host/Python tests before the NPU workflow.

@@ -397,7 +397,9 @@ class Config:
             if self.checkpoint != COMBINE_DRY_RUN_CHECKPOINT and not os.environ.get("TILEXR_COMM_ID"):
                 default_host = self.hosts()[0]["host"]
             self.chain = chain_configuration(self.checkpoint, default_host)
-        if self.checkpoint in COMBINE_MODULE_CHECKPOINTS:
+        # Only retired acceptance stages retain their historical package paths.
+        # Production builds replace one installation, regardless of profiling.
+        if self.checkpoint in (COMBINE_M12_CHECKPOINT, COMBINE_M3_CHECKPOINT, COMBINE_M4_CHECKPOINT):
             profile_on = self.profiling if action == "build" else (
                 self.chain["run_mode"] == "breakdown" if self.chain is not None else
                 os.environ.get("TILEXR_VALIDATION_BREAKDOWN", "0") == "1")
@@ -717,7 +719,8 @@ def verify_build(config, *, check_run_mode=True):
 
 def validation_build_directory(config):
     name = validation_directory(config.checkpoint)
-    if config.checkpoint in COMBINE_MEASUREMENT_CHECKPOINTS:
+    if config.checkpoint in (COMBINE_PROFILE_CHECKPOINT, COMBINE_M12_CHECKPOINT,
+                              COMBINE_M3_CHECKPOINT, COMBINE_M4_CHECKPOINT):
         name += "-profile-on" if config.profiling else "-profile-off"
     return config.root / "build" / name
 
@@ -737,8 +740,7 @@ def clean_build_directory(config):
     work.resolve().relative_to(config.root)
     if work.exists() and not work.is_dir():
         raise ValueError(f"构建路径不是目录：{work}")
-    if config.checkpoint not in COMBINE_TESTS:
-        (config.logs / "sync.json").unlink(missing_ok=True)
+    (config.logs / "sync.json").unlink(missing_ok=True)
     # 即使本次编译失败，也不能把上一轮安装包当作本次构建使用。
     (config.install / "manifest.json").unlink(missing_ok=True)
     if work.exists():

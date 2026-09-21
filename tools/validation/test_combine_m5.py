@@ -62,7 +62,7 @@ class CombineM5Tests(c5.CombineMultiTests):
                     cfg = self.config()
                     self.assertEqual((cfg.chain["loops"], cfg.chain["warmup"]), (5, 2))
                     self.assertEqual(cfg.chain["implemented_through"], "M5")
-                    self.assertEqual(cfg.install.name, "validation-combine-p24-profile-" + ("on" if mode == "breakdown" else "off"))
+                    self.assertEqual(cfg.install.name, "validation-combine-p24")
         for key, value in (("LOOPS", "0"), ("COMBINE_QUANT_MODE", "4"),
                            ("COMBINE_OBSERVATION", "per-round"), ("COMBINE_FIXTURE", "sparse")):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
@@ -204,7 +204,8 @@ class CombineM5Tests(c5.CombineMultiTests):
                 self.assertEqual(builds, ["profile-off", "profile-on"])
                 self.assertEqual(len(summary["cases"]), 24)
                 self.assertTrue(all(gate["status"] == "PASS" for gate in summary["gates"].values()))
-                self.assertNotEqual(summary["phases"][0]["install_directory"], summary["phases"][1]["install_directory"])
+                self.assertEqual(summary["phases"][0]["install_directory"], summary["phases"][1]["install_directory"])
+                self.assertEqual(summary["phases"][0]["build_directory"], summary["phases"][1]["build_directory"])
                 for index, name in enumerate(names, 1):
                     self.assertIn(f"[{index}/24] PASS {name}", output.getvalue())
             else:
