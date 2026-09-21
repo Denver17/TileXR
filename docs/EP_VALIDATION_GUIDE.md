@@ -2,17 +2,17 @@
 
 ## Combine 第一阶段 C7：当前交付，待设备验证
 
-C5 已按用户回传登记通过，C6/C7 仍待设备验证。下一点切换到 C6 提交验收，不能用 C7 结果替代 C6 的 profiling ON/OFF 矩阵：
+C5/C6 已按用户回传登记通过，下一点切换到 C7 提交验收。各点的通过结论仅覆盖对应验收范围：
 
 | 点 | 提交 | 验收范围 | 状态 |
 | --- | --- | --- | --- |
 | C5 | `4ef0439640b016727287bebec84ef5cc0a521445` | 连续预热/多轮、三种算子模式、magic/生命周期 | 用户回传通过 |
-| C6 | `abee43c70502de88c18ddd0700b0afde528ecc93` | OFF performance / ON breakdown、独立记录区和双 trace | 待设备验证 |
+| C6 | `abee43c70502de88c18ddd0700b0afde528ecc93` | OFF performance / ON breakdown、独立记录区和双 trace | 用户回传通过 |
 | C7 | `5ce1a927802a05ab5455a55ec30fe449d99e3d0d` | 双窗合法边界探针、真实 Dispatch 回归 | 待设备验证 |
 
 ```bash
 git fetch origin
-git switch --detach <目标提交SHA>
+git switch --detach 5ce1a927802a05ab5455a55ec30fe449d99e3d0d
 bash run_commit_validation.sh
 ```
 
@@ -38,7 +38,7 @@ C7 checkpoint=`ep-sdedup-combine-p1-memory-boundary`，使用独立
 普通 `run.sh` 强制为 0，保持 dispatch/combine/both 的正常算子调用。
 
 C7 不包含 Combine 数据面、Flag 协议或 yOut 业务数值验收；空 Combine 的 50μs 等待不变。
-C5 多轮已获用户通过确认，C6 profile 仍须切回其提交单独验证。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
+C5 多轮及 C6 profile 均已获用户通过确认；C7 边界仍需独立验收。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
 
 2026-09-21 C7 开发验证：CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5
 `dav-c310-vec`、profiling OFF，通过正式生产构建、安装及真实 consumer 编译链接。
@@ -52,11 +52,11 @@ blue 为无 `.git` 源码快照，manifest 如实记录 commit 未知；构建�
 工具链和构建/Host/脚本日志保留在开发工作区 `build/combine-c7-verification/`。
 这些仅证明编译及 Host 测试行为；三组真实 16P 用例尚未执行，C7 继续等待用户设备验收。
 
-## Combine 第一阶段 C6：已交付，待设备验证
+## Combine 第一阶段 C6：用户回传验收通过
 
-2026-09-21：验证环境暂不可用，用户授权提前开发 C6/C7，但分别提交。
-该授权发生时 C5 待验证，现已按用户回传登记通过；C6/C7 不自动继承设备通过结论。
-下一点执行 C6：
+已登记用户回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-profile`，6/6 用例通过。
+总报告：`/home/h00580772/TileXR-git-check/run/validation/commit-06f978880a8340f78a48a51176ad30a6/summary.json`。
+通过范围及未独立核验的运行身份见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。如需重现 C6：
 
 ```bash
 git fetch origin
@@ -97,7 +97,7 @@ OFF build_id=`4d07c76f2bce494da0f545d615a9c476`，ON build_id=`5814b6b13ed840599
 各自安装包 Host 验收 11/11 通过。控制脚本执行 312 项，311 通过，1 项因缺 Windows transport harness 跳过；
 既有 Dispatch consumer 25 项通过。独立审查后的故障路径保留另一算子有效报告，Shell/diff 检查通过。
 blue 使用无 `.git` 源码快照；manifest 如实记录 commit 未知，源码与产物哈希、工具链及日志
-保留在开发工作区 `build/combine-c6-verification/`。这些是编译和 Host 证据，六组真实 16P 用例仍待外部验收。
+保留在开发工作区 `build/combine-c6-verification/`。这些是编译和 Host 证据；后续用户已回传六组真实 16P 用例通过，见上文验收记录。
 
 ## Combine C5：用户回传验收通过
 

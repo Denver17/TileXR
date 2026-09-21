@@ -52,7 +52,7 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 | C3 | `dry-run` | 同一脚本/consumer 接入 dispatch、combine、both；dtype/量化格式共用，quant 开关独立；仅验证配置/rank 映射，不分配设备通信域。用户回传通过，交付 `b68b56e` |
 | C4 | `chain-single` | 单轮 Combine 独立及真实 Dispatch→空 Combine；五表/count 原指针连接、量化 Dispatch 的独立 BF16/FP16 expertOut、输入输出生命周期；不验 yOut 数值 |
 | C5 | `chain-multi` | warmup/多轮、各自 magic/选窗、同步与生命周期；联合模式 D/C 固定使用不同窗口符合预期。用户回传 8/8 通过，交付 `4ef0439` |
-| C6 | `profile` | functional/performance/breakdown 共用 consumer；分离记录 base/counter/latest，两算子独立 trace；空算子算法字节 0、算法带宽 N/A |
+| C6 | `profile` | functional/performance/breakdown 共用 consumer；分离记录 base/counter/latest，两算子独立 trace；空算子算法字节 0、算法带宽 N/A。用户回传 6/6 通过，交付 `abee43c` |
 | C7 | `memory-boundary` | 两半区分别执行合法区边界与保护区探针，避开 runtime；保留真实 Dispatch 回归，不冒充 Combine 数据面验证 |
 
 C1 历史入口一次完成构建和三项 Host 测试，不要求 CANN/hostfile/SSH/NPU；
@@ -178,7 +178,7 @@ Host 受控时钟测试覆盖 49999/50000 阈值和溢出；不能把它当作�
 ### C5 当前交付：连续批次、各算子 magic 和生命周期
 
 C5 已收到用户 `COMMIT_VALIDATION_PASS` 和 8/8 通过回传；总报告及边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
-C6/C7 已提前分批交付，仍需各自提交的设备验收结果。下文保留 C5 交付契约。
+C6/C7 已提前分批交付；C6 已获用户通过回传，C7 仍待设备验收。下文保留 C5 交付契约。
 
 C4 已获用户 `COMMIT_VALIDATION_PASS` 回传，交付 commit `c86e1ef`，报告见进度文档。
 本次只实现 `ep-sdedup-combine-p1-chain-multi`，保留 C4 单轮快照回归；C6/C7 不提前实现。
@@ -241,7 +241,10 @@ D 为 1/3/5…、C 为 2/4/6…；实际 bufferIndex 始终按各自 magic%2 取
 8GiB 通信域；读取在设备批次完成后进行，不进入 kernel 计时区间或逐轮热路径。
 联合模式按两算子的角色分别检查各自窗口，不把 Combine 窗口交给 Dispatch 校验器。
 
-### C6：两算子记录区及 trace 隔离（已交付，待设备验证）
+### C6：两算子记录区及 trace 隔离（用户回传验收通过）
+
+C6 已收到用户 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-profile` 及 6/6 通过回传，
+总报告及验收边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。C7 仍需独立验收。
 
 breakdown 扩充标准 profiling 记录区，以不同 base 分隔 D/C 的记录、有效计数、丢弃计数和
 latest-launch 状态；记录区不占通信窗口。Dispatch 单测只解析 D 区，Combine 单测只解析 C 区，
@@ -283,7 +286,7 @@ Host 编译通过不能替代 profiling ON 的真实 A5 编译，OFF/ON 必须�
 
 ### C7：双窗合法边界探针与 Dispatch 回归（当前交付）
 
-C6 交付为 `abee43c70502de88c18ddd0700b0afde528ecc93`，设备验收待回传；按 2026-09-21
+C6 交付为 `abee43c70502de88c18ddd0700b0afde528ecc93`，现已按用户回传登记通过；此前按 2026-09-21
 用户授权单独开发并提交 C7，不把 C5/C6 的开发检查或 Git 交付当作上机通过。
 
 - checkpoint=`ep-sdedup-combine-p1-memory-boundary`，同一 consumer、独立 C7 安装包，
