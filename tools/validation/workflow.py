@@ -2031,6 +2031,94 @@ def combine_m12_cases():
     return sorted(cases, key=lambda case: case["run_mode"] == "breakdown")
 
 
+def combine_m12_defaults():
+    return dict(bs=96, h=7168, topk=6, moe_expert_num=96, loops=5, warmup=2, dtype="bf16",
+                dispatch_quant_mode=0, combine_quant_mode=0, operator_mode="combine", fp8_format="e4m3",
+                block_dim="auto", route_mode="balance_shift", seed=2026, case_analysis=0,
+                servers=2, boundary_probe=0, combine_fixture="balanced", combine_observation="batch")
+
+
+def load_combine_m12_resume(config, cases, path, log):
+    """Explicitly reuse the reported OFF run and its already-built ON companion.
+
+    Old manifests lack per-file digests, so the source mismatch cannot be repaired
+    retrospectively. Keep it visible; never rebuild one side under this exception.
+    """
+    path = Path(path).resolve()
+    previous = read_json(path)
+
+    def require(condition, message):
+        if not condition:
+            raise Failure("RESULT_FAILED", "P2.1续跑拒绝：" + message)
+
+    require(previous.get("checkpoint") == config.checkpoint and previous.get("mode") == "production"
+            and previous.get("status") == "FAIL" and previous.get("cleanup") == "complete",
+            "原报告必须为本检查点且已完成清理的失败运行")
+    require(previous.get("case_manifest") == cases, "原验收矩阵与当前不一致")
+    errors = previous.get("errors", [])
+    require(len(errors) == 1 and errors[0].get("type") == "BUILD_FAILED"
+            and errors[0].get("stage") == "build-profile-on"
+            and errors[0].get("message") == "P2.1 OFF/ON源码不一致，拒绝混合版本验收",
+            "仅支持19项OFF通过后在ON源码一致性检查处停止的运行")
+    hosts = config.hosts()[:2]
+    require(previous.get("rank_size") == 16 and previous.get("expected_hosts") == hosts,
+            "host/device范围已变化")
+    phases = previous.get("phases", [])
+    require(len(phases) == 2 and phases[0].get("package") == "profile-off"
+            and phases[0].get("status") == "PASS" and phases[1].get("package") == "profile-on",
+            "缺少原OFF完成阶段或ON构建身份")
+    packages = {}
+    for profiling, phase in zip((False, True), phases):
+        os.environ["TILEXR_VALIDATION_BREAKDOWN"] = str(int(profiling))
+        package_config = Config("build")
+        manifest = verify_build(package_config, check_run_mode=False)
+        require(manifest["build_id"] == phase.get("build_id")
+                and manifest["server_dedup_profiling"] is profiling,
+                "原安装包被替换或打点模式不匹配；续跑不重建安装包")
+        packages[phase["package"]] = manifest
+    off = packages["profile-off"]
+    require(read_json(phases[0]["manifest"]) == off, "OFF安装包与原报告保存的manifest不一致")
+    host_report = read_json(phases[0]["host_regression"])
+    require(host_report.get("status") == "PASS" and host_report.get("build_id") == off["build_id"]
+            and host_report.get("checkpoint") == config.checkpoint, "原OFF Host检查未通过或身份不匹配")
+    rows = previous.get("cases", [])
+    off_cases = [case for case in cases if case["run_mode"] != "breakdown"]
+    require(len(rows) == len(off_cases) == 19, "原报告必须包含完整19项OFF结果")
+    reports = []
+    for case, row in zip(off_cases, rows):
+        require(row.get("name") == case["name"] and row.get("gate") == case["gate"]
+                and row.get("status") == "PASS" and row.get("completed_ranks") == 16
+                and row.get("build_id") == off["build_id"], "原用例缺失、失败或身份不匹配：" + case["name"])
+        expected = dict(combine_m12_defaults(), **{k: v for k, v in case.items() if k not in ("name", "gate")})
+        actual = row.get("configuration", {})
+        require(all(actual.get(k) == v for k, v in expected.items() if k not in ("servers", "boundary_probe")),
+                "原用例参数不匹配：" + case["name"])
+        report = read_json(row["summary"])
+        require(report.get("status") == "PASS" and report.get("checkpoint") == config.checkpoint
+                and report.get("build_id") == off["build_id"] and report.get("rank_size") == 16
+                and report.get("completed_ranks") == 16 and report.get("expected_hosts") == hosts
+                and report.get("chain_configuration") == actual and not report.get("errors"),
+                "原用例summary未完整通过或与总报告不符：" + case["name"])
+        reports.append(report)
+    # Snapshot evidence only after all prerequisites pass; never alter old reports.
+    write_json(log / "reused/original-summary.json", previous)
+    write_json(log / "reused/off-host-summary.json", host_report)
+    reused = []
+    for row, report in zip(rows, reports):
+        saved = log / "reused/cases" / (row["name"] + ".summary.json")
+        write_json(saved, report)
+        reused.append(dict(row, reused=True, origin_summary=row["summary"], summary=str(saved),
+                           summary_sha256=digest(saved)))
+    metadata = dict(original_summary=str(path), original_summary_sha256=digest(path),
+                    runner_workflow_sha256=digest(Path(__file__)),
+                    source_consistency="historical-mismatch-explicit-resume",
+                    original_errors=errors, reused_cases=19, new_cases=4,
+                    artifact_policy="reuse-original-off-and-on-packages-no-rebuild",
+                    source_identities={key: dict(commit=m["source"]["commit"],
+                        content_sha256=m["source"]["content_sha256"]) for key, m in packages.items()})
+    return previous, packages, reused, metadata
+
+
 def combine_m12_commit_validate(config, run_id):
     log = config.logs / run_id
     cases = combine_m12_cases()
@@ -2055,11 +2143,27 @@ def combine_m12_commit_validate(config, run_id):
         for key in owned:
             os.environ.pop("TILEXR_VALIDATION_" + key, None)
         os.environ.pop("TILEXR_DIRECT_HOSTS_JSON", None)
-        defaults = dict(bs=96, h=7168, topk=6, moe_expert_num=96, loops=5, warmup=2, dtype="bf16",
-                        dispatch_quant_mode=0, combine_quant_mode=0, operator_mode="combine", fp8_format="e4m3",
-                        block_dim="auto", route_mode="balance_shift", seed=2026, case_analysis=0,
-                        servers=2, boundary_probe=0, combine_fixture="balanced", combine_observation="batch")
+        defaults = combine_m12_defaults()
+        resume = os.environ.get("TILEXR_VALIDATION_RESUME_SUMMARY")
+        retained = {}
+        if resume:
+            stage = "resume-preflight"
+            previous, retained, summary["cases"], summary["resume"] = load_combine_m12_resume(config, cases, resume, log)
+            summary.update(expected_hosts=previous["expected_hosts"], rank_size=16)
+            phase = dict(previous["phases"][0], reused=True, host_regression=str(log / "reused/off-host-summary.json"),
+                         manifest=str(log / "builds/profile-off.manifest.json"))
+            write_json(phase["manifest"], retained["profile-off"])
+            summary["phases"].append(phase)
+            for index, row in enumerate(summary["cases"], 1):
+                print(f"[{index}/{len(cases)}] SKIP {row['name']} (reused PASS) 来源：{row['origin_summary']}", flush=True)
+            for name, gate in summary["gates"].items():
+                count = sum(row["gate"] == name for row in summary["cases"])
+                if count:
+                    gate.update(status="PASS", completed_cases=count)
+            print("P2.1续跑：跳过19项OFF及两次构建，仅执行原ON包Host检查/同步/4项breakdown；保留历史源码差异。", flush=True)
         for profiling in (False, True):
+            if resume and not profiling:
+                continue
             package = "profile-on" if profiling else "profile-off"
             os.environ.update({"TILEXR_VALIDATION_" + key.upper(): str(value) for key, value in defaults.items()})
             os.environ.update(TILEXR_VALIDATION_RESULT_ROOT=str(config.logs), TILEXR_VALIDATION_QUANT_MODE="0",
@@ -2067,24 +2171,31 @@ def combine_m12_commit_validate(config, run_id):
                               TILEXR_VALIDATION_BREAKDOWN=str(int(profiling)),
                               TILEXR_VALIDATION_TIMEOUT=str(config.timeout))
             active_config = Config("build")
-            stage = "build-" + package
+            stage = ("reuse-" if resume else "build-") + package
             phase = dict(package=package, profiling=profiling, status="FAIL",
                          build_directory=str(validation_build_directory(active_config)),
                          install_directory=str(active_config.install))
             summary["phases"].append(phase)
-            try:
-                build(active_config)
-            finally:
-                phase.update(build_id=getattr(active_config, "build_id", None),
-                             build_logs=str(config.logs / ("build-" + getattr(active_config, "build_id", "unknown"))))
+            if resume:
+                phase.update(build_reused=True, build_id=retained[package]["build_id"],
+                             build_logs=previous["phases"][1]["build_logs"])
+            else:
+                try:
+                    build(active_config)
+                finally:
+                    phase.update(build_id=getattr(active_config, "build_id", None),
+                                 build_logs=str(config.logs / ("build-" + getattr(active_config, "build_id", "unknown"))))
             manifest = verify_build(active_config, check_run_mode=False)
+            if resume and manifest != retained[package]:
+                raise Failure("RESULT_FAILED", "P2.1续跑期间ON安装包发生变化")
             fingerprint = manifest["source"].get("content_sha256")
             if not isinstance(fingerprint, str) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
                 raise Failure("BUILD_FAILED", "P2.1缺少源码内容摘要")
             identity = dict(commit=manifest["source"]["commit"], content_sha256=fingerprint)
-            if summary.get("source_identity", identity) != identity:
+            if not resume and summary.get("source_identity", identity) != identity:
                 raise Failure("BUILD_FAILED", "P2.1 OFF/ON源码不一致，拒绝混合版本验收")
-            summary["source_identity"] = identity
+            if not resume:
+                summary["source_identity"] = identity
             summary.update(commit=identity["commit"], source_provenance=manifest["source"]["provenance"])
             phase["manifest"] = str(log / "builds" / (package + ".manifest.json"))
             write_json(phase["manifest"], manifest)

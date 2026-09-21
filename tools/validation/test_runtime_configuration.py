@@ -233,6 +233,28 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         self.assertFalse((self.root / "hostfile").exists())
         self.assertEqual(self.local.read_bytes(), before)
 
+    def test_commit_resume_argument_is_explicit_and_not_overridden_by_deployment_config(self):
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import os,json; print(json.dumps(dict(os.environ)))\n")
+        cann = self.root / "cann-env.sh"
+        cann.write_text("# environment fixture\n")
+        with self.local.open("a") as local:
+            local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n"
+                        "export TILEXR_VALIDATION_RESUME_SUMMARY=deployment-stale.json\n")
+        path = str(self.root / "old run/summary.json")
+        for args, expected in (([], None), (["--resume", path], path)):
+            with self.subTest(args=args):
+                result = subprocess.run([str(self.bash), "run_commit_validation.sh", *args], cwd=self.root,
+                    env=dict(self.env, TILEXR_VALIDATION_RESUME_SUMMARY="shell-stale.json"),
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                values = json.loads(result.stdout.splitlines()[-1])
+                self.assertEqual(values.get("TILEXR_VALIDATION_RESUME_SUMMARY"), expected)
+        for args in (["--resume"], ["--resume", ""], ["--resume", path, "extra"]):
+            result = subprocess.run([str(self.bash), "run_commit_validation.sh", *args], cwd=self.root,
+                                    env=self.env, capture_output=True, text=True, timeout=10)
+            self.assertEqual(result.returncode, 2)
+
     def test_combine_run_selects_p21_and_preserves_prior_gates(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json\nfrom pathlib import Path\nfrom run_summary import write_result\n"

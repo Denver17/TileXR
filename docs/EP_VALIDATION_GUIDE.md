@@ -32,7 +32,25 @@ P2.1 源码摘要排查（2026-09-21）：用户回传 OFF 的 19 例通过、ON
 现由 `tools/validation/source.py` 按精确文件名在各层目录排除，同时用于摘要和同步清单，
 `.gitignore` 也排除它；仅修改 rsync 或 Git 忽略规则无法修复普通文件部署的摘要采集。
 回归覆盖探测文件创建/改写/删除不影响摘要和同步、其他 `.tmp` 输入仍保留、真实源码修改仍改变摘要。
-此修复不改 Host/kernel，不取消 OFF/ON 一致性门槛；拉取修复后重新执行一键验收，不能将 19 例通过登记为 P2.1 整体通过。
+此修复不改 Host/kernel，不取消全量运行的 OFF/ON 一致性门槛；不能将 19 例通过登记为 P2.1 整体通过。
+
+针对此次“19 项 OFF 已通过、ON 已构建但因源码摘要差异停止”的运行，可显式续跑：
+
+```bash
+bash run_commit_validation.sh --resume /绝对路径/原commit运行目录/summary.json
+```
+
+保留原报告、各用例 summary 及 `install/validation-combine-p21-profile-off` / `-on`，更新脚本后
+直接执行，**不要先重建安装包**。续跑核对矩阵、参数、完整 16 rank、host/device、原 OFF Host
+通过证据，以及两包 build_id/全部产物哈希；条件不符即停止，不自动回退重跑 19 项。
+核对通过后显示 19 条 `SKIP (reused PASS)`，跳过两次构建，只补原 ON 包的 Host 检查、同步及
+`[20/23]`–`[23/23]` 四项 breakdown。无参数仍全量运行，旧环境变量不能隐式触发续跑。
+
+新 summary 快照保存历史证据，逐项标记 `reused` 和来源，并保留原 OFF/ON 摘要及原错误；
+`resume.source_consistency=historical-mismatch-explicit-resume` 表示用户显式接续已有产物。
+旧 manifest 无逐文件摘要，不能追溯证明其差异仅来自编辑器文件；该入口不重建任一包，也不宣称
+两包源码摘要一致或新 checkout 的算子已重新验证。四项新增验收也通过后才输出总通过标志。
+本入口仅覆盖上述特定中断点，不接受任意失败记录或自动搜索“最近一次通过”。
 
 ## Combine 第一阶段：C1–C7 用户回传验收通过
 
