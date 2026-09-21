@@ -18,7 +18,7 @@ Dispatch 阶段历史规划保留如下；当前新增 Combine 第一阶段的�
 
 专家数约束按最新主设计同步：总专家数不超过 1024 且能被 R 整除，不设独立单卡上限，允许 L=1。
 当前 cnt/cumsum 增量已适配 Host/layout/调度器限制；可执行步骤与数值判据见[当前提交验收](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收)。
-Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runtime Flag）；以 `magic % 2` 选择两个固定 4 GiB 窗口，后续 Combine 共用该域但尚未实现。每窗前 2 MiB 留给控制信息，Token 区不得越过 4092 MiB 相对偏移；第一窗尾部留空以保持两窗容量一致。
+Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runtime Flag）；以 `magic % 2` 选择两个固定 4 GiB 窗口，后续 Combine 共用该域但尚未实现。历史 Dispatch 布局曾在每窗前留 2 MiB；当前联合布局为 764KiB Dispatch 控制区、52KiB Combine 控制区及 208KiB 间隙，共享数据从 1MiB 开始。Token 区不得越过 4092 MiB 相对偏移；第一窗尾部留空以保持两窗容量一致。
 开发阶段 1～4 统一先用 16P、每卡 6 专家（总计 96）、BS=96、TopK=6、balance_shift 主场景验证流程及性能；边界条件检查留到完整流程的最终验收，不在各增量默认扫描。
 下文保留阶段规划，空 kernel 辅助打点及完整数据路径的布局/ABI 不代表当前计数实现；既有通过记录不作为新范围已经验证的证据。
 
@@ -238,7 +238,7 @@ D 为 1/3/5…、C 为 2/4/6…；实际 bufferIndex 始终按各自 magic%2 取
 8GiB 通信域；读取在设备批次完成后进行，不进入 kernel 计时区间或逐轮热路径。
 联合模式按两算子的角色分别检查各自窗口，不把 Combine 窗口交给 Dispatch 校验器。
 
-### C6：两算子记录区及 trace 隔离（当前交付）
+### C6：两算子记录区及 trace 隔离（已交付，待设备验证）
 
 breakdown 扩充标准 profiling 记录区，以不同 base 分隔 D/C 的记录、有效计数、丢弃计数和
 latest-launch 状态；记录区不占通信窗口。Dispatch 单测只解析 D 区，Combine 单测只解析 C 区，
@@ -273,6 +273,45 @@ C6 执行约定（2026-09-21）：
 提前中断而丢失有效 Combine 报告。OFF/ON 分目录构建并比较源码内容摘要，禁止把两个版本合并验收。
 writer 的 occupied count 必须按 8 条记录对齐，只有两个有效事件也需发布 8 槽；尾部零事件不作为有效数据。
 CPU 时钟/导出测试仅验证记录契约，设备缓存可见性和 profile 时序由用户 A5 验证。
+
+维护经验（C6）：CANN 的 `GM_ADDR` 可能是指针宏，`const GM_ADDR` 会限定所指数据，
+与 Host typedef 替身的语义不同；记录区可写地址使用明确的 `__gm__ uint8_t * const`。
+Host 编译通过不能替代 profiling ON 的真实 A5 编译，OFF/ON 必须分别构建。
+
+### C7：双窗合法边界探针与 Dispatch 回归（当前交付）
+
+C6 交付为 `abee43c70502de88c18ddd0700b0afde528ecc93`，设备验收待回传；按 2026-09-21
+用户授权单独开发并提交 C7，不把 C5/C6 的开发检查或 Git 交付当作上机通过。
+
+- checkpoint=`ep-sdedup-combine-p1-memory-boundary`，同一 consumer、独立 C7 安装包，
+  profiling OFF、functional。测试内部 `TILEXR_VALIDATION_BOUNDARY_PROBE=1` 选择探针，
+  默认 0 保留三种算子模式及 C5 连续批次语义；不新增业务算子参数。
+- 一键入口先构建和执行 Host 回归，然后前两台固定 8P，串行三组：独立双窗探针
+  （loops=1/warmup=0）、真实 Dispatch BF16、真实 Dispatch FP16（均 loops=5/warmup=2，
+  BS96/H7168/K6/E96，D quant=0）。各组新进程、新通信域，首错停止，不让探针写入污染业务回归。
+- 探针使用 8GiB 通信域，两窗步长均为 4GiB；每窗统一排除末 4MiB，合法上界为
+  相对偏移 4092MiB。第二窗被排除的末端是真实 runtime 区，第一窗相同位置保留不用。
+- 每窗四个 32B 写入点：Combine 控制区首 `764KiB`、控制区尾 `816KiB-32`、
+  共享数据首 `1MiB`、合法区尾 `4092MiB-32`。各点/各窗使用不同非零模式，
+  检查初始零值、设备写后读回、Host 读回及合法范围内相邻 guard 保持零；最后重读全部目标以发现窗别名。
+  guard 不进入 runtime 保留范围；208KiB 间隙仅作邻接保护字节读回，不写入。
+- 独立测试 kernel 只由一个 AIV 访问本 rank 窗口，通过 UB/DataCopy 写入并清空 UB 后重读；
+  64 位偏移贯穿 Host/launch/Kernel。独立 artifact 经注册式 launch 提交，业务 D/C ABI 不变。
+  不调用 NextMagic，不伪造算子轮次；probe 提交和完成单独计数，未确认完成前不释放通信域。
+- Host 替身注入错误窗口、丢失写入/读回、guard 改写及同步/清理失败，要求无总 PASS；
+  脚本严格检查两窗完整点位、独立模式、身份与产物，真实 Dispatch 使用既有完整输出和 Flag 判据。
+
+本点仅证明合法窗口边界的本卡地址访问、邻接保护及真实 Dispatch 回归；不证明跨卡 Combine
+结果传输、ready/Flag 协议、yOut 业务数值或超出当前 shape 的业务容量。
+
+维护经验：旧 Dispatch 的 4GiB 单域尾部探针不能直接用于当前 8GiB 双窗；必须从实际
+`peerMemBytes/2` 计算窗口，并先扣除统一 runtime 保留量。末端 guard 只能位于合法一侧。
+探针与业务回归使用不同通信域，可保留初始零值 oracle，同时避免测试写入影响后续算法。
+GM 写后先清空 UB 再读回，Host 零值检查缓冲预填非零哨兵，避免漏读仍命中初始值；
+全部目标与 guard 在最后再次复核，可捕获后续探针的别名或越界改写。
+内部测试 selector 必须在普通 `run.sh` 入口清零，并与部署配置隔离；否则 shell 遗留
+`BOUNDARY_PROBE=1` 会让请求的 both 调用被替换为探针，产生错误的通过结论。
+selector 只由 C7 验收 workflow 的专用用例启用，Host 参数回归须覆盖此污染场景。
 
 ### Flag 遗留范围
 
@@ -784,7 +823,3 @@ checkpoint 是验证阶段名称，具体尝试用完整 commit SHA 标识；失
 - 真实通信旧 ready 隔离、后续完整 workspace 预算、Combine 生命周期或未确认的并发/量化支持。
 
 本文只记录流程规划。实际通过情况必须以对应 Git checkpoint 的服务器日志为准，并在后续实现提交中更新验证记录。
-
-维护经验（C6）：CANN 的 `GM_ADDR` 可能是指针宏，`const GM_ADDR` 会限定所指数据，
-与 Host typedef 替身的语义不同；记录区可写地址使用明确的 `__gm__ uint8_t * const`。
-Host 编译通过不能替代 profiling ON 的真实 A5 编译，OFF/ON 必须分别构建。

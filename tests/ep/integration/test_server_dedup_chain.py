@@ -69,6 +69,7 @@ class ChainConsumerTests(unittest.TestCase):
         cls.executable = cls.folder / "consumer"
         result = subprocess.run([
             compiler, "-std=c++14", "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
+            "-DTILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1",
             "-I", str(include.parent), "-I", str(ROOT / "src/include"),
             "-I", str(ROOT / "src/comm"), "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
             str(SOURCE / "test_tilexr_ep_server_dedup_chain.cpp"),

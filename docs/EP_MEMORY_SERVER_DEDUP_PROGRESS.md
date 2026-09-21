@@ -37,7 +37,8 @@ C5 交付点 `ep-sdedup-combine-p1-chain-multi`；入口仍为 `bash run_commit_
 C5 连续提交 warmup/正式轮次，批末同步，分别检查各算子计数和 magic/窗口；保留空 Combine 50μs 等待。
 **C5 待验证**：交付 `4ef0439640b016727287bebec84ef5cc0a521445`。2026-09-21 用户通知验证环境暂不可用，
 授权继续 C6/C7 并要求分批提交，后续切换目标 commit 执行同一入口。本授权仅调整开发顺序，不代表 C5 通过。
-当前开发 C6 `ep-sdedup-combine-p1-profile`，C7 将单独提交；两点设备验收同样等待服务器恢复。
+C6 `ep-sdedup-combine-p1-profile` 已交付 `abee43c70502de88c18ddd0700b0afde528ecc93`，**待设备验证**。
+当前交付 C7 `ep-sdedup-combine-p1-memory-boundary`，独立提交；设备验收同样等待服务器恢复。
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，

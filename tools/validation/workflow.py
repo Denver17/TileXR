@@ -50,7 +50,14 @@ COMBINE_PROFILE_TEST = "test_tilexr_ep_server_dedup_combine_profile"
 COMBINE_PROFILE_KERNEL_TEST = "test_tilexr_ep_server_dedup_combine_profile_kernel"
 COMBINE_PROFILE_LAUNCH_TEST = "test_tilexr_ep_server_dedup_combine_profile_launch"
 COMBINE_PROFILE_REGIONS_TEST = "test_tilexr_ep_server_dedup_combine_profile_regions"
-COMBINE_CONTINUOUS_CHECKPOINTS = (COMBINE_MULTI_CHECKPOINT, COMBINE_PROFILE_CHECKPOINT)
+COMBINE_BOUNDARY_CHECKPOINT = "ep-sdedup-combine-p1-memory-boundary"
+COMBINE_BOUNDARY_TEST = "test_tilexr_ep_server_dedup_combine_boundary_consumer"
+COMBINE_BOUNDARY_LAUNCH_TEST = "test_tilexr_ep_server_dedup_combine_boundary_launch"
+COMBINE_BOUNDARY_KERNEL_TEST = "test_tilexr_ep_server_dedup_combine_boundary_kernel"
+COMBINE_BOUNDARY_MARKER = "EP_SERVER_DEDUP_COMBINE_BOUNDARY_PASS "
+COMBINE_BOUNDARY_LIBRARY = "lib/libtilexr-ep-combine-memory-boundary-test.so"
+COMBINE_BOUNDARY_KERNEL = "lib/tilexr/kernels/tilexr_ep_combine_memory_boundary_test_kernel.o"
+COMBINE_CONTINUOUS_CHECKPOINTS = (COMBINE_MULTI_CHECKPOINT, COMBINE_PROFILE_CHECKPOINT, COMBINE_BOUNDARY_CHECKPOINT)
 COMBINE_DEVICE_CHECKPOINTS = (COMBINE_CHAIN_CHECKPOINT, *COMBINE_CONTINUOUS_CHECKPOINTS)
 COMBINE_CHAIN_TEST = "test_tilexr_ep_server_dedup_combine_chain"
 COMBINE_DELAY_TEST = "test_tilexr_ep_server_dedup_combine_delay"
@@ -63,6 +70,8 @@ COMBINE_TESTS = {
     COMBINE_MULTI_CHECKPOINT: COMBINE_ABI_HOST_TESTS | {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST, COMBINE_MULTI_TEST},
 }
 COMBINE_TESTS[COMBINE_PROFILE_CHECKPOINT] = COMBINE_TESTS[COMBINE_MULTI_CHECKPOINT] | {COMBINE_PROFILE_TEST, COMBINE_PROFILE_REGIONS_TEST, COMBINE_PROFILE_LAUNCH_TEST, COMBINE_PROFILE_KERNEL_TEST}
+COMBINE_TESTS[COMBINE_BOUNDARY_CHECKPOINT] = COMBINE_TESTS[COMBINE_PROFILE_CHECKPOINT] | {
+    COMBINE_BOUNDARY_TEST, COMBINE_BOUNDARY_LAUNCH_TEST, COMBINE_BOUNDARY_KERNEL_TEST}
 COMBINE_ABI = {"launch_bytes": 88, "tiling_bytes": 16, "runtime_args_bytes": 88,
                "block_dim": 64, "kernel_scope": "combine-empty"}
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
@@ -319,6 +328,11 @@ class Config:
             if breakdown not in ("0", "1"):
                 raise ValueError("编译 breakdown 必须为 0/1")
             self.profiling = breakdown == "1"
+        if self.checkpoint == COMBINE_BOUNDARY_CHECKPOINT and self.profiling:
+            raise ValueError("Combine C7要求profiling OFF产物")
+        probe = os.environ.get("TILEXR_VALIDATION_BOUNDARY_PROBE", "0")
+        if probe not in ("0", "1") or (probe == "1" and self.checkpoint != COMBINE_BOUNDARY_CHECKPOINT):
+            raise ValueError("BOUNDARY_PROBE必须为0/1，且仅C7允许启用")
         if self.checkpoint in (CHAIN_CHECKPOINT, CHAIN_MULTI_CHECKPOINT, "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send"):
             raise ValueError("旧 cnt-only/first-hop/source-send checkpoint 已由 ep-sdedup-p2-dispatch 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
@@ -327,7 +341,7 @@ class Config:
         if self.checkpoint in (COMBINE_ABI_HOST_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT) and self.mode != "host":
             raise ValueError("Combine C1/C3 仅验证 Host ABI/layout/configuration；请使用 host 模式")
         if action == "commit-validate" and self.checkpoint not in COMBINE_TESTS:
-            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3/C4/C5/C6")
+            raise ValueError("当前提交验收入口仅支持 Combine C1/C2/C3/C4/C5/C6/C7")
         if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, COMBINE_EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
@@ -405,8 +419,8 @@ def chain_configuration(checkpoint, default_host=None):
             os.environ.get("TILEXR_VALIDATION_LOOPS", "1") != "1" or
             os.environ.get("TILEXR_VALIDATION_WARMUP", "0") != "0"):
         raise ValueError("memory-boundary / Combine C4 仅执行 functional，loops=1，warmup=0")
-    if checkpoint == COMBINE_MULTI_CHECKPOINT and os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional":
-        raise ValueError("Combine C5 仅执行 functional，performance/breakdown 属于 C6")
+    if checkpoint in (COMBINE_MULTI_CHECKPOINT, COMBINE_BOUNDARY_CHECKPOINT) and os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional":
+        raise ValueError("Combine C5/C7 仅执行 functional；performance/breakdown 请选择 C6")
     shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
              for name, default in (("bs", "96"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "96"))}
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
@@ -458,10 +472,15 @@ def chain_configuration(checkpoint, default_host=None):
         except ValueError:
             raise ValueError(f"{name} 必须为首节点可跨机访问的IPv4:端口；检查 hostfile 首项或 run.sh 地址覆盖参数") from None
 
+    boundary_probe = os.environ.get("TILEXR_VALIDATION_BOUNDARY_PROBE", "0") == "1"
+    if boundary_probe and (checkpoint != COMBINE_BOUNDARY_CHECKPOINT or loops != 1 or warmup != 0):
+        raise ValueError("C7边界探针要求loops=1、warmup=0")
     chain = dict(shape, dtype=dtype, operator_mode=operator_mode,
                  quant_mode=int(quant_mode), dispatch_quant_mode=int(quant_mode), combine_quant_mode=0,
                  fp8_format=fp8_format, block_dim=block_dim, run_mode=run_mode, loops=loops, warmup=warmup,
                  route_mode=route_mode, seed=int(seed), case_analysis=int(case_analysis))
+    if checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
+        chain["boundary_probe"] = boundary_probe
     if checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
         return chain
 
@@ -472,7 +491,7 @@ def chain_configuration(checkpoint, default_host=None):
     if comm_id == barrier_addr:
         raise ValueError("communicator 与 Host barrier 必须使用不同端口")
     scope = {"dispatch": "dispatch", "combine": "combine-empty", "both": "dispatch-combine-empty"}[operator_mode]
-    chain.update(comm_id=comm_id, barrier_addr=barrier_addr, kernel_scope=scope)
+    chain.update(comm_id=comm_id, barrier_addr=barrier_addr, kernel_scope="memory-boundary" if boundary_probe else scope)
     if run_mode == "performance":
         chain["msprof"] = os.environ.get("TILEXR_VALIDATION_MSPROF", "msprof")
         if not chain["msprof"]:
@@ -532,7 +551,8 @@ def validation_directory(checkpoint):
             COMBINE_DRY_RUN_CHECKPOINT: "validation-combine-c3",
             COMBINE_CHAIN_CHECKPOINT: "validation-combine-c4",
             COMBINE_MULTI_CHECKPOINT: "validation-combine-c5",
-            COMBINE_PROFILE_CHECKPOINT: "validation-combine-c6"}.get(checkpoint, "validation")
+            COMBINE_PROFILE_CHECKPOINT: "validation-combine-c6",
+            COMBINE_BOUNDARY_CHECKPOINT: "validation-combine-c7"}.get(checkpoint, "validation")
 
 
 def runtime_check(config, install, log):
@@ -559,6 +579,12 @@ def runtime_check(config, install, log):
         kernel = install / "lib/tilexr/kernels/tilexr_ep_combine_memory_server_dedup_kernel.o"
         inspect(["readelf", "-h", kernel], "combine-server-dedup-elf.log")
 
+    if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
+        inspect(["readelf", "-h", install / COMBINE_BOUNDARY_KERNEL], "combine-boundary-elf.log")
+        probe_dependencies = inspect(["ldd", "-r", install / COMBINE_BOUNDARY_LIBRARY],
+                                     "combine-boundary-dependencies.log", env=env)
+        if any(word in probe_dependencies for word in ("not found", "undefined symbol", "/devlib/")):
+            raise ValueError("C7边界探针依赖未正确解析")
     symbols = inspect(["nm", "-D", "--defined-only", "--no-demangle", "--format=posix", library],
                       "symbols.log")
     # 公共接口采用 extern "C"；匹配完整动态函数符号名，不带参数列表或左括号。
@@ -604,6 +630,8 @@ def verify_build(config, *, check_run_mode=True):
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
             raise ValueError("需要完整 Dispatch 120B ABI / 独立 GM tiling 产物，请重新 build_all.sh 和 sync.sh")
         profiling = manifest.get("server_dedup_profiling")
+        if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT and profiling is not False:
+            raise ValueError("C7验收不接受profiling ON产物")
         if type(profiling) is not bool or (check_run_mode and config.chain is not None and
                                            profiling is not (config.chain["run_mode"] == "breakdown")):
             raise ValueError("设备打点开关与运行模式不一致：breakdown 请执行 bash build_all.sh breakdown=1，"
@@ -613,6 +641,9 @@ def verify_build(config, *, check_run_mode=True):
     if manifest["architecture"] != platform.machine():
         raise ValueError("节点 CPU 架构与构建不一致，不能直接分发二进制")
     artifacts = artifact_files(config.install)
+    if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT and any(
+            name not in manifest["artifacts"] for name in (COMBINE_BOUNDARY_LIBRARY, COMBINE_BOUNDARY_KERNEL)):
+        raise ValueError("C7安装包缺少独立边界探针产物")
     # Incremental deployments retain retired files; only this manifest's files
     # belong to the active package. Local build validation remains exact.
     if config.action in ("verify", "node", "rank"):
@@ -673,7 +704,7 @@ def build(config):
     work = clean_build_directory(config)
     require_tools(["cmake", "ctest", "g++", "make"])
     source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
-    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+    if config.checkpoint in (COMBINE_PROFILE_CHECKPOINT, COMBINE_BOUNDARY_CHECKPOINT):
         source["content_sha256"] = source_content_sha256(config.root, source)
     stage = work / "install"
     log = config.logs / ("build-" + build_id)
@@ -692,10 +723,12 @@ def build(config):
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
                  f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if config.profiling else 'OFF'}",
-                 f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}"],
+                 f"-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
+                 f"-DTILEXR_EP_BUILD_COMBINE_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs,
-                 *(["--target", "tilexr-ep"] if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS else [])],
+                 *(["--target", "tilexr-ep"] if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS else []),
+                 *(["tilexr-ep-combine-memory-boundary-test"] if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT else [])],
                 log / "production-build.log", timeout=3600)
         command(["cmake", "--install", work / "production"], log / "production-install.log", timeout=180)
         kernels = ["dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup"]
@@ -713,11 +746,12 @@ def build(config):
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST={'ON' if registration else 'OFF'}",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST={'ON' if chain else 'OFF'}",
              f"-DBUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT else 'OFF'}",
+             f"-DBUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST={'ON' if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT else 'OFF'}",
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     build_targets = combine_tests
     if config.checkpoint in (COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
-        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
+        build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
     if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
         build_targets = build_targets | {CHAIN_PROGRAM}
     targets = ["--target", *sorted(build_targets)] if build_targets else []
@@ -743,7 +777,7 @@ def build(config):
     tests = []
     for test in listing["tests"]:
         command = test["command"]
-        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST):
+        if test["name"] in (COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST):
             if (len(command) != 4 or not command[1].endswith(".py") or command[2] != "--consumer"
                     or Path(command[3]).name != COMBINE_DRY_RUN_PROGRAM):
                 raise ValueError(f"无法导出 C3 consumer 测试命令：{command}")
@@ -778,12 +812,16 @@ def build(config):
                          "lib/tilexr/kernels/tilexr_ep_memory_boundary_test_kernel.o"):
             if not (stage / artifact).is_file():
                 raise ValueError("缺少通信域边界测试产物：" + artifact)
+    if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
+        for artifact in (COMBINE_BOUNDARY_LIBRARY, COMBINE_BOUNDARY_KERNEL):
+            if not (stage / artifact).is_file():
+                raise ValueError("C7缺少独立边界探针产物：" + artifact)
     runtime_check(config, stage, log)
-    if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
+    if config.checkpoint in (COMBINE_PROFILE_CHECKPOINT, COMBINE_BOUNDARY_CHECKPOINT):
         final_source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
         if (final_source["commit"] != source["commit"] or
                 source_content_sha256(config.root, final_source) != source["content_sha256"]):
-            raise Failure("BUILD_FAILED", "C6构建期间源码发生变化，拒绝关联不确定产物")
+            raise Failure("BUILD_FAILED", "构建期间源码发生变化，拒绝关联不确定产物")
     manifest = {"build_id": build_id, "source": source, "mode": config.mode,
                 "checkpoint": config.checkpoint, "architecture": platform.machine(),
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
@@ -833,6 +871,7 @@ def remote_argv(config, host, action, *arguments):
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "operator_mode", "dispatch_quant_mode", "combine_quant_mode", "fp8_format",
                             "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis", "route_mode", "seed"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
+                values["TILEXR_VALIDATION_BOUNDARY_PROBE"] = int(config.chain.get("boundary_probe", False))
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
         exports = "; ".join("export " + key + "=" + shlex.quote(str(value))
@@ -1037,6 +1076,8 @@ def validate_combine_dispatch_record(dispatch, chain, mapping, run_id, manifest,
     """Retain the Combine checkpoint identity while applying the complete Dispatch validator."""
     if dispatch.get("checkpoint") != manifest["checkpoint"] or dispatch.get("pid") != chain["pid"]:
         raise Failure("RESULT_FAILED", "Dispatch 不属于本次进程/检查点", rank=mapping["rank"])
+    if manifest["checkpoint"] == COMBINE_BOUNDARY_CHECKPOINT and dispatch.get("boundary_probe") is not False:
+        raise Failure("RESULT_FAILED", "C7真实Dispatch不得使用边界探针标记", rank=mapping["rank"])
     adapted = dict(dispatch, checkpoint=DISPATCH_CHECKPOINT,
                    chain=dict(chain, checkpoint=DISPATCH_CHECKPOINT))
     validate_rank_records([adapted], [mapping], run_id, dict(manifest, checkpoint=DISPATCH_CHECKPOINT),
@@ -1096,16 +1137,50 @@ def validate_combine_multi_record(record, mapping, run_id, manifest, config):
         raise Failure("RESULT_FAILED", "Combine 独跑意外提交 Dispatch", rank=mapping["rank"])
 
 
+def validate_combine_boundary_record(record, mapping):
+    stride = SERVER_DEDUP_PEER_BYTES // 2
+    reserved = 4 * 1024 ** 2
+    numbers = dict(peer_mem_bytes=SERVER_DEDUP_PEER_BYTES, buffer_stride=stride,
+                   runtime_reserved_bytes=reserved, legal_window_bytes=stride - reserved,
+                   probe_bytes=32, probe_submitted=8, probe_completed=8, submitted=8, completed=8,
+                   warmup_submitted=0, warmup_completed=0, dispatch_submitted=0, dispatch_completed=0,
+                   combine_submitted=0, combine_completed=0)
+    if any(type(record.get(key)) is not int or record[key] != value for key, value in numbers.items()):
+        raise Failure("RESULT_FAILED", "C7探针容量或提交/完成计数不一致", rank=mapping["rank"])
+    if record.get("kernel_scope") != "memory-boundary" or record.get("native_status") != "boundary-probe":
+        raise Failure("RESULT_FAILED", "C7边界探针执行范围不明确", rank=mapping["rank"])
+    points = record.get("points")
+    if not isinstance(points, list) or len(points) != 8 or any(not isinstance(point, dict) for point in points):
+        raise Failure("LOG_PARSE_FAILED", "C7必须包含双窗全部8个独立点位", rank=mapping["rank"])
+    offsets = (764 * 1024, 816 * 1024 - 32, 1024 ** 2, stride - reserved - 32)
+    for number, point in enumerate(points):
+        window, index = divmod(number, 4)
+        expected = dict(window=window, index=index, offset=window * stride + offsets[index],
+                        pattern=0xC7000101 + window * 0x100 + index * 0x10,
+                        initial_zero=True, device_initial_zero=True, device_readback=True, host_readback=True,
+                        guard_before_zero=True, guard_after_checked=index != 3,
+                        guard_after_zero=True if index != 3 else None, final_readback=True)
+        if any(key not in point or type(point[key]) is not type(value) or point[key] != value for key, value in expected.items()):
+            raise Failure("RESULT_FAILED", "C7点位/窗口/pattern/保护区或最终复核不完整", rank=mapping["rank"], point=number)
+
+
 def validate_combine_chain_record(record, mapping, run_id, manifest, config):
     """Certify empty Combine evidence while retaining the complete Dispatch checks."""
     if config is None:
         raise Failure("RESULT_FAILED", "缺少 Combine 配置", rank=mapping["rank"])
     both = config["operator_mode"] == "both"
+    if manifest["checkpoint"] == COMBINE_BOUNDARY_CHECKPOINT:
+        for marker in (record, record["chain"]):
+            if marker.get("boundary_probe") is not config["boundary_probe"]:
+                raise Failure("RESULT_FAILED", "C7 boundary_probe回显不一致", rank=mapping["rank"])
     for marker in (record, record["chain"]):
         for key in ("operator_mode", "dispatch_quant_mode", "combine_quant_mode", "quant_mode",
                     "fp8_format", "run_mode", "loops", "warmup"):
             if type(marker.get(key)) is not type(config[key]) or marker[key] != config[key]:
                 raise Failure("RESULT_FAILED", "Combine 配置回显不一致", rank=mapping["rank"], field=key)
+    if config.get("boundary_probe"):
+        validate_combine_boundary_record(record, mapping)
+        return
     if manifest["checkpoint"] in COMBINE_CONTINUOUS_CHECKPOINTS:
         validate_combine_multi_record(record, mapping, run_id, manifest, config)
         return
@@ -1170,7 +1245,8 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                             kernel_shas=operator_kernel_shas(manifest, chain_config))
                     except (ValueError, TypeError, KeyError) as error:
                         raise Failure("RESULT_FAILED", f"C6算子测量记录无效：{error}", rank=mapping["rank"]) from error
-            loops = chain_config["loops"] if manifest["checkpoint"] in COMBINE_CONTINUOUS_CHECKPOINTS else 1
+            loops = (8 if chain_config and chain_config.get("boundary_probe") else
+                     chain_config["loops"] if manifest["checkpoint"] in COMBINE_CONTINUOUS_CHECKPOINTS else 1)
             if manifest["checkpoint"] == DISPATCH_CHECKPOINT:
                 if chain_config is None:
                     raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
@@ -1300,6 +1376,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
                 env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
+                env["TILEXR_VALIDATION_BOUNDARY_PROBE"] = str(int(config.chain.get("boundary_probe", False)))
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "operator_mode", "dispatch_quant_mode", "combine_quant_mode", "fp8_format", "loops", "warmup", "run_mode", "route_mode", "seed"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
                 inputs = log.parent / "inputs"
@@ -1339,6 +1416,8 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                     marker = MEMORY_BOUNDARY_MARKER
                 if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and config.chain["operator_mode"] != "dispatch":
                     marker = COMBINE_CHAIN_MARKER
+                if config.chain.get("boundary_probe"):
+                    marker = COMBINE_BOUNDARY_MARKER
                 if any(line.startswith(DISPATCH_INVALID_MARKER) for line in output.splitlines()):
                     if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
                         raise Failure("RESULT_FAILED", "Dispatch 输出校验失败")
@@ -1353,7 +1432,11 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                 if marker == DISPATCH_MARKER and record.get("validation_status") == "FAIL":
                     raise Failure("LOG_PARSE_FAILED", "PASS marker 与输出校验失败状态矛盾")
                 record["chain"] = parse_rank_marker(output, CHAIN_MARKER)
-                if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
+                if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
+                    unexpected = ((DISPATCH_MARKER, COMBINE_CHAIN_MARKER) if config.chain["boundary_probe"] else (COMBINE_BOUNDARY_MARKER,))
+                    if any(line.startswith(unexpected) for line in output.splitlines()):
+                        raise Failure("RESULT_FAILED", "C7探针与业务算子marker混用")
+                if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and not config.chain.get("boundary_probe"):
                     has_dispatch = any(line.startswith(DISPATCH_MARKER) for line in output.splitlines())
                     if config.chain["operator_mode"] == "both":
                         record["dispatch"] = parse_rank_marker(output, DISPATCH_MARKER)
@@ -1491,6 +1574,10 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_EMPTY_KERNEL_", " test=" + name.removeprefix(prefix + "combine_")
     elif name in (COMBINE_CHAIN_TEST, COMBINE_DELAY_TEST):
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_CHAIN_", " test=" + ("delay" if name == COMBINE_DELAY_TEST else "lifecycle")
+    elif name == COMBINE_BOUNDARY_TEST:
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_BOUNDARY_HOST_", " test=lifecycle"
+    elif name in (COMBINE_BOUNDARY_KERNEL_TEST, COMBINE_BOUNDARY_LAUNCH_TEST):
+        marker, suffix = "EP_SERVER_DEDUP_COMBINE_BOUNDARY_" + ("KERNEL_" if name == COMBINE_BOUNDARY_KERNEL_TEST else "LAUNCH_"), ""
     elif name == COMBINE_PROFILE_KERNEL_TEST:
         marker, suffix = "EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_", ""
     elif name == COMBINE_PROFILE_LAUNCH_TEST:
@@ -1536,6 +1623,8 @@ def host_validate(config, run_id=None):
         result.update(scope="Combine C5 Host回归：C1/C3/C4、连续批次/预热/选窗/生命周期及空kernel等待；不含真实NPU提交。")
     if config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
         result.update(scope="Combine C6 Host回归：C1/C3/C4/C5、独立记录区及三模式profiling；不含真实NPU提交。")
+    if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
+        result.update(scope="Combine C7 Host回归：C1/C3/C4/C5/C6、边界探针注册/kernel与consumer；不含真实NPU提交。")
     if config.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
         result.update(scope="Combine C3：C1回归、同一consumer的三种算子模式、独立量化开关及rank映射；无CANN/SSH/设备分配/communicator/launch。")
     started = time.monotonic()
@@ -1605,6 +1694,13 @@ COMBINE_CHAIN_CASES = (
 )
 
 
+COMBINE_BOUNDARY_CASES = (
+    ("boundary", "combine", "bf16", 0, "e4m3"),
+    ("dispatch-bf16", "dispatch", "bf16", 0, "e4m3"),
+    ("dispatch-fp16", "dispatch", "fp16", 0, "e4m3"),
+)
+
+
 COMBINE_MULTI_CASES = (
     ("dispatch-bf16", "dispatch", "bf16", 0, "e4m3"),
     ("dispatch-fp16", "dispatch", "fp16", 0, "e4m3"),
@@ -1614,8 +1710,9 @@ COMBINE_MULTI_CASES = (
 def combine_chain_commit_validate(config, run_id):
     """Run one checkpoint's bounded matrix through the normal sync/run path."""
     multi = config.checkpoint == COMBINE_MULTI_CHECKPOINT
-    cases = COMBINE_MULTI_CASES if multi else COMBINE_CHAIN_CASES
-    checkpoint_label = "C5" if multi else "C4"
+    boundary = config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT
+    cases = COMBINE_BOUNDARY_CASES if boundary else COMBINE_MULTI_CASES if multi else COMBINE_CHAIN_CASES
+    checkpoint_label = "C7" if boundary else "C5" if multi else "C4"
     loops, warmup = (5, 2) if multi else (1, 0)
     log = config.logs / run_id
     summary = dict(run_id=run_id, checkpoint=config.checkpoint, mode=config.mode, status="FAIL",
@@ -1625,6 +1722,9 @@ def combine_chain_commit_validate(config, run_id):
         summary["scope"] = ("Combine C5：C1/C3/C4/C5 Host回归及50us空kernel；前2台固定8P，"
                             "三种算子模式共8个串行用例，每例2轮预热+5轮正式调用；"
                             "批末同步、各自magic/选窗和最终Dispatch校验；不验Combine通信或业务数值。")
+    if boundary:
+        summary["scope"] = ("Combine C7：C1-C6 Host回归及边界探针；前2台固定8P，独立8GiB双窗8点探针、"
+                            "BF16/FP16真实Dispatch多轮回归共3例；避开runtime保留区，不验Combine业务数据。")
     original_environment = dict(os.environ)
     stage = "host-regression"
     case_config = None
@@ -1636,6 +1736,11 @@ def combine_chain_commit_validate(config, run_id):
                        build_timeout_seconds=900, validation_timeout_seconds=config.timeout,
                        per_test_timeout_seconds=120, per_case_timeout_seconds=config.timeout,
                        build_logs=str(config.logs / ("build-" + manifest["build_id"])))
+        if boundary:
+            summary["source_content_sha256"] = manifest["source"]["content_sha256"]
+            summary["manifest"] = str(log / "build-manifest.json")
+            write_json(Path(summary["manifest"]), manifest)
+            os.environ["TILEXR_VALIDATION_BOUNDARY_PROBE"] = "0"
         host_id = run_id + "/host-regression"
         code = host_validate(config, run_id=host_id)
         summary["host_regression"] = str(config.logs / host_id / "summary.json")
@@ -1647,7 +1752,7 @@ def combine_chain_commit_validate(config, run_id):
             if key.startswith("TILEXR_VALIDATION_") and key.removeprefix("TILEXR_VALIDATION_") in (
                     "RUN_MODE", "LOOPS", "WARMUP", "BS", "H", "TOPK", "MOE_EXPERT_NUM", "DTYPE",
                     "QUANT_MODE", "DISPATCH_QUANT_MODE", "COMBINE_QUANT_MODE", "OPERATOR_MODE",
-                    "FP8_FORMAT", "BLOCK_DIM", "CASE_ANALYSIS", "ROUTE_MODE", "SEED", "SERVERS"):
+                    "FP8_FORMAT", "BLOCK_DIM", "CASE_ANALYSIS", "ROUTE_MODE", "SEED", "SERVERS", "BOUNDARY_PROBE"):
                 os.environ.pop(key)
         os.environ.pop("TILEXR_DIRECT_HOSTS_JSON", None)
         os.environ.update(TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS=str(loops),
@@ -1663,9 +1768,13 @@ def combine_chain_commit_validate(config, run_id):
         selected_hosts = case_config.hosts()
         summary.update(expected_hosts=selected_hosts, rank_size=len(selected_hosts) * 8)
         sync(case_config)
-        print(f"{checkpoint_label} 设备矩阵共 {len(cases)} 个串行用例，每例 loops={loops} warmup={warmup}；首个失败即停止。", flush=True)
+        print(f"{checkpoint_label} 设备矩阵共 {len(cases)} 个串行用例；各例轮次见START行，首个失败即停止。", flush=True)
         for index, (name, operator, dtype, quant, fp8) in enumerate(cases, 1):
             stage = name
+            if boundary:
+                loops, warmup = (1, 0) if name == "boundary" else (5, 2)
+                os.environ.update(TILEXR_VALIDATION_BOUNDARY_PROBE="1" if name == "boundary" else "0",
+                                  TILEXR_VALIDATION_LOOPS=str(loops), TILEXR_VALIDATION_WARMUP=str(warmup))
             os.environ.update(TILEXR_VALIDATION_OPERATOR_MODE=operator, TILEXR_VALIDATION_DTYPE=dtype,
                               TILEXR_VALIDATION_QUANT_MODE=str(quant), TILEXR_VALIDATION_DISPATCH_QUANT_MODE=str(quant),
                               TILEXR_VALIDATION_FP8_FORMAT=fp8,
@@ -1684,7 +1793,8 @@ def combine_chain_commit_validate(config, run_id):
                 code = FAILURE_CODES[errors[0]["type"]]
             report = read_json(case_config.last_summary_path)
             passed = (code == 0 and report.get("status") == "PASS" and
-                      report.get("rank_size") == 16 and report.get("completed_ranks") == 16)
+                      report.get("rank_size") == 16 and report.get("completed_ranks") == 16 and
+                      (not boundary or report.get("build_id") == manifest["build_id"]))
             summary["cases"].append(dict(name=name, status="PASS" if passed else "FAIL",
                                          summary=str(case_config.last_summary_path),
                                          configuration=dict(case_config.chain),
@@ -2294,6 +2404,10 @@ def run(config):
     if config.checkpoint == MEMORY_BOUNDARY_CHECKPOINT:
         scope = (f"{len(mappings)}P 每 Rank 4 GiB MemoryDomain 分配和 peer 映射；"
                  "本卡末尾 32B DataCopy 写入/读回、Host 比较及前邻 32B 零值检查；未验证跨卡数据传输或去重算法。")
+    elif config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
+        scope = (f"Combine C7：{len(mappings)}P 双窗8点独立边界探针，避开runtime；不提交业务算子。"
+                 if config.chain["boundary_probe"] else f"Combine C7：{len(mappings)}P {config.chain['operator_mode']} "
+                 "连续预热/正式调用回归，保留真实Dispatch输出/五表/Flag校验；不验Combine业务数据。")
     elif config.checkpoint == COMBINE_PROFILE_CHECKPOINT:
         scope = (f"Combine C6：{len(mappings)}P {config.chain['operator_mode']} {config.chain['run_mode']}，"
                  "连续预热/正式调用、各算子独立采集和trace；空Combine等待50us，算法字节0/带宽N/A；不验Combine通信。")
@@ -2326,7 +2440,8 @@ def run(config):
         report.update(rank_size=len(mappings), completed_ranks=completed, rank_mapping=mappings)
         if config.chain is not None:
             report["chain_configuration"] = dict(config.chain)
-            if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and config.chain["operator_mode"] != "combine" and not errors:
+            if (config.checkpoint in COMBINE_DEVICE_CHECKPOINTS and not config.chain.get("boundary_probe")
+                    and config.chain["operator_mode"] != "combine" and not errors):
                 try:
                     dispatch_records = [rank["dispatch"] if config.chain["operator_mode"] == "both" else rank
                                         for node in nodes for rank in node["reported_result"]["ranks"]]

@@ -37,6 +37,9 @@
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_test.h"
 #endif
+#ifdef TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST
+#include "combine_memory_boundary_test.h"
+#endif
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -110,6 +113,7 @@ struct Config {
     int64_t combineQuantMode = 0;
     std::string operatorMode = "dispatch";
     bool dryRun = false;
+    bool boundaryProbe = false;
     std::string fp8Format = "e4m3";
     sockaddr_in barrier {};
 };
@@ -147,8 +151,16 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-dry-run" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile",
+        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
+        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary",
         "unsupported TILEXR_VALIDATION_CHECKPOINT");
+    if (const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE")) {
+        Require(std::strcmp(probe, "0") == 0 || std::strcmp(probe, "1") == 0,
+            "boundary_probe must be 0/1");
+        c.boundaryProbe = std::strcmp(probe, "1") == 0;
+    }
+    Require(!c.boundaryProbe || c.checkpoint == "ep-sdedup-combine-p1-memory-boundary",
+        "boundary_probe requires C7 checkpoint");
     Require(c.checkpoint != "ep-sdedup-combine-p1-dry-run" || c.dryRun,
         "Combine C3 requires --dry-run");
     if (const char *op = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE")) c.operatorMode = op;
@@ -157,8 +169,9 @@ Config Parse(int argc, char **argv)
     Require(c.dryRun || c.operatorMode == "dispatch" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile",
-        "Combine and joint device execution require C4/C5/C6 checkpoint");
+        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
+        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary",
+        "Combine and joint device execution require C4/C5/C6/C7 checkpoint");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
     Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
@@ -178,6 +191,10 @@ Config Parse(int argc, char **argv)
         "C4 requires functional mode, loops=1, warmup=0");
     Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-multi" ||
         c.runMode == "functional", "C5 requires functional mode");
+    Require(c.checkpoint != "ep-sdedup-combine-p1-memory-boundary" || c.runMode == "functional",
+        "C7 requires functional mode");
+    Require(!c.boundaryProbe || (!c.dryRun && c.loops == 1 && c.warmup == 0),
+        "C7 boundary probe requires real functional mode, loops=1, warmup=0");
     if (const char *routeMode = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
         c.routeMode = TileXREpDemo::ParseRouteMode(routeMode);
     if (const char *seedText = std::getenv("TILEXR_VALIDATION_SEED")) {
@@ -207,7 +224,9 @@ Config Parse(int argc, char **argv)
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
     if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
         c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile" || c.dryRun) && c.operatorMode != "combine") {
+        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
+        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" || c.dryRun) &&
+        !c.boundaryProbe && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
         if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
@@ -314,6 +333,7 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"route_mode\":" << Json(TileXREpDemo::RouteModeName(c.routeMode))
         << ",\"seed\":" << c.seed << ",\"quant_mode\":" << c.quantMode
         << ",\"operator_mode\":" << Json(c.operatorMode)
+        << ",\"boundary_probe\":" << (c.boundaryProbe ? "true" : "false")
         << ",\"dispatch_quant_mode\":" << c.quantMode
         << ",\"combine_quant_mode\":" << c.combineQuantMode
         << ",\"fp8_format\":" << Json(c.fp8Format)
@@ -467,6 +487,9 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
 #include "memory_boundary_consumer.h"
 #endif
+#ifdef TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST
+#include "combine_memory_boundary_consumer.h"
+#endif
 
 // Resolve configuration with production layout arithmetic before any runtime,
 // profiling, socket or device operation. This describes C4 wiring, not tensors.
@@ -502,6 +525,13 @@ int DryRun(const Config &c)
 int Run(const Config &c)
 {
     if (c.dryRun) return DryRun(c);
+    if (c.boundaryProbe) {
+#ifdef TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST
+        return RunCombineMemoryBoundary(c);
+#else
+        throw std::runtime_error("Combine boundary test kernel was not built");
+#endif
+    }
     if (c.checkpoint == "ep-sdedup-p1-memory-boundary") {
 #ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
         return RunMemoryBoundary(c);
@@ -510,7 +540,8 @@ int Run(const Config &c)
 #endif
     }
     const bool multi = c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile";
+        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
+        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary";
     const bool runDispatch = c.operatorMode != "combine";
     const bool runCombine = c.operatorMode != "dispatch";
     TileXREp::EpMemoryServerDedupLayout layout {};

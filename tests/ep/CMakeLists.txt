@@ -17,6 +17,7 @@ option(BUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST "Build installed A
 option(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST "Build installed A5 server dedup registration consumer" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST "Build installed A5 server dedup chain consumer" OFF)
 option(BUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST "Enable the installed 4 GiB boundary test in the chain consumer" OFF)
+option(BUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST "Enable the installed 8 GiB Combine boundary probe" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix")
@@ -350,6 +351,7 @@ add_executable(test_tilexr_ep_server_dedup_chain_dry_run
 target_include_directories(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE
     ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/comm)
 target_link_libraries(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE Threads::Threads)
+target_compile_definitions(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1)
 install(TARGETS test_tilexr_ep_server_dedup_chain_dry_run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(Python3_Interpreter_FOUND)
     add_test(NAME test_tilexr_ep_server_dedup_combine_dry_run
@@ -378,6 +380,32 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(test_tilexr_ep_server_dedup_combine_multi PROPERTIES
         LABELS ep-sdedup-combine-p1-chain-multi TIMEOUT 120)
 endif()
+# C7 keeps the boundary probe separate from the business-operator batch.
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_boundary_consumer
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_boundary.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_boundary_consumer PROPERTIES
+        LABELS ep-sdedup-combine-p1-memory-boundary TIMEOUT 120)
+endif()
+add_executable(test_tilexr_ep_server_dedup_combine_boundary_launch
+    unit/test_tilexr_ep_server_dedup_combine_boundary_launch.cpp
+    integration/combine_memory_boundary_launch.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_combine_boundary_launch PRIVATE
+    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/common)
+target_link_libraries(test_tilexr_ep_server_dedup_combine_boundary_launch PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+add_executable(test_tilexr_ep_server_dedup_combine_boundary_kernel
+    unit/test_tilexr_ep_server_dedup_combine_boundary_kernel.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_combine_boundary_kernel BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/combine_memory_boundary_fake"
+    ${TILEXR_ROOT}/src/include ${TILEXR_ROOT}/src/ep/common)
+foreach(test_name IN ITEMS launch kernel)
+    set(test_target test_tilexr_ep_server_dedup_combine_boundary_${test_name})
+    add_test(NAME ${test_target} COMMAND ${test_target})
+    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-p1-memory-boundary TIMEOUT 30)
+    install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endforeach()
 add_executable(test_tilexr_ep_server_dedup_combine_delay
     unit/test_tilexr_ep_server_dedup_combine_delay.cpp
     ${TILEXR_ROOT}/src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp)
@@ -744,6 +772,12 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)
             PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
         target_link_libraries(test_tilexr_ep_server_dedup_chain PRIVATE ${TILEXR_EP_BOUNDARY_TEST_LIB})
         target_compile_definitions(test_tilexr_ep_server_dedup_chain PRIVATE TILEXR_EP_MEMORY_BOUNDARY_TEST=1)
+    endif()
+    if(BUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST)
+        find_library(TILEXR_EP_COMBINE_BOUNDARY_TEST_LIB tilexr-ep-combine-memory-boundary-test
+            PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
+        target_link_libraries(test_tilexr_ep_server_dedup_chain PRIVATE ${TILEXR_EP_COMBINE_BOUNDARY_TEST_LIB})
+        target_compile_definitions(test_tilexr_ep_server_dedup_chain PRIVATE TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1)
     endif()
     set_target_properties(test_tilexr_ep_server_dedup_chain PROPERTIES
         SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")

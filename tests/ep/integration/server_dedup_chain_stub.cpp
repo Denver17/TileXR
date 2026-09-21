@@ -14,6 +14,7 @@
 #include "ep_memory_server_dedup_combine_host.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
+#include "combine_memory_boundary_test.h"
 #include "tilexr_profiling_runtime.h"
 #include "server_dedup_dispatch_reference.h"
 
@@ -31,8 +32,11 @@ uint64_t lastDispatchMagic = 0;
 bool IsMultiBatch()
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE");
     return checkpoint && (std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0 ||
-        std::strcmp(checkpoint, "ep-sdedup-combine-p1-profile") == 0);
+        std::strcmp(checkpoint, "ep-sdedup-combine-p1-profile") == 0 ||
+        (std::strcmp(checkpoint, "ep-sdedup-combine-p1-memory-boundary") == 0 &&
+         (!probe || std::strcmp(probe, "0") == 0)));
 }
 bool BatchPending()
 {
@@ -41,6 +45,8 @@ bool BatchPending()
 std::map<uintptr_t, std::vector<uint8_t>> packets;
 std::array<uint8_t, 64> boundaryTail {};
 bool boundaryMode = false;
+bool combineBoundaryMode = false;
+std::map<uint64_t, uint8_t> combineBoundaryBytes;
 alignas(512) std::array<uint8_t, 32> localPeer {};
 TileXR::TileXRProfilingRuntimeConfig profileConfig;
 std::vector<uint64_t> profileTimes;
@@ -137,6 +143,26 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
     }
     const uintptr_t address = reinterpret_cast<uintptr_t>(source);
     const uintptr_t peer = rankId < 0 ? 0 : reinterpret_cast<uintptr_t>(args.peerMems[rankId]);
+    if (combineBoundaryMode && peer && address >= peer && address - peer < args.peerMemBytes) {
+        using namespace TileXRCombineMemoryBoundaryTest;
+        const uint64_t offset = address - peer;
+        if (!LegalRange(offset, bytes) || bytes != kProbeBytes) return 92;
+        bool allowed = false;
+        for (uint32_t window = 0; window < kWindowCount; ++window)
+            for (uint32_t index = 0; index < kProbesPerWindow; ++index) {
+                const uint64_t point = ProbeOffset(window, index);
+                allowed = allowed || offset == point || offset == point - kProbeBytes ||
+                    (LegalRange(point + kProbeBytes, kProbeBytes) && offset == point + kProbeBytes);
+            }
+        if (!allowed) return 92;
+        const int ret = Call("combine-boundary-host-read");
+        if (ret != 0) return ret;
+        const char *fault = std::getenv("TEST_COMBINE_BOUNDARY_FAULT");
+        if (fault && std::strcmp(fault, "host-no-read") == 0) return 0;
+        for (size_t byte = 0; byte < bytes; ++byte)
+            static_cast<uint8_t *>(destination)[byte] = combineBoundaryBytes[offset + byte];
+        return 0;
+    }
     if (peer && address >= peer && address - peer < args.peerMemBytes) {
         if (!boundaryMode) {
             const uint64_t bank = lastDispatchMagic % 2U;
@@ -201,6 +227,9 @@ int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, in
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
     boundaryMode = checkpoint && std::strcmp(checkpoint, "ep-sdedup-p1-memory-boundary") == 0;
+    const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE");
+    combineBoundaryMode = checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p1-memory-boundary") == 0 &&
+        probe && std::strcmp(probe, "1") == 0;
     if (dataMiB != (boundaryMode ? 4092 : 8188)) return 92;
     const int ret = TileXRCommInitRankMemoryDomain(domain, size, rank, comm);
     if (ret != 0) return ret;
@@ -214,6 +243,9 @@ int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, in
     const char *fault = std::getenv("TEST_BOUNDARY_FAULT");
     if (fault != nullptr && std::strcmp(fault, "capacity") == 0) args.peerMemBytes -= 32;
     if (fault != nullptr && std::strcmp(fault, "initial") == 0) boundaryTail[63] = 1;
+    const char *combineFault = std::getenv("TEST_COMBINE_BOUNDARY_FAULT");
+    if (combineBoundaryMode && combineFault && std::strcmp(combineFault, "initial") == 0)
+        combineBoundaryBytes[TileXRCombineMemoryBoundaryTest::ProbeOffset(1, 3)] = 1;
     return Call("comm-init-sized");
 }
 int TileXRGetCommArgsHost(TileXRCommPtr, TileXR::CommArgs *&host) { host = &args; return Call("host-args"); }
@@ -523,5 +555,42 @@ int TileXRMemoryBoundaryTest::Launch(void *commArgs, void *result, aclrtStream s
     if (fault != "no-write") std::memset(boundaryTail.data() + 32, 0xFF, 32);
     if (fault != "no-read") std::memcpy(output + 32, boundaryTail.data() + 32, 32);
     if (fault == "guard") boundaryTail[31] = 0xFF;
+    return 0;
+}
+
+int TileXRCombineMemoryBoundaryTest::Launch(void *commArgs, void *result,
+    uint32_t window, uint32_t index, aclrtStream stream)
+{
+    if (!combineBoundaryMode || commArgs != &args || stream != reinterpret_cast<void *>(0x20) ||
+        !ValidProbe(window, index) || args.peerMemBytes != kPeerBytes ||
+        allocations.size() != 1 || allocationBytes.count(result) != 1 || allocationBytes.at(result) != kResultBytes ||
+        calls["launch"] || calls["combine-launch"] || sharedMagic != 0 ||
+        calls["sync"] != window * kProbesPerWindow + index) return 92;
+    const int ret = Call("combine-boundary-launch");
+    if (ret != 0) return ret;
+    const char *configured = std::getenv("TEST_COMBINE_BOUNDARY_FAULT");
+    const std::string fault = configured ? configured : "";
+    if (fault == "no-launch") return 0;
+    const uint64_t offset = ProbeOffset(window, index);
+    auto *output = static_cast<uint8_t *>(result);
+    if (fault != "no-initial-read")
+        for (uint32_t byte = 0; byte < kProbeBytes; ++byte) output[byte] = combineBoundaryBytes[offset + byte];
+    const uint32_t pattern = ProbePattern(window, index);
+    std::array<uint8_t, kProbeBytes> value {};
+    for (uint32_t word = 0; word < kProbeBytes / sizeof(pattern); ++word)
+        std::memcpy(value.data() + word * sizeof(pattern), &pattern, sizeof(pattern));
+    const auto write = [&](uint64_t destination) {
+        for (uint32_t byte = 0; byte < kProbeBytes; ++byte) combineBoundaryBytes[destination + byte] = value[byte];
+    };
+    if (fault != "no-write") write(fault == "wrong-window" ? ProbeOffset(window ^ 1U, index) : offset);
+    if (fault != "no-readback")
+        for (uint32_t byte = 0; byte < kProbeBytes; ++byte) output[kProbeBytes + byte] = combineBoundaryBytes[offset + byte];
+    if (fault == "guard-before") combineBoundaryBytes[offset - 1U] = 1;
+    if (fault == "guard-after" && LegalRange(offset + kProbeBytes, kProbeBytes))
+        combineBoundaryBytes[offset + kProbeBytes] = 1;
+    if (fault == "alias" && window == 1U) write(ProbeOffset(0, index));
+    // A late write into an already-checked guard must be caught by the final sweep.
+    if (fault == "old-guard" && window == 1U && index == 3U)
+        combineBoundaryBytes[ProbeOffset(0, 0) - 1U] = 1;
     return 0;
 }

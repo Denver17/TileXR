@@ -1,6 +1,58 @@
 # EP 验证与人工测试
 
-## Combine 第一阶段 C6：当前交付，待设备验证
+## Combine 第一阶段 C7：当前交付，待设备验证
+
+C5/C6/C7 分批交付，设备验收分别等待用户回传。恢复环境后按目标提交验证，不能用 C7 结果替代 C6 的 profiling ON/OFF 矩阵：
+
+| 点 | 提交 | 验收范围 | 状态 |
+| --- | --- | --- | --- |
+| C5 | `4ef0439640b016727287bebec84ef5cc0a521445` | 连续预热/多轮、三种算子模式、magic/生命周期 | 待设备验证 |
+| C6 | `abee43c70502de88c18ddd0700b0afde528ecc93` | OFF performance / ON breakdown、独立记录区和双 trace | 待设备验证 |
+| C7 | 本节所在交付提交 | 双窗合法边界探针、真实 Dispatch 回归 | 待设备验证 |
+
+```bash
+git fetch origin
+git switch --detach <目标提交SHA>
+bash run_commit_validation.sh
+```
+
+C7 checkpoint=`ep-sdedup-combine-p1-memory-boundary`，使用独立
+`build/validation-combine-c7` / `install/validation-combine-c7`，profiling OFF。
+一键构建并执行 Host 回归后，沿原 hostfile/sync/run 路径使用前两台固定 8P，串行三组：
+
+| 次序 | 用例 | 配置 |
+| --- | --- | --- |
+| 1/3 | 双窗本卡边界探针 | 8GiB 通信域，两窗各四个 32B 目标，独立测试 kernel |
+| 2/3 | 真实 Dispatch BF16 | functional，D quant=0，warmup=2/loops=5 |
+| 3/3 | 真实 Dispatch FP16 | functional，D quant=0，warmup=2/loops=5 |
+
+各组新建进程和通信域，probe 不运行 D/C、不消费 magic；后两组使用既有 Dispatch 完整输出和通信 Flag 校验。
+每组业务 shape 仍为 BS96/H7168/K6/E96。首错停止，日志显示 `[i/3]`，总报告保留各组 summary。
+构建期限 900 秒，Host 总期限 180 秒/单项 120 秒，设备每组 180 秒。
+全部判据通过后输出 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-memory-boundary`。
+
+探针在每窗 Combine 控制区首尾、共享数据起点及 EP 合法区尾部读写，并检查邻接 guard。
+两窗步长 4GiB，统一排除各自末 4MiB；所有访问均止于该合法上界，绝不读取或写入 runtime 保留区。
+每窗/每点模式不同，最终再次读回全部点位，发现跨窗别名或地址高位截断。
+测试内部 `TILEXR_VALIDATION_BOUNDARY_PROBE=1` 只由 C7 workflow 探针用例启用；
+普通 `run.sh` 强制为 0，保持 dispatch/combine/both 的正常算子调用。
+
+C7 不包含 Combine 数据面、Flag 协议或 yOut 业务数值验收；空 Combine 的 50μs 等待不变。
+C5/C6 的 A5 多轮与 profile 仍须切回各自提交单独验证。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
+
+2026-09-21 C7 开发验证：CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5
+`dav-c310-vec`、profiling OFF，通过正式生产构建、安装及真实 consumer 编译链接。
+`build_id=e0b0dd104d46465f8b2f720d0fb65999`，安装包 Host 验收 14/14 通过，
+报告 `host-4ce75a0fce2647a8ac19bfb17134bca9/summary.json`。最终 C7 driver 7 组（含缺省 selector）
+另用该安装包复验通过；已有 Dispatch 25 组、C4 9 组、C5 8 组回归通过。
+控制脚本执行 319 项，318 通过、1 项因 Windows transport harness 条件不足跳过；
+入口 selector 修正后重跑相关 24 项通过，环境隔离 9 项通过。独立审查发现的入口污染问题已修正，
+probe 注册/Kernel 及最终代码审阅无剩余发现；Shell 语法和 diff 检查通过。
+blue 为无 `.git` 源码快照，manifest 如实记录 commit 未知；构建源码摘要、最终文件 SHA256、
+工具链和构建/Host/脚本日志保留在开发工作区 `build/combine-c7-verification/`。
+这些仅证明编译及 Host 测试行为；三组真实 16P 用例尚未执行，C7 继续等待用户设备验收。
+
+## Combine 第一阶段 C6：已交付，待设备验证
 
 2026-09-21：验证环境暂不可用，用户授权提前开发 C6/C7，但分别提交。
 C5 `4ef0439640b016727287bebec84ef5cc0a521445` 仍为**待验证**；C6/C7 不自动继承或宣称设备通过。
