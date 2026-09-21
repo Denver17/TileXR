@@ -6,7 +6,7 @@ void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes, uint64
     std::vector<uint16_t> chunk(512U * 1024U, one);
     for (uint64_t offset = 0; offset < bytes;) {
         const uint64_t count = std::min<uint64_t>(bytes - offset, chunk.size() * sizeof(uint16_t));
-        if (c.checkpoint == "ep-sdedup-combine-p2-m12") {
+        if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3") {
             for (uint64_t i = 0; i < count / 2U; ++i) {
                 const uint64_t element = offset / 2U + i;
                 // Finite, exact dtype bits distinguish rank, original row, column and round.

@@ -46,7 +46,7 @@ class CombineCommitValidationTests(unittest.TestCase):
         if self.behavior == "configure-fails" and "-S" in args:
             return self.real_execute([sys.executable, "-c", "raise SystemExit(7)"], log, **kwargs)
         if "--build" in args and str(work) in args:
-            expected_targets = (self.required - {workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST}) | {workflow.COMBINE_DRY_RUN_PROGRAM} if self.checkpoint in (workflow.COMBINE_DRY_RUN_CHECKPOINT, *workflow.COMBINE_DEVICE_CHECKPOINTS) else self.required
+            expected_targets = (self.required - {workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST, workflow.COMBINE_M3_CONSUMER_TEST, workflow.COMBINE_CONFIG_TEST}) | {workflow.COMBINE_DRY_RUN_PROGRAM} if self.checkpoint in (workflow.COMBINE_DRY_RUN_CHECKPOINT, *workflow.COMBINE_DEVICE_CHECKPOINTS) else self.required
             if self.checkpoint in workflow.COMBINE_DEVICE_CHECKPOINTS:
                 expected_targets |= {workflow.CHAIN_PROGRAM}
             self.assertEqual(set(args[args.index("--target") + 1:]), expected_targets)
@@ -77,6 +77,10 @@ class CombineCommitValidationTests(unittest.TestCase):
                     marker = "EP_SERVER_DEDUP_COMBINE_BOUNDARY_KERNEL_PASS"
                 if name == workflow.COMBINE_BOUNDARY_LAUNCH_TEST:
                     marker = "EP_SERVER_DEDUP_COMBINE_BOUNDARY_LAUNCH_PASS"
+                if name in (workflow.COMBINE_M3_TEST, workflow.COMBINE_M3_CONSUMER_TEST):
+                    marker = "EP_SERVER_DEDUP_COMBINE_M3_PASS" + (" test=lifecycle" if name == workflow.COMBINE_M3_CONSUMER_TEST else "")
+                if name == workflow.COMBINE_CONFIG_TEST:
+                    marker = "EP_SERVER_DEDUP_COMBINE_CONFIG_PASS"
                 if self.behavior == "wrong-marker":
                     marker = marker.replace("COMBINE_", "")
                 program = work / name
@@ -92,8 +96,12 @@ class CombineCommitValidationTests(unittest.TestCase):
                 content += "print(" + repr(marker) + ")\n"
                 program.write_text(content, encoding="utf-8")
                 program.chmod(0o755)
-                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST):
-                    script = "test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_multi.py" if name == workflow.COMBINE_MULTI_TEST else "test_server_dedup_combine_profile.py" if name == workflow.COMBINE_PROFILE_TEST else "test_server_dedup_combine_boundary.py" if name == workflow.COMBINE_BOUNDARY_TEST else "test_server_dedup_combine_chain.py"
+                if name == workflow.COMBINE_CONFIG_TEST:
+                    driver = self.root / "tests/ep/unit/test_server_dedup_combine_config.py"
+                    driver.parent.mkdir(parents=True, exist_ok=True)
+                    driver.write_text(content)
+                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST, workflow.COMBINE_M3_CONSUMER_TEST):
+                    script = "test_server_dedup_combine_m3.py" if name == workflow.COMBINE_M3_CONSUMER_TEST else "test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_multi.py" if name == workflow.COMBINE_MULTI_TEST else "test_server_dedup_combine_profile.py" if name == workflow.COMBINE_PROFILE_TEST else "test_server_dedup_combine_boundary.py" if name == workflow.COMBINE_BOUNDARY_TEST else "test_server_dedup_combine_chain.py"
                     driver = self.root / "tests/ep/integration" / script
                     driver.parent.mkdir(parents=True, exist_ok=True)
                     driver.write_text("import pathlib,sys\nassert sys.argv[1] == '--consumer'\nassert pathlib.Path(sys.argv[2]).is_file()\nprint(" + repr(marker) + ")\n")
@@ -104,7 +112,7 @@ class CombineCommitValidationTests(unittest.TestCase):
             artifacts += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o" for name in (
                 "dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup",
                 "combine_memory_server_dedup")]
-            if self.checkpoint == workflow.COMBINE_PROFILE_CHECKPOINT:
+            if self.checkpoint in workflow.COMBINE_MEASUREMENT_CHECKPOINTS:
                 artifacts += ["share/tilexr/profiling/" + name for name in ("server_dedup.mapping.json", "server_dedup_combine.mapping.json")]
             if self.checkpoint == workflow.COMBINE_BOUNDARY_CHECKPOINT:
                 artifacts += [workflow.COMBINE_BOUNDARY_LIBRARY, workflow.COMBINE_BOUNDARY_KERNEL]
@@ -118,9 +126,9 @@ class CombineCommitValidationTests(unittest.TestCase):
         if args[0] == "ctest":
             self.assertIn("^(" + "|".join(sorted(self.required)) + ")$", args)
             output = json.dumps({"tests": [{"name": name, "command":
-                [sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_multi.py" if name == workflow.COMBINE_MULTI_TEST else "test_server_dedup_combine_profile.py" if name == workflow.COMBINE_PROFILE_TEST else "test_server_dedup_combine_boundary.py" if name == workflow.COMBINE_BOUNDARY_TEST else "test_server_dedup_combine_chain.py")),
+                [sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_m3.py" if name == workflow.COMBINE_M3_CONSUMER_TEST else "test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine_multi.py" if name == workflow.COMBINE_MULTI_TEST else "test_server_dedup_combine_profile.py" if name == workflow.COMBINE_PROFILE_TEST else "test_server_dedup_combine_boundary.py" if name == workflow.COMBINE_BOUNDARY_TEST else "test_server_dedup_combine_chain.py")),
                  "--consumer", str(work / workflow.COMBINE_DRY_RUN_PROGRAM)]
-                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST) else [str(work / name)]} for name in self.names]})
+                if name in (workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST, workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST, workflow.COMBINE_M3_CONSUMER_TEST) else [sys.executable, str(self.root / "tests/ep/unit/test_server_dedup_combine_config.py")] if name == workflow.COMBINE_CONFIG_TEST else [str(work / name)]} for name in self.names]})
         Path(log).parent.mkdir(parents=True, exist_ok=True)
         Path(log).write_text(output, encoding="utf-8")
         return output
@@ -305,6 +313,9 @@ class CombineChainBuildTests(unittest.TestCase):
     def test_c7_package_exports_fourteen_host_checks_and_probe_artifacts(self):
         self.check_package(workflow.COMBINE_BOUNDARY_CHECKPOINT, 14)
 
+    def test_m3_build_exports_module_contract_and_ten_host_checks(self):
+        self.check_package(workflow.COMBINE_M3_CHECKPOINT, 10)
+
     def check_package(self, checkpoint, expected_count):
         fixture = CombineCommitValidationTests()
         fixture.checkpoint = checkpoint
@@ -312,11 +323,11 @@ class CombineChainBuildTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         config = workflow.Config("commit-validate")
-        if checkpoint in (workflow.COMBINE_PROFILE_CHECKPOINT, workflow.COMBINE_BOUNDARY_CHECKPOINT):
+        if checkpoint in (*workflow.COMBINE_MEASUREMENT_CHECKPOINTS, workflow.COMBINE_BOUNDARY_CHECKPOINT):
             # These Python drivers are source inputs; seed the fixture before
             # C6 fingerprints source, as a real checkout already contains them.
             targets = (fixture.required - {workflow.COMBINE_DRY_RUN_TEST, workflow.COMBINE_CHAIN_TEST,
-                       workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST}) | {
+                       workflow.COMBINE_MULTI_TEST, workflow.COMBINE_PROFILE_TEST, workflow.COMBINE_BOUNDARY_TEST, workflow.COMBINE_M3_CONSUMER_TEST, workflow.COMBINE_CONFIG_TEST}) | {
                        workflow.COMBINE_DRY_RUN_PROGRAM, workflow.CHAIN_PROGRAM}
             fixture.execute(["cmake", "--build", workflow.validation_build_directory(config) / "host",
                              "--target", *sorted(targets)], fixture.root / "fixture-build.log")
@@ -328,12 +339,13 @@ class CombineChainBuildTests(unittest.TestCase):
         manifest = workflow.verify_build(config)
         self.assertEqual({test["name"] for test in manifest["tests"]}, workflow.COMBINE_TESTS[fixture.checkpoint])
         self.assertEqual(len(manifest["tests"]), expected_count)
-        self.assertEqual(manifest["server_dedup_combine_contract"], workflow.COMBINE_ABI)
+        self.assertEqual(manifest["server_dedup_combine_contract"], workflow.combine_contract(checkpoint))
         self.assertEqual(manifest["server_dedup_contract"], workflow.DISPATCH_ABI)
         self.assertFalse(manifest["server_dedup_profiling"])
         self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
         self.assertIn("bin/" + workflow.COMBINE_DRY_RUN_PROGRAM, manifest["artifacts"])
         self.assertEqual(len([test for test in manifest["tests"] if test["argv"][0] == "@python"]),
+                         3 if checkpoint == workflow.COMBINE_M3_CHECKPOINT else
                          5 if checkpoint == workflow.COMBINE_BOUNDARY_CHECKPOINT else
                          4 if checkpoint == workflow.COMBINE_PROFILE_CHECKPOINT else expected_count - 4)
         self.assertEqual(workflow.node_tests(manifest), [])

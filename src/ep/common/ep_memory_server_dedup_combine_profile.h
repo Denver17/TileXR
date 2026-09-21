@@ -25,5 +25,12 @@ constexpr uint32_t kEpServerDedupCombineProfileDrainBegin = 0x3013U;
 constexpr uint32_t kEpServerDedupCombineProfileDrainEnd = 0x3014U;
 constexpr uint32_t kEpServerDedupCombineProfileDelayBegin = 0x3015U;
 constexpr uint32_t kEpServerDedupCombineProfileDelayEnd = 0x3016U;
+// P2.2 module intervals; earlier fine-grained IDs remain reserved.
+constexpr uint32_t kEpServerDedupCombineProfileStageBegin = 0x3017U;
+constexpr uint32_t kEpServerDedupCombineProfileStageEnd = 0x3018U;
+constexpr uint32_t kEpServerDedupCombineProfileControlBegin = 0x3019U;
+constexpr uint32_t kEpServerDedupCombineProfileControlEnd = 0x301aU;
+constexpr uint32_t kEpServerDedupCombineProfileDirectBegin = 0x301bU;
+constexpr uint32_t kEpServerDedupCombineProfileDirectEnd = 0x301cU;
 } // namespace TileXREp
 #endif

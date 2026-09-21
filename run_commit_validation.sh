@@ -3,35 +3,31 @@ set -eo pipefail
 case "$#:${1:-}" in
     0:) unset TILEXR_VALIDATION_RESUME_SUMMARY ;;
     2:--resume)
-        [[ -n $2 ]] || { echo 'Missing prior summary path' >&2; exit 2; }
-        export TILEXR_VALIDATION_RESUME_SUMMARY="$2" ;;
+        printf '[commit-validate] Failed: P2.2 cannot reuse historical P2.1 results; checkout the M1/M2 commit to resume it.\n' >&2
+        exit 2 ;;
     1:-h|1:--help)
         cat <<'EOF'
-Usage: bash run_commit_validation.sh [--resume PRIOR_SUMMARY.json]
-Build and validate Combine P2.1: ep-sdedup-combine-p2-m12 (M0/M1/M2, 50us retained).
-Default: builds isolated profiling OFF/ON packages and runs Host regressions for both.
-First two configured hosts, fixed 8P each: 18 base + 5 targeted serial cases.
-F1: single functional (0 warmup + 1 loop); F2/P/B: 2 warmup + 5 loops.
-Each gate covers BF16/FP16 combine/both; plus Dispatch regression, quant4 connection,
-and sparse/tail/empty/10000-row fixtures. All four gates must pass; first failure stops.
-Requires configured CANN 9.1, real A5 devices, SSH/rsync, msprof and hostfile.
-The manifest prints every case and [i/23] progress; no automatic retry/restart.
---resume is for P2.1 stopped at OFF/ON source mismatch after all 19 OFF cases passed.
-It verifies retained reports and installed package hashes, skips those 19 cases and
-both builds, then runs ON Host checks, sync and the four breakdown cases.
-Keep both original installed packages and reports; do not rebuild before resuming.
-The report preserves the historical source mismatch and marks reused PASS evidence.
-Does not validate M3-M5 business data or yOut arithmetic.
+Usage: bash run_commit_validation.sh
+Build and validate Combine P2.2: ep-sdedup-combine-p2-m3 (M1/M2/M3; no fixed delay).
+Builds isolated profiling OFF/ON packages with identical source and Host regressions.
+First two configured hosts, fixed8P each: 16 serial cases, each zero warmup + one launch.
+Functional/performance/breakdown each cover BF16/FP16 combine/both (12 cases).
+Plus BF16/FP16 Dispatch regression and two Dispatch-quant4/Combine-nonquant connections.
+Checks DIRECT payload/Flag and current module results; M4/M5 and yOut arithmetic excluded.
+Single-launch performance validates acquisition only: no baseline or threshold.
+Requires configured CANN9.1, real A5 devices, SSH/rsync, msprof and hostfile.
+Prints the full manifest and [i/16] progress; first failure stops, no automatic retries.
+Historical P2.1 --resume results cannot qualify M3; use that checkpoint to resume it.
 Requires Python 3.9+, CMake, Make and g++. TILEXR_VALIDATION_JOBS controls build jobs.
 Reports: run/validation/commit-*/summary.json (or TILEXR_VALIDATION_RESULT_ROOT).
 Return the summary and logs before proceeding to the next checkpoint.
 EOF
         exit 0 ;;
-    *) printf '[commit-validate] Failed: use no arguments or --resume PRIOR_SUMMARY.json (see --help)\n' >&2; exit 2 ;;
+    *) printf '[commit-validate] Failed: use no arguments (see --help)\n' >&2; exit 2 ;;
 esac
 # This entry point follows the current delivery checkpoint, independent of a
 # previous Dispatch build or deployment-specific case options.
-export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m12
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m3
 export TILEXR_VALIDATION_BUILD_MODE=production
 export TILEXR_VALIDATION_ACTION=commit-validate
 export TILEXR_VALIDATION_BOUNDARY_PROBE=0

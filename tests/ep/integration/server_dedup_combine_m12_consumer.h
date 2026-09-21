@@ -3,6 +3,8 @@
 struct CombineM12Validation {
     TileXREp::EpServerDedupCombineDataLayout data {};
     std::vector<uint8_t> initialControl;
+    // Optional M3 result oracle. Only semantically unspecified payload/Flag lanes are masked.
+    std::vector<uint8_t> initialResult, expectedResult, ignoredResult;
     std::array<uint64_t, 2> generations {{0, 0}};
     uint32_t launchedWindows = 0;
     uint64_t observations = 0, type3Rows = 0, validatedTokenNum = 0;
@@ -43,16 +45,21 @@ struct CombineM12Validation {
         generations[magic % 2] = generation;
     }
 
-    void CheckBytes(const void *device, const std::vector<uint8_t> &expected, const std::string &name)
+    void CheckBytes(const void *device, const std::vector<uint8_t> &expected, const std::string &name,
+        const std::vector<uint8_t> *ignored = nullptr)
     {
         std::vector<uint8_t> actual(std::min<size_t>(1024U * 1024U, expected.size()));
         for (size_t offset = 0; offset < expected.size();) {
             const size_t count = std::min(actual.size(), expected.size() - offset);
             Check(aclrtMemcpy(actual.data(), actual.size(), static_cast<const uint8_t *>(device) + offset,
-                count, ACL_MEMCPY_DEVICE_TO_HOST), "read P2.1 communication window");
-            auto mismatch = std::mismatch(actual.begin(), actual.begin() + count, expected.begin() + offset);
-            ValidateOutput(mismatch.first == actual.begin() + count,
-                name + " mismatch byte=" + std::to_string(offset + (mismatch.first - actual.begin())));
+                count, ACL_MEMCPY_DEVICE_TO_HOST), "read Combine communication window");
+            size_t mismatch = 0;
+            for (; mismatch < count; ++mismatch) {
+                const auto index = offset + mismatch;
+                if (ignored && index < ignored->size() && (*ignored)[index]) continue;
+                if (actual[mismatch] != expected[index]) break;
+            }
+            ValidateOutput(mismatch == count, name + " mismatch byte=" + std::to_string(offset + mismatch));
             offset += count;
         }
     }
@@ -94,9 +101,11 @@ struct CombineM12Validation {
                     TileXREp::kEpServerDedupCombineRecvCoreNum * 512U, 0);
             }
             CheckBytes(base + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET, control,
-                "P2.1 control/ownership window=" + std::to_string(window));
+                "Combine control/ownership window=" + std::to_string(window));
             if (c.operatorMode == "both" && window == 1U) continue;
             std::vector<uint8_t> expected(data.requiredWindowBytes - data.resultOffset, guard);
+            const auto &results = used ? expectedResult : initialResult;
+            std::copy(results.begin(), results.end(), expected.begin());
             std::set<uint32_t> slots;
             for (int32_t row = 0; used && row < tokenNum; ++row) {
                 if (types[row] != 3U) continue;
@@ -116,7 +125,8 @@ struct CombineM12Validation {
                 }
             }
             CheckBytes(base + data.resultOffset, expected,
-                "P2.1 stage/result/padding window=" + std::to_string(window));
+                "Combine stage/result/padding window=" + std::to_string(window),
+                used ? &ignoredResult : nullptr);
         }
         ++observations;
     }

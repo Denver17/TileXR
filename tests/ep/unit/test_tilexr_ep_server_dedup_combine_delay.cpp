@@ -14,8 +14,8 @@ int main()
                 reinterpret_cast<GM_ADDR>(f.expert.data()), reinterpret_cast<GM_ADDR>(f.table.data()),
                 reinterpret_cast<GM_ADDR>(f.counts.data()), f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()),
                 f.untouched.data(), f.untouched.data(), f.untouched.data(), reinterpret_cast<GM_ADDR>(&f.tiling), 0);
-            Check(ClockIndex() == 4U, "P2.1 waits exactly50000 elapsed ticks including clock wrap");
-            Check(f.observedPrepare == 8U && AscendC::PendingMte3().empty(), "M1 publication completed before final delay");
+            Check(ClockIndex() == 0U, "P2.2 performs no artificial clock wait");
+            Check(f.observedPrepare == 8U && AscendC::PendingMte3().empty(), "M1 publication completed before return");
             f.ResetHooks();
         }
         ClockSamples().clear();
@@ -25,6 +25,6 @@ int main()
         Check(Clock() == before, "null tiling returns before work");
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     if (ServerDedupTest::Failures() != 0) return 1;
-    std::cout << "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS test=delay\n";
+    std::cout << "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS test=no-delay\n";
     return 0;
 }

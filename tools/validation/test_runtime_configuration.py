@@ -212,7 +212,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertIn('VALIDATION_FAIL 执行阶段失败 | exit=15', result.stdout)
                 self.assertEqual(len(result.stdout.splitlines()), 1)
 
-    def test_commit_entry_selects_p21_production_before_workflow_preflight(self):
+    def test_commit_entry_selects_p22_production_before_workflow_preflight(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json,sys; print(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n")
         cann = self.root / "cann-env.sh"
@@ -226,14 +226,14 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertEqual(values["action"], "commit-validate")
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_M12_CHECKPOINT)
+        self.assertEqual(values["env"]["TILEXR_VALIDATION_CHECKPOINT"], workflow.COMBINE_M3_CHECKPOINT)
         self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "production")
         self.assertEqual(values["env"]["TILEXR_VALIDATION_ACTION"], "commit-validate")
         self.assertNotIn("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", values["env"])
         self.assertFalse((self.root / "hostfile").exists())
         self.assertEqual(self.local.read_bytes(), before)
 
-    def test_commit_resume_argument_is_explicit_and_not_overridden_by_deployment_config(self):
+    def test_commit_rejects_resume_and_clears_stale_deployment_values(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json; print(json.dumps(dict(os.environ)))\n")
         cann = self.root / "cann-env.sh"
@@ -242,20 +242,18 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n"
                         "export TILEXR_VALIDATION_RESUME_SUMMARY=deployment-stale.json\n")
         path = str(self.root / "old run/summary.json")
-        for args, expected in (([], None), (["--resume", path], path)):
-            with self.subTest(args=args):
-                result = subprocess.run([str(self.bash), "run_commit_validation.sh", *args], cwd=self.root,
-                    env=dict(self.env, TILEXR_VALIDATION_RESUME_SUMMARY="shell-stale.json"),
-                    capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                values = json.loads(result.stdout.splitlines()[-1])
-                self.assertEqual(values.get("TILEXR_VALIDATION_RESUME_SUMMARY"), expected)
-        for args in (["--resume"], ["--resume", ""], ["--resume", path, "extra"]):
+        result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
+            env=dict(self.env, TILEXR_VALIDATION_RESUME_SUMMARY="shell-stale.json"),
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        values = json.loads(result.stdout.splitlines()[-1])
+        self.assertNotIn("TILEXR_VALIDATION_RESUME_SUMMARY", values)
+        for args in (["--resume"], ["--resume", ""], ["--resume", path], ["--resume", path, "extra"]):
             result = subprocess.run([str(self.bash), "run_commit_validation.sh", *args], cwd=self.root,
                                     env=self.env, capture_output=True, text=True, timeout=10)
             self.assertEqual(result.returncode, 2)
 
-    def test_combine_run_selects_p21_and_preserves_prior_gates(self):
+    def test_combine_run_selects_p22_and_preserves_prior_gates(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json\nfrom pathlib import Path\nfrom run_summary import write_result\n"
             "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
@@ -266,15 +264,15 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         with self.local.open("a") as local:
             local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n")
         for operator, checkpoint, loops, warmup, mode, accepted in (
-                ("combine", None, "5", "2", "0", True),
-                ("both", None, "5", "2", "0", True),
+                ("combine", None, "1", "0", "0", True),
+                ("both", None, "1", "0", "0", True),
                 ("dispatch", workflow.COMBINE_MULTI_CHECKPOINT, "5", "2", "0", True),
                 ("both", workflow.COMBINE_CHAIN_CHECKPOINT, "1", "0", "0", True),
                 ("both", workflow.COMBINE_CHAIN_CHECKPOINT, "5", "2", "0", False),
                 ("both", workflow.COMBINE_MULTI_CHECKPOINT, "5", "2", "1", False),
                 ("both", workflow.COMBINE_MULTI_CHECKPOINT, "5", "2", "0", True),
-                ("both", None, "5", "2", "1", True),
-                ("combine", None, "5", "2", "2", True),
+                ("both", None, "1", "0", "1", True),
+                ("combine", None, "1", "0", "2", True),
                 ("both", workflow.COMBINE_PROFILE_CHECKPOINT, "5", "2", "0", True),
                 ("both", workflow.COMBINE_BOUNDARY_CHECKPOINT, "5", "2", "2", False)):
             with self.subTest(operator=operator, checkpoint=checkpoint, mode=mode):
@@ -289,7 +287,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 if accepted:
                     values = json.loads((output / "config.json").read_text())
                     self.assertEqual(values["TILEXR_VALIDATION_BOUNDARY_PROBE"], "0")
-                    self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], checkpoint or workflow.COMBINE_M12_CHECKPOINT)
+                    self.assertEqual(values["TILEXR_VALIDATION_CHECKPOINT"], checkpoint or workflow.COMBINE_M3_CHECKPOINT)
                     self.assertEqual((values["TILEXR_VALIDATION_LOOPS"], values["TILEXR_VALIDATION_WARMUP"]), (loops, warmup))
 
     def test_case_dry_run_resolves_new_modes_before_loading_runtime(self):

@@ -1,30 +1,81 @@
 # EP 验证与人工测试
 
-## 当前计划：Combine 第二阶段按模块验收
+## 当前入口：Combine P2.2（M3）
 
-结构对齐提交 `53f3313` 已收到用户“测试通过”确认；未附外部报告，范围按[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)登记。
-P2.1 的 M1/M2 已按用户回传登记验收通过；M3–M5 的待定项不作为 P2.1 前置条件。
-第二阶段详细判据、矩阵和交付约定见[模块验收计划](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
+P2.1 的 M1/M2 已按用户回传登记通过。P2.2 增加 M3：Send 核将 type1 的原始
+BF16/FP16 expertOut 按表 2 返回 source/token/k 结果槽，每块 480B payload + 32B Flag；
+保留 M1/M2，移除所有核末尾 50μs 等待。M4/M5 尚未实现，type2 不生成 partial，yOut 保持。
+P2.2 设备验收待用户回传；开发侧构建和 Host 证据见下文。
 
-| 交付顺序 | 累计模块 | 阶段末尾 50μs | 必须分别确认 |
-| --- | --- | --- | --- |
-| P2.1 | M0 + M1/M2 + 必需 M6 | 保留，全核完成自身责任后等待 | 单轮功能、多轮功能、多轮 performance、多轮 breakdown |
-| P2.2 | 前序 + M3 | 移除 | 同上；检查 DIRECT 结果槽 |
-| P2.3 | 前序 + M4 | 不保留 | 同上；检查成员聚合及 partial |
-| P2.4 | 完整 M1–M5 + M6 | 不保留 | 同上；检查最终 yOut 及生产结果 Flag 清理 |
+最新 CB06-04 覆盖原“四类多轮”计划：M3/M4 的功能、性能、breakdown 均为 **0 预热 + 1 正式调用**。
+检查到达数据/Flag 后结束，不增加测试侧结果 Flag 清理助手；M5 接入生产结果清理后再验证完整多轮复用。
+性能只验数据可获取、模块解析正常，不设置时延门槛，不将单次数据当作稳定性能基线。
 
-每点默认 BF16/FP16×combine/both×四类=16 例，加两例 dispatch-only 回归，共 18 个基础串行用例；
-边界用例在实现时另列并打印完整总数。首轮分核按 CB06-03 已确认的 32/32 独立编译期配置；
-M3/M4 缺少 M5 时的测试后处理方案仍待确认。
-单轮默认 0 预热+1 正式，多轮默认 2 预热+5 正式；OFF/ON 分开构建，按模块分别提交并回传总 summary。
-P2.1 已完成 blue CANN 9.1 A5 OFF/ON 构建及各 14/14 项 Host 验收，设备验收已按用户回传登记通过；P2.2–P2.4 尚未实现。
-`bash run_commit_validation.sh` 切换到 `ep-sdedup-combine-p2-m12`：23 个串行 16P 用例，OFF 包 19 例、ON 包 4 例。
-四类基础矩阵加 Dispatch 回归、D 量化接线和 sparse/empty/10000 行定向检查；首错停止，不自动重跑。
-独立安装目录为 `install/validation-combine-p21-profile-off` / `install/validation-combine-p21-profile-on`，
-通过总标志必须对应本点 checkpoint，不能沿用 C7 的通过记录。
-手动分步跑 breakdown 时先 `export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m12`，构建、同步和运行必须选择同一个 ON 包：
-`bash build_all.sh breakdown=1` → `TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh` → `bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=both`。
-一次脚本调用中的环境变量不会自动传给下一次 shell 调用；一键验收已负责两包选择。
+```bash
+bash run_commit_validation.sh
+```
+
+当前 checkpoint 为 `ep-sdedup-combine-p2-m3`，沿用 hostfile 前两台各 8P，共 16P；
+BS96/H7168/K6/E96，Send/Read=32/32。共 **16 个串行用例**：
+
+| 分组 | 用例数 | 配置 |
+| --- | --- | --- |
+| F：单轮功能 | 4 | BF16/FP16 × combine/both，profiling OFF |
+| P：单轮性能采集 | 4 | 同上，profiling OFF |
+| Dispatch 回归 | 2 | BF16、FP16，profiling OFF |
+| 量化接线回归 | 2 | Dispatch quant=4，Combine quant=0，独立低精度 expertOut |
+| B：单轮模块耗时/trace | 4 | BF16/FP16 × combine/both，profiling ON |
+
+OFF/ON 独立构建安装且源码摘要必须相同，目录为
+`install/validation-combine-p22-profile-off` / `install/validation-combine-p22-profile-on`。
+三个测试模式共用 consumer；both 保留五表/count 的原 tensor 接线及 D/C 各自 magic/窗口。
+M3 校验包含 DIRECT 有效字节及每块 ready Flag、未写槽、M1 stage、M2 控制区、输入/yOut 和边界保护。
+若 kernel 正常结束但结果校验失败，仍保留可用性能和 trace，最终汇总为失败。
+
+手动测试也须显式使用单轮，构建、同步和运行选择同一包：
+
+```bash
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m3
+# 性能采集：OFF
+bash build_all.sh breakdown=0
+TILEXR_VALIDATION_BREAKDOWN=0 bash sync.sh
+bash run.sh -n 2 -e 96 -m 1 -l 1 0 operator_mode=combine
+# 模块 trace：ON
+bash build_all.sh breakdown=1
+TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh
+bash run.sh -n 2 -e 96 -m 2 -l 1 0 operator_mode=combine
+```
+
+将 `operator_mode=combine` 改为 `both` 可测试联合调用；输入 dtype、量化模式仍沿用共享脚本参数。
+单独脚本调用中的环境变量不会自动传给下一次调用，一键验收负责完整选择。
+D/C trace 分别保存；模块事件为 M1a Init、M1b、M2（Read 核）、M3（Send 核）、M6 及 kernel total，
+异步区间不可相加冒充总耗时。P2.2 不复用 P2.1 的 `--resume` 通过记录。
+
+实现注意：去掉 Dispatch 包尾后必须重新计算结果包 stride，不能继续沿用 Dispatch 的包长。
+M3 的 GM 输入只读 `2H` 字节，但 Vector 打包会覆盖 `ceilDiv(2H,480)*480` 字节 UB，
+因此 Host/kernel 共用的准入预算同时计入该输入跨度及 `N*512` 输出 lane；仅预算有效输入会越界。
+M1 排空后复用输入 lane，M3 输入由 Vector 完成释放、输出由 MTE3 完成释放。
+CPU 测试覆盖尾块、稀疏表跨度和延迟 MTE3 的 lane 回绕；真实设备可见性仍须 16P 验收。
+
+开发侧验证（2026-09-21）：blue 使用 CANN 9.1、ccec/Clang 15.0.5、A5 `dav-c310-vec`，
+正式 workflow 的 OFF/ON 构建、安装均成功，安装包 Host 验收各 10/10 通过。
+最终 `python3 -m unittest discover -s tools/validation -p 'test_*.py' -q` 共 349 项：
+348 通过、1 项 Windows PowerShell/MSYS transport harness 因环境条件跳过；Shell 语法与 diff 检查通过。
+OFF build_id=`8f2cead3edd14d9586232c1c76d42d32`，ON build_id=`d85cf289c8624fa0978e69bec54291f4`；
+源码摘要均为 `1811119abe0d6e77f6a7ba63c444ad0034f3a16d1346c18a348690d6da56704a`。
+构建使用文件快照，manifest commit 为空；不将快照基点 SHA 冒充交付提交的构建证据。
+生产代码与该快照逐文件核对一致；构建后仅补充 Python 回归测试及文档，最终测试按更新后的文件执行。
+逐文件 provenance、编译器/配置/退出码、产物哈希及 Host 日志保留在开发工作区
+`build/combine-p22-verification/`。当前证据不包含 NPU 实际运行、跨卡可见性或性能达标。
+本次集成曾在编译、安装成功后因 manifest 生成路径的 Python 命名错误失败；已修复并增加
+执行到 manifest 导出的构建行为回归，不能只凭编译器退出码判构建链路通过。
+数值 INVALID 为完成性能/trace 导出可正常退出进程；验收必须读取结构化校验状态并最终判 FAIL，
+不能仅凭进程 exit=0 登记通过。
+
+### P2.1 历史验收及续跑
+
+以下为 P2.1 专用流程，复验需切换相应历史提交（`acb826b` 实现、`4ffc700` 续跑）。
+P2.1 保留 50μs，23 例及旧 OFF/ON 包不作为 M3 通过证据。
 
 P2.1 源码摘要排查（2026-09-21）：用户回传 OFF 的 19 例通过、ON 构建成功，但在两包源码
 一致性检查处停止，4 个 breakdown 未运行；两份清单均为 965 个同名文件，期间被改写的候选为

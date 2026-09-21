@@ -25,6 +25,24 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 适用平台为 Ascend 910A5/Ascend950 A5 环境，目标工具链为 CANN 9.1.0，保持 C++14。
 910B Host 或 simulator 只能验证 Host/构建边界，不能作为 A5 kernel 执行证据。
 
+### P2.2 当前交付契约：M3 无预热单轮
+
+本段按最新已确认 CB03-01/02、CB06-04 固定当前提交的范围，覆盖历史“四类多轮”计划中对 M3 的要求。
+checkpoint=`ep-sdedup-combine-p2-m3`，`implemented_through=M3`、`scope=partial`。
+M1/M2 保留；M3 按 type1 密排后在 Send 核间均分，使用 12B 表 2 有界连续缓存，
+将原始 BF16/FP16 expertOut 打包为 480B+32B Flag，写 source/token/k 结果槽。
+移除所有核末尾 50μs，按实际 Event 所有权及 M6 排空退出；无 M4/M5、无 type2 partial、yOut 保持。
+
+`bash run_commit_validation.sh` 共 16 个串行 16P 用例，BS96/H7168/K6/E96、Send/Read32/32：
+F/P/B 各 4 例（BF16/FP16 × combine/both），另有 Dispatch 回归 2 例、D quant4→独立低精度 expertOut 接线 2 例。
+所有用例均 0 预热、1 正式调用；性能不设达标门槛，breakdown 只记录模块级区间。
+检查本轮数据/Flag 后结束，不清结果 Flag，不引入测试侧清理助手或多轮压力矩阵。
+OFF 12 例与 ON 4 例采用独立安装包、同一源码摘要，不能续用 P2.1 的历史通过结果。
+数值错误但 kernel 正常结束时继续保存可用性能/trace，最终标记失败。
+
+开发证据及手动运行命令见[EP 验证指南](EP_VALIDATION_GUIDE.md#当前入口combine-p22m3)；
+设备验收仍待用户回传，不将 Host 替身或 A5 编译结果作为跨卡数据正确性证明。
+
 <a id="combine-phase2-modular-acceptance"></a>
 ## Combine 第二阶段：按模块递进验收（2026-09-21）
 

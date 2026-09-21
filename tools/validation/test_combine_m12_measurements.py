@@ -22,6 +22,21 @@ class M12MeasurementTests(unittest.TestCase):
         self.row = dict(rank=0, combine_type3_rows=3, combine_algorithm_bytes=3096,
                         combine_stage_copy_bytes=6192, combine_control_publish_bytes=24576)
         self.sha = "c" * 64
+        # Retained P2.1 records must use their historical mapping, never the evolving production M3 mapping.
+        self.mapping = self.root / "m12.mapping.json"
+        stages = (
+            ("kernel_total", "total"), ("m1_init", "setup"),
+            ("m1_select", "compute"), ("m1_stage_copy", "copy"),
+            ("m1_prepare_publish", "issue"), ("m2_prepare_wait", "wait"),
+            ("m2_notify", "issue"), ("m2_ready_wait", "wait"),
+            ("m2_ready_clear", "copy"), ("m6_drain", "finalize"),
+            ("p21_delay_50us", "wait"),
+        )
+        self.mapping.write_text(json.dumps(dict(
+            schema="tilexr_profiling_mapping.v1", operator="tilexr_ep_combine_memory_server_dedup",
+            cycles_per_us=1000, stages=[dict(name=name, category=category, critical=index == 0,
+                begin=0x3001 + 2 * index, end=0x3002 + 2 * index)
+                for index, (name, category) in enumerate(stages)])))
 
     def events(self):
         events = {}
@@ -43,7 +58,7 @@ class M12MeasurementTests(unittest.TestCase):
         path = write_capture(self.root / (suffix + ".records.v1"), launches=7, warmup=2,
                              events_by_core=events or self.events())
         return operators.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / suffix,
-                                          operator="combine", run_id="run-test", kernel_sha=self.sha, record=self.row)
+                                          operator="combine", run_id="run-test", kernel_sha=self.sha, record=self.row, mapping_path=self.mapping)
 
     def validate(self, evidence):
         row = dict(self.row, operator_measurements=dict(combine=dict(breakdown=evidence)))

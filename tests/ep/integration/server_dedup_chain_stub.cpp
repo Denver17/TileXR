@@ -30,10 +30,15 @@ std::vector<void *> firstBuffers;
 std::vector<const void *> firstCombineBuffers;
 uint64_t sharedMagic = 0;
 uint64_t lastDispatchMagic = 0;
+bool IsM3()
+{
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m3") == 0;
+}
 bool IsM12()
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m12") == 0;
+    return IsM3() || (checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m12") == 0);
 }
 bool IsDiagnostic()
 {
@@ -169,6 +174,10 @@ aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes
 {
     if (BatchPending()) return Call("mid-batch-transfer") == 0 ? 92 : 91;
     if (IsM12() && IsLocalPeer(reinterpret_cast<uintptr_t>(destination))) {
+        if (auto data = M12Address(reinterpret_cast<uintptr_t>(destination), bytes)) {
+            std::memcpy(data, source, bytes);
+            return Call("m12-window-seed");
+        }
         auto &region = m12Memory[reinterpret_cast<uintptr_t>(destination)];
         region.assign(static_cast<const uint8_t *>(source), static_cast<const uint8_t *>(source) + bytes);
         return Call("m12-window-seed");
@@ -573,6 +582,59 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
             if (isFault("padding") && stride > uint64_t(h) * 2U) target[h * 2U] = 0;
             ++packed;
         }
+        if (IsM3()) {
+            // Host transport substitute reconstructs incoming peer sends. This
+            // does not execute or prove the device packing/communication path.
+            using namespace ServerDedupReference;
+            Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
+                dtype == TileXR::TILEXR_DATA_TYPE_BFP16, false, true};
+            if (const char *route = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
+                shape.routeMode = TileXREpDemo::ParseRouteMode(route);
+            if (!both) shape.routeMode = TileXREpDemo::RouteMode::Balance;
+            if (const char *seed = std::getenv("TILEXR_VALIDATION_SEED"))
+                shape.seed = static_cast<uint32_t>(std::strtoull(seed, nullptr, 10));
+            const bool generated = !both || firstBuffers.size() == 12U;
+            const uint64_t packetBytes = ((h * 2U + 479U) / 480U) * 512U;
+            const char *m3Fault = std::getenv("TEST_M3_FAULT");
+            const auto faultIs = [&](const char *name) { return m3Fault && std::strcmp(m3Fault, name) == 0; };
+            bool corrupted = false;
+            for (uint32_t producer = 0; producer < uint32_t(world); ++producer) {
+                const auto rows = DispatchRows(shape, producer);
+                for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
+                    const auto &row = rows[rowIndex];
+                    if (!row.Direct() || row.source != uint32_t(rank)) continue;
+                    const uint64_t offset = (row.token * topK + row.k) * packetBytes;
+                    auto target = M12Address(base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + offset, packetBytes);
+                    if (!target) return 92;
+                    if (faultIs("missing-packet")) continue;
+                    std::vector<uint8_t> payload(packetBytes / 512U * 480U, 0xabU);
+                    for (uint32_t col = 0; col < uint32_t(h); ++col) {
+                        const uint16_t one = shape.bf16 ? 0x3f80U : 0x3c00U;
+                        const uint16_t bits = generated ? static_cast<uint16_t>(one +
+                            (rowIndex * 17U + col * 3U + producer * 11U) % 113U) :
+                            HiddenBits(shape, row.source, row.token, col);
+                        std::memcpy(payload.data() + col * 2U, &bits, 2U);
+                    }
+                    const auto packet = Pack(payload);
+                    std::memcpy(target, packet.data(), packet.size());
+                    if (!corrupted) {
+                        if (faultIs("payload")) target[0] ^= 1U;
+                        if (faultIs("tail")) target[(h * 2U - 1U) / 480U * 512U + (h * 2U - 1U) % 480U] ^= 1U;
+                        if (faultIs("flag")) target[packetBytes - 32U] ^= 1U;
+                        corrupted = true;
+                    }
+                }
+            }
+            if (faultIs("unwritten")) {
+                for (uint64_t offset = 0; offset < resultBytes; offset += packetBytes) {
+                    auto target = M12Address(base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + offset, packetBytes);
+                    if (target[480U] == 0 && target[481U] == 0 && target[482U] == 0 && target[483U] == 0) {
+                        target[0] ^= 1U;
+                        break;
+                    }
+                }
+            }
+        }
         auto control = M12Address(base + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET,
             TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES);
         if (!control) return 92;
@@ -612,6 +674,17 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                 for (size_t index = 0; index < events.size(); ++index) {
                     combineProfileEvents[base + index] = events[index];
                     combineProfileTimes[base + index] = origin + core + index * 100U;
+                }
+                if (IsM3()) {
+                    events = {0x3001, 0x3003, 0x3004, 0x3017, 0x3018};
+                    if (core < TileXREp::kEpServerDedupCombineSendCoreNum)
+                        events.insert(events.end(), {0x301b, 0x301c});
+                    else events.insert(events.end(), {0x3019, 0x301a});
+                    events.insert(events.end(), {0x3013, 0x3014, 0x3002});
+                    for (size_t index = 0; index < events.size(); ++index) {
+                        combineProfileEvents[base + index] = events[index];
+                        combineProfileTimes[base + index] = origin + core + index * 100U;
+                    }
                 }
                 // The real DirectProfilingWriter publishes an 8-record-aligned
                 // occupied span with a zero tail, not its logical event count.

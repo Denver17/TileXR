@@ -133,6 +133,15 @@ int main()
     auto unsupportedLane = valid;
     unsupportedLane.combine.h = 100000;
     Rejected(unsupportedLane, TILEXR_ERROR_NOT_SUPPORT);
+    // At capacityRows=768 the independent fixed/index buffers leave 171456B.
+    // One DIRECT lane needs ceil(2H/480)*(480+512), including input tail space.
+    // 172 blocks fit; the next block must be rejected before launch.
+    g_args.peerMemBytes = 8ULL * 1024U * 1024U * 1024U;
+    auto laneBoundary = valid;
+    laneBoundary.combine.h = 41280;
+    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last complete DIRECT lane fits UB");
+    laneBoundary.combine.h = 41281;
+    Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
     g_args.peerMemBytes = 2ULL * (1048576ULL + TILEXR_FLAG_BUFF_BYTES);
     Rejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_args.peerMemBytes = fullBytes;

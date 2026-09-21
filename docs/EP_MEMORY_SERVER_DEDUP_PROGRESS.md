@@ -5,8 +5,8 @@
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
 Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6 独立 profiling/trace 已收到用户通过确认；C7 双窗边界及 Dispatch 回归已收到用户通过确认。Combine 第一阶段 C1–C7 已全部按用户回传登记通过。
-当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 的 M0/M1/M2 及必需 M6 已实现，保留末尾 50μs；设备验收已按用户回传登记通过。M3→M4→M5 在各自设计完成及前一点通过后再开发。
-P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。当前一键入口为 P2.1 的 23 个串行 16P 用例，四类设备确认及回归/边界均已按用户回传登记通过；详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
+当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 已按用户回传通过；P2.2（M3）增加 DIRECT 原始数据返回并移除全核 50μs，设备验收待回传。M4/M5 尚未实现。
+P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。P2.1 的 23 个串行 16P 用例已按用户回传登记通过；当前一键入口切换为 P2.2 的 16 例无预热单轮验收，详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
 下文 Dispatch 阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 **P2.1 已验收（用户回传，续跑汇总）**：用户回传
@@ -21,7 +21,7 @@ P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 
 沿用续跑记录的历史 OFF/ON 源码摘要差异，不将本结果表述为两包摘要一致或当前 checkout 重新构建后的全量运行。
 通过范围：M0/M1/M2 的 stage 原始数据、控制通知/消费清理、保护区和各自 magic/选窗，以及保留的 50μs 等待；
 不包含 M3–M5 返回/归约、yOut 业务数值，不据四项性能模式通过推断具体性能指标达标。
-下一模块为 P2.2（M3），实施时移除全核 50μs 等待，按届时已确认的设计及验收范围推进。
+P2.2（M3）已启动交付：按最新 CB06-04，功能、性能、breakdown 均只调用一次且无预热，不增加测试侧结果清理；详见[当前入口及开发证据](EP_VALIDATION_GUIDE.md#当前入口combine-p22m3)。
 
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。

@@ -20,8 +20,8 @@ fi
 # Build options are explicit and independent of all runtime case parameters.
 export TILEXR_VALIDATION_BREAKDOWN="$breakdown"
 if [[ "$breakdown" == 1 ]]; then
-    if [[ "$TILEXR_VALIDATION_BUILD_MODE" != production || ( "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-p2-dispatch && "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-combine-p1-profile && "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-combine-p2-m12 ) ]]; then
-        printf '[build] Failed: breakdown=1 requires production Dispatch or Combine C6/P2.1\n' >&2
+    if [[ "$TILEXR_VALIDATION_BUILD_MODE" != production || ( "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-p2-dispatch && "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-combine-p1-profile && "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-combine-p2-m12 && "$TILEXR_VALIDATION_CHECKPOINT" != ep-sdedup-combine-p2-m3 ) ]]; then
+        printf '[build] Failed: breakdown=1 requires production Dispatch or Combine C6/P2.1/P2.2\n' >&2
         exit 2
     fi
 fi
