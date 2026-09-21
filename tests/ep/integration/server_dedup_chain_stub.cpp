@@ -33,22 +33,22 @@ uint64_t sharedMagic = 0;
 uint64_t lastDispatchMagic = 0;
 bool IsM5()
 {
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m5") == 0;
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
+    return !checkpoint || !*checkpoint || std::strcmp(checkpoint, "ep-sdedup-combine-p2-m5") == 0;
 }
 bool IsM4()
 {
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
     return IsM5() || (checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m4") == 0);
 }
 bool IsM3()
 {
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
     return IsM4() || (checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m3") == 0);
 }
 bool IsM12()
 {
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
     return IsM3() || (checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m12") == 0);
 }
 bool IsDiagnostic()
@@ -73,7 +73,7 @@ bool IsLocalPeer(uintptr_t address)
 }
 bool IsMultiBatch()
 {
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
     const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE");
     return IsM12() || (checkpoint && (std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0 ||
         std::strcmp(checkpoint, "ep-sdedup-combine-p1-profile") == 0 ||
@@ -287,7 +287,7 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
 }
 int TileXRCommInitRankMemoryDomainWithSize(int domain, int dataMiB, int size, int rank, TileXRCommPtr *comm)
 {
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
     boundaryMode = checkpoint && std::strcmp(checkpoint, "ep-sdedup-p1-memory-boundary") == 0;
     const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE");
     combineBoundaryMode = checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p1-memory-boundary") == 0 &&

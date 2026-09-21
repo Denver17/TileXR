@@ -1,6 +1,49 @@
 # EP 验证与人工测试
 
-## 当前入口：Combine P2.4（M5）
+## 日常构建、同步和运行（不使用 checkpoint）
+
+普通入口已弃用 `TILEXR_VALIDATION_CHECKPOINT`；旧 shell 导出、旧部署配置及旧验收 manifest
+均不参与算子或版本选择。默认执行当前源码的完整 Dispatch / Combine M1–M5。
+普通构建固定覆盖 `install/server-dedup`，不保留 ON/OFF 两份包，
+与 `run_commit_validation.sh` 的阶段验收包隔离。兼容结果 JSON 仍保留 `checkpoint: null`，
+它不是可设置的运行参数。需要重验某笔历史提交时，切换到该提交运行其 `run_commit_validation.sh`。
+
+```bash
+bash set_env.sh && bash build_all.sh && bash sync.sh
+bash run.sh -m 1 -n 8 -e 384 -l 100 50 bs=96 operator_mode=combine
+
+bash build_all.sh breakdown=1 && bash sync.sh
+bash run.sh -m 2 -n 8 -e 384 -l 100 50 bs=96 operator_mode=both
+```
+
+`-m 0/1` 要求当前包关闭 profiling，`-m 2` 要求开启 profiling；不匹配会在启动前拒绝，须重新编译和同步。`operator_mode` 支持
+`dispatch/combine/both`，`-l 正式轮数 预热轮数` 控制批次。Combine 仅非量化；Dispatch
+量化开关独立。both 的两个算子分别记录耗时并生成各自 trace。`case_analysis=1` 可用于
+包含 Dispatch 的运行，在全部设备调用结束后分析路由去重率。
+
+`sync.sh` 和独立 `run_host_validation.sh` 使用同一个固定目录的安装包，无需设置 breakdown。
+构建开始时失效旧 manifest/同步回执，构建失败后不能把旧包当作本次成功产物。
+同步使用完整 hostfile，运行使用前 `-n` 台；新增服务器后须再次同步。
+`dry_run=1` 使用当前包中的 Host consumer，检查参数/rank 映射，不加载 CANN、不 SSH、
+不分配设备或创建 communicator；无需另建 C3 包。仅做本机配置检查也可先
+`TILEXR_VALIDATION_BUILD_MODE=host bash build_all.sh`，此 Host 包不能用于真实设备运行。
+
+维护教训：只修改 shell 的默认 checkpoint 不能解除 manifest、consumer、结果校验之间的阶段耦合，
+会使独立 shell 构建/同步/运行选到不同包。普通路径必须贯穿无阶段身份，并保留完整业务/Flag/trace
+校验；提交验收阶段只由专用入口内部选择。另一个 shell 无法继承 `build_all.sh breakdown=1` 的
+子进程变量，同步应始终分发固定目录中的 manifest 和对应产物。回归覆盖旧变量干扰、独立 shell、打点开关切换、远端参数、
+三算子模式、多轮调用和 dry-run；Host 替身及编译通过不能替代真实多机 A5 验证。
+
+开发侧验证（2026-09-21）：blue CANN 9.1 / A5 实际构建依次覆盖同一个
+`install/server-dedup`，profiling OFF/ON 均通过，安装包 Host 回归各 10/10；
+三种算子 dry-run 各自通过 16/16 rank 配置检查。独立纯 Host 构建及回归也通过 10/10，
+可直接使用该包做 dry-run。新增 consumer 替身回归覆盖无 checkpoint 的多轮 combine/both
+及 functional/performance/breakdown，仍检查最终 yOut/Flag，不是只检查返回码。
+完整 Python 工作流回归 374 项中 373 通过、1 项 Windows 专属检查跳过；Shell 语法检查通过。
+证据保留在开发工作区 `build/normal-workflow-verification/`。上述未启动真实 NPU 集群，
+不外推为本次入口修改已完成设备性能或跨机通信验收。
+
+## 提交验收入口：Combine P2.4（M5）
 
 M4/P2.3 已按用户回传通过 F/P/B 各 4/4、regression/connection 各 2/2，共 16/16。
 结果：`/home/h00580772/TileXR-git-check/run/validation/commit-c44caafd510d495e9c2eb67e5cef2604/summary.json`。
@@ -33,7 +76,6 @@ BS96/H7168/K6/E96，Send/Read=32/32；24 个串行用例如下。
 人工性能和 trace 共用安装目录，切换模式时重新构建并同步：
 
 ```bash
-export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m5
 bash build_all.sh breakdown=0
 bash sync.sh
 bash run.sh -n 2 -e 96 -m 1 -l 5 2 operator_mode=combine
@@ -42,10 +84,10 @@ bash sync.sh
 bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=combine
 ```
 
-`build_all.sh`、`sync.sh` 和 `run.sh` 在独立 shell 中执行时，默认都选择当前
-`ep-sdedup-combine-p2-m5` 包，不依赖前一个 shell 的环境变量，也不会被旧的
-`install/validation/manifest.json` 覆盖。Dispatch 单跑仍可直接使用该包；若要切换到
-旧 Dispatch checkpoint，须在三个命令前都显式设置 `TILEXR_VALIDATION_CHECKPOINT`。
+日常 `build_all.sh`、`sync.sh` 和 `run.sh` 不需要设置 checkpoint；workflow 会选择当前
+生产 Combine 包，不依赖前一个 shell 的环境变量，也不会被旧的
+`install/validation/manifest.json` 覆盖。Dispatch 单跑仍可直接使用同一生产包。
+checkpoint 仅由 `run_commit_validation.sh` 内部用于验收提交，不作为日常运行参数。
 
 `operator_mode=both` 测联合调用；D/C 分别输出 trace，Combine 包含 M5 final 区间。
 统计区分单次、正式轮累计、含预热累计字节；trace 保存最后一次调用（7 次调用时 index=6）。
@@ -109,10 +151,10 @@ DIRECT、partial 的有效 payload 和每块 ready Flag、未写槽、M1 stage�
 ```bash
 export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m4
 bash build_all.sh breakdown=0
-TILEXR_VALIDATION_BREAKDOWN=0 bash sync.sh
+bash sync.sh
 bash run.sh -n 2 -e 96 -m 1 -l 1 0 operator_mode=combine
 bash build_all.sh breakdown=1
-TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh
+bash sync.sh
 bash run.sh -n 2 -e 96 -m 2 -l 1 0 operator_mode=combine
 ```
 
@@ -440,8 +482,7 @@ Combine expertOut 独立分配为共享 dtype 的 BF16/FP16，Combine quant 始�
 真实 Dispatch 仍执行完整输出和对应窗口 Flag 校验；不将 Combine 窗口交给 Dispatch 包解析器。
 C4 仅支持单轮 functional，连续多轮与双 trace 分区分别留 C5/C6，六组全部通过后再推进 C5。
 
-手动 `run.sh` 保持现有三模式参数；Combine/both 的实际运行从 C4 安装包读取 checkpoint，
-不能使用旧 Dispatch 包冒充。`dry_run=1` 仍使用 C3 独立安装包（需先保留/构建该包）。
+以下为 C4 历史实现：当时实际运行读取 C4 包、dry-run 使用 C3 包。当前日常入口均使用本页首节的无 checkpoint 普通包。
 详见[验收流程 C4](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#c4-历史交付单轮接线和输入生命周期)。
 
 2026-09-20 C4 开发验证：基于 `b68b56e02e1f49975549515f2d7f805ee4e1e0c8` 加本次改动，
@@ -742,7 +783,7 @@ bash run.sh -n 2 -e 96 -m 0 -l 1 0
 
 构建应输出 `BUILD_PASS`，同步输出 `SYNC_PASS`，运行输出 `VALIDATION_PASS`。三个脚本各自负责一个步骤；`run_commit_validation.sh` 已按 Combine 七点流程恢复，目前一键验收 Combine C5 连续多轮，不代替这里的 Dispatch 多卡流程。
 
-`build_all.sh` 默认关闭设备打点，production 默认选择完整 Dispatch 检查点。同步和运行读取已安装的 manifest。若终端显式导出旧 `TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-p1-chain-*` 、`ep-sdedup-p2-first-hop` 或 `ep-sdedup-p2-source-send`，先 `unset TILEXR_VALIDATION_CHECKPOINT` 再构建；当前代码拒绝沿用旧检查点。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
+`build_all.sh` 默认关闭设备打点，普通包包含完整 Dispatch/Combine；旧 `TILEXR_VALIDATION_CHECKPOINT` 已弃用并忽略，当前安装目录与流程见本页首节。内部 kernel launch ABI 为 120B；去重开关不进入 launch 参数，修改宏后须同步重建 kernel、Host 库和 consumer。
 
 单轮通过后，用同一产物检查完整 Dispatch 多轮复用：
 
@@ -1311,7 +1352,7 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 
 - 环境配置只读，不用追加参数/备份恢复方式传递 case；那会造成双份配置、覆盖用户修改和多机不一致。
 - 核心参数由调用方提供，批测只组合 case，不隐式编译或同步。提交验收按实际需要决定部署步骤。
-- checkpoint 只在提交验收入口选择；人工运行继承安装产物身份，结果仍记录 checkpoint。
+- checkpoint 只在提交验收入口选择；普通运行使用当前完整实现，结果记录 checkpoint=null。
 - 只对受影响的配置传递、结果解析和输出做脚本行为测试，不重复旧硬件验收。
 
 下面保留历史实施记录作为排查参考；其中旧七步配置操作以本页上述三层入口为准。

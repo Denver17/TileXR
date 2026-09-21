@@ -25,17 +25,17 @@ class CombineM5Tests(chain.CombineChainTests):
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_CHECKPOINT=CHECKPOINT,
+        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=CHECKPOINT,
                                 TILEXR_VALIDATION_BS="16", TILEXR_VALIDATION_H="257",
                                 TILEXR_VALIDATION_TOPK="6",
                                 TILEXR_VALIDATION_COMBINE_FIXTURE="balanced",
                                 TILEXR_VALIDATION_COMBINE_OBSERVATION="batch")
 
-    def check_successful_m5(self, rank, process, mode, loops=1, warmup=0):
+    def check_successful_m5(self, rank, process, mode, loops=1, warmup=0, checkpoint=CHECKPOINT):
         output, errors = process.communicate(timeout=30)
         self.assertEqual(process.returncode, 0, output + errors)
         record, = self.records(output, chain.MARKER)
-        self.assertEqual(record["checkpoint"], CHECKPOINT)
+        self.assertEqual(record["checkpoint"], checkpoint)
         self.assertEqual(record["native_status"], "combine-m5")
         self.assertEqual(record["implemented_through"], "M5")
         self.assertEqual(record["scope"], "full")
@@ -143,6 +143,22 @@ class CombineM5Tests(chain.CombineChainTests):
                     self.assertIn("mismatch", errors)
                     self.assertEqual(self.trace_lines(rank)[-1], "finalize")
                 self.reset_case()
+
+    def test_normal_calls_ignore_retired_public_checkpoint(self):
+        self.environment.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE")
+        self.environment["TILEXR_VALIDATION_CHECKPOINT"] = "ep-sdedup-combine-p1-chain-single"
+        for mode in ("combine", "both"):
+            for run_mode in ("functional", "performance", "breakdown"):
+                with self.subTest(mode=mode, run_mode=run_mode):
+                    processes = [self.start(rank, environment=dict(
+                        TILEXR_VALIDATION_OPERATOR_MODE=mode, TILEXR_VALIDATION_RUN_MODE=run_mode,
+                        TILEXR_VALIDATION_LOOPS="2", TILEXR_VALIDATION_WARMUP="1",
+                        TILEXR_PROFILING_COMBINE_RECORDS_PATH=str(Path(self.trace.name) / f"rank-{rank}.combine.records.v1"),
+                        TILEXR_PROFILING_RECORDS_PATH=str(Path(self.trace.name) / f"rank-{rank}.dispatch.records.v1")))
+                        for rank in range(16)]
+                    for rank, process in enumerate(processes):
+                        self.check_successful_m5(rank, process, mode, 2, 1, checkpoint=None)
+                    self.reset_case()
 
     def test_invalid_round_count_and_diagnostic_rejected_before_acl(self):
         for mode in ("functional", "performance", "breakdown"):

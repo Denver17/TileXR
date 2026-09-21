@@ -27,7 +27,7 @@ class CombineMultiTests(single_tests.CombineChainTests):
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_CHECKPOINT=CHECKPOINT,
+        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=CHECKPOINT,
                                 TILEXR_VALIDATION_LOOPS="3", TILEXR_VALIDATION_WARMUP="2")
 
     def check_success(self, rank, process, mode, quant=0, loops=3, warmup=2):

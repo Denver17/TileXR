@@ -17,7 +17,7 @@ from test_workflow import TemporaryRoot
 class DryRunTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DRY_RUN_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.DRY_RUN_CHECKPOINT
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         self.manifest = {"build_id": "dry-build", "checkpoint": workflow.DRY_RUN_CHECKPOINT,
                          "mode": "host", "source": {"commit": "a" * 40}, "tests": []}

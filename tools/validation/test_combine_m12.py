@@ -15,7 +15,7 @@ import test_combine_multi as c5
 class CombineM12Tests(c5.CombineMultiTests):
     def setUp(self):
         super().setUp()
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.COMBINE_M12_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.COMBINE_M12_CHECKPOINT
         self.manifest.update(checkpoint=workflow.COMBINE_M12_CHECKPOINT, mode="production")
         self.manifest["source"]["content_sha256"] = "a" * 64
         self.manifest["artifacts"] = {f"lib/tilexr/kernels/tilexr_ep_{operator}_memory_server_dedup_kernel.o": char * 64

@@ -18,7 +18,7 @@ import test_combine_chain as c4
 class CombineMultiTests(c4.CombineChainTests):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_MULTI_CHECKPOINT,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_MULTI_CHECKPOINT,
                           TILEXR_VALIDATION_LOOPS="5", TILEXR_VALIDATION_WARMUP="2")
         self.manifest["checkpoint"] = workflow.COMBINE_MULTI_CHECKPOINT
 

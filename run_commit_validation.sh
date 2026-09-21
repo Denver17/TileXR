@@ -27,13 +27,13 @@ EOF
 esac
 # This entry point follows the current delivery checkpoint, independent of a
 # previous Dispatch build or deployment-specific case options.
-export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m5
+export TILEXR_INTERNAL_ACCEPTANCE_STAGE=ep-sdedup-combine-p2-m5
 export TILEXR_VALIDATION_BUILD_MODE=production
 export TILEXR_VALIDATION_ACTION=commit-validate
 export TILEXR_VALIDATION_BOUNDARY_PROBE=0
 export TILEXR_VALIDATION_BREAKDOWN=0
 if ! source "$(dirname -- "${BASH_SOURCE[0]}")/set_env.sh"; then
-    printf '失败 COMMIT_VALIDATION_FAIL checkpoint=%s type=CONFIG_FAILED (environment setup; no build or tests started)\n' "$TILEXR_VALIDATION_CHECKPOINT" >&2
+    printf '失败 COMMIT_VALIDATION_FAIL checkpoint=%s type=CONFIG_FAILED (environment setup; no build or tests started)\n' "$TILEXR_INTERNAL_ACCEPTANCE_STAGE" >&2
     exit 1
 fi
 exec "$TILEXR_VALIDATION_PYTHON" -u "$TILEXR_VALIDATION_ROOT/tools/validation/workflow.py" commit-validate

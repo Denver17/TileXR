@@ -19,13 +19,11 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
                     block_dim=auto comm_id=IP:PORT barrier_addr=IP:PORT
                     msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
                     case_analysis=0|1 (default: 0)
-                    combine_fixture=balanced|sparse|empty (P2.1 combine-only fixtures)
-                    combine_observation=batch|per-round (P2.1 functional diagnostics)
-  dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
-  Dry-run requires the C3 package; real combine/both defaults to P2.4 M5.
-  P2.4 supports one/two/repeated calls; rebuild without profiling for functional/performance, with profiling for breakdown.
-  The current production default is Combine P2.4/M5; earlier checkpoints and
-  the Dispatch package remain available via TILEXR_VALIDATION_CHECKPOINT override.
+  dry_run=1 reads hostfile and validates ranks locally using the installed consumer; no SSH/CANN/NPU.
+  Dry-run uses the current package without CANN, SSH or device operations.
+  Supports repeated calls; rebuild without profiling for functional/performance, with profiling for breakdown.
+  The current production package is selected automatically; checkpoint is not
+  a normal run parameter and is reserved for commit validation.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
   Endpoints default to hostfile's first (local coordinator) IPv4, ports 10177/10274.
@@ -61,7 +59,7 @@ while (( $# )); do
             host_validation=${key#*=}
             [[ $host_validation == 0 || $host_validation == 1 ]] || fail 'host_validation must be 0 or 1'
             seen[host_validation]=1; shift;;
-        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*|combine_fixture=*|combine_observation=*)
+        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*)
             name=${key%%=*}; value=${key#*=}
             [[ -n $value ]] || fail "missing value for $name"
             [[ -z ${seen[$name]+set} ]] || fail "duplicate argument: $name"
@@ -93,10 +91,6 @@ while (( $# )); do
 done
 [[ -n $servers && -n $experts ]] || fail '-n SERVERS and -e EXPERTS are required'
 (( experts % (servers * 8) == 0 )) || fail '-e must be divisible by 8 * -n'
-# Select the current production package explicitly. This prevents a stale
-# install/validation/manifest.json from switching a fresh manual run back to
-# the retired Dispatch package when build/sync/run are separate shells.
-export TILEXR_VALIDATION_CHECKPOINT="${TILEXR_VALIDATION_CHECKPOINT:-ep-sdedup-combine-p2-m5}"
 if [[ -n $legacy_quant && -n $dispatch_quant && $legacy_quant != "$dispatch_quant" ]]; then
     fail 'quant_mode conflicts with dispatch_quant_mode'
 fi
@@ -116,22 +110,14 @@ unset TILEXR_COMM_ID TILEXR_DEMO_BARRIER_ADDR
 assignments+=("TILEXR_VALIDATION_SERVERS=$servers" "TILEXR_VALIDATION_MOE_EXPERT_NUM=$experts"
               "TILEXR_VALIDATION_RUN_MODE=$run_mode" "TILEXR_VALIDATION_LOOPS=$loops"
               "TILEXR_VALIDATION_WARMUP=$warmup")
-if [[ $dry_run == 0 && $operator_mode != dispatch ]]; then
-    case "${TILEXR_VALIDATION_CHECKPOINT:-}" in
-        ep-sdedup-combine-p1-chain-single)
-            [[ $run_mode == functional && $loops == 1 && $warmup == 0 ]] || fail 'C4 requires functional, loops=1, warmup=0';;
-        ep-sdedup-combine-p1-chain-multi)
-            [[ $run_mode == functional ]] || fail 'C5 requires functional mode';;
-        ep-sdedup-combine-p1-profile|ep-sdedup-combine-p2-m12|ep-sdedup-combine-p2-m3|ep-sdedup-combine-p2-m4|ep-sdedup-combine-p2-m5) ;;
-        ep-sdedup-combine-p1-memory-boundary)
-            [[ $run_mode == functional ]] || fail 'C7 requires functional mode; select C6 for profiling';;
-        *) export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m5;;
-    esac
+unset TILEXR_VALIDATION_CHECKPOINT TILEXR_INTERNAL_ACCEPTANCE_STAGE
+export TILEXR_VALIDATION_BREAKDOWN=0
+[[ $run_mode != breakdown ]] || export TILEXR_VALIDATION_BREAKDOWN=1
+if [[ $dry_run == 0 ]]; then
     export TILEXR_VALIDATION_BUILD_MODE=production
 fi
 if [[ $dry_run == 1 ]]; then
     export TILEXR_VALIDATION_ACTION=case-dry-run TILEXR_VALIDATION_BUILD_MODE=host
-    export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-dry-run
 fi
 if [[ $dry_run == 0 && ! -f validation.local.sh ]]; then
     fail "missing $PWD/validation.local.sh; configure it from validation.local.sh.example"

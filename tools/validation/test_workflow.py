@@ -29,7 +29,8 @@ class TemporaryRoot(unittest.TestCase):
         self.hostfile.write_text("127.0.0.1\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
-        environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
+        environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.CHECKPOINT,
+                           TILEXR_VALIDATION_ROOT=str(self.root),
                            TILEXR_VALIDATION_HOSTFILE=str(self.hostfile),
                            TILEXR_VALIDATION_BUILD_MODE="host",
                            TILEXR_VALIDATION_TIMEOUT="30")
@@ -140,7 +141,7 @@ class ConfigTests(TemporaryRoot):
     def test_chain_endpoints_default_to_coordinator_and_propagate_to_remote(self):
         self.hostfile.write_text("192.0.2.1\n192.0.2.2\n")
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",
-                                         "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
+                                         "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
                                          "TILEXR_COMM_ID": ""}, clear=False):
             os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
             config = self.config()
@@ -153,7 +154,7 @@ class ConfigTests(TemporaryRoot):
             self.assertEqual(self.config().chain["comm_id"], "192.0.2.2:10177")
 
     def test_empty_kernel_requires_production(self):
-        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
+        with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.EMPTY_KERNEL_CHECKPOINT}):
             with self.assertRaisesRegex(ValueError, "production"):
                 self.config()
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production"}):
@@ -179,7 +180,7 @@ class ConfigTests(TemporaryRoot):
     def test_sync_ignores_case_configuration_and_selects_entire_inventory(self):
         self.hostfile.write_text("\n".join(f"192.0.2.{i + 1}" for i in range(8)))
         with mock.patch.dict(os.environ, {
-                "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
+                "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
                 "TILEXR_VALIDATION_BUILD_MODE": "production", "TILEXR_VALIDATION_SERVERS": "bad",
                 "TILEXR_VALIDATION_BS": "bad", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "96",
                 "TILEXR_VALIDATION_RUN_MODE": "bad", "TILEXR_VALIDATION_TIMEOUT": "bad",
@@ -195,7 +196,7 @@ class ConfigTests(TemporaryRoot):
                            ("JOBS", "0"), ("JOBS", "257"), ("TIMEOUT", "29"),
                            ("TIMEOUT", "181"), ("SSH_USER", "user;command")):
             with self.subTest(key=key, value=value), mock.patch.dict(
-                    os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
+                    os.environ, {("TILEXR_INTERNAL_ACCEPTANCE_STAGE" if key == "CHECKPOINT" else "TILEXR_VALIDATION_" + key): value}), self.assertRaises(ValueError):
                 workflow.Config("build" if key == "JOBS" else "run")
 
     def test_hostfile_must_be_inside_synchronized_root(self):
@@ -699,7 +700,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         workflow.write_json(self.root / ".tilexr-source.json", self.manifest["source"])
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",
-                                        "TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
+                                        "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.EMPTY_KERNEL_CHECKPOINT}):
             self.prepare_sync()
             result = self.invoke("run")
             self.assert_success(result)
@@ -719,13 +720,13 @@ class WorkflowIntegrationTests(TemporaryRoot):
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
         result = self.invoke("node", "registration-marker", self.manifest["build_id"], "10", "2",
                              environment={"TILEXR_VALIDATION_BUILD_MODE": "production",
-                                          "TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT})
+                                          "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.EMPTY_KERNEL_CHECKPOINT})
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("LOG_PARSE_FAILED", result.stdout)
 
     def enable_dry_run(self, injected_rank_code=""):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DRY_RUN_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.DRY_RUN_CHECKPOINT
         self.manifest["checkpoint"] = workflow.DRY_RUN_CHECKPOINT
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
         if injected_rank_code:
@@ -859,7 +860,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
 
     def enable_chain(self, checkpoint=workflow.DISPATCH_CHECKPOINT, run_mode="functional"):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=checkpoint,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=checkpoint,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177",
                           TILEXR_VALIDATION_RUN_MODE=run_mode)
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
@@ -882,7 +883,7 @@ host_index, local_rank, device, rank, rank_size = map(int, sys.argv[5:10])
 assert os.environ['TILEXR_COMM_ID'] == '192.0.2.1:10177'
 assert os.environ['TILEXR_DEMO_BARRIER_ADDR'] == '192.0.2.1:10274'
 assert os.environ['TILEXR_VALIDATION_BS'] == '96'
-checkpoint = os.environ['TILEXR_VALIDATION_CHECKPOINT']
+checkpoint = os.environ['TILEXR_INTERNAL_ACCEPTANCE_STAGE']
 boundary = checkpoint == 'ep-sdedup-p1-memory-boundary'
 loops = int(os.environ['TILEXR_VALIDATION_LOOPS'])
 warmup = int(os.environ['TILEXR_VALIDATION_WARMUP'])
@@ -1802,7 +1803,7 @@ class EnvironmentEntryTests(TemporaryRoot):
 
     def test_source_accepts_dry_run_with_eight_devices_per_host(self):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
-        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.DRY_RUN_CHECKPOINT}):
+        with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DRY_RUN_CHECKPOINT}):
             result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("checkpoint=", result.stdout)
@@ -1810,7 +1811,7 @@ class EnvironmentEntryTests(TemporaryRoot):
 
     def test_source_ignores_legacy_case_settings_in_environment_file(self):
         (self.root / "validation.local.sh").write_text(
-            "TILEXR_VALIDATION_CHECKPOINT=obsolete\nTILEXR_VALIDATION_LOOPS=0\n")
+            "TILEXR_INTERNAL_ACCEPTANCE_STAGE=obsolete\nTILEXR_VALIDATION_LOOPS=0\n")
         result = self.source_real_entry()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("ENV_READY", result.stdout)

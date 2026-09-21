@@ -26,7 +26,7 @@ struct CombineM3Validation : CombineM12Validation {
         using namespace ServerDedupReference;
         auto shape = SourceSendShape(c);
         shape.quantized = false;
-        if (c.operatorMode == "combine" && (c.checkpoint != "ep-sdedup-combine-p2-m4" && c.checkpoint != "ep-sdedup-combine-p2-m5")) shape.routeMode = TileXREpDemo::RouteMode::Balance;
+        if (c.operatorMode == "combine" && (c.checkpoint != "ep-sdedup-combine-p2-m4" && !c.FullCombine())) shape.routeMode = TileXREpDemo::RouteMode::Balance;
         const bool generated = c.operatorMode == "combine" || c.quantMode != 0;
         expectedResult = initialResult;
         ignoredResult.assign(expectedResult.size(), 0);
@@ -49,7 +49,7 @@ struct CombineM3Validation : CombineM12Validation {
                 std::vector<uint16_t> values(c.h);
                 for (uint32_t column = 0; column < uint32_t(c.h); ++column) {
                     const uint16_t one = shape.bf16 ? 0x3f80U : 0x3c00U;
-                    values[column] = generated ? ((c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5") ?
+                    values[column] = generated ? ((c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine()) ?
                         CombineM4Reference::ExpertBits(shape.bf16, producer, originalRow, column, c.operatorMode == "both") :
                         static_cast<uint16_t>(one + (originalRow * 17U + column * 3U + producer * 11U) % 113U)) :
                         HiddenBits(shape, row.source, row.token, column);
@@ -81,7 +81,7 @@ struct CombineM3Validation : CombineM12Validation {
         const OperatorProgress &combine, uint64_t synchronizations, bool valid = true) const
     {
         const bool both = c.operatorMode == "both";
-        const bool m5 = c.checkpoint == "ep-sdedup-combine-p2-m5";
+        const bool m5 = c.FullCombine();
         const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4" || m5;
         const char *native = m5 ? "combine-m5" : m4 ? "combine-m4" : "combine-m3";
         const char *checked = valid ? "true" : "false";

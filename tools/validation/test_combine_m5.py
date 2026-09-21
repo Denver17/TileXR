@@ -16,7 +16,7 @@ import test_combine_multi as c5
 class CombineM5Tests(c5.CombineMultiTests):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_M5_CHECKPOINT,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_M5_CHECKPOINT,
                           TILEXR_VALIDATION_LOOPS="5", TILEXR_VALIDATION_WARMUP="2")
         self.manifest.update(checkpoint=workflow.COMBINE_M5_CHECKPOINT, mode="production")
         self.manifest["source"]["content_sha256"] = "a" * 64
@@ -78,6 +78,24 @@ class CombineM5Tests(c5.CombineMultiTests):
             self.assertEqual({(case["dtype"], case["operator_mode"]) for case in cases if case["gate"] == gate},
                 {(dtype, op) for dtype in ("bf16", "fp16") for op in ("combine", "both")})
         self.assertEqual([case["gate"] for case in cases[-4:]], ["B"] * 4)
+
+    def test_normal_contract_keeps_full_validation_without_acceptance_stage(self):
+        os.environ.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE")
+        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = "obsolete"
+        self.manifest["checkpoint"] = None
+        for operator in ("dispatch", "combine", "both"):
+            for mode in ("functional", "performance", "breakdown"):
+                with self.subTest(operator=operator, mode=mode):
+                    config, mappings, records = self.m5_records(operator, mode)
+                    self.assertIsNone(config.checkpoint)
+                    self.assertEqual(config.install.name, "server-dedup")
+                    workflow.validate_rank_records(records, mappings, "run", self.manifest,
+                                                   config.chain, check_measurements=False)
+                    if operator != "dispatch":
+                        records[0]["combine_y_out_validated"] = False
+                        with self.assertRaises(workflow.Failure):
+                            workflow.validate_rank_records(records, mappings, "run", self.manifest,
+                                                           config.chain, check_measurements=False)
 
     def test_one_two_and_many_call_window_contracts(self):
         for operator in ("dispatch", "combine", "both"):

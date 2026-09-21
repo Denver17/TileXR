@@ -6,7 +6,7 @@ void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes, uint64
     std::vector<uint16_t> chunk(512U * 1024U, one);
     for (uint64_t offset = 0; offset < bytes;) {
         const uint64_t count = std::min<uint64_t>(bytes - offset, chunk.size() * sizeof(uint16_t));
-        if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5") {
+        if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine()) {
             for (uint64_t i = 0; i < count / 2U; ++i) {
                 const uint64_t element = offset / 2U + i;
                 chunk[i] = CombineM4Reference::ExpertBits(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16,
@@ -33,7 +33,7 @@ void InitializeStandaloneCombine(const Config &c,
     auto shape = SourceSendShape(c);
     // Arithmetic checkpoints honor the configured global routes. Earlier
     // standalone fixtures retain balanced routes for incomplete global epochs.
-    if (c.checkpoint != "ep-sdedup-combine-p2-m4" && c.checkpoint != "ep-sdedup-combine-p2-m5") shape.routeMode = TileXREpDemo::RouteMode::Balance;
+    if (c.checkpoint != "ep-sdedup-combine-p2-m4" && !c.FullCombine()) shape.routeMode = TileXREpDemo::RouteMode::Balance;
     shape.quantized = false;
     const auto rows = DispatchRows(shape, c.rank);
     Require(rows.size() <= layout.capacityRows, "standalone Combine row capacity");
@@ -43,7 +43,7 @@ void InitializeStandaloneCombine(const Config &c,
     std::vector<uint32_t> relay(layout.relayReadIndexBytes / 4U, 0);
     std::vector<uint32_t> mask(c.bs, 0);
     auto weights = Weights(shape, c.rank);
-    if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5")
+    if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine())
         for (uint32_t token = 0; token < uint32_t(c.bs); ++token)
             for (uint32_t k = 0; k < uint32_t(c.topK); ++k)
                 weights[token * c.topK + k] = CombineM4Reference::Weight(c.rank, token, k);
@@ -55,7 +55,7 @@ void InitializeStandaloneCombine(const Config &c,
         std::copy(address.begin(), address.end(), assist.begin() + i * 3U);
         if (row.FirstHop()) {
             auto words = RelayReadIndex(row);
-            if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5")
+            if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine())
                 for (size_t member = 0; member < row.packet.members.size(); ++member)
                     words[member * 2U + 1U] = FloatBits(CombineM4Reference::Weight(
                         row.source, row.token, row.packet.members[member].k));
@@ -112,7 +112,7 @@ std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
         "relayReadIndex", "sourceMask", "yOut"};
     std::vector<CombineTensorSnapshot> snapshots;
     for (size_t i = 0; i < 8U; ++i) {
-        if (c.checkpoint == "ep-sdedup-combine-p2-m5" && indices[i] == 13U) continue;
+        if (c.FullCombine() && indices[i] == 13U) continue;
         // A continuous Dispatch batch legitimately rewrites its output tensors.
         // Independent expertOut is invariant; yOut is invariant only before M5.
         if (dispatchBatch && indices[i] != 12U && indices[i] != 13U) continue;

@@ -19,7 +19,7 @@ import test_combine_multi as c5
 class CombineProfileTests(c5.CombineMultiTests):
     def setUp(self):
         super().setUp()
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.COMBINE_PROFILE_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.COMBINE_PROFILE_CHECKPOINT
         self.manifest["source"]["content_sha256"] = "a" * 64
         self.manifest.update(checkpoint=workflow.COMBINE_PROFILE_CHECKPOINT, mode="production",
                              artifacts={f"lib/tilexr/kernels/tilexr_ep_{operator}_memory_server_dedup_kernel.o": value * 64
@@ -56,7 +56,7 @@ class CombineProfileTests(c5.CombineMultiTests):
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "host"}), self.assertRaises(ValueError):
             self.config()
         for checkpoint in (workflow.COMBINE_CHAIN_CHECKPOINT, workflow.COMBINE_MULTI_CHECKPOINT):
-            with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": checkpoint,
+            with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": checkpoint,
                     "TILEXR_VALIDATION_RUN_MODE": "performance"}), self.assertRaises(ValueError):
                 self.config()
         self.assertEqual(len(workflow.COMBINE_TESTS[workflow.COMBINE_PROFILE_CHECKPOINT]), 11)

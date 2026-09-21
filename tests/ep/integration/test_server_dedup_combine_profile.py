@@ -30,7 +30,7 @@ class CombineProfileTests(single.CombineChainTests):
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_CHECKPOINT=CHECKPOINT,
+        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=CHECKPOINT,
             TILEXR_VALIDATION_LOOPS="2", TILEXR_VALIDATION_WARMUP="1")
 
     def start_profile(self, rank, mode, run_mode, **extra):

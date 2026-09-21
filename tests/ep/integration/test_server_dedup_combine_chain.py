@@ -30,7 +30,7 @@ class CombineChainTests(dispatch_tests.ChainConsumerTests):
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_CHECKPOINT=CHECKPOINT,
+        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=CHECKPOINT,
             TILEXR_VALIDATION_OPERATOR_MODE="both", TILEXR_VALIDATION_RUN_MODE="functional",
             TILEXR_VALIDATION_LOOPS="1", TILEXR_VALIDATION_WARMUP="0",
             TILEXR_VALIDATION_COMBINE_QUANT_MODE="0")

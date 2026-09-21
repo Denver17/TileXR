@@ -4,7 +4,7 @@ This directory contains utility scripts for building, testing, and managing the 
 
 EP 服务器验证的统一入口与配置见[EP 七步验证](../docs/EP_VALIDATION_GUIDE.md)。根目录提供
 `set_env.sh`、`build_all.sh`、`sync.sh`、`run.sh`、`run_host_validation.sh`、`clean_run.sh`，PC 首次同步使用 `tools/validation/push.ps1`。
-`bash build_all.sh` 默认关闭设备打点；`bash build_all.sh breakdown=1` 编译 cnt/cumsum breakdown 产物。
+`bash build_all.sh` 默认关闭设备打点；`bash build_all.sh breakdown=1` 编译 Dispatch/Combine 模块 breakdown 产物。
 随后手动执行 `bash sync.sh`，再执行 `bash run.sh -n 2 -e 96 -m 2 -l 3 2`；同步无需设置运行模式、服务器数或专家数。hostfile 每行一个 IP；sync 分发全部机器，run 的 `-n` 选择前 N 台，每台固定 8 卡。
 这些入口负责构建、分发和结果汇总；下列模块脚本保留为内部实现及单独开发入口。
 
@@ -30,17 +30,17 @@ Host 回归不会在 build 后自动执行；`run.sh` 默认 `host_validation=0`
 报告保存在 `run/validation/host-<id>/summary.json`，每项测试的原始日志放在同一目录。
 修改 Host/ABI/布局、Planner 或 Python 分析工具后，以及完整交付验收时，建议手动执行此入口。
 
-`bash run_commit_validation.sh` 当前交付 Combine C7（`ep-sdedup-combine-p1-memory-boundary`）：
-独立 `install/validation-combine-c7` 使用 profiling OFF，完成 14 项 Host 回归后，
-在 hostfile 前两台各 8 卡串行运行 3 例：8GiB 双窗独立边界探针、BF16 Dispatch 回归、FP16 Dispatch 回归。
-探针每窗检查 4 点，使用不同 pattern、相邻合法保护区及最后全点重读；不访问 runtime 保留区。
-Dispatch 回归各 2 轮预热 + 5 轮正式调用，使用新进程/comm，避免探针写入污染算子输入。
-终端以 `[i/3] START/PASS/FAIL` 显示批次与结果路径，首错停止；各例报告绑定同一 build_id。
-总报告为 `commit-<id>/summary.json`，构建 manifest 与三例结果分别保留在 `build-manifest.json`、`cases/`。
-内部 `TILEXR_VALIDATION_BOUNDARY_PROBE=1` 仅选择 C7 独立探针，不改变 dispatch/combine/both 及三种运行模式的含义。
-`run.sh` 的 combine/both functional 默认使用 C7；performance/breakdown 继续选择 C6，保持其独立测量及 trace。
-维护时不要复用旧 4GiB 单域末尾探针：新布局末 4MiB 是 runtime，两个半区按同一可用上限检查；
-末端无合法后邻区时明确记录未检查，不能将未读地址报告为零。开发侧通过不替代 C5/C6/C7 各自设备验收。
+普通入口已弃用 `TILEXR_VALIDATION_CHECKPOINT`，旧导出和旧部署配置不影响执行。
+普通包固定为 `install/server-dedup`，每次构建覆盖；`-m 0/1` 要求关闭打点，`-m 2` 要求开启打点。
+`sync.sh` 同步当前唯一安装包，不必在新 shell 再指定 breakdown；模式不匹配须重新构建同步。
+`operator_mode=dispatch|combine|both` 和 `-l 正式轮数 预热轮数` 可自由组合；Combine 仅支持非量化。
+`dry_run=1` 使用普通包内的 Host consumer，不需要历史 C3 安装包。
+
+`bash run_commit_validation.sh` 内部选择当前提交的验收矩阵，无需设置 checkpoint。
+当前为 Combine P2.4/M5：前两台各 8 卡，共 24 例，包含单轮、双轮、多轮功能、性能、
+模块 trace、Dispatch 回归和量化 Dispatch 接线。验收包独立位于
+`install/validation-combine-p24`，不替代日常构建和同步。
+检查历史提交时切换到目标提交后执行该脚本，详细范围见 [EP 验证指南](../docs/EP_VALIDATION_GUIDE.md)。
 
 ## Environment Setup
 

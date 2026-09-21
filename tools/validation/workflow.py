@@ -62,7 +62,9 @@ COMBINE_M3_CHECKPOINT = "ep-sdedup-combine-p2-m3"
 COMBINE_M4_CHECKPOINT = "ep-sdedup-combine-p2-m4"
 COMBINE_SINGLE_MODULE_CHECKPOINTS = (COMBINE_M3_CHECKPOINT, COMBINE_M4_CHECKPOINT)
 COMBINE_M5_CHECKPOINT = "ep-sdedup-combine-p2-m5"
-COMBINE_RETURN_CHECKPOINTS = (*COMBINE_SINGLE_MODULE_CHECKPOINTS, COMBINE_M5_CHECKPOINT)
+# None denotes normal production use, without an acceptance stage. Historical
+# stages are selected only by the commit-validation entry and its subprocesses.
+COMBINE_RETURN_CHECKPOINTS = (*COMBINE_SINGLE_MODULE_CHECKPOINTS, COMBINE_M5_CHECKPOINT, None)
 COMBINE_MODULE_CHECKPOINTS = (COMBINE_M12_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)
 COMBINE_M5_TEST = "test_tilexr_ep_server_dedup_combine_m5"
 COMBINE_M5_CONSUMER_TEST = "test_tilexr_ep_server_dedup_combine_m5_consumer"
@@ -99,6 +101,7 @@ COMBINE_TESTS[COMBINE_M4_CHECKPOINT] = (COMBINE_TESTS[COMBINE_M3_CHECKPOINT] - {
     COMBINE_M3_TEST, COMBINE_M3_CONSUMER_TEST}) | {COMBINE_M4_TEST, COMBINE_M4_CONSUMER_TEST}
 COMBINE_TESTS[COMBINE_M5_CHECKPOINT] = (COMBINE_TESTS[COMBINE_M4_CHECKPOINT] - {
     COMBINE_M4_TEST, COMBINE_M4_CONSUMER_TEST}) | {COMBINE_M5_TEST, COMBINE_M5_CONSUMER_TEST}
+COMBINE_TESTS[None] = COMBINE_TESTS[COMBINE_M5_CHECKPOINT]
 COMBINE_ABI = {"launch_bytes": 88, "tiling_bytes": 16, "runtime_args_bytes": 88,
                "block_dim": 64, "kernel_scope": "combine-empty"}
 COMBINE_M12_ABI = dict(COMBINE_ABI, kernel_scope="combine-m12", implemented_through="M2",
@@ -110,7 +113,7 @@ COMBINE_M4_ABI = dict(COMBINE_M3_ABI, kernel_scope="combine-m4", implemented_thr
 COMBINE_M5_ABI = dict(COMBINE_M4_ABI, kernel_scope="combine-m5", implemented_through="M5", scope="full")
 
 def combine_contract(checkpoint):
-    return {COMBINE_M12_CHECKPOINT: COMBINE_M12_ABI, COMBINE_M3_CHECKPOINT: COMBINE_M3_ABI, COMBINE_M4_CHECKPOINT: COMBINE_M4_ABI, COMBINE_M5_CHECKPOINT: COMBINE_M5_ABI}.get(checkpoint, COMBINE_ABI)
+    return {None: COMBINE_M5_ABI, COMBINE_M12_CHECKPOINT: COMBINE_M12_ABI, COMBINE_M3_CHECKPOINT: COMBINE_M3_ABI, COMBINE_M4_CHECKPOINT: COMBINE_M4_ABI, COMBINE_M5_CHECKPOINT: COMBINE_M5_ABI}.get(checkpoint, COMBINE_ABI)
 
 
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
@@ -345,11 +348,9 @@ class Config:
         self.is_run = action in ("run", "node", "rank", "case-dry-run")
         self.root = Path(os.environ.get("TILEXR_VALIDATION_ROOT", Path(__file__).resolve().parents[2])).resolve()
         self.mode = os.environ.get("TILEXR_VALIDATION_BUILD_MODE", "production")
-        # 同步和人工测试继承安装检查点；build_all.sh 选择当前生产增量。
-        self.checkpoint = os.environ.get("TILEXR_VALIDATION_CHECKPOINT")
-        if not self.checkpoint:
-            installed = self.root / "install/validation/manifest.json"
-            self.checkpoint = read_json(installed)["checkpoint"] if installed.exists() else CHECKPOINT
+        # The public checkpoint variable and old generic manifest are ignored.
+        # Only run_commit_validation.sh supplies an internal acceptance stage.
+        self.checkpoint = os.environ.get("TILEXR_INTERNAL_ACCEPTANCE_STAGE") or None
         local_only = action in ("build", "verify", "host-validate", "commit-validate") and self.checkpoint not in COMBINE_DEVICE_CHECKPOINTS
         self.hostfile = (self.root / "hostfile" if local_only else
                          Path(os.environ.get("TILEXR_VALIDATION_HOSTFILE", self.root / "hostfile")))
@@ -376,12 +377,12 @@ class Config:
             raise ValueError("旧 cnt-only/first-hop/source-send checkpoint 已由 ep-sdedup-p2-dispatch 替代；更新 CHECKPOINT 后执行 build_all.sh 和 sync.sh")
         if self.mode not in ("host", "production") or self.checkpoint not in (
                 CHECKPOINT, *COMBINE_TESTS, EMPTY_KERNEL_CHECKPOINT, *RANK_CHECKPOINTS):
-            raise ValueError("不支持的 checkpoint：" + self.checkpoint)
+            raise ValueError("不支持的 mode/stage：" + str((self.mode, self.checkpoint)))
         if self.checkpoint in (COMBINE_ABI_HOST_CHECKPOINT, COMBINE_DRY_RUN_CHECKPOINT) and self.mode != "host":
             raise ValueError("Combine C1/C3 仅验证 Host ABI/layout/configuration；请使用 host 模式")
-        if action == "commit-validate" and self.checkpoint not in COMBINE_TESTS:
+        if action == "commit-validate" and (self.checkpoint is None or self.checkpoint not in COMBINE_TESTS):
             raise ValueError("当前提交验收入口仅支持已定义的 Combine checkpoint")
-        if self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, COMBINE_EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
+        if self.checkpoint is not None and self.checkpoint in (EMPTY_KERNEL_CHECKPOINT, COMBINE_EMPTY_KERNEL_CHECKPOINT, *CHAIN_CHECKPOINTS) and self.mode != "production":
             raise ValueError("empty-kernel / dispatch / memory-boundary 必须使用 production 模式验证真实 A5 artifact 和设备调用")
         if not 1 <= self.jobs <= 256 or not 30 <= self.timeout <= 180:
             raise ValueError("JOBS 必须为 1..256，TIMEOUT 必须为 30..180 秒")
@@ -394,9 +395,9 @@ class Config:
         self.chain = None
         if self.is_run and self.checkpoint in (*CHAIN_CHECKPOINTS, COMBINE_DRY_RUN_CHECKPOINT):
             default_host = None
-            if self.checkpoint != COMBINE_DRY_RUN_CHECKPOINT and not os.environ.get("TILEXR_COMM_ID"):
+            if action != "case-dry-run" and self.checkpoint != COMBINE_DRY_RUN_CHECKPOINT and not os.environ.get("TILEXR_COMM_ID"):
                 default_host = self.hosts()[0]["host"]
-            self.chain = chain_configuration(self.checkpoint, default_host)
+            self.chain = chain_configuration(self.checkpoint, default_host, dry_run=action == "case-dry-run")
         # Only retired acceptance stages retain their historical package paths.
         # Production builds replace one installation, regardless of profiling.
         if self.checkpoint in (COMBINE_M12_CHECKPOINT, COMBINE_M3_CHECKPOINT, COMBINE_M4_CHECKPOINT):
@@ -404,9 +405,9 @@ class Config:
                 self.chain["run_mode"] == "breakdown" if self.chain is not None else
                 os.environ.get("TILEXR_VALIDATION_BREAKDOWN", "0") == "1")
             self.install = self.install.with_name(self.install.name + ("-profile-on" if profile_on else "-profile-off"))
-        if action == "case-dry-run" and self.checkpoint != COMBINE_DRY_RUN_CHECKPOINT:
+        if action == "case-dry-run" and self.checkpoint not in (None, COMBINE_DRY_RUN_CHECKPOINT):
             raise ValueError("case-dry-run 要求 Combine C3 checkpoint")
-        if action in ("run", "node", "rank") and self.checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
+        if action in ("run", "node", "rank") and ((self.checkpoint is None and self.mode != "production") or self.checkpoint == COMBINE_DRY_RUN_CHECKPOINT):
             raise ValueError("Combine C3 仅支持 case-dry-run，不允许实际设备执行")
 
     def hosts(self):
@@ -448,7 +449,7 @@ def source_send_stride(config):
     return (payload + 479) // 480 * 512
 
 
-def chain_configuration(checkpoint, default_host=None):
+def chain_configuration(checkpoint, default_host=None, *, dry_run=False):
     route_mode = os.environ.get("TILEXR_VALIDATION_ROUTE_MODE", "balance_shift")
     if route_mode not in ("random", "balance", "balance_shift"):
         raise ValueError("route_mode 必须为 random、balance 或 balance_shift")
@@ -458,7 +459,7 @@ def chain_configuration(checkpoint, default_host=None):
     case_analysis = os.environ.get("TILEXR_VALIDATION_CASE_ANALYSIS", "0")
     if case_analysis not in ("0", "1"):
         raise ValueError("case_analysis 必须为 0 或 1")
-    if case_analysis == "1" and checkpoint != DISPATCH_CHECKPOINT:
+    if case_analysis == "1" and (checkpoint not in (None, DISPATCH_CHECKPOINT) or os.environ.get("TILEXR_VALIDATION_OPERATOR_MODE", "dispatch") == "combine"):
         raise ValueError("case_analysis 只支持完整 Dispatch 用例")
     if checkpoint in (MEMORY_BOUNDARY_CHECKPOINT, COMBINE_CHAIN_CHECKPOINT) and (
             os.environ.get("TILEXR_VALIDATION_RUN_MODE", "functional") != "functional" or
@@ -536,12 +537,12 @@ def chain_configuration(checkpoint, default_host=None):
             raise ValueError("M1/M2逐轮观察仅支持functional")
         if checkpoint in COMBINE_SINGLE_MODULE_CHECKPOINTS and (loops != 1 or warmup != 0 or observation != "batch" or fixture != "balanced"):
             raise ValueError("M3/M4 requires one launch, zero warmup, balanced fixture and batch observation in every mode")
-        if checkpoint == COMBINE_M5_CHECKPOINT and (observation != "batch" or fixture != "balanced"):
+        if checkpoint in (None, COMBINE_M5_CHECKPOINT) and (observation != "batch" or fixture != "balanced"):
             raise ValueError("M5 requires balanced fixture and batch observation; no test-side preconditioning")
         chain.update(combine_fixture=fixture, combine_observation=observation,
                      implemented_through=combine_contract(checkpoint)["implemented_through"],
-                     scope="full" if checkpoint == COMBINE_M5_CHECKPOINT else "partial", combine_send_core_num=32)
-    if checkpoint == COMBINE_DRY_RUN_CHECKPOINT:
+                     scope="full" if checkpoint in (None, COMBINE_M5_CHECKPOINT) else "partial", combine_send_core_num=32)
+    if checkpoint == COMBINE_DRY_RUN_CHECKPOINT or dry_run:
         return chain
 
     comm_id = endpoint(os.environ.get("TILEXR_COMM_ID") or f"{default_host}:10177", "TILEXR_COMM_ID")
@@ -609,7 +610,7 @@ def require_tools(names):
 
 
 def validation_directory(checkpoint):
-    return {COMBINE_ABI_HOST_CHECKPOINT: "validation-combine-c1",
+    return {None: "server-dedup", COMBINE_ABI_HOST_CHECKPOINT: "validation-combine-c1",
             COMBINE_EMPTY_KERNEL_CHECKPOINT: "validation-combine-c2",
             COMBINE_DRY_RUN_CHECKPOINT: "validation-combine-c3",
             COMBINE_CHAIN_CHECKPOINT: "validation-combine-c4",
@@ -683,9 +684,10 @@ def artifact_files(install):
             for path in sorted(install.rglob("*")) if path.is_file() and path.name != "manifest.json"}
 
 
-def verify_build(config, *, check_run_mode=True):
+def verify_build(config, *, check_run_mode=True, dry_run=False):
     manifest = read_json(config.install / "manifest.json")
-    if manifest["mode"] != config.mode or manifest["checkpoint"] != config.checkpoint:
+    if (manifest["mode"] not in (("host", "production") if dry_run else (config.mode,))
+            or manifest["checkpoint"] != config.checkpoint):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         if manifest.get("server_dedup_combine_contract") != combine_contract(config.checkpoint):
@@ -740,7 +742,8 @@ def clean_build_directory(config):
     work.resolve().relative_to(config.root)
     if work.exists() and not work.is_dir():
         raise ValueError(f"构建路径不是目录：{work}")
-    (config.logs / "sync.json").unlink(missing_ok=True)
+    if config.checkpoint in (None, COMBINE_M5_CHECKPOINT) or config.checkpoint not in COMBINE_TESTS:
+        (config.logs / "sync.json").unlink(missing_ok=True)
     # 即使本次编译失败，也不能把上一轮安装包当作本次构建使用。
     (config.install / "manifest.json").unlink(missing_ok=True)
     if work.exists():
@@ -772,7 +775,7 @@ def build(config):
         source["content_sha256"] = source_content_sha256(config.root, source)
     stage = work / "install"
     log = config.logs / ("build-" + build_id)
-    print(f"开始构建 {config.checkpoint}，mode={config.mode}，日志：{log}", flush=True)
+    print(f"开始构建 {config.checkpoint or 'server-dedup'}，mode={config.mode}，日志：{log}", flush=True)
     for tool in ("cmake", "g++"):
         command([tool, "--version"], log / (tool + "-version.log"))
     combine_tests = COMBINE_TESTS.get(config.checkpoint)
@@ -803,7 +806,7 @@ def build(config):
                 raise ValueError(f"缺少 EP kernel：{kernel}")
     host_build = work / "host"
     registration = config.checkpoint == EMPTY_KERNEL_CHECKPOINT
-    chain = config.checkpoint in CHAIN_CHECKPOINTS
+    chain = config.mode == "production" and config.checkpoint in CHAIN_CHECKPOINTS
     command(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST={'ON' if combine_c2 else 'OFF'}",
@@ -816,13 +819,13 @@ def build(config):
     build_targets = combine_tests
     if config.checkpoint in (COMBINE_DRY_RUN_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         build_targets = (combine_tests - {COMBINE_DRY_RUN_TEST, COMBINE_CHAIN_TEST, COMBINE_MULTI_TEST, COMBINE_PROFILE_TEST, COMBINE_BOUNDARY_TEST, COMBINE_M12_CONSUMER_TEST, COMBINE_M3_CONSUMER_TEST, COMBINE_M4_CONSUMER_TEST, COMBINE_M5_CONSUMER_TEST, COMBINE_CONFIG_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
-    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
+    if chain and combine_tests:
         build_targets = build_targets | {CHAIN_PROGRAM}
     targets = ["--target", *sorted(build_targets)] if build_targets else []
     command(["cmake", "--build", host_build, "-j", config.jobs, *targets], log / "host-build.log", timeout=1800)
     if not combine_tests:
         command(["cmake", "--install", host_build], log / "host-install.log")
-    if config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
+    if chain and combine_tests:
         (stage / "bin").mkdir(parents=True, exist_ok=True)
         shutil.copy2(host_build / CHAIN_PROGRAM, stage / "bin" / CHAIN_PROGRAM)
     if chain and not (stage / "bin" / CHAIN_PROGRAM).is_file():
@@ -880,6 +883,11 @@ def build(config):
         for artifact in (COMBINE_BOUNDARY_LIBRARY, COMBINE_BOUNDARY_KERNEL):
             if not (stage / artifact).is_file():
                 raise ValueError("C7缺少独立边界探针产物：" + artifact)
+    if config.mode == "host" and config.checkpoint is None:
+        mapping_dir = stage / "share/tilexr/profiling"
+        mapping_dir.mkdir(parents=True, exist_ok=True)
+        for filename in ("server_dedup.mapping.json", "server_dedup_combine.mapping.json"):
+            shutil.copy2(config.root / "src/ep/profiling" / filename, mapping_dir / filename)
     runtime_check(config, stage, log)
     if config.checkpoint in (*COMBINE_MEASUREMENT_CHECKPOINTS, COMBINE_BOUNDARY_CHECKPOINT):
         final_source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
@@ -924,7 +932,7 @@ def remote_argv(config, host, action, *arguments):
     command = "bash -s -- " + " ".join(shlex.quote(str(value)) for value in (config.root, action, *arguments))
     if action in ("verify", "node", "cancel"):
         values = {
-            "TILEXR_VALIDATION_CHECKPOINT": config.checkpoint,
+            "TILEXR_INTERNAL_ACCEPTANCE_STAGE": config.checkpoint or "",
             "TILEXR_VALIDATION_BUILD_MODE": config.mode,
             "TILEXR_VALIDATION_RESULT_ROOT": str(config.logs),
             "TILEXR_VALIDATION_BREAKDOWN": int(config.install.name.endswith("-profile-on")) if config.checkpoint in COMBINE_MODULE_CHECKPOINTS else int(config.profiling),
@@ -1381,7 +1389,7 @@ def validate_combine_chain_record(record, mapping, run_id, manifest, config, *, 
 
 
 def validate_rank_records(records, expected, run_id, manifest, chain_config=None, *, check_measurements=True,
-                          allow_invalid_output=False):
+                          allow_invalid_output=False, dry_run=False):
     if not isinstance(records, list) or any(not isinstance(record, dict) for record in records):
         raise Failure("LOG_PARSE_FAILED", "rank 记录格式错误")
     actual = [record.get("rank") for record in records]
@@ -1393,7 +1401,7 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
         invalid_output = (allow_invalid_output and manifest["checkpoint"] in (DISPATCH_CHECKPOINT, *COMBINE_RETURN_CHECKPOINTS)
                           and chain_config is not None
                           and record.get("validation_status") == "FAIL")
-        chain = manifest["checkpoint"] in CHAIN_CHECKPOINTS
+        chain = not dry_run and manifest["checkpoint"] in CHAIN_CHECKPOINTS
         for marker in (record, record.get("chain")) if chain else (record,):
             if not isinstance(marker, dict):
                 raise Failure("LOG_PARSE_FAILED", "缺少 rank 的建链记录", rank=mapping["rank"])
@@ -1545,7 +1553,7 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                         manifest["source"]["commit"] or "unknown",
                         *[str(mapping[key]) for key in ("host", "host_index", "local_rank", "device", "rank", "rank_size")]]
                 env = dict(os.environ)
-                env["TILEXR_VALIDATION_CHECKPOINT"] = config.checkpoint
+                env["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = config.checkpoint or ""
                 env["TILEXR_VALIDATION_BOUNDARY_PROBE"] = str(int(config.chain.get("boundary_probe", False)))
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "operator_mode", "dispatch_quant_mode", "combine_quant_mode", "fp8_format", "loops", "warmup", "run_mode", "route_mode", "seed"):
                     env["TILEXR_VALIDATION_" + key.upper()] = str(config.chain[key])
@@ -1823,7 +1831,7 @@ def host_validate(config, run_id=None):
         result.update(scope="Combine C6 Host回归：C1/C3/C4/C5、独立记录区及三模式profiling；不含真实NPU提交。")
     if config.checkpoint == COMBINE_BOUNDARY_CHECKPOINT:
         result.update(scope="Combine C7 Host回归：C1/C3/C4/C5/C6、边界探针注册/kernel与consumer；不含真实NPU提交。")
-    if config.checkpoint == COMBINE_M5_CHECKPOINT:
+    if config.checkpoint in (None, COMBINE_M5_CHECKPOINT):
         result.update(scope="Combine P2.4 Host: M1-M5 full oracle, result reuse and module profiling; no device execution.")
     elif config.checkpoint == COMBINE_M4_CHECKPOINT:
         result.update(scope="Combine P2.3 Host: M4 partial oracle, module profiling and public contracts; no device execution.")
@@ -2493,7 +2501,7 @@ def commit_validate(config):
 
 def case_dry_run(config):
     """Resolve the normal case/rank contract locally without starting SSH or ACL."""
-    manifest = verify_build(config, check_run_mode=False)
+    manifest = verify_build(config, check_run_mode=False, dry_run=True)
     mappings = rank_mapping(config.hosts())
     run_id = "dry-run-" + uuid.uuid4().hex
     result = dict(run_id=run_id, build_id=manifest["build_id"], checkpoint=config.checkpoint,
@@ -2502,7 +2510,7 @@ def case_dry_run(config):
                   chain_configuration=dict(config.chain), rank_size=len(mappings), completed_ranks=0)
     deadline = time.monotonic() + config.timeout
     try:
-        env = dict(os.environ, TILEXR_VALIDATION_CHECKPOINT=config.checkpoint)
+        env = dict(os.environ, TILEXR_INTERNAL_ACCEPTANCE_STAGE=config.checkpoint or "")
         for key, value in config.chain.items():
             env["TILEXR_VALIDATION_" + key.upper()] = str(value)
         env.pop("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM", None)
@@ -2518,7 +2526,7 @@ def case_dry_run(config):
             output = execute(argv, config.logs / run_id / f"rank-{mapping['rank']}.log",
                              timeout=remaining, cwd=config.root, env=env)
             result["ranks"].append(parse_rank_marker(output, COMBINE_DRY_RUN_MARKER))
-        validate_rank_records(result["ranks"], mappings, run_id, manifest, config.chain)
+        validate_rank_records(result["ranks"], mappings, run_id, manifest, config.chain, dry_run=True)
         for record, mapping in zip(result["ranks"], mappings):
             if any(type(record.get(key)) is not type(value) for key, value in rank_record(mapping, run_id, manifest).items()):
                 raise Failure("RESULT_FAILED", "C3 rank 身份字段类型不一致", rank=mapping["rank"])
@@ -2932,7 +2940,7 @@ def run(config):
         scope = (f"Combine C7：{len(mappings)}P 双窗8点独立边界探针，避开runtime；不提交业务算子。"
                  if config.chain["boundary_probe"] else f"Combine C7：{len(mappings)}P {config.chain['operator_mode']} "
                  "连续预热/正式调用回归，保留真实Dispatch输出/五表/Flag校验；不验Combine业务数据。")
-    elif config.checkpoint == COMBINE_M5_CHECKPOINT:
+    elif config.checkpoint in (None, COMBINE_M5_CHECKPOINT):
         scope = (f"{len(mappings)}P M1-M5 full Combine: final yOut, Flag cleanup and used windows; "
                  f"{config.chain['warmup']} warmup + {config.chain['loops']} measured launches; "
                  "functional/performance/module breakdown; no fixed wait or performance threshold.")

@@ -117,6 +117,7 @@ struct Config {
     std::string operatorMode = "dispatch";
     std::string combineFixture = "balanced";
     std::string combineObservation = "batch";
+    bool FullCombine() const { return checkpoint.empty() || checkpoint == "ep-sdedup-combine-p2-m5"; }
     bool dryRun = false;
     bool boundaryProbe = false;
     std::string fp8Format = "e4m3";
@@ -149,8 +150,8 @@ Config Parse(int argc, char **argv)
     }
     Require(argc == 10, "expected [--dry-run] run build commit host host_index local_rank device rank rank_size");
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
-    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
-    c.checkpoint = checkpoint == nullptr ? "ep-sdedup-p2-dispatch" : checkpoint;
+    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
+    c.checkpoint = checkpoint == nullptr ? "" : checkpoint;
     Require(c.checkpoint == "ep-sdedup-p2-dispatch" ||
         c.checkpoint == "ep-sdedup-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p1-dry-run" ||
@@ -159,8 +160,8 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p2-m12" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5",
-        "unsupported TILEXR_VALIDATION_CHECKPOINT");
+        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine(),
+        "unsupported TILEXR_INTERNAL_ACCEPTANCE_STAGE");
     if (const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE")) {
         Require(std::strcmp(probe, "0") == 0 || std::strcmp(probe, "1") == 0,
             "boundary_probe must be 0/1");
@@ -179,7 +180,7 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
         c.checkpoint == "ep-sdedup-combine-p2-m12" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5",
+        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine(),
         "Combine device execution requires a Combine acceptance checkpoint");
     if (const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_FIXTURE")) c.combineFixture = value;
     if (const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_OBSERVATION")) c.combineObservation = value;
@@ -248,7 +249,7 @@ Config Parse(int argc, char **argv)
         c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
         c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5" || c.dryRun) &&
+        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine() || c.dryRun) &&
         !c.boundaryProbe && c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
@@ -309,7 +310,7 @@ ProfilePaths ConfigureProfiling(const Config &c)
 {
     ProfilePaths paths;
     const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5";
+        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine();
     const bool dispatch = c.runMode == "breakdown" && c.operatorMode != "combine";
     const bool combine = c.runMode == "breakdown" && split && c.operatorMode != "dispatch";
     const auto configure = [&](const char *name, bool enabled, std::string &path) {
@@ -348,7 +349,7 @@ void Marker(const Config &c, const char *name, const std::string &details, const
 {
     std::cout << name << " {\"run_id\":" << Json(c.run) << ",\"build_id\":" << Json(c.build)
         << ",\"commit\":" << (c.commit == "unknown" ? "null" : Json(c.commit))
-        << ",\"checkpoint\":" << Json(c.checkpoint) << ",\"status\":" << Json(status) << ",\"host\":" << Json(c.host)
+        << ",\"checkpoint\":" << (c.checkpoint.empty() ? "null" : Json(c.checkpoint)) << ",\"status\":" << Json(status) << ",\"host\":" << Json(c.host)
         << ",\"run_mode\":" << Json(c.runMode) << ",\"loops\":" << c.loops << ",\"warmup\":" << c.warmup
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
@@ -363,10 +364,10 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
         << Json(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16");
-    if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5") {
-        std::cout << ",\"implemented_through\":" << Json(c.checkpoint == "ep-sdedup-combine-p2-m5" ? "M5" : c.checkpoint == "ep-sdedup-combine-p2-m4" ? "M4" :
+    if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine()) {
+        std::cout << ",\"implemented_through\":" << Json(c.FullCombine() ? "M5" : c.checkpoint == "ep-sdedup-combine-p2-m4" ? "M4" :
             c.checkpoint == "ep-sdedup-combine-p2-m3" ? "M3" : "M2") << ",\"scope\":" <<
-            Json(c.checkpoint == "ep-sdedup-combine-p2-m5" ? "full" : "partial")
+            Json(c.FullCombine() ? "full" : "partial")
             << ",\"combine_fixture\":" << Json(c.combineFixture)
             << ",\"combine_observation\":" << Json(c.combineObservation);
     }
@@ -578,7 +579,7 @@ int Run(const Config &c)
     const bool m12 = c.checkpoint == "ep-sdedup-combine-p2-m12";
     const bool m3 = c.checkpoint == "ep-sdedup-combine-p2-m3";
     const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4";
-    const bool m5 = c.checkpoint == "ep-sdedup-combine-p2-m5";
+    const bool m5 = c.FullCombine();
     const bool observeRounds = c.combineObservation == "per-round";
     const bool multi = m12 || m3 || m4 || m5 || c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
         c.checkpoint == "ep-sdedup-combine-p1-profile" ||
@@ -914,7 +915,7 @@ int Run(const Config &c)
         const auto profileMarker = [&](const char *op, const std::string &path) {
             if (path.empty()) return;
             const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-                c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.checkpoint == "ep-sdedup-combine-p2-m5";
+                c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine();
             Marker(c, split ? "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS" : "EP_SERVER_DEDUP_BREAKDOWN_PASS",
                 (split ? ",\"operator\":" + Json(op) : "") +
                 ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(path) +

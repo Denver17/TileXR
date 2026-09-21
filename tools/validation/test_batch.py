@@ -55,13 +55,13 @@ class BatchTests(unittest.TestCase):
             (root / 'tools/validation/workflow.py').write_text(
                 'import json, os, pathlib, sys\n'
                 'pathlib.Path("calls").write_text(json.dumps({"argv": sys.argv[1:], '
-                '"checkpoint": os.environ["TILEXR_VALIDATION_CHECKPOINT"], '
+                '"checkpoint": os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"], '
                 '"mode": os.environ["TILEXR_VALIDATION_BUILD_MODE"]}))\n'
                 'raise SystemExit(19)\n', encoding='utf-8')
             result = subprocess.run([str(bash), 'run_commit_validation.sh'], cwd=root,
                 env=dict(os.environ, PATH=str(bash.parent) + os.pathsep + os.environ['PATH'],
                          TILEXR_VALIDATION_PYTHON=sys.executable,
-                         TILEXR_VALIDATION_CHECKPOINT='ep-sdedup-p2-dispatch',
+                         TILEXR_INTERNAL_ACCEPTANCE_STAGE='ep-sdedup-p2-dispatch',
                          TILEXR_VALIDATION_BUILD_MODE='production',
                          TILEXR_CANN_ENV_SCRIPT=str(cann)),
                 text=True, capture_output=True, timeout=10)

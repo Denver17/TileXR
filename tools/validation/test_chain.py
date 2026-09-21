@@ -14,7 +14,7 @@ from test_workflow import TemporaryRoot
 class ChainTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.DISPATCH_CHECKPOINT,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.DISPATCH_CHECKPOINT,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
@@ -143,7 +143,7 @@ class ChainTests(TemporaryRoot):
                     with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
                         self.config()
         for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send"):
-            with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": checkpoint}), self.assertRaises(ValueError):
+            with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": checkpoint}), self.assertRaises(ValueError):
                 self.config()
         for quant, format, stride in (("0", "e4m3", 15872), ("4", "e4m3", 8192), ("4", "e5m2", 8192)):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_QUANT_MODE": quant, "TILEXR_VALIDATION_FP8_FORMAT": format}):
@@ -157,7 +157,7 @@ class ChainTests(TemporaryRoot):
                 self.assertEqual(workflow.source_send_stride(dict(h=h, quant_mode=quant, topk=k)), expected)
 
     def test_multi_requires_all_configured_rounds_and_batch_identity(self):
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.DISPATCH_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.DISPATCH_CHECKPOINT
         os.environ["TILEXR_VALIDATION_LOOPS"] = "1"
         config = self.config()
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
@@ -188,7 +188,7 @@ class ChainTests(TemporaryRoot):
             workflow.validate_rank_records([record], [mapping], "run", manifest)
 
     def test_memory_boundary_requires_capacity_and_each_read_write_assertion(self):
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
         config = self.config()
         manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
         mapping = workflow.rank_mapping(config.hosts())[0]
@@ -232,7 +232,7 @@ class ChainTests(TemporaryRoot):
                 workflow.validate_dispatch_tables(changed, config)
 
     def test_memory_boundary_is_one_functional_case(self):
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
         self.assertEqual(self.config().chain["run_mode"], "functional")
         for key, value in (("RUN_MODE", "performance"), ("RUN_MODE", "breakdown"), ("LOOPS", "2"), ("WARMUP", "1")):
             with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), \

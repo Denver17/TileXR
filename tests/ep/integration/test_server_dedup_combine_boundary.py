@@ -27,7 +27,7 @@ class CombineBoundaryTests(single_tests.CombineChainTests):
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_CHECKPOINT=CHECKPOINT,
+        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=CHECKPOINT,
             TILEXR_VALIDATION_BOUNDARY_PROBE="1", TILEXR_VALIDATION_OPERATOR_MODE="combine",
             TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS="1", TILEXR_VALIDATION_WARMUP="0")
 
@@ -131,7 +131,7 @@ class CombineBoundaryTests(single_tests.CombineChainTests):
         cases = [dict(TILEXR_VALIDATION_BOUNDARY_PROBE="2"), dict(TILEXR_VALIDATION_LOOPS="2"),
                  dict(TILEXR_VALIDATION_WARMUP="1"), dict(TILEXR_VALIDATION_RUN_MODE="performance"),
                  dict(TILEXR_VALIDATION_RUN_MODE="breakdown"),
-                 dict(TILEXR_VALIDATION_CHECKPOINT="ep-sdedup-combine-p1-chain-multi")]
+                 dict(TILEXR_INTERNAL_ACCEPTANCE_STAGE="ep-sdedup-combine-p1-chain-multi")]
         for invalid in cases:
             with self.subTest(invalid=invalid):
                 process = self.start(0, environment=invalid)

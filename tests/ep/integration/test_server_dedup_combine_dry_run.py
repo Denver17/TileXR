@@ -28,7 +28,7 @@ class CombineDryRunTests(unittest.TestCase):
 
     def configure(self, **values):
         for key, value in values.items():
-            self.env["TILEXR_VALIDATION_" + key] = str(value)
+            self.env["TILEXR_INTERNAL_ACCEPTANCE_STAGE" if key == "CHECKPOINT" else "TILEXR_VALIDATION_" + key] = str(value)
 
     def invoke(self, *, rank=0, ranks=16, identity=None, dry_run=True, error=None):
         host, local = divmod(rank, 8)

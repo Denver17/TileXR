@@ -86,7 +86,8 @@ class BuildTests(unittest.TestCase):
         (self.root / "CMakeLists.txt").write_text("# copied source without Git\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
-        environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
+        environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.CHECKPOINT,
+                           TILEXR_VALIDATION_ROOT=str(self.root),
                            TILEXR_VALIDATION_BUILD_MODE="host",
                            TILEXR_VALIDATION_TIMEOUT="30")
         patch = mock.patch.dict(os.environ, environment, clear=True)
@@ -165,7 +166,7 @@ class BuildTests(unittest.TestCase):
     def test_production_build_needs_no_inventory_or_runtime_case(self):
         (self.root / "hostfile").unlink()
         with mock.patch.dict(os.environ, {
-                "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
+                "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
                 "TILEXR_VALIDATION_SERVERS": "invalid", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "invalid",
                 "TILEXR_VALIDATION_RUN_MODE": "invalid", "TILEXR_VALIDATION_LOOPS": "invalid",
                 "TILEXR_VALIDATION_TIMEOUT": "invalid", "TILEXR_COMM_ID": "invalid",
@@ -232,7 +233,7 @@ class BuildTests(unittest.TestCase):
                 self.assertFalse((self.config().install / "manifest.json").exists())
 
     def test_empty_kernel_build_requires_installed_registration_consumer(self):
-        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_CHECKPOINT": workflow.EMPTY_KERNEL_CHECKPOINT}):
+        with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.EMPTY_KERNEL_CHECKPOINT}):
             config = self.config("production")
         with self.assertRaisesRegex(ValueError, workflow.REGISTRATION_TEST):
             self.build_fixture(config)
@@ -248,7 +249,7 @@ class BuildTests(unittest.TestCase):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for checkpoint in (workflow.DISPATCH_CHECKPOINT, workflow.MEMORY_BOUNDARY_CHECKPOINT):
             with self.subTest(checkpoint=checkpoint), mock.patch.dict(os.environ, {
-                    "TILEXR_VALIDATION_CHECKPOINT": checkpoint, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
+                    "TILEXR_INTERNAL_ACCEPTANCE_STAGE": checkpoint, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
                 config = self.config("production")
                 self.install_chain = False
                 with self.assertRaisesRegex(ValueError, workflow.CHAIN_PROGRAM):
@@ -271,7 +272,7 @@ class BuildTests(unittest.TestCase):
 
     def test_dispatch_rejects_previous_launch_abi(self):
         with mock.patch.dict(os.environ, {
-                'TILEXR_VALIDATION_CHECKPOINT': workflow.DISPATCH_CHECKPOINT,
+                'TILEXR_INTERNAL_ACCEPTANCE_STAGE': workflow.DISPATCH_CHECKPOINT,
                 'TILEXR_COMM_ID': '192.0.2.1:10177'}):
             config = self.config('production')
             manifest, _ = self.build_fixture(config)
@@ -297,7 +298,7 @@ class BuildTests(unittest.TestCase):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
-                    "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
+                    "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
                     "TILEXR_VALIDATION_RUN_MODE": mode, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
                 self.commands.clear()
                 self.build_fixture(self.config("production"))
@@ -312,7 +313,7 @@ class BuildTests(unittest.TestCase):
     def test_breakdown_build_enables_count_profile_and_rejects_baseline_or_legacy_package(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {
-                "TILEXR_VALIDATION_CHECKPOINT": workflow.DISPATCH_CHECKPOINT,
+                "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
                 "TILEXR_VALIDATION_BREAKDOWN": "1", "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
             config = self.config("production")
             manifest, _ = self.build_fixture(config)

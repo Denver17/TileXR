@@ -105,7 +105,7 @@ class ChainConsumerTests(unittest.TestCase):
             self.environment.pop("TILEXR_VALIDATION_" + key, None)
         self.environment.pop("TILEXR_VALIDATION_ROUTE_MODE", None)
         self.environment.pop("TILEXR_VALIDATION_SEED", None)
-        self.environment.pop("TILEXR_VALIDATION_CHECKPOINT", None)
+        self.environment.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE", None)
         self.environment.pop("TILEXR_VALIDATION_LOOPS", None)
         self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
         self.environment.pop("TILEXR_VALIDATION_RUN_MODE", None)
@@ -225,7 +225,7 @@ class ChainConsumerTests(unittest.TestCase):
 
     def test_memory_boundary_all_ranks_validate_capacity_and_roundtrip(self):
         # This probe does not route tokens: Dispatch divisibility/epoch rules do not apply.
-        environment = {"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary",
+        environment = {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": "ep-sdedup-p1-memory-boundary",
                        "TILEXR_VALIDATION_BS": "1", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "33"}
         processes = [self.start(rank, environment=environment) for rank in range(16)]
         for rank, process in enumerate(processes):
@@ -245,7 +245,7 @@ class ChainConsumerTests(unittest.TestCase):
             self.assertEqual(calls[-1], "finalize")
 
     def test_memory_boundary_rejects_bad_capacity(self):
-        process = self.start(0, environment={"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary",
+        process = self.start(0, environment={"TILEXR_INTERNAL_ACCEPTANCE_STAGE": "ep-sdedup-p1-memory-boundary",
                                            "TEST_BOUNDARY_FAULT": "capacity"})
         output, errors = process.communicate(timeout=5)
         self.assertNotEqual(process.returncode, 0)
@@ -255,7 +255,7 @@ class ChainConsumerTests(unittest.TestCase):
     def test_memory_boundary_detects_missing_operations_and_corruption(self):
         for fault in ("initial", "no-launch", "no-write", "no-read", "guard"):
             with self.subTest(fault=fault):
-                process = self.start(0, environment={"TILEXR_VALIDATION_CHECKPOINT": "ep-sdedup-p1-memory-boundary",
+                process = self.start(0, environment={"TILEXR_INTERNAL_ACCEPTANCE_STAGE": "ep-sdedup-p1-memory-boundary",
                                                    "TEST_BOUNDARY_FAULT": fault})
                 peers = []
                 try:
@@ -350,7 +350,7 @@ class ChainConsumerTests(unittest.TestCase):
         cases = [{"TILEXR_VALIDATION_LOOPS": value} for value in ("", "0", "-1", "abc", "4294967296")]
         cases += [{"TILEXR_VALIDATION_WARMUP": value} for value in ("", "-1", "4294967296", "abc")]
         cases += [{"TILEXR_VALIDATION_RUN_MODE": value} for value in ("", "unknown")]
-        cases += [{"TILEXR_VALIDATION_CHECKPOINT": value} for value in
+        cases += [{"TILEXR_INTERNAL_ACCEPTANCE_STAGE": value} for value in
                   ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p1-profile", "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send")]
         cases += [{"TILEXR_VALIDATION_QUANT_MODE": "3"}, {"TILEXR_VALIDATION_FP8_FORMAT": "invalid"}]
         for env in cases:

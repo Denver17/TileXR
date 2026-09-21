@@ -15,7 +15,7 @@ class CombineM12ResumeTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
         self.hostfile.write_text("192.0.2.1\n192.0.2.2\n")
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_M12_CHECKPOINT,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_M12_CHECKPOINT,
                           TILEXR_VALIDATION_BUILD_MODE="production")
         self.old = self.root / "run/validation/original/summary.json"
         self.hosts = workflow.hosts_from_file(self.hostfile)

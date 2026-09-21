@@ -25,7 +25,7 @@ class CombineCommitValidationTests(unittest.TestCase):
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
         environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
-                           TILEXR_VALIDATION_CHECKPOINT=self.checkpoint,
+                           TILEXR_INTERNAL_ACCEPTANCE_STAGE=self.checkpoint,
                            TILEXR_VALIDATION_BUILD_MODE=self.mode)
         patch = mock.patch.dict(os.environ, environment, clear=True)
         patch.start()

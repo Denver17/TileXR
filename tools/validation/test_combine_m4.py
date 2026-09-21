@@ -16,7 +16,7 @@ import test_combine_multi as c5
 class CombineM4Tests(c5.CombineMultiTests):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_M4_CHECKPOINT,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_M4_CHECKPOINT,
                           TILEXR_VALIDATION_LOOPS="1", TILEXR_VALIDATION_WARMUP="0")
         self.manifest.update(checkpoint=workflow.COMBINE_M4_CHECKPOINT, mode="production")
         self.manifest["source"]["content_sha256"] = "a" * 64

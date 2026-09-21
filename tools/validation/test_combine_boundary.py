@@ -18,7 +18,7 @@ from test_combine_multi import CombineMultiTests
 class CombineBoundaryTests(CombineMultiTests):
     def setUp(self):
         super().setUp()
-        os.environ["TILEXR_VALIDATION_CHECKPOINT"] = workflow.COMBINE_BOUNDARY_CHECKPOINT
+        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.COMBINE_BOUNDARY_CHECKPOINT
         self.manifest["checkpoint"] = workflow.COMBINE_BOUNDARY_CHECKPOINT
         self.manifest["source"]["content_sha256"] = "b" * 64
 

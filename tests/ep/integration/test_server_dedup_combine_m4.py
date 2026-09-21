@@ -25,7 +25,7 @@ class CombineM4Tests(chain.CombineChainTests):
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_CHECKPOINT=CHECKPOINT,
+        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=CHECKPOINT,
                                 TILEXR_VALIDATION_BS="16", TILEXR_VALIDATION_H="257",
                                 TILEXR_VALIDATION_TOPK="6",
                                 TILEXR_VALIDATION_COMBINE_FIXTURE="balanced",

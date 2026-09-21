@@ -20,7 +20,7 @@ class CombineChainTests(TemporaryRoot):
     def setUp(self):
         super().setUp()
         self.hostfile.write_text("192.0.2.1\n192.0.2.2\n192.0.2.3\n")
-        os.environ.update(TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_CHAIN_CHECKPOINT,
+        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_CHAIN_CHECKPOINT,
                           TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_VALIDATION_OPERATOR_MODE="both",
                           TILEXR_VALIDATION_SERVERS="2", TILEXR_COMM_ID="192.0.2.1:10177")
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
