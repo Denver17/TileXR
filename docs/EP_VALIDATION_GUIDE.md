@@ -3,7 +3,7 @@
 ## 当前计划：Combine 第二阶段按模块验收
 
 结构对齐提交 `53f3313` 已收到用户“测试通过”确认；未附外部报告，范围按[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)登记。
-P2.1 的 M1/M2 设计与验收范围已确定，开发验证已完成；M3–M5 的待定项不作为 P2.1 前置条件。
+P2.1 的 M1/M2 已按用户回传登记验收通过；M3–M5 的待定项不作为 P2.1 前置条件。
 第二阶段详细判据、矩阵和交付约定见[模块验收计划](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
 
 | 交付顺序 | 累计模块 | 阶段末尾 50μs | 必须分别确认 |
@@ -17,7 +17,7 @@ P2.1 的 M1/M2 设计与验收范围已确定，开发验证已完成；M3–M5 
 边界用例在实现时另列并打印完整总数。首轮分核按 CB06-03 已确认的 32/32 独立编译期配置；
 M3/M4 缺少 M5 时的测试后处理方案仍待确认。
 单轮默认 0 预热+1 正式，多轮默认 2 预热+5 正式；OFF/ON 分开构建，按模块分别提交并回传总 summary。
-P2.1 已完成 blue CANN 9.1 A5 OFF/ON 构建及各 14/14 项 Host 验收，设备验收待用户回传；P2.2–P2.4 尚未实现。
+P2.1 已完成 blue CANN 9.1 A5 OFF/ON 构建及各 14/14 项 Host 验收，设备验收已按用户回传登记通过；P2.2–P2.4 尚未实现。
 `bash run_commit_validation.sh` 切换到 `ep-sdedup-combine-p2-m12`：23 个串行 16P 用例，OFF 包 19 例、ON 包 4 例。
 四类基础矩阵加 Dispatch 回归、D 量化接线和 sparse/empty/10000 行定向检查；首错停止，不自动重跑。
 独立安装目录为 `install/validation-combine-p21-profile-off` / `install/validation-combine-p21-profile-on`，
@@ -51,6 +51,11 @@ bash run_commit_validation.sh --resume /绝对路径/原commit运行目录/summa
 旧 manifest 无逐文件摘要，不能追溯证明其差异仅来自编辑器文件；该入口不重建任一包，也不宣称
 两包源码摘要一致或新 checkout 的算子已重新验证。四项新增验收也通过后才输出总通过标志。
 本入口仅覆盖上述特定中断点，不接受任意失败记录或自动搜索“最近一次通过”。
+
+**续跑验收已通过（用户回传）**：F1/F2/P/B 各 4/4，regression 2/2、connection 2/2、edges 3/3，合计 23/23；
+总标志为 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p2-m12`。复用历史 OFF 19 项，补齐 ON 4 项，
+总报告及身份核对边界见[进度记录](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。范围为 M0/M1/M2、必要排空和 50μs 等待，
+不包括 M3–M5 或 yOut 业务数值，也不代表已给出具体性能达标结论。
 
 ## Combine 第一阶段：C1–C7 用户回传验收通过
 

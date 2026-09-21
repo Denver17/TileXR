@@ -28,7 +28,7 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 <a id="combine-phase2-modular-acceptance"></a>
 ## Combine 第二阶段：按模块递进验收（2026-09-21）
 
-本节为第二阶段开发/验收计划。P2.1 已按最新设计完成 M1/M2 开发及开发侧验证，待设备验收；M3–M5 在各自设计完成后再启动。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
+本节为第二阶段开发/验收计划。P2.1 的 M1/M2 已完成开发，设备验收已按用户回传登记通过；M3–M5 在各自设计完成后再启动。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
 每个模块交付点都须完成单轮功能、多轮功能、多轮 performance、多轮 breakdown 四类确认，
 全部通过后才开发下一模块。共四个模块交付点、十六项子验收；按模块分别提交，不将四类确认默认拆成十六次代码提交。
 沿用同一 `run_commit_validation.sh`、`build_all.sh/sync.sh/run.sh`、workflow 和 chain consumer，
@@ -148,7 +148,7 @@ OFF build_id=`a84a2c26f0434d529b2643710f8de5cb`，ON build_id=`82da3fcaa3e14e58a
 两包源码摘要一致，为 `5491212146edba5ef3552ade3d21ec6a4bfb0602070572dd73d2e8c75b652149`。
 该次为文件快照构建，manifest 的 commit 为空，不伪报为 Git 提交构建；构建后仅有文档和接口注释更新。
 原始日志、manifest、源码逐文件摘要保存在开发工作区 `build/combine-p21-verification/`，不随产品提交。
-上述证据不包含 NPU 执行、跨卡可见性或性能结论；23 个设备用例仍待用户回传。
+上述开发侧证据不包含 NPU 执行、跨卡可见性或性能结论。后续用户回传 P2.1 总通过：复用 OFF 19 项并补齐 ON 4 项 breakdown，23/23；报告、历史源码摘要差异和范围见[进度记录](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
 
 ### P2.2 / P2.3 / P2.4 的新增判据
 
@@ -222,7 +222,7 @@ M3 前落实 CB03-01 与上述测试后处理；M4 前落实 CB04-01/02 与数�
 每个模块的交付闭环：本地 Host/脚本回归及 blue CANN 9.1 A5 OFF/ON 编译 → 独立提交并推送 →
 用户切换对应 SHA 执行 `bash run_commit_validation.sh` → 回传四类子结果及总 summary → 登记后进入下一模块。
 报告保留环境身份、源码状态/摘要、build_id、Host/Kernel 哈希、命令和各 rank 证据；复用已存在的匹配环境 HCCL 资格记录。
-未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及验收证据单独登记，未取得用户设备回传前保持待验证；P2.2–P2.4 未开发、未验收。
+未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及设备验收证据已单独登记，设备部分按用户回传通过；P2.2–P2.4 未开发、未验收。
 
 
 <a id="combine-phase1-confirmed"></a>

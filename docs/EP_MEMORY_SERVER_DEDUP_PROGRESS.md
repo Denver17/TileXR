@@ -5,9 +5,24 @@
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
 Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6 独立 profiling/trace 已收到用户通过确认；C7 双窗边界及 Dispatch 回归已收到用户通过确认。Combine 第一阶段 C1–C7 已全部按用户回传登记通过。
-当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 的 M0/M1/M2 及必需 M6 已实现，保留末尾 50μs；设备验收待用户回传。M3→M4→M5 在各自设计完成及前一点通过后再开发。
-P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。当前一键入口为 P2.1 的 23 个串行 16P 用例，四类设备确认均待回传；详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
+当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 的 M0/M1/M2 及必需 M6 已实现，保留末尾 50μs；设备验收已按用户回传登记通过。M3→M4→M5 在各自设计完成及前一点通过后再开发。
+P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。当前一键入口为 P2.1 的 23 个串行 16P 用例，四类设备确认及回归/边界均已按用户回传登记通过；详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
 下文 Dispatch 阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
+
+**P2.1 已验收（用户回传，续跑汇总）**：用户回传
+`COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p2-m12`。
+单轮 F1、多轮 F2、性能 P、耗时拆解 B 各 4/4，Dispatch 回归 2/2、量化接线 2/2、边界 3/3，合计 23/23。
+总报告：`/home/h00580772/TileXR-git-check/run/validation/commit-346c04fba7a244a8adec8cddc1b516ab/summary.json`。
+末例 B-both-fp16：`/home/h00580772/TileXR-git-check/run/validation/commit-346c04fba7a244a8adec8cddc1b516ab/cases/B-both-fp16/11d5d5a9b0cb4d8bb4407c88ff5145d9/summary.json`。
+本轮按续跑交付 `4ffc700` 关联登记：复用原 OFF 19 项通过证据，补齐原 ON 包的 Host 检查和 4 项 breakdown；
+原报告为 `/home/h00580772/TileXR-git-check/run/validation/commit-a222916af636494c87f86100f24c6004/summary.json`。
+算子实现交付为 `acb826b`；`15274db` 排除编辑器临时文件，`4ffc700` 增加显式续跑，后二者未修改 Host/kernel。
+本次未独立读取外部 summary、trace、实际执行 SHA、环境身份或产物哈希；报告目录为 run 标识，不是 Git SHA。
+沿用续跑记录的历史 OFF/ON 源码摘要差异，不将本结果表述为两包摘要一致或当前 checkout 重新构建后的全量运行。
+通过范围：M0/M1/M2 的 stage 原始数据、控制通知/消费清理、保护区和各自 magic/选窗，以及保留的 50μs 等待；
+不包含 M3–M5 返回/归约、yOut 业务数值，不据四项性能模式通过推断具体性能指标达标。
+下一模块为 P2.2（M3），实施时移除全核 50μs 等待，按届时已确认的设计及验收范围推进。
+
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
 C1 交付 commit 为 `01c9b1d9f2fa49ea15e57df01c1cfd1905b6cd1f`；2026-09-20 用户明确回传通过。
