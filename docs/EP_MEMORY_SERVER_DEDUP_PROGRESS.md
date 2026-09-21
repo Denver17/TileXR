@@ -4,7 +4,7 @@
 
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
-Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 已交付、待设备验证；按用户授权提前交付 C6/C7，分别提交。
+Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6/C7 已分别交付，待设备验证。
 下文阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
@@ -35,10 +35,18 @@ Combine 独跑/Dispatch→空 Combine 用例；验证同步、输入/yOut 保持
 
 C5 交付点 `ep-sdedup-combine-p1-chain-multi`；入口仍为 `bash run_commit_validation.sh`。
 C5 连续提交 warmup/正式轮次，批末同步，分别检查各算子计数和 magic/窗口；保留空 Combine 50μs 等待。
-**C5 待验证**：交付 `4ef0439640b016727287bebec84ef5cc0a521445`。2026-09-21 用户通知验证环境暂不可用，
-授权继续 C6/C7 并要求分批提交，后续切换目标 commit 执行同一入口。本授权仅调整开发顺序，不代表 C5 通过。
+**C5 已验收（用户回传）**：交付 `4ef0439640b016727287bebec84ef5cc0a521445`。
+用户回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-chain-multi`，末例
+`[8/8] PASS both-fp16-mxfp8-e5m2`，总报告：`/home/h00580772/TileXR-git-check/run/validation/commit-22f77fd2236149a09405863e25bc9543/summary.json`。
+末例报告：`/home/h00580772/TileXR-git-check/run/validation/commit-22f77fd2236149a09405863e25bc9543/cases/both-fp16-mxfp8-e5m2/3e555c194a314f998419f03601195426/summary.json`。
+按用户回传登记通过，未独立读取 summary 或核对实际运行 SHA、工具链及产物哈希；报告目录为 run 标识，不是 Git SHA。
+范围：C1/C3/C4/C5 Host 回归及 50μs 空 kernel；前两台固定 8P，三种算子模式共 8 个串行用例，
+每例 2 轮预热 + 5 轮正式调用，验证批末同步、各自 magic/选窗和最终 Dispatch 校验；
+不包含 Combine 通信或业务数值验证，也不替代 C6 profiling 或 C7 边界验收。
+此前用户因环境暂不可用授权提前开发 C6/C7，现按独立验收结果更新 C5 状态。
 C6 `ep-sdedup-combine-p1-profile` 已交付 `abee43c70502de88c18ddd0700b0afde528ecc93`，**待设备验证**。
-当前交付 C7 `ep-sdedup-combine-p1-memory-boundary`，独立提交；设备验收同样等待服务器恢复。
+C7 `ep-sdedup-combine-p1-memory-boundary` 已交付 `5ce1a927802a05ab5455a55ec30fe449d99e3d0d`，**待设备验证**。
+下一验收点为 C6：切换到 `abee43c` 后执行同一入口；C6 通过后再切换 C7 提交。
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，

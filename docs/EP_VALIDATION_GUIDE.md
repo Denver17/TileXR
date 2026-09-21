@@ -2,13 +2,13 @@
 
 ## Combine 第一阶段 C7：当前交付，待设备验证
 
-C5/C6/C7 分批交付，设备验收分别等待用户回传。恢复环境后按目标提交验证，不能用 C7 结果替代 C6 的 profiling ON/OFF 矩阵：
+C5 已按用户回传登记通过，C6/C7 仍待设备验证。下一点切换到 C6 提交验收，不能用 C7 结果替代 C6 的 profiling ON/OFF 矩阵：
 
 | 点 | 提交 | 验收范围 | 状态 |
 | --- | --- | --- | --- |
-| C5 | `4ef0439640b016727287bebec84ef5cc0a521445` | 连续预热/多轮、三种算子模式、magic/生命周期 | 待设备验证 |
+| C5 | `4ef0439640b016727287bebec84ef5cc0a521445` | 连续预热/多轮、三种算子模式、magic/生命周期 | 用户回传通过 |
 | C6 | `abee43c70502de88c18ddd0700b0afde528ecc93` | OFF performance / ON breakdown、独立记录区和双 trace | 待设备验证 |
-| C7 | 本节所在交付提交 | 双窗合法边界探针、真实 Dispatch 回归 | 待设备验证 |
+| C7 | `5ce1a927802a05ab5455a55ec30fe449d99e3d0d` | 双窗合法边界探针、真实 Dispatch 回归 | 待设备验证 |
 
 ```bash
 git fetch origin
@@ -38,7 +38,7 @@ C7 checkpoint=`ep-sdedup-combine-p1-memory-boundary`，使用独立
 普通 `run.sh` 强制为 0，保持 dispatch/combine/both 的正常算子调用。
 
 C7 不包含 Combine 数据面、Flag 协议或 yOut 业务数值验收；空 Combine 的 50μs 等待不变。
-C5/C6 的 A5 多轮与 profile 仍须切回各自提交单独验证。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
+C5 多轮已获用户通过确认，C6 profile 仍须切回其提交单独验证。当前 Flag 复用问题继续作为设计遗留，未在本点扩展。
 
 2026-09-21 C7 开发验证：CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5
 `dav-c310-vec`、profiling OFF，通过正式生产构建、安装及真实 consumer 编译链接。
@@ -55,10 +55,12 @@ blue 为无 `.git` 源码快照，manifest 如实记录 commit 未知；构建�
 ## Combine 第一阶段 C6：已交付，待设备验证
 
 2026-09-21：验证环境暂不可用，用户授权提前开发 C6/C7，但分别提交。
-C5 `4ef0439640b016727287bebec84ef5cc0a521445` 仍为**待验证**；C6/C7 不自动继承或宣称设备通过。
-恢复环境后切换各目标 commit，再执行该提交自己的入口：
+该授权发生时 C5 待验证，现已按用户回传登记通过；C6/C7 不自动继承设备通过结论。
+下一点执行 C6：
 
 ```bash
+git fetch origin
+git switch --detach abee43c70502de88c18ddd0700b0afde528ecc93
 bash run_commit_validation.sh
 ```
 
@@ -97,16 +99,18 @@ OFF build_id=`4d07c76f2bce494da0f545d615a9c476`，ON build_id=`5814b6b13ed840599
 blue 使用无 `.git` 源码快照；manifest 如实记录 commit 未知，源码与产物哈希、工具链及日志
 保留在开发工作区 `build/combine-c6-verification/`。这些是编译和 Host 证据，六组真实 16P 用例仍待外部验收。
 
-## Combine C5：已交付，待设备验证
+## Combine C5：用户回传验收通过
 
-已登记 C4 用户回传通过（交付 `c86e1ef`）；报告与验证边界见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
-拉取本次提交后执行：
+已登记 C5 用户回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-chain-multi`，
+8/8 用例通过。总报告：`/home/h00580772/TileXR-git-check/run/validation/commit-22f77fd2236149a09405863e25bc9543/summary.json`。
+通过范围及未独立核验的运行身份见[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。如需重现 C5，先切回其交付提交：
 
 ```bash
+git switch --detach 4ef0439640b016727287bebec84ef5cc0a521445
 bash run_commit_validation.sh
 ```
 
-当前 checkpoint 为 `ep-sdedup-combine-p1-chain-multi`，使用独立
+C5 提交的 checkpoint 为 `ep-sdedup-combine-p1-chain-multi`，使用独立
 `build/validation-combine-c5` / `install/validation-combine-c5`。
 脚本先构建并执行 Host 回归，再在 hostfile 前两台固定 8P 运行 **8 个串行设备用例**，
 每组均为 BS96/H7168/K6/E96、functional、loops=5、warmup=2：
@@ -143,7 +147,7 @@ blue 的 CANN 9.1.0 / ccec clang 15.0.5（2026-05-18）、A5 `dav-c310-vec`、pr
 独立审查未发现需修正的具体缺陷，Shell 语法及 diff 检查通过。
 blue 使用无 `.git` 的源码快照，manifest 不冒认 commit；全部变更 C++/CMake 与已编译源码 SHA256 一致。
 编译配置、工具链、构建/Host 日志与 manifest 保留在开发工作区 `build/combine-c5-verification/`。
-这些仅为 Host 和编译证据；本次未执行八组真实 16P 多轮矩阵，C5 仍等待用户设备验收。
+这些仅为 Host 和编译证据；开发交付时未执行八组真实 16P 多轮矩阵；后续用户已回传该矩阵通过，见上文验收记录。
 
 ## Combine C4 历史交付与验收
 
