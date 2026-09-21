@@ -26,6 +26,14 @@ P2.1 已完成 blue CANN 9.1 A5 OFF/ON 构建及各 14/14 项 Host 验收，设�
 `bash build_all.sh breakdown=1` → `TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh` → `bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=both`。
 一次脚本调用中的环境变量不会自动传给下一次 shell 调用；一键验收已负责两包选择。
 
+P2.1 源码摘要排查（2026-09-21）：用户回传 OFF 的 19 例通过、ON 构建成功，但在两包源码
+一致性检查处停止，4 个 breakdown 未运行；两份清单均为 965 个同名文件，期间被改写的候选为
+编辑器探测文件 `.vscode_io_test.tmp`。原清单会纳入该文件，内容变化可复现摘要变化。
+现由 `tools/validation/source.py` 按精确文件名在各层目录排除，同时用于摘要和同步清单，
+`.gitignore` 也排除它；仅修改 rsync 或 Git 忽略规则无法修复普通文件部署的摘要采集。
+回归覆盖探测文件创建/改写/删除不影响摘要和同步、其他 `.tmp` 输入仍保留、真实源码修改仍改变摘要。
+此修复不改 Host/kernel，不取消 OFF/ON 一致性门槛；拉取修复后重新执行一键验收，不能将 19 例通过登记为 P2.1 整体通过。
+
 ## Combine 第一阶段：C1–C7 用户回传验收通过
 
 C1–C7 均已按用户回传登记通过，第一阶段空算子验收收口。各点的通过结论仅覆盖对应验收范围；

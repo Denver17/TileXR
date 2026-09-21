@@ -23,7 +23,7 @@ EXCLUDED_DIRS = {".git", ".worktrees", ".idea", ".vs", ".vscode", ".ci-build",
 # 仓库根目录的比较代码不分发；嵌套 reference/third_party 可能是实际编译输入。
 ROOT_EXCLUDED_DIRS = {"reference", "third_party"}
 EXCLUDED_FILES = ("*.pyc", "*.pyo", "*.o", "*.a", "*.so", "*.so.*", "*.log", "*.swp",
-                  ".DS_Store", "CMakeCache.txt", "cmake_install.cmake", "install_manifest.txt")
+                  ".DS_Store", ".vscode_io_test.tmp", "CMakeCache.txt", "cmake_install.cmake", "install_manifest.txt")
 
 
 class GitMetadataError(ValueError):

@@ -18,6 +18,7 @@ cmake-build-*
 
 # Visual Studio Code
 .vscode
+.vscode_io_test.tmp
 
 # vim cache
 *.swp

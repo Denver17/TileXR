@@ -148,6 +148,38 @@ class SourceTests(unittest.TestCase):
         self.assertEqual(set(inventory(deployed)["files"]),
                          {name, "src/component/third_party/support.h", "tests/reference/check.py"})
 
+    def test_editor_probe_does_not_change_source_digest_or_sync_paths(self):
+        from types import SimpleNamespace
+        from workflow import source_content_sha256, sync_paths
+
+        deployed = self.base / "plain"
+        tools = deployed / "tools/validation"
+        tools.mkdir(parents=True)
+        real_source = tools / "example.py"
+        real_source.write_text("original source\n")
+        # Do not broadly ignore *.tmp: a same-suffix input can be intentional.
+        (tools / "input.tmp").write_text("source fixture\n")
+        probes = [deployed / ".vscode_io_test.tmp", tools / ".vscode_io_test.tmp"]
+        config = SimpleNamespace(root=deployed, hostfile=deployed / "hostfile",
+                                 install=deployed / "install/validation")
+        baseline = inventory(deployed)
+        fingerprint = source_content_sha256(deployed, baseline)
+        paths = sync_paths(config, baseline, None)
+        self.assertIn("tools/validation/input.tmp", paths)
+        for content in ("before OFF build\n", "editor rewrites between OFF and ON\n", None):
+            for probe in probes:
+                if content is None:
+                    probe.unlink()
+                else:
+                    probe.write_text(content)
+            current = inventory(deployed)
+            with self.subTest(content=content):
+                self.assertEqual(current, baseline)
+                self.assertEqual(source_content_sha256(deployed, current), fingerprint)
+                self.assertEqual(sync_paths(config, current, None), paths)
+        real_source.write_text("changed source\n")
+        self.assertNotEqual(source_content_sha256(deployed, inventory(deployed)), fingerprint)
+
     def test_old_or_malformed_optional_metadata_does_not_block_plain_copy(self):
         deployed = self.base / "plain"
         deployed.mkdir()
