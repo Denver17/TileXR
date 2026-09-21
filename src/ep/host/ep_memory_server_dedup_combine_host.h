@@ -3,6 +3,7 @@
 
 #include "ep_host.h"
 #include "ep_memory_server_dedup_buffer_layout.h"
+#include "ep_memory_server_dedup_combine_config.h"
 
 namespace TileXREp {
 
@@ -11,6 +12,16 @@ struct EpMemoryServerDedupCombineParams {
     const uint32_t *tokenType = nullptr;
     const void *relayReadIndex = nullptr;
     const uint32_t *sourceMask = nullptr;
+};
+
+struct EpServerDedupCombineDataLayout {
+    uint64_t resultOffset = 0;
+    uint64_t resultBytes = 0;
+    uint64_t stageOffset = 0;
+    uint64_t stageRowBytes = 0;
+    uint64_t stageRows = 0;
+    uint64_t stageBytes = 0;
+    uint64_t requiredWindowBytes = 0;
 };
 
 struct EpMemoryServerDedupCombineLayout {
@@ -25,18 +36,8 @@ struct EpMemoryServerDedupCombineLayout {
     uint64_t relayReadIndexBytes = 0;
     uint64_t sourceMaskBytes = 0;
     uint64_t yOutBytes = 0;
-    // Phase one reserves the fixed shared prefix only. The empty kernel has no
-    // result/stage data accesses; real wire capacity validation belongs to phase two.
-    uint64_t requiredWindowBytes = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
-};
-
-struct EpServerDedupCombineDataLayout {
-    uint64_t resultOffset = 0;
-    uint64_t resultBytes = 0;
-    uint64_t stageOffset = 0;
-    uint64_t stageRowBytes = 0;
-    uint64_t stageRows = 0;
-    uint64_t stageBytes = 0;
+    // Reserve the full result region even while P2.1 writes only stage.
+    EpServerDedupCombineDataLayout data {};
     uint64_t requiredWindowBytes = 0;
 };
 

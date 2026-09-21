@@ -5,7 +5,8 @@
 Dispatch 优化设计阶段收口，当前规格见[主设计](specs/ep-memory-server-dedup.md)，
 五表改动前设计提交为 `3b0ba92`。完整 Dispatch 与五表输出已实现，接下来完善 [Combine 设计](specs/ep-memory-server-dedup-combine-design.md)；
 Server Dedup Combine 的 C1/C2 已收到用户 `COMMIT_VALIDATION_PASS` 确认；C3 也已收到用户通过确认；C4 单轮接线已收到用户通过确认；C5 连续多轮已收到用户通过确认；C6 独立 profiling/trace 已收到用户通过确认；C7 双窗边界及 Dispatch 回归已收到用户通过确认。Combine 第一阶段 C1–C7 已全部按用户回传登记通过。
-当前开始[Combine 第二阶段模块验收拆解](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：M1/M2→M3→M4→M5，各点包含单轮功能、多轮功能、多轮 performance/breakdown 四类确认；尚未开发。
+当前[Combine 第二阶段模块验收](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)：P2.1 的 M0/M1/M2 及必需 M6 已实现，保留末尾 50μs；设备验收待用户回传。M3→M4→M5 在各自设计完成及前一点通过后再开发。
+P2.1 开发验证：blue CANN 9.1 A5 OFF/ON 实际构建成功，安装包 Host 各 14/14；Python 验收工具 329 项中 328 通过、1 项 Windows 专属检查跳过。当前一键入口为 P2.1 的 23 个串行 16P 用例，四类设备确认均待回传；详见[验收记录](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
 下文 Dispatch 阶段 1/2 的表格和日期记录属于历史交付证据，不作为当前实现缺失清单。
 
 Combine 第一阶段采用[七点逐次提交/外部验收流程](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#七点交付与外部验收门槛2026-09-20)。
@@ -65,8 +66,8 @@ BF16/FP16 真实 Dispatch 多轮回归共 3 例，保留真实 Dispatch 输出/�
 
 **第一阶段收口**：C1–C7 均已获用户通过确认，公共接口、空 kernel、三种测试模式、
 单轮/多轮接线、独立 profiling/trace 和双窗边界已完成各自范围的验收。
-Combine 仍为保留 50μs 等待的空算子；真实非量化业务逻辑属于第二阶段，Flag 复用继续作为重点遗留单独处理。
-`run_commit_validation.sh` 保留 C7 入口；复验其他点需切换各自交付提交，C7 的 Host 回归不替代此前各点的独立设备验收。
+第一阶段交付时 Combine 为保留 50μs 等待的空算子；真实非量化业务逻辑属于第二阶段，Flag 复用继续作为重点遗留单独处理。
+第一阶段 C7 提交的 `run_commit_validation.sh` 为 C7 入口；复验需切换各自交付提交，C7 的 Host 回归不替代此前各点的独立设备验收。
 
 **结构对齐后测试通过（用户确认）**：最近交付 `53f33139a227e2603e0ba15cae1f5bf69cb07780`，
 用户回传“测试通过”。该提交将 Launch 声明归入 launch.h、将空 Kernel 拆为同名头文件内的 Init/Process，
@@ -77,7 +78,7 @@ Combine 仍为保留 50μs 等待的空算子；真实非量化业务逻辑属�
 M1/M2 全核参与前置逻辑，阶段末尾保留 50μs；M3 起所有核移除该等待。M0 最新 96KiB 控制区、完整 result/stage
 容量检查纳入首点，M6 依赖/排空随模块实施，不延后到最后。默认每点 18 个基础用例，模块边界用例另列。
 首轮按最新 CB06-03 已确认的 32/32 独立编译期配置；M3/M4 测试后处理方案仍待确认，详见计划。
-本次仅拆解验收流程，未改动当前 C7 脚本或实现业务模块。
+上述为初始拆解记录；当前 P2.1 已实现并切换一键入口，后续模块尚未开发。
 
 
 已建立 [Dispatch / Combine 联合设计初版](specs/ep-memory-server-dedup-dispatch-combine-design.md)，

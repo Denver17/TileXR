@@ -19,9 +19,11 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
                     block_dim=auto comm_id=IP:PORT barrier_addr=IP:PORT
                     msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
                     case_analysis=0|1 (default: 0)
+                    combine_fixture=balanced|sparse|empty (P2.1 combine-only fixtures)
+                    combine_observation=batch|per-round (P2.1 functional diagnostics)
   dry_run=1 reads hostfile and validates ranks locally using the C3 consumer; no SSH/CANN/NPU.
-  Dry-run requires the C3 package; real combine/both defaults to C7 functional or C6 performance/breakdown.
-  C7 requires functional/profiling OFF; C6 uses OFF for performance and ON for breakdown.
+  Dry-run requires the C3 package; real combine/both defaults to P2.1 M1/M2.
+  P2.1 uses isolated OFF for functional/performance and ON for breakdown.
   Earlier checkpoints remain available via TILEXR_VALIDATION_CHECKPOINT override.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
   case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
@@ -58,7 +60,7 @@ while (( $# )); do
             host_validation=${key#*=}
             [[ $host_validation == 0 || $host_validation == 1 ]] || fail 'host_validation must be 0 or 1'
             seen[host_validation]=1; shift;;
-        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*)
+        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*|combine_fixture=*|combine_observation=*)
             name=${key%%=*}; value=${key#*=}
             [[ -n $value ]] || fail "missing value for $name"
             [[ -z ${seen[$name]+set} ]] || fail "duplicate argument: $name"
@@ -100,6 +102,7 @@ export TILEXR_VALIDATION_DTYPE=bf16 TILEXR_VALIDATION_QUANT_MODE="$dispatch_quan
 export TILEXR_VALIDATION_DISPATCH_QUANT_MODE="$dispatch_quant" TILEXR_VALIDATION_COMBINE_QUANT_MODE="$combine_quant"
 export TILEXR_VALIDATION_OPERATOR_MODE="$operator_mode" TILEXR_VALIDATION_DRY_RUN="$dry_run"
 export TILEXR_VALIDATION_BOUNDARY_PROBE=0
+export TILEXR_VALIDATION_COMBINE_FIXTURE=balanced TILEXR_VALIDATION_COMBINE_OBSERVATION=batch
 export TILEXR_VALIDATION_BLOCK_DIM=auto TILEXR_VALIDATION_ACTION=run
 export TILEXR_VALIDATION_CASE_ANALYSIS=0
 export TILEXR_VALIDATION_ROUTE_MODE=balance_shift TILEXR_VALIDATION_SEED=2026
@@ -114,15 +117,10 @@ if [[ $dry_run == 0 && $operator_mode != dispatch ]]; then
             [[ $run_mode == functional && $loops == 1 && $warmup == 0 ]] || fail 'C4 requires functional, loops=1, warmup=0';;
         ep-sdedup-combine-p1-chain-multi)
             [[ $run_mode == functional ]] || fail 'C5 requires functional mode';;
-        ep-sdedup-combine-p1-profile) ;;
+        ep-sdedup-combine-p1-profile|ep-sdedup-combine-p2-m12) ;;
         ep-sdedup-combine-p1-memory-boundary)
             [[ $run_mode == functional ]] || fail 'C7 requires functional mode; select C6 for profiling';;
-        *)
-            if [[ $run_mode == functional ]]; then
-                export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-memory-boundary
-            else
-                export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-profile
-            fi;;
+        *) export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m12;;
     esac
     export TILEXR_VALIDATION_BUILD_MODE=production
 fi

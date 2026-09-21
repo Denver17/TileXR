@@ -150,7 +150,7 @@ class CombineDryRunTests(unittest.TestCase):
         self.configure(CHECKPOINT="ep-sdedup-p2-dispatch")
         for op in ("combine", "both"):
             self.configure(OPERATOR_MODE=op)
-            self.invoke(dry_run=False, error="require C4")
+            self.invoke(dry_run=False, error="requires a Combine acceptance checkpoint")
 
 
 if __name__ == "__main__":

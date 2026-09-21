@@ -63,7 +63,7 @@ int main()
         s.expertShardType == 0 && s.sharedExpertNum == 0 && s.sharedExpertRankNum == 0 && s.quantMode == 0 &&
         s.dtype == TILEXR_DATA_TYPE_BFP16 && s.activeMaskType == 0 && s.xActiveMask == nullptr &&
         s.sharedExpertX == nullptr && g_context.hostArgs == &g_args && g_context.devArgs == g_dev &&
-        g_layout.capacityRows == 768 && g_layout.requiredWindowBytes == 1048576,
+        g_layout.capacityRows == 768 && g_layout.requiredWindowBytes == 1454080,
         "scalars and validated context forwarded");
     for (int i = 0; i < 39; ++i) {
         auto invalid = valid;
@@ -128,6 +128,15 @@ int main()
         }
         Rejected(invalid, TILEXR_ERROR_PARA_CHECK_FAIL);
     }
+    // Same fixed prefix is insufficient once the kernel writes the real stage.
+    const uint64_t fullBytes = g_args.peerMemBytes;
+    auto unsupportedLane = valid;
+    unsupportedLane.combine.h = 100000;
+    Rejected(unsupportedLane, TILEXR_ERROR_NOT_SUPPORT);
+    g_args.peerMemBytes = 2ULL * (1048576ULL + TILEXR_FLAG_BUFF_BYTES);
+    Rejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
+    g_args.peerMemBytes = fullBytes;
+    Check(CombineTest::Invoke(valid) == TILEXR_SUCCESS, "exact full data capacity accepted");
     const int hosts = g_hostCalls;
     g_a5 = false;
     Rejected(valid, TILEXR_ERROR_NOT_SUPPORT);

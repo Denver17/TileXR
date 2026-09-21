@@ -12,6 +12,7 @@
 #include "acl/acl.h"
 #include "tilexr_ep.h"
 #include "ep_memory_server_dedup_combine_host.h"
+#include "ep_memory_server_dedup_combine_config.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "memory_boundary_test.h"
 #include "combine_memory_boundary_test.h"
@@ -29,17 +30,43 @@ std::vector<void *> firstBuffers;
 std::vector<const void *> firstCombineBuffers;
 uint64_t sharedMagic = 0;
 uint64_t lastDispatchMagic = 0;
+bool IsM12()
+{
+    const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
+    return checkpoint && std::strcmp(checkpoint, "ep-sdedup-combine-p2-m12") == 0;
+}
+bool IsDiagnostic()
+{
+    const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_OBSERVATION");
+    return IsM12() && value && std::strcmp(value, "per-round") == 0;
+}
+std::map<uintptr_t, std::vector<uint8_t>> m12Memory;
+uint8_t *M12Address(uintptr_t address, size_t bytes)
+{
+    auto found = m12Memory.upper_bound(address);
+    if (found == m12Memory.begin()) return nullptr;
+    --found;
+    if (address - found->first > found->second.size() || bytes > found->second.size() - (address - found->first)) return nullptr;
+    return found->second.data() + address - found->first;
+}
+bool IsLocalPeer(uintptr_t address)
+{
+    if (rankId < 0) return false;
+    const auto base = reinterpret_cast<uintptr_t>(args.peerMems[rankId]);
+    return address >= base && address - base < args.peerMemBytes;
+}
 bool IsMultiBatch()
 {
     const char *checkpoint = std::getenv("TILEXR_VALIDATION_CHECKPOINT");
     const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE");
-    return checkpoint && (std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0 ||
+    return IsM12() || (checkpoint && (std::strcmp(checkpoint, "ep-sdedup-combine-p1-chain-multi") == 0 ||
         std::strcmp(checkpoint, "ep-sdedup-combine-p1-profile") == 0 ||
         (std::strcmp(checkpoint, "ep-sdedup-combine-p1-memory-boundary") == 0 &&
-         (!probe || std::strcmp(probe, "0") == 0)));
+         (!probe || std::strcmp(probe, "0") == 0))));
 }
 bool BatchPending()
 {
+    if (IsDiagnostic()) return calls["sync"] < calls["combine-launch"];
     return IsMultiBatch() && sharedMagic != 0 && calls["sync"] == 0;
 }
 std::map<uintptr_t, std::vector<uint8_t>> packets;
@@ -101,7 +128,7 @@ aclError aclrtDestroyStream(aclrtStream) { return Call("destroy-stream"); }
 aclError aclrtSynchronizeStream(aclrtStream stream)
 {
     if (stream != reinterpret_cast<void *>(0x20)) { return 92; }
-    if (IsMultiBatch()) {
+    if (IsMultiBatch() && !IsDiagnostic()) {
         const char *mode = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE");
         const bool dispatch = mode == nullptr || std::strcmp(mode, "combine") != 0;
         const bool combine = mode != nullptr && std::strcmp(mode, "dispatch") != 0;
@@ -131,12 +158,27 @@ aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
 {
     if (BatchPending()) return Call("mid-batch-memset") == 0 ? 92 : 91;
     if (bytes > size) return 92;
+    if (IsM12() && IsLocalPeer(reinterpret_cast<uintptr_t>(data))) {
+        m12Memory[reinterpret_cast<uintptr_t>(data)].assign(bytes, static_cast<uint8_t>(value));
+        return Call("m12-window-seed");
+    }
     std::memset(data, value, bytes);
     return Call("memset");
 }
 aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
 {
     if (BatchPending()) return Call("mid-batch-transfer") == 0 ? 92 : 91;
+    if (IsM12() && IsLocalPeer(reinterpret_cast<uintptr_t>(destination))) {
+        auto &region = m12Memory[reinterpret_cast<uintptr_t>(destination)];
+        region.assign(static_cast<const uint8_t *>(source), static_cast<const uint8_t *>(source) + bytes);
+        return Call("m12-window-seed");
+    }
+    if (IsM12()) {
+        if (auto data = M12Address(reinterpret_cast<uintptr_t>(source), bytes)) {
+            std::memcpy(destination, data, bytes);
+            return Call("m12-window-read");
+        }
+    }
     if (boundaryMode && source == args.peerMems[rankId] + TileXRMemoryBoundaryTest::kOffset - 32 && bytes == 64) {
         std::memcpy(destination, boundaryTail.data(), bytes);
         return Call("boundary-host-read");
@@ -215,8 +257,8 @@ int TileXRCommInitRankMemoryDomain(int domain, int size, int rank, TileXRCommPtr
         if (combineProfileConfig.recordsPerCore != 65536U ||
             (profileConfig.enabled && profileConfig.recordsPath == combineProfileConfig.recordsPath)) return 95;
         combineProfileConfig.latestLaunch = true;
-        combineProfileConfig.recordsPerCore = 16U;
-        combineProfileTimes.resize(16U * 64U);
+        combineProfileConfig.recordsPerCore = IsM12() ? 32U : 16U;
+        combineProfileTimes.resize(combineProfileConfig.recordsPerCore * 64U);
         combineProfileEvents.resize(combineProfileTimes.size());
         combineProfileOccupied.resize(64U);
         combineProfileDropped.resize(64U);
@@ -445,7 +487,7 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
         mask || maskType != 0 || sharedX || (dtype != TileXR::TILEXR_DATA_TYPE_BFP16 &&
         dtype != TileXR::TILEXR_DATA_TYPE_FP16) || calls["comm-init"] != 1 || calls["create-stream"] != 1) return 92;
     if (IsMultiBatch()) {
-        if (calls["launch"] != (both ? calls["combine-launch"] + 1U : 0U) || calls["sync"] != 0) return 92;
+        if (calls["launch"] != (both ? calls["combine-launch"] + 1U : 0U) || (!IsDiagnostic() && calls["sync"] != 0)) return 92;
     } else if (calls["launch"] != (both ? 1U : 0U) || calls["sync"] != (both ? 1U : 0U) ||
                calls["combine-launch"] != 0) return 92;
     const char *configuredDtype = std::getenv("TILEXR_VALIDATION_DTYPE");
@@ -485,7 +527,8 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
         }
         if (allocations.size() != firstBuffers.size() + (dispatchQuantized ? 2U : 1U)) return 92;
     } else if (allocations.size() != 8U) return 92;
-    {
+    if (!IsM12() || !std::getenv("TILEXR_VALIDATION_COMBINE_FIXTURE") ||
+        std::strcmp(std::getenv("TILEXR_VALIDATION_COMBINE_FIXTURE"), "balanced") == 0) {
         using namespace ServerDedupReference;
         Shape shape {uint32_t(world), uint32_t(experts), uint32_t(bs), uint32_t(h), uint32_t(topK),
             dtype == TileXR::TILEXR_DATA_TYPE_BFP16, false, true};
@@ -508,17 +551,77 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
     const int result = Call("combine-launch");
     if (result != 0) return result;
     ++sharedMagic;
+    if (IsM12()) {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(args.peerMems[rankId]) +
+            (sharedMagic % 2U) * (args.peerMemBytes / 2U);
+        const char *fault = std::getenv("TEST_M12_FAULT");
+        const auto isFault = [&](const char *name) { return fault && std::strcmp(fault, name) == 0; };
+        const uint64_t resultBytes = bs * topK * ((h * 2U + 479U) / 480U * 512U);
+        const uint64_t stride = (h * 2U + 511U) / 512U * 512U;
+        const uintptr_t stage = base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + resultBytes;
+        uint32_t packed = 0;
+        for (int32_t row = 0; row < sendCounts[experts - 1]; ++row) {
+            if (tokenType[row] != 3U) continue;
+            const uint32_t slot = assist[uint64_t(row) * 3U];
+            auto target = M12Address(stage + uint64_t(slot) * stride, stride);
+            if (!target) return 92;
+            if (!isFault("missing-copy")) {
+                const uint32_t sourceRow = isFault("packed-index") ? packed : static_cast<uint32_t>(row);
+                std::memcpy(target, static_cast<uint8_t *>(expertOut) + uint64_t(sourceRow) * h * 2U, h * 2U);
+            }
+            if (isFault("stage-tail")) target[h * 2U - 1U] ^= 1U;
+            if (isFault("padding") && stride > uint64_t(h) * 2U) target[h * 2U] = 0;
+            ++packed;
+        }
+        auto control = M12Address(base + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET,
+            TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES);
+        if (!control) return 92;
+        std::memset(control, 0, TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_BYTES);
+        std::memset(control + TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET, 0,
+            TileXREp::kEpServerDedupCombineRecvCoreNum * 512U);
+        if (isFault("prepare")) control[0] = 1;
+        if (isFault("ready")) control[TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET] = 1;
+        if (isFault("neighbor")) control[TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET +
+            TileXREp::kEpServerDedupCombineRecvCoreNum * 512U] = 0;
+        if (isFault("reserved")) control[TILEXR_EP_SERVER_DEDUP_COMBINE_RESERVED_OFFSET] = 0;
+        if (isFault("result")) *M12Address(base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, 1) = 0;
+        if (isFault("inactive-window")) {
+            const uintptr_t other = reinterpret_cast<uintptr_t>(args.peerMems[rankId]) +
+                (1U - sharedMagic % 2U) * (args.peerMemBytes / 2U);
+            *M12Address(other + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET +
+                TILEXR_EP_SERVER_DEDUP_COMBINE_RESERVED_OFFSET, 1) = 0;
+        }
+    }
     if (combineProfileConfig.enabled) {
         const uint64_t origin = calls["combine-launch"] * 100000U;
         const char *profileFault = std::getenv("TEST_COMBINE_PROFILE_FAULT");
         for (uint32_t core = 0; core < 64U; ++core) {
-            const uint32_t base = core * 16U;
+            const uint32_t base = core * combineProfileConfig.recordsPerCore;
             combineProfileTimes[base] = origin + core;
             combineProfileTimes[base + 1U] = origin + core + 50000U;
             combineProfileEvents[base] = 0x3001U;
             combineProfileEvents[base + 1U] = 0x3002U;
             combineProfileOccupied[core] = 8U;
             combineProfileDropped[core] = 0;
+            if (IsM12()) {
+                std::vector<uint32_t> events {0x3001,0x3003,0x3004,0x3005,0x3006,0x3007,0x3008,0x3009,0x300a};
+                if (core >= 56U) events.insert(events.end(), {0x300b,0x300c,0x300d,0x300e});
+                if (core >= TileXREp::kEpServerDedupCombineSendCoreNum)
+                    events.insert(events.end(), {0x300f,0x3010,0x3011,0x3012});
+                events.insert(events.end(), {0x3013,0x3014,0x3015,0x3016,0x3002});
+                for (size_t index = 0; index < events.size(); ++index) {
+                    combineProfileEvents[base + index] = events[index];
+                    combineProfileTimes[base + index] = origin + core + index * 100U;
+                }
+                // The real DirectProfilingWriter publishes an 8-record-aligned
+                // occupied span with a zero tail, not its logical event count.
+                const uint32_t occupied = static_cast<uint32_t>((events.size() + 7U) / 8U * 8U);
+                for (uint32_t index = events.size(); index < occupied; ++index) {
+                    combineProfileTimes[base + index] = 0U;
+                    combineProfileEvents[base + index] = 0U;
+                }
+                combineProfileOccupied[core] = occupied;
+            }
             if (profileFault && std::strcmp(profileFault, "overflow") == 0) combineProfileDropped[core] = 1U;
             if (profileFault && std::strcmp(profileFault, "end") == 0) combineProfileEvents[base + 1U] = 0;
         }

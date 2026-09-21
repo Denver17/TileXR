@@ -19,6 +19,18 @@ bool Add(uint64_t a, uint64_t b, uint64_t &out)
     out = a + b;
     return true;
 }
+bool BuildDataLayout(uint64_t bs, uint64_t h, uint64_t topK, uint64_t experts,
+    uint64_t resultSlotBytes, EpServerDedupCombineDataLayout &next)
+{
+    if (resultSlotBytes == 0 || resultSlotBytes % 512U != 0) { return false; }
+    next.resultOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
+    next.stageRowBytes = (h * 2U + 511U) / 512U * 512U;
+    next.stageRows = experts * bs;
+    return Multiply(bs * topK, resultSlotBytes, next.resultBytes) &&
+        Add(next.resultOffset, next.resultBytes, next.stageOffset) &&
+        Multiply(next.stageRows, next.stageRowBytes, next.stageBytes) &&
+        Add(next.stageOffset, next.stageBytes, next.requiredWindowBytes);
+}
 } // namespace
 
 int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64_t h,
@@ -46,6 +58,11 @@ int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64
         !Multiply(bs, 4U, next.sourceMaskBytes) || !Multiply(bs, rowBytes, next.yOutBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    const uint64_t resultSlotBytes = (rowBytes + 479U) / 480U * 512U;
+    if (!BuildDataLayout(bs, h, topK, experts, resultSlotBytes, next.data)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    next.requiredWindowBytes = next.data.requiredWindowBytes;
     *out = next;
     return TileXR::TILEXR_SUCCESS;
 }
@@ -58,16 +75,8 @@ int TileXREpBuildServerDedupCombineDataLayout(int64_t ranks, int64_t bs, int64_t
     EpMemoryServerDedupCombineLayout tensors {};
     int ret = TileXREpBuildMemoryServerDedupCombineLayout(ranks, bs, h, topK, experts, &tensors);
     if (ret != TileXR::TILEXR_SUCCESS) { return ret; }
-    if (resultSlotBytes == 0 || resultSlotBytes % 512U != 0) { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
     EpServerDedupCombineDataLayout next {};
-    next.resultOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
-    next.stageRowBytes = (uint64_t(h) * 2U + 511U) / 512U * 512U;
-    next.stageRows = uint64_t(experts) * bs;
-    // resultBytes is already aligned because resultSlotBytes is aligned.
-    if (!Multiply(uint64_t(bs) * topK, resultSlotBytes, next.resultBytes) ||
-        !Add(next.resultOffset, next.resultBytes, next.stageOffset) ||
-        !Multiply(next.stageRows, next.stageRowBytes, next.stageBytes) ||
-        !Add(next.stageOffset, next.stageBytes, next.requiredWindowBytes)) {
+    if (!BuildDataLayout(bs, h, topK, experts, resultSlotBytes, next)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     *out = next;

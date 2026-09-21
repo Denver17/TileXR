@@ -54,7 +54,7 @@ class CombineBoundaryTests(single_tests.CombineChainTests):
         self.assertEqual(record["native_status"], "boundary-probe")
         self.assertEqual(record["cleanup"], "complete")
         self.assertEqual(len(record["points"]), 8)
-        offsets = (764 * 1024, 816 * 1024 - 32, 1024 * 1024, 4092 * 1024 ** 2 - 32)
+        offsets = (764 * 1024, 860 * 1024 - 32, 1024 * 1024, 4092 * 1024 ** 2 - 32)
         patterns = set()
         for point, (window, index) in zip(record["points"], ((w, i) for w in range(2) for i in range(4))):
             self.assertEqual((point["window"], point["index"]), (window, index))

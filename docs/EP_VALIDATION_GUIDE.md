@@ -3,6 +3,7 @@
 ## 当前计划：Combine 第二阶段按模块验收
 
 结构对齐提交 `53f3313` 已收到用户“测试通过”确认；未附外部报告，范围按[进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)登记。
+P2.1 的 M1/M2 设计与验收范围已确定，开发验证已完成；M3–M5 的待定项不作为 P2.1 前置条件。
 第二阶段详细判据、矩阵和交付约定见[模块验收计划](EP_MEMORY_SERVER_DEDUP_VALIDATION_FLOW.md#combine-phase2-modular-acceptance)。
 
 | 交付顺序 | 累计模块 | 阶段末尾 50μs | 必须分别确认 |
@@ -16,8 +17,14 @@
 边界用例在实现时另列并打印完整总数。首轮分核按 CB06-03 已确认的 32/32 独立编译期配置；
 M3/M4 缺少 M5 时的测试后处理方案仍待确认。
 单轮默认 0 预热+1 正式，多轮默认 2 预热+5 正式；OFF/ON 分开构建，按模块分别提交并回传总 summary。
-当前只完成流程拆解，四个 P2 checkpoint **均未实现、未验收**，不能用下面 C7 的通过标志登记 P2 通过。
-`bash run_commit_validation.sh` 仍执行 C7，待 P2.1 代码交付时随提交切换，不提前指向不存在的流程。
+P2.1 已完成 blue CANN 9.1 A5 OFF/ON 构建及各 14/14 项 Host 验收，设备验收待用户回传；P2.2–P2.4 尚未实现。
+`bash run_commit_validation.sh` 切换到 `ep-sdedup-combine-p2-m12`：23 个串行 16P 用例，OFF 包 19 例、ON 包 4 例。
+四类基础矩阵加 Dispatch 回归、D 量化接线和 sparse/empty/10000 行定向检查；首错停止，不自动重跑。
+独立安装目录为 `install/validation-combine-p21-profile-off` / `install/validation-combine-p21-profile-on`，
+通过总标志必须对应本点 checkpoint，不能沿用 C7 的通过记录。
+手动分步跑 breakdown 时先 `export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m12`，构建、同步和运行必须选择同一个 ON 包：
+`bash build_all.sh breakdown=1` → `TILEXR_VALIDATION_BREAKDOWN=1 bash sync.sh` → `bash run.sh -n 2 -e 96 -m 2 -l 5 2 operator_mode=both`。
+一次脚本调用中的环境变量不会自动传给下一次 shell 调用；一键验收已负责两包选择。
 
 ## Combine 第一阶段：C1–C7 用户回传验收通过
 
@@ -33,7 +40,7 @@ C7 回传 `COMMIT_VALIDATION_PASS checkpoint=ep-sdedup-combine-p1-memory-boundar
 | C6 | `abee43c70502de88c18ddd0700b0afde528ecc93` | OFF performance / ON breakdown、独立记录区和双 trace | 用户回传通过 |
 | C7 | `5ce1a927802a05ab5455a55ec30fe449d99e3d0d` | 双窗合法边界探针、真实 Dispatch 回归 | 用户回传通过 |
 
-当前入口保留 C7；如需复验 C7：
+如需复验历史空算子 C7，切换其提交后执行：
 
 ```bash
 git fetch origin

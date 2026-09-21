@@ -48,7 +48,9 @@ inline std::function<void(const void *, uint32_t)> &GmReadObserver() {
     return observer;
 }
 inline uint32_t GetBlockNum() { return 64; }
+#if !defined(TILEXR_TEST_EXTERNAL_CLOCK)
 inline uint64_t GetSystemCycle() { static uint64_t ticks = 100; return ++ticks; }
+#endif
 inline uint64_t &TestSyncOperations() { static uint64_t count = 0; return count; }
 template<class A, class B> inline uint32_t Ceil(A a, B b) { return uint32_t((a + b - 1) / b); }
 enum class HardEvent { MTE2_V, MTE2_S, V_MTE2, V_S, S_V, S_MTE3, V_MTE3, MTE3_V, MTE3_S, MTE2_MTE3, MTE3_MTE2 };
@@ -367,15 +369,20 @@ template<class T> void Sum(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<u
     Sum(dst, src, p);
     if (SumObserver()) SumObserver()(p);
 }
-enum class CMPMODE { GE, LT };
+enum class CMPMODE { GE, LT, EQ };
 template<class T> void Compares(LocalTensor<uint8_t> dst, LocalTensor<T> src, T value, CMPMODE mode, uint32_t n) {
     Duplicate<uint8_t>(dst, 0, (n + 7) / 8);
-    for (uint32_t i = 0; i < n; ++i) if (mode == CMPMODE::GE ? src.GetValue(i) >= value : src.GetValue(i) < value)
+    for (uint32_t i = 0; i < n; ++i) if (mode == CMPMODE::GE ? src.GetValue(i) >= value :
+        (mode == CMPMODE::EQ ? src.GetValue(i) == value : src.GetValue(i) < value))
         dst.SetValue(i / 8, dst.GetValue(i / 8) | (1U << (i % 8)));
 }
 inline void And(LocalTensor<uint16_t> dst, LocalTensor<uint16_t> a, LocalTensor<uint16_t> b, int32_t n) {
     for (int32_t i = 0; i < n; ++i) dst.SetValue(i, a.GetValue(i) & b.GetValue(i));
 }
+template<class T> void CreateVecIndex(LocalTensor<T> dst, T first, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) dst.SetValue(i, first + T(i));
+}
+inline void Trap() { throw std::runtime_error("AscendC device trap"); }
 struct GatherMaskParams { uint16_t src0BlockStride, repeatTimes, src0RepeatStride, src1RepeatStride; };
 template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<uint32_t> mask,
     bool, uint32_t count, GatherMaskParams p, uint64_t &selected) {

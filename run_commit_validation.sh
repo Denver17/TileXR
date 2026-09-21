@@ -5,13 +5,15 @@ case "$#:${1:-}" in
     1:-h|1:--help)
         cat <<'EOF'
 Usage: bash run_commit_validation.sh
-Build and validate the current Combine checkpoint: ep-sdedup-combine-p1-memory-boundary.
-C7 builds one isolated profiling OFF package and runs C1-C6 plus boundary Host regressions.
-It syncs to the first two configured hosts and runs three serial 16P functional cases:
-8GiB dual-window boundary probes (8 points), then BF16 and FP16 real Dispatch regressions.
-Requires configured CANN 9.1, real A5 devices, SSH/rsync and hostfile; no skips.
-Progress is printed as [i/3]; the first failure stops the matrix.
-Probe uses loops=1 warmup=0; Dispatch regressions use loops=5 warmup=2 in fresh processes.
+Build and validate Combine P2.1: ep-sdedup-combine-p2-m12 (M0/M1/M2, 50us retained).
+Builds isolated profiling OFF/ON packages and runs Host regressions for both.
+First two configured hosts, fixed 8P each: 18 base + 5 targeted serial cases.
+F1: single functional (0 warmup + 1 loop); F2/P/B: 2 warmup + 5 loops.
+Each gate covers BF16/FP16 combine/both; plus Dispatch regression, quant4 connection,
+and sparse/tail/empty/10000-row fixtures. All four gates must pass; first failure stops.
+Requires configured CANN 9.1, real A5 devices, SSH/rsync, msprof and hostfile; no skips.
+The manifest prints every case and [i/23] progress; no automatic retry/restart.
+Does not validate M3-M5 business data or yOut arithmetic.
 Requires Python 3.9+, CMake, Make and g++. TILEXR_VALIDATION_JOBS controls build jobs.
 Reports: run/validation/commit-*/summary.json (or TILEXR_VALIDATION_RESULT_ROOT).
 Return the summary and logs before proceeding to the next checkpoint.
@@ -21,7 +23,7 @@ EOF
 esac
 # This entry point follows the current delivery checkpoint, independent of a
 # previous Dispatch build or deployment-specific case options.
-export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p1-memory-boundary
+export TILEXR_VALIDATION_CHECKPOINT=ep-sdedup-combine-p2-m12
 export TILEXR_VALIDATION_BUILD_MODE=production
 export TILEXR_VALIDATION_ACTION=commit-validate
 export TILEXR_VALIDATION_BOUNDARY_PROBE=0

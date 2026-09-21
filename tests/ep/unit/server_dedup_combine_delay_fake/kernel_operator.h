@@ -1,17 +1,4 @@
-#ifndef TILEXR_EP_SERVER_DEDUP_COMBINE_DELAY_FAKE_KERNEL_OPERATOR_H
-#define TILEXR_EP_SERVER_DEDUP_COMBINE_DELAY_FAKE_KERNEL_OPERATOR_H
-
-#include <cstdint>
-
-#define __global__
-#define __aicore__
-#define __gm__
-#define __mix__(cube, vector)
-using GM_ADDR = uint8_t *;
-
-namespace AscendC {
-// Defined by the test; every timestamp is supplied explicitly.
-int64_t GetSystemCycle();
-}
-
-#endif
+#pragma once
+#define TILEXR_TEST_EXTERNAL_CLOCK 1
+#include "../server_dedup_count_fake/kernel_operator.h"
+namespace AscendC { int64_t GetSystemCycle(); }

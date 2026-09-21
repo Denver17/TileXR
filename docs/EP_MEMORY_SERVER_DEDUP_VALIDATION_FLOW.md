@@ -28,12 +28,12 @@ Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runt
 <a id="combine-phase2-modular-acceptance"></a>
 ## Combine 第二阶段：按模块递进验收（2026-09-21）
 
-本节为第二阶段开发/验收计划，尚未实现。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
+本节为第二阶段开发/验收计划。P2.1 已按最新设计完成 M1/M2 开发及开发侧验证，待设备验收；M3–M5 在各自设计完成后再启动。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
 每个模块交付点都须完成单轮功能、多轮功能、多轮 performance、多轮 breakdown 四类确认，
 全部通过后才开发下一模块。共四个模块交付点、十六项子验收；按模块分别提交，不将四类确认默认拆成十六次代码提交。
 沿用同一 `run_commit_validation.sh`、`build_all.sh/sync.sh/run.sh`、workflow 和 chain consumer，
 保留 dispatch/combine/both 三种模式、独立 D/C quantMode、共享输入 dtype/量化格式配置。
-当前脚本仍执行第一阶段 C7；以下 checkpoint 名称是待实现契约，不是现已可执行的 selector。
+P2.1 入口为 `ep-sdedup-combine-p2-m12`；其余三个 checkpoint 仍是后续契约。
 
 权威模块语义见[Combine 设计](specs/ep-memory-server-dedup-combine-design.md)，
 接口/五表/共享布局见[联合设计](specs/ep-memory-server-dedup-dispatch-combine-design.md)。
@@ -94,6 +94,8 @@ OFF/ON 各用独立构建和安装目录，源码摘要一致；functional/perfo
 3. **M1 全核和索引。** 每核读取 sendCounts[E−1]，仅筛选有效行，按 type3 密排后的数量均分 64 核。
    源使用原始 row，目的使用表 2 的物理 stage slot，逐有效元素校验未加权 BF16/FP16；不将密排序号当 row/slot。
    无任务核仍发布；验证 0、少于核数、整除/非整除、稀疏类型分布及合法上限 10000 行，不缩小既定分配容量。
+   表 2 单份缓存按原始行号跨度分批、每行完整 12B；lane 轮转跨批次持续，换表段不统一排空 payload。
+   仅搬运 H*2B，有效尾部不得越读，stage 对齐空隙必须保持；覆盖非满批、跨度超缓存及多次 lane 回绕。
 4. **M2 两级协议。** 核 c 向 8 个监听区各发布一个完整 32B 槽；通知核 56+j 只累加本行 64 个首 float。
    完整 sum=64 后保存状态、清本行 2048B，通知本 Server 卡 j 的实际 Read 块；来源槽按来源卡 s 定位。
    Read 核按组内 LocalID 监听 sum=8，保存 ready 并清自身完整 512B；仅发布有效 Read 块，非活动预留不变。
@@ -102,13 +104,51 @@ OFF/ON 各用独立构建和安装目录，源码摘要一致；functional/perfo
    单轮/多轮 functional 读回 stage、控制区、保护区和输入/yOut，breakdown 检查全 64 核及通知/Read 角色事件。
    覆盖非首 float 干扰、延迟生产者、空任务卡/核、通知邻槽保护、两窗和同窗再次使用。
 6. **M6 排空与临时等待。** stage 写完才发布，通知/清理源 UB 在 MTE3 完成前不复用，退出前排空本核责任；
-   在上述真实完成条件之后保留每核 50μs 等待，并单独打点 `empty_wait`，不混入 M1/M2 模块时长。
+   在上述真实完成条件之后保留每核 50μs 等待，并单独打点 `p21_delay_50us`，不混入 M1/M2 模块时长。
 
 M2 首版按已确认方案分别分配检测输入/work/sumOut、清零源和通知源 UB；
 本点完成 M1/M2 实际预算，不提前替未实现 M3–M5 决定跨模块 UB 复用。
 首点同步落实 Combine 分核宏：合法 Send 核数 16/24/32/40/48/56，Read=64−Send；
 Host/编译期检查覆盖合法范围、非法值及通知核/LocalID 映射，设备基础矩阵先固定 32/32。
 其他合法分核的设备验证属于后续配置覆盖，不能由默认配置通过推断已验收全部分核。
+
+### P2.1 确定的执行矩阵与实现约束
+
+本点固定 **23 个串行 16P 用例**，运行前打印完整 manifest：上述 18 个基础用例，
+加 2 个 D quant=4/C quant=0 联跑接线回归（BF16/E4M3、FP16/E5M2），
+加 3 个 combine-only 定向用例（均 BF16、H516、K2、E32）：
+BS4 sparse 的逐轮功能（type3 少于 64）、BS16 empty 单轮、BS512 sparse 的逐轮功能并确认实际 TokenNum=10000。
+逐轮诊断使用 2 轮预热 + 5 轮正式，改变本轮 expertOut 并在明确边界读回；
+它不替换基础多轮的连续提交/批末同步。OFF 包先跑 19 例，ON 包最后跑 4 个 breakdown 用例。
+所有四类子验收及回归/定向用例均通过才输出本点唯一总通过标志。
+
+M1b 使用 512 行单份表段缓存；原始行跨度超限即换批，payload lane 序号不重置。
+当前 UB arena 为 190KiB，三个行数组及 mask 按有效 TokenNum 分配，其余 M1/M2 资源独立；
+laneCount 取剩余 UB 可容纳的完整 payload 行数与 8 个事件槽上限的较小值。
+默认 32/32、TokenNum=10000 时：固定区 13632B、行数组/mask 122112B，payload 余量 58816B；
+H7168 可用 4 lane。Host 按 min(分配容量行数,10000) 检查至少一个 lane，失败返回不支持，
+不能缩短合法行或伪造一个 lane；容量规划仍保留完整输入分配公式。
+这些是 P2.1 实际资源分配，不代表 CB1A-01 跨 M1–M5 的复用预算已完成。
+
+Host 替身直接执行生产 M1/M2 逻辑，注入未到齐/到齐及非首 float 干扰，检查发布前 payload 已完成、
+MTE3 在途源不被改写、清理范围及非目标区域；consumer 故障注入确认遗漏拷贝、错 slot、尾部污染、
+控制残留和越区写入不能通过。Host 替身不模拟真实跨卡可见性，设备四类验收仍为必需。
+
+复用经验：Flag 最后为零不能单独证明发布和消费发生；结合独立 stage oracle、受控等待测试和
+全部角色事件判定。prepare/notify/clear 的事件区间测量发布或清理指令的提交，实际异步完成由
+`m6_drain` 覆盖；不得把这些局部区间当成各自 DMA 完成耗时，也不得用总耗时减 50μs 替代模块测量。
+profiling 替身也须复现 writer 的 occupied 按 8 条对齐及尾部清零；实际事件数 14/18/22
+不能直接作为 occupied，否则标准导出拒绝记录，可能被误报为 communicator 清理失败。
+
+开发侧证据（2026-09-21）：本地 `python3 -m unittest discover -s tools/validation -p 'test_*.py' -q`
+运行 329 项，328 通过、1 项仅 Windows PowerShell 可运行的检查跳过；最后的零任务带宽调整另经 M12 9 项及 measurements 11 项聚焦回归。
+blue 使用 CANN 9.1、ccec/Clang 15.0.5，目标 `dav-c310-vec` / `CATLASS_ARCH=3510`，
+实际 workflow 构建与安装 OFF/ON 包均成功，安装包 Host 验收各 14/14 通过。
+OFF build_id=`a84a2c26f0434d529b2643710f8de5cb`，ON build_id=`82da3fcaa3e14e58a1beec0855b7e6dc`；
+两包源码摘要一致，为 `5491212146edba5ef3552ade3d21ec6a4bfb0602070572dd73d2e8c75b652149`。
+该次为文件快照构建，manifest 的 commit 为空，不伪报为 Git 提交构建；构建后仅有文档和接口注释更新。
+原始日志、manifest、源码逐文件摘要保存在开发工作区 `build/combine-p21-verification/`，不随产品提交。
+上述证据不包含 NPU 执行、跨卡可见性或性能结论；23 个设备用例仍待用户回传。
 
 ### P2.2 / P2.3 / P2.4 的新增判据
 
@@ -174,15 +214,15 @@ P2.1 整体 kernel 时长包含 50μs，模块时长单独报告，不直接把�
 | workflow 与报告 | `tools/validation/workflow.py`、`tools/validation/test_workflow.py`、原有四个脚本及 profiling mapping/解析器 | 单入口四类矩阵、精确进度/超时、当前 checkpoint/模块身份校验、独立安装包及可追溯 summary |
 
 用户本次已确定模块顺序、四类门槛和 50μs 生命周期；不自动批准设计文档中所有推荐项。
-CB06-03 已确认默认 32/32 及编译期统一配置；P2.1 实现前仍需落实 CB1B-02 拷贝/表缓存及
-CB1A-01 本阶段实际 UB/Event 预算；无需等待 M3–M5 的全部预算才能拆解或开发本点。
+CB06-03 已确认默认 32/32 及编译期统一配置；CB1B-02 已确认单份有界连续表段缓存和按剩余 UB/Event 配置的共用环形 lane。
+P2.1 落实 M1/M2 实际 UB/Event 预算和目标 API 验证；CB1A-01 的跨模块总预算继续暂缓，不作为本点前置条件。
 M3 前落实 CB03-01 与上述测试后处理；M4 前落实 CB04-01/02 与数值容差；M5 前落实 CB05-01/02、
 空 mask 语义和完整调度/数值验收。跨模块复用优化仍待实际预算，已确认的 M2 独立 UB 不因计划变化而改写。
 
 每个模块的交付闭环：本地 Host/脚本回归及 blue CANN 9.1 A5 OFF/ON 编译 → 独立提交并推送 →
 用户切换对应 SHA 执行 `bash run_commit_validation.sh` → 回传四类子结果及总 summary → 登记后进入下一模块。
 报告保留环境身份、源码状态/摘要、build_id、Host/Kernel 哈希、命令和各 rank 证据；复用已存在的匹配环境 HCCL 资格记录。
-未回传仍为待验证，不重用第一阶段通过标志；本次仅形成计划，四个 P2 checkpoint 均未开发、未验收。
+未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及验收证据单独登记，未取得用户设备回传前保持待验证；P2.2–P2.4 未开发、未验收。
 
 
 <a id="combine-phase1-confirmed"></a>

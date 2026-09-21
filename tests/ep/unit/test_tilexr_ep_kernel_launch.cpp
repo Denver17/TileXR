@@ -728,7 +728,7 @@ extern "C" {
 
 int TileXRProfilingReserveLatestCombineLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
 {
-    Check(recordsPerLaunch == 8U, "Combine has an independent eight-record latest budget");
+    Check(recordsPerLaunch == 32U, "Combine has an independent 32-record M1/M2 latest budget");
     *slot = gProfilingExhausted ? UINT32_MAX : 0U;
     ++gCombineProfilingCalls;
     return TileXR::TILEXR_SUCCESS;

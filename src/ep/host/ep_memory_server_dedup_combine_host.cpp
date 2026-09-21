@@ -46,6 +46,13 @@ int TileXREpValidateMemoryServerDedupCombineConfig(const EpMemoryServerDedupComb
     EpMemoryServerDedupCombineLayout next {};
     int ret = TileXREpBuildMemoryServerDedupCombineLayout(args.rankSize, p.bs, p.h, p.topK, p.moeExpertNum, &next);
     if (ret != TileXR::TILEXR_SUCCESS) { return ret; }
+    // TokenNum stays device-side. Reserve for every supported count that can
+    // fit the caller's tensor capacity, rather than reading count data on Host.
+    const uint32_t maxTokens = static_cast<uint32_t>(next.capacityRows < kEpServerDedupCombineMaxTokenNum ?
+        next.capacityRows : kEpServerDedupCombineMaxTokenNum);
+    if (EpCombinePayloadLaneCount(maxTokens, static_cast<uint32_t>(p.h)) == 0U) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
     if ((p.globalBs != 0 && (p.globalBs < 0 || uint64_t(p.globalBs) != next.globalBs)) ||
         !AddressRange(p.expertOut, next.expertOutBytes) || !AddressRange(p.yOut, next.yOutBytes) ||
         !AddressRange(p.assistInfoForCombine, next.assistInfoBytes) ||

@@ -9,6 +9,76 @@
       "critical": true,
       "begin": 12289,
       "end": 12290
+    },
+    {
+      "name": "m1_init",
+      "category": "setup",
+      "critical": false,
+      "begin": 12291,
+      "end": 12292
+    },
+    {
+      "name": "m1_select",
+      "category": "compute",
+      "critical": false,
+      "begin": 12293,
+      "end": 12294
+    },
+    {
+      "name": "m1_stage_copy",
+      "category": "copy",
+      "critical": false,
+      "begin": 12295,
+      "end": 12296
+    },
+    {
+      "name": "m1_prepare_publish",
+      "category": "issue",
+      "critical": false,
+      "begin": 12297,
+      "end": 12298
+    },
+    {
+      "name": "m2_prepare_wait",
+      "category": "wait",
+      "critical": false,
+      "begin": 12299,
+      "end": 12300
+    },
+    {
+      "name": "m2_notify",
+      "category": "issue",
+      "critical": false,
+      "begin": 12301,
+      "end": 12302
+    },
+    {
+      "name": "m2_ready_wait",
+      "category": "wait",
+      "critical": false,
+      "begin": 12303,
+      "end": 12304
+    },
+    {
+      "name": "m2_ready_clear",
+      "category": "copy",
+      "critical": false,
+      "begin": 12305,
+      "end": 12306
+    },
+    {
+      "name": "m6_drain",
+      "category": "finalize",
+      "critical": false,
+      "begin": 12307,
+      "end": 12308
+    },
+    {
+      "name": "p21_delay_50us",
+      "category": "wait",
+      "critical": false,
+      "begin": 12309,
+      "end": 12310
     }
   ]
 }

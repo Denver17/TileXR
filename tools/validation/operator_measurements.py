@@ -36,21 +36,60 @@ def _empty_scope(evidence, operator):
     return evidence
 
 
-def performance_record(profile_dir, loops, warmup, *, operator, run_id, rank, kernel_sha):
+def m12_stage_counts(config):
+    counts = {name: 64 for name in ("kernel_total", "m1_init", "m1_select", "m1_stage_copy",
+                                    "m1_prepare_publish", "m6_drain", "p21_delay_50us")}
+    counts.update(m2_prepare_wait=8, m2_notify=8,
+                  m2_ready_wait=64 - config.get("combine_send_core_num", 32),
+                  m2_ready_clear=64 - config.get("combine_send_core_num", 32))
+    return counts
+
+
+def m12_traffic(record, config):
+    if not isinstance(record, dict):
+        raise ValueError("M1/M2 measurement requires validated rank traffic")
+    rows = record.get("combine_type3_rows")
+    measure._integer(rows, "combine_type3_rows")
+    if rows > 10000:
+        raise ValueError("M1/M2 type3 rows exceed supported TokenNum")
+    expected = dict(algorithm_bytes=rows * config["h"] * 2,
+                    stage_copy_bytes=rows * config["h"] * 4,
+                    control_publish_bytes=(64 * 8 + 8 * (64 - config.get("combine_send_core_num", 32))) * 32)
+    for key, value in expected.items():
+        if type(record.get("combine_" + key)) is not int or record["combine_" + key] != value:
+            raise ValueError("M1/M2 traffic mismatch: " + key)
+    return dict(rank=record["rank"], type3_rows=rows, **expected)
+
+
+def _operator_scope(evidence, operator, config=None, record=None, *, duration=None):
+    if operator != "combine" or not config or config.get("implemented_through") != "M2":
+        return _empty_scope(evidence, operator)
+    traffic = m12_traffic(record, config)
+    measured = duration if duration is not None else evidence
+    us = measured["mean_us"] if config["run_mode"] == "performance" else measured["sample_us"][0]
+    evidence.update(scope="partial", implemented_through="M2", native_status="combine-m12",
+                    algorithm_bytes=traffic["algorithm_bytes"], stage_copy_bytes=traffic["stage_copy_bytes"],
+                    control_publish_bytes=traffic["control_publish_bytes"], wait_us=50,
+                    algorithm_bandwidth_gbps=traffic["algorithm_bytes"] / (us * 1000) if traffic["algorithm_bytes"] else None,
+                    algorithm_bandwidth="effective local stage payload GB/s / full kernel including 50us" if traffic["algorithm_bytes"] else "N/A")
+    return evidence
+
+
+def performance_record(profile_dir, loops, warmup, *, operator, run_id, rank, kernel_sha, config=None, record=None):
     identity = _identity(operator, run_id, rank, kernel_sha, loops, warmup, "performance")
     evidence = measure.performance_record(profile_dir, loops, warmup, operator=operator)
-    return _empty_scope(dict(evidence, **identity), operator)
+    return _operator_scope(dict(evidence, **identity), operator, config, record)
 
 
 def breakdown_record(records_path, config, rank, capture_id, output_dir, *,
-                     operator, run_id, kernel_sha, mapping_path=None):
+                     operator, run_id, kernel_sha, mapping_path=None, record=None):
     identity = _identity(operator, run_id, rank, kernel_sha, config["loops"], config["warmup"], "breakdown")
     if capture_id != str(uuid5(NAMESPACE_URL, "tilexr-validation:" + run_id)):
         raise ValueError("capture UUID does not belong to this run_id")
     evidence = measure.breakdown_record(records_path, config, rank, capture_id, output_dir,
         mapping_path, operator=operator, run_id=run_id, kernel_sha=kernel_sha)
     evidence.update(identity)
-    _empty_scope(evidence, operator)
+    _operator_scope(evidence, operator, config, record)
     # Keep the producer's small, hashed summary identical to its scalar evidence.
     evidence.pop("summary_sha256", None)
     measure.atomic_write_json(Path(evidence["summary_path"]), evidence)
@@ -58,7 +97,7 @@ def breakdown_record(records_path, config, rank, capture_id, output_dir, *,
     return evidence
 
 
-def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha):
+def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha, record=None):
     if not isinstance(evidence, dict):
         raise ValueError("missing " + operator + " measurement evidence")
     identity = _identity(operator, run_id, rank, kernel_sha, config["loops"], config["warmup"], config["run_mode"])
@@ -73,14 +112,16 @@ def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha):
             raise ValueError(operator + " capture dropped records")
         if operator == "combine":
             stages = evidence.get("stages_us", {})
-            if set(stages) != {"kernel_total", "empty_wait"} or any(
-                    stage.get("sample_count") != 64 for stage in stages.values()):
-                raise ValueError("Combine breakdown requires both intervals on all 64 cores")
+            expected = (m12_stage_counts(config) if config.get("implemented_through") == "M2"
+                        else dict(kernel_total=64, empty_wait=64))
+            if set(stages) != set(expected) or any(stages[name].get("sample_count") != count
+                                                  for name, count in expected.items()):
+                raise ValueError("Combine breakdown is missing required module/core-role intervals")
     if operator == "combine":
-        expected = _empty_scope({}, operator)
+        expected = _operator_scope({}, operator, config, record, duration=evidence)
         if any(type(evidence.get(key)) is not type(value) or evidence[key] != value
                for key, value in expected.items()):
-            raise ValueError("empty Combine must report zero algorithm bytes and N/A bandwidth")
+            raise ValueError("Combine module/data-volume/bandwidth scope mismatch")
 
 
 def validate_operator_measurements(record, config, *, run_id=None, kernel_shas=None):
@@ -103,7 +144,7 @@ def validate_operator_measurements(record, config, *, run_id=None, kernel_shas=N
             raise ValueError("operator measurement evidence must be an object")
         expected_run = run_id if run_id is not None else record.get("run_id")
         expected_sha = kernel_shas[operator] if kernel_shas is not None else item.get("kernel_sha256")
-        _validate_evidence(item, config, operator, record["rank"], expected_run, expected_sha)
+        _validate_evidence(item, config, operator, record["rank"], expected_run, expected_sha, record)
         if mode == "breakdown":
             for key in ("records_path", "summary_path"):
                 path = str(Path(item[key]).resolve())
@@ -133,7 +174,8 @@ def summarize_operator_measurements(rank_records, config, run_id, kernel_shas):
     result = {}
     for operator in active_operators(config):
         rows = _operator_rows(rank_records, operator, config["run_mode"])
-        op_config = dict(config, kernel_scope="dispatch" if operator == "dispatch" else "combine-empty")
+        op_config = dict(config, kernel_scope="dispatch" if operator == "dispatch" else
+                         "combine-m12" if config.get("implemented_through") == "M2" else "combine-empty")
         summary = measure.summarize_measurements(rows, op_config, kernel_shas[operator], operator=operator)
         durations = [row[config["run_mode"]]["mean_us"] if config["run_mode"] == "performance"
                      else row["breakdown"]["sample_us"][0] for row in sorted(rows, key=lambda row: row["rank"])]
@@ -141,7 +183,24 @@ def summarize_operator_measurements(rank_records, config, run_id, kernel_shas):
             latency_us=measure._statistics(durations), rank_latency_us=durations,
             latency_reduction="statistics across ranks of measured-launch mean" if config["run_mode"] == "performance"
             else "statistics across ranks of last-launch slowest core")
-        _empty_scope(summary, operator)
+        if operator == "combine" and config.get("implemented_through") == "M2":
+            traffic = [m12_traffic(row, config) for row in sorted(rows, key=lambda row: row["rank"])]
+            bandwidth = [row["algorithm_bytes"] / (us * 1000) if row["algorithm_bytes"] else None
+                         for row, us in zip(traffic, durations)]
+            active_bandwidth = [value for value in bandwidth if value is not None]
+            summary.update(scope="partial", implemented_through="M2", native_status="combine-m12",
+                algorithm_bytes=sum(row["algorithm_bytes"] for row in traffic),
+                algorithm_communication_bytes=0, communication_scope="M1 local stage copies; M2 control separately reported",
+                rank_traffic=traffic, control_publish_bytes=sum(row["control_publish_bytes"] for row in traffic),
+                stage_copy_bytes=sum(row["stage_copy_bytes"] for row in traffic),
+                rank_algorithm_bandwidth_gbps=bandwidth,
+                algorithm_bandwidth_gbps=measure._statistics(active_bandwidth) if active_bandwidth else None,
+                algorithm_bandwidth=("effective local stage payload GB/s over nonzero-work ranks / full kernel including 50us"
+                                     if active_bandwidth else "N/A"),
+                bandwidth="local copy payload rate; not inter-server communication bandwidth",
+                wait_us=50)
+        else:
+            _empty_scope(summary, operator)
         result[operator] = summary
     return result
 
@@ -153,7 +212,14 @@ def render_operator_measurements(summaries):
         text = (f"{operator}: backend={summary['backend']} native={summary['native_status']} "
                 f"median={stats['median']:.3f} us min={stats['minimum']:.3f} us max={stats['maximum']:.3f} us\n"
                 f"kernel={summary['kernel']} sha256={summary['kernel_sha256']}")
-        if operator == "combine":
+        if operator == "combine" and summary.get("implemented_through") == "M2":
+            rates = summary["algorithm_bandwidth_gbps"]
+            text += (f"\nscope=partial implemented_through=M2 stage_payload={summary['algorithm_bytes']}B "
+                     f"stage_read_write={summary['stage_copy_bytes']}B control_publish={summary['control_publish_bytes']}B")
+            text += (f"\nlocal_payload_GB/s(nonzero-work ranks) median={rates['median']:.3f} "
+                     f"min={rates['minimum']:.3f} max={rates['maximum']:.3f}" if rates else "\nlocal_payload_GB/s=N/A")
+            text += "（完整kernel时长含50us等待；控制流量不计业务带宽）"
+        elif operator == "combine":
             text += "\nscope=empty/framework algorithm_bytes=0 algorithm_bandwidth=N/A（含空算子50us等待）"
         else:
             text += "\n" + measure.render_measurements(summary)

@@ -31,6 +31,10 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_config
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/unit/test_server_dedup_combine_config.py")
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_config PROPERTIES TIMEOUT 120)
     add_test(NAME test_dispatch_memory_trace
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/test_dispatch_memory_trace.py")
@@ -364,6 +368,12 @@ endif()
 
 # C4 reuses the same Host consumer for lifecycle/fault-injection coverage.
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_combine_m12_consumer
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m12.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_m12_consumer PROPERTIES
+        LABELS ep-sdedup-combine-p2-m12 TIMEOUT 180)
     add_test(NAME test_tilexr_ep_server_dedup_combine_chain
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_chain.py"
@@ -411,6 +421,7 @@ add_executable(test_tilexr_ep_server_dedup_combine_delay
     ${TILEXR_ROOT}/src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp)
 target_include_directories(test_tilexr_ep_server_dedup_combine_delay BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
+    "${TILEXR_ROOT}/src/include"
     "${TILEXR_ROOT}/src/ep/common")
 add_test(NAME test_tilexr_ep_server_dedup_combine_delay
     COMMAND test_tilexr_ep_server_dedup_combine_delay)
@@ -441,12 +452,21 @@ install(TARGETS test_tilexr_ep_server_dedup_combine_profile_regions RUNTIME DEST
 add_executable(test_tilexr_ep_server_dedup_combine_profile_kernel
     unit/test_tilexr_ep_server_dedup_combine_profile_kernel.cpp)
 target_include_directories(test_tilexr_ep_server_dedup_combine_profile_kernel BEFORE PRIVATE
-    "${TILEXR_ROOT}/tests/profiling/unit/stubs" ${TILEXR_EP_TEST_INCLUDE_DIRS})
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake" ${TILEXR_EP_TEST_INCLUDE_DIRS})
 target_compile_definitions(test_tilexr_ep_server_dedup_combine_profile_kernel PRIVATE
     __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
 add_test(NAME test_tilexr_ep_server_dedup_combine_profile_kernel COMMAND test_tilexr_ep_server_dedup_combine_profile_kernel)
 set_tests_properties(test_tilexr_ep_server_dedup_combine_profile_kernel PROPERTIES TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_combine_profile_kernel RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+
+add_executable(test_tilexr_ep_server_dedup_combine_m12
+    unit/test_tilexr_ep_server_dedup_combine_m12.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_combine_m12 BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
+    "${TILEXR_ROOT}/src/include" "${TILEXR_ROOT}/src/ep/common")
+add_test(NAME test_tilexr_ep_server_dedup_combine_m12 COMMAND test_tilexr_ep_server_dedup_combine_m12)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_m12 PROPERTIES LABELS ep-sdedup-combine-p2-m12 TIMEOUT 120)
+install(TARGETS test_tilexr_ep_server_dedup_combine_m12 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.

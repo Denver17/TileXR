@@ -34,12 +34,14 @@ int TileXRMoeEpCombineMemory(void *expertOut, int32_t *assistInfoForCombine, int
     int64_t quantMode, int64_t globalBs, void *yOut, TileXR::TileXRDataType dtype, aclrtStream stream);
 
 // Server Dedup Combine: A5 only, FP16/BFP16, quantMode=0, fixed 64 AIV.
-// Phase one submits an empty kernel with a 50us per-core wait; success means asynchronous submission,
-// not a numerical result. It leaves all tensors and communication buffers unchanged.
+// P2.1 stages unweighted type3 rows and completes server readiness (M1/M2),
+// then retains a 50us per-core wait. Success means asynchronous submission;
+// M3-M5 and numerical yOut are not implemented. Inputs and yOut stay unchanged.
 // C=R*bs*min(topK,moeExpertNum/R); expertOut[C,h], assistInfoForCombine[C,3],
 // tokenType[C], relayReadIndex[C,topK,2] (raw 32-bit pairs), sourceMask[bs],
 // expertScales[bs,topK]. sendCounts is the full int32[moeExpertNum] prefix;
-// its last item is the device-side valid row count. Host never reads tensors.
+// its last item is the device-side valid row count, in [0,min(C,10000)].
+// Host never reads tensors and rejects H when the M1/M2 UB budget cannot fit a lane.
 // yOut[bs,h] has dtype. Tensor capacity/device ownership are caller obligations.
 // Table pointers retain Dispatch row order and remain alive through completion.
 // epWorldSize/epRankId/globalBs accept 0 as the existing infer-from-comm sentinel.

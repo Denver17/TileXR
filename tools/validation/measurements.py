@@ -221,7 +221,7 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
     run = replace(run, attributes={**run.attributes, "selection": "last_launch",
                   "capture_mode": "latest_launch", "captured_launch": config["warmup"] + config["loops"] - 1,
                   "submitted_launches": config["warmup"] + config["loops"], **identity})
-    run = breakdown_timeline(run) if operator == "dispatch" else combine_breakdown_timeline(run)
+    run = breakdown_timeline(run) if operator == "dispatch" else combine_breakdown_timeline(run, config)
     generated = generate_reports_for_run(run, Path(output_dir))
     # Common analysis owns timing semantics; EP only reduces each rank's result.
     analysis = analyze_run(run)
@@ -250,8 +250,22 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
     return evidence
 
 
-def combine_breakdown_timeline(run):
-    """The empty kernel's only measured interval is its intentional wait."""
+def combine_breakdown_timeline(run, config=None):
+    """Keep real module intervals; retained C6 captures contain only the total."""
+    if config and config.get("implemented_through") == "M2":
+        common = {"kernel_total", "m1_init", "m1_select", "m1_stage_copy", "m1_prepare_publish", "m6_drain", "p21_delay_50us"}
+        for launch in run.launches:
+            for lane in launch.lanes:
+                expected = set(common)
+                if lane.core >= config.get("combine_send_core_num", 32):
+                    expected.update(("m2_ready_wait", "m2_ready_clear"))
+                if lane.core >= 56:
+                    expected.update(("m2_prepare_wait", "m2_notify"))
+                actual = [sample.name for sample in lane.samples if sample.kind == "interval"]
+                if set(actual) != expected or len(actual) != len(expected):
+                    raise ValueError("M1/M2 breakdown core role or interval coverage mismatch: " + str(lane.core))
+        return replace(run, attributes={**run.attributes, "scope": "partial", "implemented_through": "M2",
+            "timing": "M1/M2 explicit intervals; 50 us wait separately measured, never subtracted from total"})
     launches = []
     for launch in run.launches:
         lanes = []
@@ -585,7 +599,8 @@ def validate_report_artifacts(evidence, rank, chain_config):
     identity = ("schema", "capture_id", "run_mode", "loops", "warmup", "launches", "measured_launches",
                 "selection", "capture_mode", "captured_launch", "captured_launches", "status", "sample_us",
                 "stages_us", "dropped_records", "artifact_manifest", "operator", "kernel", "run_id", "kernel_sha256",
-                "last_launch", "scope", "native_status", "algorithm_bytes", "algorithm_bandwidth_gbps", "algorithm_bandwidth")
+                "last_launch", "scope", "native_status", "algorithm_bytes", "algorithm_bandwidth_gbps", "algorithm_bandwidth",
+                "implemented_through", "stage_copy_bytes", "control_publish_bytes", "wait_us")
     if any(summary.get(key) != evidence.get(key) for key in identity):
         raise ValueError("profiling report summary disagrees with node scalar result")
     if (summary.get("loops") != chain_config["loops"] or summary.get("warmup") != chain_config["warmup"]

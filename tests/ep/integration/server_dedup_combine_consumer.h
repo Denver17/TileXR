@@ -1,11 +1,19 @@
-// Included by the shared integration consumer. C4/C5 test wiring and empty behavior.
-// This fixture is not a Combine numerical reference or an expert computation.
-void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes)
+// Shared Combine tensor fixtures and invariant checks.
+// These expert values exercise routing and copies; they do not model expert computation.
+void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes, uint64_t generation = 0)
 {
     const uint16_t one = c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? 0x3f80U : 0x3c00U;
-    const std::vector<uint16_t> chunk(512U * 1024U, one);
+    std::vector<uint16_t> chunk(512U * 1024U, one);
     for (uint64_t offset = 0; offset < bytes;) {
         const uint64_t count = std::min<uint64_t>(bytes - offset, chunk.size() * sizeof(uint16_t));
+        if (c.checkpoint == "ep-sdedup-combine-p2-m12") {
+            for (uint64_t i = 0; i < count / 2U; ++i) {
+                const uint64_t element = offset / 2U + i;
+                // Finite, exact dtype bits distinguish rank, original row, column and round.
+                chunk[i] = static_cast<uint16_t>(one + (element / c.h * 17U +
+                    element % c.h * 3U + c.rank * 11U + generation * 29U) % 113U);
+            }
+        }
         Check(aclrtMemcpy(static_cast<uint8_t *>(data) + offset, bytes - offset,
             chunk.data(), count, ACL_MEMCPY_HOST_TO_DEVICE), "initialize combine expertOut");
         offset += count;
@@ -41,6 +49,18 @@ void InitializeStandaloneCombine(const Config &c,
         }
     }
     for (size_t i = 1; i < prefix.size(); ++i) prefix[i] += prefix[i - 1];
+    if (c.combineFixture != "balanced") {
+        const uint32_t count = c.combineFixture == "empty" ? 0U :
+            static_cast<uint32_t>(std::min<uint64_t>(layout.capacityRows, 10000U));
+        std::fill(prefix.begin(), prefix.end(), 0);
+        prefix.back() = count;
+        std::fill(types.begin(), types.end(), 0);
+        for (uint32_t row = 0; row < count; ++row) {
+            // Holes cross table-cache batches; slots deliberately differ from row and packed position.
+            types[row] = row % 7U == 2U || row % 11U == 5U ? 3U : 1U;
+            assist[row * 3U] = static_cast<uint32_t>(c.experts * c.bs - 1U - row);
+        }
+    }
     const auto packets = SourcePackets(Ids(shape, c.rank), weights, c.rank, c.rankSize, c.experts, c.topK);
     for (const auto &packet : packets) {
         const auto &first = packet.members.front();
@@ -98,7 +118,7 @@ void ValidateCombineTensors(const std::vector<CombineTensorSnapshot> &snapshots)
             Check(aclrtMemcpy(chunk.data(), chunk.size(), static_cast<const uint8_t *>(snapshot.device) + offset,
                 count, ACL_MEMCPY_DEVICE_TO_HOST), "read Combine tensor");
             ValidateOutput(std::memcmp(chunk.data(), snapshot.bytes.data() + offset, count) == 0,
-                std::string("empty Combine modified ") + snapshot.name + " at chunk=" + std::to_string(offset));
+                std::string("Combine modified invariant tensor ") + snapshot.name + " at chunk=" + std::to_string(offset));
             offset += count;
         }
     }
