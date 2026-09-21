@@ -5,7 +5,9 @@
 M4/P2.3 已按用户回传通过 F/P/B 各 4/4、regression/connection 各 2/2，共 16/16。
 结果：`/home/h00580772/TileXR-git-check/run/validation/commit-c44caafd510d495e9c2eb67e5cef2604/summary.json`。
 该目录后缀为验证运行标识，M4 独立代码提交为 `f770c829202f1b41dcb2bee502c173c7dd419b0d`。
-M5 增加 source 端完整 yOut 归约及结果 Flag 清理，恢复连续多轮；设备验收待回传。
+M5 增加 source 端完整 yOut 归约及结果 Flag 清理，恢复连续多轮；已按用户回传通过 24/24。
+F1/F2/Fmulti/P/B 各 4/4，regression/connection 各 2/2；结果：`/home/h00580772/TileXR-git-check/run/validation/commit-88e6f60b915444958a04f6149a354671/summary.json`。
+关联代码提交为 `cc0477d9934caa3123ab30718f432eaa746de629`，性能项通过表示采集成功，不代表达到性能阈值。
 
 ```bash
 bash run_commit_validation.sh
@@ -74,7 +76,8 @@ Python 验收工具 366 项中 365 通过、1 项 Windows 专属检查跳过；M
 主 shape 六组 16-rank consumer 替身各 2 预热+5 正式调用通过，覆盖 N=1..5 与同卡成员，
 检查完整双窗/最终 yOut，并实际确认本次 fixture 数值域为有限正常数或零。
 证据保留在开发工作区 `build/combine-p24-verification/`，包括编译配置、退出码、产物哈希和源码 provenance。
-以上不证明真实 A5 跨 rank 可见性、连续调用时序或设备数值；P2.4 的 24 例设备验收仍待用户回传。
+以上开发侧证据本身不证明真实 A5 跨 rank 可见性、连续调用时序或设备数值；后续用户已回传上述 P2.4 24 例设备验收通过。
+该结论限于既定矩阵，不外推至任意配置、压力场景或性能达标。
 
 <a id="当前入口combine-p23m4"></a>
 ### P2.3（M4）历史开发及验收证据
