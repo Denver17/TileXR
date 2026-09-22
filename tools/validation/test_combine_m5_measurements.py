@@ -57,6 +57,55 @@ class M5MeasurementTests(unittest.TestCase):
         row = dict(self.row, operator_measurements=dict(combine=dict(breakdown=evidence)))
         operators.validate_operator_measurements(row, self.config, run_id="run-test", kernel_shas=dict(combine=self.sha))
 
+    def split_m2_events(self):
+        events = self.events()
+        for core, rows in events.items():
+            if core < self.config["combine_send_core_num"]:
+                continue
+            if core >= 56:
+                rows.extend(((3010, 0x3026), (3200, 0x3027)))
+            rows.extend(((3210 if core >= 56 else 3010, 0x3028), (3490, 0x3029)))
+            rows.sort()
+        return events
+
+    def test_m2_split_roles_durations_and_trace(self):
+        for send in (16, 24, 32, 40, 48, 56):
+            self.config["combine_send_core_num"] = send
+            self.row["combine_control_publish_bytes"] = (64 * 8 + 8 * (64 - send)) * 32
+            evidence = self.capture(self.split_m2_events(), f"m2-send{send}")
+            self.validate(evidence)
+            stages = evidence["stages_us"]
+            self.assertEqual(stages["m2_prepare_notify"]["sample_count"], 8)
+            self.assertEqual(stages["m2_server_wait"]["sample_count"], 64 - send)
+            self.assertAlmostEqual(stages["m2_prepare_notify"]["minimum"], 0.19)
+            self.assertAlmostEqual(stages["m2_server_wait"]["minimum"], 0.28)
+            trace = json.loads(Path(evidence["artifacts"]["perfetto_trace.json"]).read_text())["traceEvents"]
+            parts = [e for e in trace if e["ph"] == "X" and e["name"] in
+                     ("m2_prepare_notify", "m2_server_wait")]
+            self.assertEqual(len(parts), 8 + 64 - send)
+            for part in parts:
+                self.assertIsNotNone(part["args"]["parent_stage_id"])
+                self.assertFalse(part["args"]["attributes"]["mte3_completion_required"])
+
+    def test_m2_split_rejects_missing_duplicate_or_wrong_role(self):
+        for fault in ("missing-core", "missing-phase", "missing-end", "duplicate", "wrong-role"):
+            events = self.split_m2_events()
+            if fault == "missing-core":
+                events[63] = [row for row in events[63] if not 0x3026 <= row[1] <= 0x3029]
+            elif fault == "missing-phase":
+                for core in events:
+                    events[core] = [row for row in events[core] if row[1] not in (0x3026, 0x3027)]
+            elif fault == "missing-end":
+                events[63] = [row for row in events[63] if row[1] != 0x3029]
+            elif fault == "duplicate":
+                events[63].extend(((3201, 0x3026), (3202, 0x3027)))
+                events[63].sort()
+            else:
+                events[32].extend(((3010, 0x3026), (3020, 0x3027)))
+                events[32].sort()
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.validate(self.capture(events, "m2-" + fault))
+
     def test_modules_roles_and_no_delay(self):
         evidence = self.capture()
         self.validate(evidence)

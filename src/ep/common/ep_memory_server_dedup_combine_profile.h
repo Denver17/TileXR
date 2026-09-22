@@ -44,5 +44,9 @@ constexpr uint32_t kEpServerDedupCombineProfilePartialTokenBegin = 0x3022U;
 constexpr uint32_t kEpServerDedupCombineProfilePartialTokenEnd = 0x3023U;
 constexpr uint32_t kEpServerDedupCombineProfileFinalTokenBegin = 0x3024U;
 constexpr uint32_t kEpServerDedupCombineProfileFinalTokenEnd = 0x3025U;
+constexpr uint32_t kEpServerDedupCombineProfilePrepareNotifyBegin = 0x3026U;
+constexpr uint32_t kEpServerDedupCombineProfilePrepareNotifyEnd = 0x3027U;
+constexpr uint32_t kEpServerDedupCombineProfileServerWaitBegin = 0x3028U;
+constexpr uint32_t kEpServerDedupCombineProfileServerWaitEnd = 0x3029U;
 } // namespace TileXREp
 #endif

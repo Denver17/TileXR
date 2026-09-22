@@ -186,6 +186,37 @@ M3 breakdown 区间包含新增预扫描成本。比较时固定 shape、路由�
 及构建配置，记录最终加载的 kernel 哈希。
 
 
+## M2 两阶段 profiling（2026-09-22）
+
+基于优化6 `0d2cd57`，保留原 `m2_control` 总区间，新增两个子区间，用于区分本卡
+准备/通知与本server就绪等待的耗时，不作为新的性能优化点。
+
+| trace 子区间 | 核范围 | 观测内容 |
+| --- | --- | --- |
+| `m2_prepare_notify` | 56–63 核，共8核 | `NotifyServerCard`：等待本卡64核 prepare_done，生成并下发 prepare 清零及本server目标卡的 ready 通知 |
+| `m2_server_wait` | 全部 Recv 核 | `WaitServerReady`：轮询本server 8卡 ready，完成后下发对应 ready 清零 |
+
+默认32个Recv核中，32–55核只有第二段，56–63核依次经过两段；其他合法核划分按相同
+角色记录。Send核不产生M2记录。第一段较长表示本卡准备完成/通知路径较长，第二段
+较长表示在该核开始等待后，本server各卡ready尚未齐备；需结合8个通知核的第一段
+结束时间判断拖尾，不能仅凭第二段较长就归因网络。
+
+仅增加Scalar打点，未增加事件同步、PIPE_ALL或MTE3排空。两个子区间结束均表示相关
+函数完成指令下发，清零/通知MTE3可能仍在途；不是单独的远端写完成耗时。父子区间为
+包含关系，统计时不能把 `m2_control` 与两个子区间相加。
+
+`run.sh -m 2` 使用更新后的kernel、mapping和解析器即可，无需新增参数。沿用当前
+编译/同步流程，重新构建并同步后采集；trace在各核原M2区间内展示两个子区间，报告
+同时列出对应耗时和样本数。解析器兼容旧的仅模块capture；出现新子区间时，严格检查
+8个通知核和全部Recv核的覆盖、重复及核角色。
+
+验证：实际kernel profiling与M1/M2 Host测试2/2通过；测量/汇总Python回归47/47、
+旧profiling回归7/7通过，包含六种核划分的两阶段样本数、trace耗时与父子关系，以及
+缺阶段、缺核、缺结束点、重复和错误角色的拒绝测试。profiling开关前后Send、普通Recv
+和通知核的HardEvent序列一致。blue CANN9.1/A5 OFF/ON构建均通过，送编全部非文档
+输入与最终源码一致；证据在`build/combine-split-verification/m2-profile/`和
+`build/m2-profile-*.log`。尚未采集此次修改的设备trace。
+
 ## M3/M5 边界与 M4/M5 逐 token profiling
 
 基于 `6e09ad8`，新增诊断打点，用于观察各核任务下发节奏，不作为新的性能优化点。

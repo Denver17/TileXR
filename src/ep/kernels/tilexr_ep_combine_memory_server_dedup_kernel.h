@@ -98,8 +98,15 @@ public:
         Mark(kEpServerDedupCombineProfileStageEnd);
         if (core_ >= kEpServerDedupCombineSendCoreNum) {
             Mark(kEpServerDedupCombineProfileControlBegin);
-            if (core_ >= 56U) NotifyServerCard();
+            if (core_ >= 56U) {
+                Mark(kEpServerDedupCombineProfilePrepareNotifyBegin);
+                NotifyServerCard();
+                // Notification has been issued; do not add an MTE3 drain.
+                Mark(kEpServerDedupCombineProfilePrepareNotifyEnd);
+            }
+            Mark(kEpServerDedupCombineProfileServerWaitBegin);
             WaitServerReady();
+            Mark(kEpServerDedupCombineProfileServerWaitEnd);
             Mark(kEpServerDedupCombineProfileControlEnd);
             Mark(kEpServerDedupCombineProfilePartialBegin);
             ReturnPartialTokens();

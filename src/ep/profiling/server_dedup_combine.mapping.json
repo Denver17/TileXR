@@ -32,6 +32,20 @@
       "end": 12314
     },
     {
+      "name": "m2_prepare_notify",
+      "category": "wait",
+      "parent": "m2_control",
+      "begin": 12326,
+      "end": 12327
+    },
+    {
+      "name": "m2_server_wait",
+      "category": "wait",
+      "parent": "m2_control",
+      "begin": 12328,
+      "end": 12329
+    },
+    {
       "name": "m3_direct",
       "category": "issue",
       "critical": false,

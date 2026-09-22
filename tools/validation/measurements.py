@@ -255,12 +255,21 @@ def combine_breakdown_timeline(run, config=None):
     if config and config.get("implemented_through") in ("M3", "M4", "M5"):
         if config["implemented_through"] != "M5" and (config["loops"] != 1 or config["warmup"] != 0):
             raise ValueError("M3/M4 captures exactly one launch without warmup")
+        # Retained captures may predate this split. If either child is present,
+        # require the full split on every participating core, not just totals.
+        m2_split = any(sample.name in ("m2_prepare_notify", "m2_server_wait")
+                       for launch in run.launches for lane in launch.lanes for sample in lane.samples)
         launches = []
         for launch in run.launches:
             lanes = []
             for lane in launch.lanes:
                 expected = {"kernel_total", "m1_init", "m1_stage", "m6_drain"}
                 expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
+                if m2_split:
+                    if lane.core >= 56:
+                        expected.add("m2_prepare_notify")
+                    if lane.core >= config.get("combine_send_core_num", 32):
+                        expected.add("m2_server_wait")
                 if config["implemented_through"] in ("M4", "M5") and lane.core >= config.get("combine_send_core_num", 32):
                     expected.add("m4_partial")
                 if config["implemented_through"] == "M5" and lane.core >= config.get("combine_send_core_num", 32):
@@ -288,6 +297,12 @@ def combine_breakdown_timeline(run, config=None):
                     if sample.name == "m4_partial" and config["implemented_through"] == "M5":
                         sample = replace(sample, attributes={**sample.attributes,
                             "timing": "instruction issue and read/vector handoff; MTE3 may remain in flight",
+                            "mte3_completion_required": False})
+                    if sample.name in ("m2_prepare_notify", "m2_server_wait"):
+                        sample = replace(sample, attributes={**sample.attributes,
+                            "timing": ("local 64-core prepare wait, clear and ready notification issue"
+                                       if sample.name == "m2_prepare_notify" else
+                                       "local server 8-card ready wait and clear issue"),
                             "mte3_completion_required": False})
                     if sample.name == "m3_mte3_complete" and "m3_direct" not in expected:
                         raise ValueError("Combine M3 completion marker on non-Send core")

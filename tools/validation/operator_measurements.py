@@ -188,6 +188,10 @@ def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha, rec
             expected = (return_stage_counts(config) if config.get("implemented_through") in ("M3", "M4", "M5") else
                         m12_stage_counts(config) if config.get("implemented_through") == "M2"
                         else dict(kernel_total=64, empty_wait=64))
+            if config.get("implemented_through") in ("M3", "M4", "M5") and (
+                    "m2_prepare_notify" in stages or "m2_server_wait" in stages):
+                expected.update(m2_prepare_notify=8,
+                                m2_server_wait=64 - config.get("combine_send_core_num", 32))
             # Token stages are optional for retained module-only captures and
             # empty M4 task sets. When present, every real task must appear once.
             if config.get("implemented_through") in ("M4", "M5") and "m4_token_issue" in stages:

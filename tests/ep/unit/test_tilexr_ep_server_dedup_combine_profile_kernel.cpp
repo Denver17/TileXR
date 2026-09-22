@@ -36,9 +36,8 @@ int main()
                 reinterpret_cast<GM_ADDR>(f.counts.data()), reinterpret_cast<GM_ADDR>(weights.data()), reinterpret_cast<GM_ADDR>(f.types.data()),
                 f.untouched.data(), reinterpret_cast<GM_ADDR>(sourceMask.data()), reinterpret_cast<GM_ADDR>(output.data()), reinterpret_cast<GM_ADDR>(&f.tiling), 0);
         };
-        std::vector<uint32_t> sendSynchronization[2];
-        for (uint32_t round = 0; round < 3U; ++round) for (uint32_t core : {0U, kEpServerDedupCombineSendCoreNum, 63U}) {
-            f.Hooks(core, 0U); dropped[core * 16U] = 9U;
+        std::vector<uint32_t> synchronizationByCore[2][64];
+        auto seedResults = [&]() {
             // Remote return arrivals for all source slots, renewed each round.
             const uint32_t blocks = (f.h * 2U + 479U) / 480U;
             for (uint32_t p = 0; p < f.tiling.bs; ++p) for (uint32_t b = 0; b < blocks; ++b) {
@@ -47,8 +46,12 @@ int main()
                 std::memset(slot, 0, 480U); const float one = 1.0f;
                 std::memcpy(slot + 480U, &one, 4U);
             }
-            if (round == 2U && core == 0U) AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
-                sendSynchronization[1].push_back(uint32_t(event) * 32U + id * 2U + uint32_t(set));
+        };
+        for (uint32_t round = 0; round < 3U; ++round) for (uint32_t core : {0U, kEpServerDedupCombineSendCoreNum, 63U}) {
+            f.Hooks(core, 0U); dropped[core * 16U] = 9U;
+            seedResults();
+            if (round == 2U) AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
+                synchronizationByCore[1][core].push_back(uint32_t(event) * 32U + id * 2U + uint32_t(set));
             };
             invoke();
             AscendC::EventObserver() = {};
@@ -56,8 +59,12 @@ int main()
                 kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd,
                 kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd};
             if (core >= kEpServerDedupCombineSendCoreNum) {
-                expected.insert(expected.end(), {kEpServerDedupCombineProfileControlBegin,
-                    kEpServerDedupCombineProfileControlEnd, kEpServerDedupCombineProfilePartialBegin,
+                expected.push_back(kEpServerDedupCombineProfileControlBegin);
+                if (core >= 56U) expected.insert(expected.end(), {
+                    kEpServerDedupCombineProfilePrepareNotifyBegin, kEpServerDedupCombineProfilePrepareNotifyEnd});
+                expected.insert(expected.end(), {kEpServerDedupCombineProfileServerWaitBegin,
+                    kEpServerDedupCombineProfileServerWaitEnd, kEpServerDedupCombineProfileControlEnd,
+                    kEpServerDedupCombineProfilePartialBegin,
                     kEpServerDedupCombineProfilePartialEnd, kEpServerDedupCombineProfileFinalBegin});
                 const uint32_t local = core - kEpServerDedupCombineSendCoreNum;
                 const uint32_t tasks = f.tiling.bs / kEpServerDedupCombineRecvCoreNum +
@@ -77,13 +84,17 @@ int main()
         Check(std::all_of(dispatchTimes.begin(), dispatchTimes.end(), [](uint64_t x) { return x == 0xa5U; }), "Combine preserves Dispatch capture");
         const auto savedTimes = times; const auto savedEvents = events;
         f.tiling.profilingEnabled = 0U;
-        f.Hooks(0U, 0U);
-        AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
-            sendSynchronization[0].push_back(uint32_t(event) * 32U + id * 2U + uint32_t(set));
-        };
-        invoke();
-        AscendC::EventObserver() = {}; f.ResetHooks();
-        Check(sendSynchronization[0] == sendSynchronization[1], "M3/M5 profiling adds no hard-event synchronization");
+        for (uint32_t core : {0U, kEpServerDedupCombineSendCoreNum, 63U}) {
+            f.Hooks(core, 0U);
+            seedResults();
+            AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
+                synchronizationByCore[0][core].push_back(uint32_t(event) * 32U + id * 2U + uint32_t(set));
+            };
+            invoke();
+            AscendC::EventObserver() = {}; f.ResetHooks();
+            Check(synchronizationByCore[0][core] == synchronizationByCore[1][core],
+                "profiling adds no hard-event synchronization on Send, Recv or notifier cores");
+        }
         Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3/M4/M5 without profile writes");
         Check(std::memcmp(&originalArgs, &f.args, sizeof(f.args)) == 0, "kernel never mutates shared CommArgs");
 
