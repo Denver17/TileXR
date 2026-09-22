@@ -15,6 +15,11 @@ namespace TileXREp {
 // Earlier module tests intentionally own only their stage fixtures. Exercise
 // those production methods without introducing a runtime stop-stage contract.
 struct CombineModuleTestAccess {
+    static void Direct(CombineMemoryServerDedupKernel &kernel)
+    {
+        kernel.ReturnDirectTokens();
+        AscendC::PipeBarrier<PIPE_ALL>();
+    }
     static void ThroughM4(CombineMemoryServerDedupKernel &kernel)
     {
         kernel.CopyLocalPendingTokens();
@@ -35,7 +40,7 @@ inline uint64_t &Clock() { static uint64_t clock = 100; return clock; }
 struct Fixture {
     TileXR::CommArgs args {};
     TileXREp::EpServerDedupCombineTilingData tiling {};
-    std::array<std::vector<uint8_t>, 16> peers;
+    std::array<std::vector<uint8_t>, TileXR::TILEXR_MAX_RANK_SIZE> peers;
     std::vector<uint16_t> expert;
     std::vector<int32_t> table, counts, types;
     std::array<uint8_t, 128> untouched;

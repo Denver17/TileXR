@@ -5,14 +5,14 @@
 ## 分步性能验证版本
 
 此前 `f0d8191` 将优化点 2、3 联合提交。为分别测量收益，在已发布历史之后追加两个
-连续提交。本提交为第一步：**仅启用优化点 2**，M3 使用优化点 1 基线的原始任务顺序，
-没有 server 分组预扫描。下文保留优化点 3 的方案和历史联合验证记录，不代表本提交启用它。
+连续提交。`00fc323` 为第一步，仅启用优化点 2，M3 保留基线任务顺序；本提交为第二步，
+在其上启用优化点 3 的 server 分组预扫描和发送顺序，M4 配置保持第一步不变。
 
 | 版本 | 实际启用范围 | 收益比较对象 |
 | --- | --- | --- |
 | `a2dd290` | 优化点 1：M5 移至 Send 核 | 基线 |
-| 本提交：`perf(ep): isolate optimization 2 for M4 buffer validation` | 优化点 1＋2：M4 240 KiB、最多 3 读、一套计算、剩余分配发送 | 对比 `a2dd290` 得到优化点 2 收益 |
-| 后续独立提交 | 在上一步增加优化点 3：M3 按 server 分组发送 | 对比上一步得到优化点 3 增量收益 |
+| `00fc323` | 优化点 1＋2：M4 240 KiB、最多 3 读、一套计算、剩余分配发送 | 对比 `a2dd290` 得到优化点 2 收益 |
+| 本提交：`perf(ep): apply optimization 3 after M4 buffer tuning` | 在上一步增加优化点 3：M3 按 server 分组发送 | 对比 `00fc323` 得到优化点 3 增量收益 |
 
 验证环境逐个 checkout 对应提交后，重新执行 `bash build_all.sh && bash sync.sh`，再使用
 相同的 `run.sh` 参数分别测量。每笔先确认功能，再对比 performance；breakdown 独立采集。
@@ -26,6 +26,12 @@ Clang 15.0.5 / A5 `dav-c310-vec` profiling OFF/ON 分别编译 `tilexr-ep` 及�
 成功，exit=0。已核对源码快照与工作区的非文档文件一致；相对 `a2dd290`，生产修改只有
 M4 预算/分配及 Read 核 arena 容量，M3 路径与基线相同。证据保存到
 `build/combine-split-verification/opt2/`。设备正确性与性能收益待用户验证。
+
+同日，第二步基于 `00fc323` 的 Host 回归 9/9 通过；同一 CANN 9.1.0/A5 工具链的
+profiling OFF/ON 分别编译 `tilexr-ep` 及所属 kernels 成功，exit=0。源码快照与工作区
+非文档文件一致。相对第一步只有 M3 分组及对应测试变化，生产和测试代码与已审查的
+`f0d8191` 相同；独立快照和日志保存在 `build/combine-split-verification/opt3/`。
+两个版本均未运行本次 A5 多卡设备验收，功能及性能收益仍待用户分别反馈。
 
 ## 尝试优化点 1：M5 移至 Send 核，在 M3 之后执行
 
