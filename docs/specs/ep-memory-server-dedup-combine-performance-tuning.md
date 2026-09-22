@@ -526,6 +526,9 @@ trace解析器。拉取后按现有build/sync流程更新，`run.sh`参数不变
 
 ## 尝试优化点 5：M3 逐 server 扫描、均衡筛选并立即发送
 
+以下为初版方案及讨论记录；`693a00d`已报告负优化。当前筛选方式以文末
+“优化5/6修订：Vector筛选与密排计数”为准，禁止恢复逐候选Scalar遍历。
+
 ### 状态与问题依据
 
 2026-09-22，用户反馈优化点4已有一定性能提升，但收益有限；尚未提供本轮量化数据和
@@ -666,6 +669,9 @@ MTE3空隙与整体耗时。现有M3总区间不足以证明扫描已被传输�
 
 ## 尝试优化点 6：M4 聚合任务按目标 server 均衡分配并轮转发送
 
+以下为初版方案及讨论记录；当前筛选方式以文末“优化5/6修订：Vector筛选与密排计数”
+为准，Table3按本核选中token单行读取及M4→M5共享输出契约继续保留。
+
 ### 状态与目标
 
 2026-09-22，用户要求记录M4采用类似优化点5方案的可能性，统筹各核发出的聚合token，
@@ -802,7 +808,7 @@ N差异大、N[server]<R、稀疏行、非对称核数和取模绕回。保持�
 4. 主代理负责生产代码、文档、编译及Git；可独立委派对应测试文件或只读审查，禁止
    并行修改同一文件。保留用户已有四份其他文档改动；硬件功能和性能交由验证环境确认。
 
-### 优化5实现记录（2026-09-22）
+### 优化5初版实现记录（2026-09-22，已报告负优化）
 
 第一笔基于`2800dac`，生产改动仅在M3：`SelectDirectServer`每轮扫描完整DIRECT行号，
 按持续轮转owner筛选本核原始row/三元组；当前server发送下发后才开始下一轮扫描。
@@ -823,7 +829,7 @@ blue CANN9.1/A5 profiling OFF/ON构建`tilexr-ep`及kernels成功，exit=0；最
 设备功能及收益待验证。维护要点：每轮都重新建立单调Table2扫描范围，owner和发送lane
 游标则必须跨轮保留；元数据扫描不能清空发送事件，也不能覆盖完整DIRECT列表。
 
-### 优化6实现记录（2026-09-22）
+### 优化6初版实现记录（2026-09-22，筛选方式由下方修订替换）
 
 第二笔基于已提交推送的优化5 `693a00d`，增量只调整M4调度及其M5交接计数。Recv核
 每轮以32行小块扫描GM Table1/tokenType与Table2，按跨server持续轮转的owner选取
@@ -859,3 +865,95 @@ token的聚合表，也不拆成先读N再读成员。单行Table3从本地第0�
 Host M4路由用例为两server，更多server的真实通信、硬件物理重叠和性能收益待验证。
 验证时分别比较`2800dac`→`693a00d`（优化5）和`693a00d`→本笔（优化6），使用相同
 构建配置、输入与轮次；本笔不修改run.sh或验收入口，也不将Host替身结果视为设备验收。
+
+## 优化5/6修订：Vector筛选与密排计数（2026-09-22）
+
+用户设备测试确认优化5 `693a00d3162cd7befd7aeb1160703dff3ea239ab`为负优化，未提供
+具体耗时差值。初版每核每server用Scalar遍历全部DIRECT，并重复读取Table2；576个
+输入、约403个DIRECT、8个server、32个Send核时，每核每轮检查403个候选却通常只发
+1–2个token。之前Host检查只证明轮次间允许在途发送，不能证明筛选成本已被掩盖。
+上述初版Scalar扫描方案和实现记录保留用于实验归因；**当前实施方案以下述修订为准**。
+
+用户已授权同时修正优化5/6并合并一笔提交。保持server+1轮转、本server最后，保持
+跨server/分块的累计owner，不新增核间屏障、server完成Flag或MTE3排空。核内任务
+仍按紧凑序列交错分配：`first=(localCore+coreCount-owner)%coreCount`，之后每隔
+coreCount取一项；无份额时不逐项读列表，只按匹配总数更新owner继续下一轮。
+
+### M3：一次准备常驻数组，逐server向量压缩
+
+1. Vector比较tokenType==DIRECT产生bitmask；Table2按最多512原始行读取一次，
+   使用Vector生成byte offset及Gather抽取sourceRank，替代Scalar逐行读表。
+2. GatherMask分别生成DIRECT的紧凑sourceRank数组和原始row数组。复用已有三份
+   row UB：typeUb保存rank、packedUb保存原始row，indexUb留给各server压缩输出。
+   不增加常驻UB，不改变payload/output槽数。无DIRECT时直接返回。
+3. 每server用两次Compares判断`sourceRank>=server*8 && sourceRank<(server+1)*8`，
+   And合成server bitmask，GatherMask一次得到该server密排原始row与数量。比较rank
+   范围等价于目标server比较，避免Scalar整除、逐候选判断和再次读Table2。
+4. 按first/stride只读取本核命中行号，按原始row取12B路由，再沿原读/打包/发送流水
+   处理。owner和sendSequence跨server延续；本轮发送下发后才筛选下一server。
+
+候选筛选仍有O(serverCount*DIRECT)的**Vector元素工作量**，但没有对应的Scalar逐项
+循环，也没有每server整表MTE2读取。Scalar热路径仅处理本核实际发送任务。元数据准备
+仍有一次性的起步成本；本次不提前构建全部server子列表，不声称已有设备性能收益。
+
+### M4：有界Vector块，不保留会挤占发送槽的全量数组
+
+M4共享240KiB工作区不能额外常驻多份TokenNum数组。每server仍按原始row分块读取
+Table1/tokenType和Table2，**块内全部筛选由Compares/And/GatherMask完成**；不逐候选
+GetValue。仅将当前块紧凑列表中归属本核的行号追加到已有rows区，累计owner跨块延续，
+因此分块不会改变server排序、核归属和总量均衡。当前server扫描完成后立即处理本核任务。
+
+筛选阶段复用连续的Table2缓存、Table3缓存和low打包区，不占用rows、输入、FP32计算区
+或在途输出槽。按可用字节选择32/64/128/256/512行块；H=7168时使用512行，576输入
+只需两块。每块包含Table2 triples、临时rank/types、Vector索引及三份mask；小数组
+按256B保留完整Vector读取余量。所有原M4/M5 offset、输入/输出lane数量和240KiB
+上限均不变。
+
+筛选不读取Table3 GM。选中本核token之后仍只读取该行完整K*8B聚合表，原成员顺序、
+FP32乘加及最终舍入不变。M4总发送数仍由M5继承，M4尾部发送不排空。
+
+### 事件和边界
+
+- Compares、Gather与GatherMask之间保留Vector依赖；Scalar只在Gather结果/count
+  可读之后取本核行号。sourceRank合法性用Vector范围mask/count校验，非本模块类型
+  的Table2字段不按路由解释；负值和越界活跃rank仍Trap。
+  新Compares长度按64个int32对齐，满足CANN调试检查；GatherMask只消费真实数量，
+  UB填充不会成为有效row，也不扩大GM读取范围。
+- M4扫描覆盖low前必须退役其Vector读者。使用独立`V_MTE2(7)`及`MTE2_V(7)`保护
+  扫描区，避开已seed的payload输入0..2。这是同一UB地址的复用依赖，不等待最后
+  partial的MTE3完成；MTE3仍只访问独立输出槽。该方向7与M5其他方向的7独立。
+- 此方案增加了Vector筛选，与打包共享Vector流水，不能宣称硬件成本为零。是否比初版
+  快以及是否优于优化前，必须在相同数据/核数/轮次下测量。
+
+### 执行与验证计划
+
+1. 主线程修改M3、M4及共享Vector mask helper，更新Host替身的Gather/int32 Muls。
+2. 保留独立稳定排序/交错归属oracle，验证403 DIRECT/64P少命中、稀疏、空server、
+   10000行、尾块、所有合法核划分、逐token Table3及跨server在途输出；确保没有
+   在server间新增输入输出seed或重置游标。
+3. 串行运行Combine回归与共享替身影响的Dispatch count/send/receive；独立只读审查
+   API/alias/事件边界，按最终生产源码在blue执行CANN9.1 A5 OFF/ON构建。
+4. 记录真实验证边界，保留用户其他四份设计/验收文档改动；以SilentEmotion合并一笔
+   提交推送。设备单/多轮功能及性能留待用户验证环境执行。
+
+### 修订验证记录
+
+- 本机最终Combine针对性Host回归10/10通过。扩大到Dispatch及非对称核划分时，
+  因本机4GiB cgroup内存紧张出现进程被杀；未将这些中断视为通过，转到blue以相同
+  最终源码快照执行CPU替身测试，Combine与Dispatch count/send/receive共15/15通过。
+- M3/M4默认32/32及Send16/24/40/48/56全部编译运行通过，涵盖最小Recv=8、403
+  DIRECT/64P、128P、最大10000行、稀疏和尾块、server轮转、精确数值、双窗、Flag及
+  在途输出保护。验证M3初始化后只读本核路由三元组，M4仍仅取本核token单行Table3。
+- 独立审查核对CANN9.1/3510的Gather byte offsets与完整Vector尾读、Compares调试
+  对齐、掩码范围、UB复用和事件方向。修正了初次实现的M4扫描事件与已seed输入槽
+  冲突，以及空DIRECT不应读取Table2的问题；最终Host证据覆盖修正后的代码。
+- 最终生产kernel已完成blue CANN9.1/A5 profiling OFF/ON编译。新增helper已加入
+  Combine kernel的CMake DEPENDS，后续仅修改helper也会触发重建。
+- 源码及构建证据在`build/combine-split-verification/vector-select-delivery/`，包括
+  `blue-evidence/`、`blue-host-evidence/`、原始快照及补充CMake依赖的最终源码清单。
+  本机日志为`build/vector-select-combine-tests.log`，全部核划分结果为
+  `build/vector-select-blue-host.log`。
+
+本次没有新增设备测试或性能数字。用户可对照`4861815`验证本次筛选修正的增量，并与
+优化5之前的`2800dac`比较最终整体收益；后者同时缺少优化6和后续M2细分打点，不能
+将跨版本总差值全部归因于单独一个模块。

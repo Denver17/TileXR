@@ -133,13 +133,19 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
         if (core >= TileXREp::kEpServerDedupCombineSendCoreNum)
             for (uint32_t task = core - TileXREp::kEpServerDedupCombineSendCoreNum; task < schedule.size(); task += readers)
                 expected.push_back(schedule[task]);
-        uint32_t scan = 0U, currentRow = UINT32_MAX, inputSequence = 0U;
+        uint32_t scan = 0U, currentRow = UINT32_MAX, inputSequence = 0U, compactions = 0U;
         uint64_t lastIssuePosition = 0U;
         std::set<uint32_t> seededLanes;
         bool m4Started = false;
+        AscendC::GatherMaskObserver() = [&](uint32_t candidates, uint64_t selected) {
+            if (!m4Started) return;
+            Check(candidates <= TileXREp::EpCombineM4ScanRows(h, k) && selected <= candidates,
+                "M4 uses bounded Vector compaction with an exact match count");
+            ++compactions;
+        };
         AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID lane, bool publish) {
             if (!publish) return;
-            if (event == AscendC::HardEvent::MTE2_V && m4Started) {
+            if (event == AscendC::HardEvent::MTE2_V && m4Started && lane != 7U) {
                 Check(lane == inputSequence++ % layout.inputLanes,
                     "member input lane sequence stays continuous across tokens and servers");
             }
@@ -166,7 +172,7 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
             const auto relay = reinterpret_cast<uintptr_t>(f.relay.data());
             const auto types = reinterpret_cast<uintptr_t>(f.types.data());
             if (m4Started && count && p >= types && p < types + uint64_t(count) * 4U) {
-                Check(bytes <= 32U * 4U && bytes % 4U == 0U && p + bytes <= types + uint64_t(count) * 4U,
+                Check(bytes <= TileXREp::EpCombineM4ScanRows(h, k) * 4U && bytes % 4U == 0U && p + bytes <= types + uint64_t(count) * 4U,
                     "M4 reads token types in bounded scan blocks");
                 if (p == types) {
                     if (scan != 0U) {
@@ -194,7 +200,7 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
             }
             if (count && p >= table && p < table + uint64_t(count) * 12U) {
                 ++tableReads;
-                Check(bytes % 12U == 0 && bytes <= 32U * 12U && p + bytes <= table + uint64_t(count) * 12U,
+                Check(bytes % 12U == 0 && bytes <= TileXREp::EpCombineM4ScanRows(h, k) * 12U && p + bytes <= table + uint64_t(count) * 12U,
                     "M4 Table2 scan and route reads stay within bounded original-row spans");
             }
             if (count && p >= relay && p < relay + uint64_t(count) * k * 8U) {
@@ -237,12 +243,16 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
         Check(issued == expected && observed == expected && table3Rows == expected,
             "server-sorted striped ownership preserves exact token, routing, aggregation-table and send order");
         if (core >= TileXREp::kEpServerDedupCombineSendCoreNum) {
+            const uint32_t chunk = TileXREp::EpCombineM4ScanRows(h, k);
+            Check(compactions == 4U * ((count + chunk - 1U) / chunk),
+                "two server selections plus two one-time validation compactions per tile");
             const uint32_t local = core - TileXREp::kEpServerDedupCombineSendCoreNum;
             totals[local] = uint32_t(observed.size());
             for (uint32_t row : observed) ++serverCounts[uint32_t(f.table[row * 3U]) / 8U][local];
         }
         AscendC::EventObserver() = {};
         AscendC::GmWriteObserver() = {};
+        AscendC::GatherMaskObserver() = {};
         f.ResetHooks();
     }
     for (const auto &counts : serverCounts)
@@ -295,6 +305,10 @@ void TestArenaBudget()
         TileXR::CommArgs args {}; args.rankSize = 16;
         TileXREp::ServerDedupPartial partial;
         const auto layout = TileXREp::EpCombineM45Layout(tokens, 96U, 7168U, k);
+        const auto scanRows = TileXREp::EpCombineM4ScanRows(7168U, k);
+        Check(scanRows == 512U && TileXREp::EpCombineM4ScanBytes(scanRows) <=
+            384U + TileXREp::EpCombineAlign(32U * k * 8U, 32U) + 30U * 480U,
+            "default H vector selection fits existing table/packing space without losing lanes");
         for (uint32_t lane = 0; lane < layout.outputLanes; ++lane)
             AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(lane);
         std::vector<int32_t> types(tokens, 0), table(tokens * 3U, 0);

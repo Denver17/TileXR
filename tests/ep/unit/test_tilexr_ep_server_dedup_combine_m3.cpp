@@ -100,6 +100,7 @@ void DirectRows(uint32_t count, uint32_t h, bool sparse, uint32_t window, uint8_
             expected.insert(schedule[task]);
         Check(writes == expected, "server-ordered DIRECT stream divides evenly across Send cores only");
         AscendC::GmWriteObserver() = {};
+        AscendC::GatherMaskObserver() = {};
         f.ResetHooks();
     }
     Check(allWrites.size() == selected.size(), "every selected row returned once");
@@ -183,28 +184,8 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
             const auto expert = reinterpret_cast<uintptr_t>(f.expert.data());
             if (count && address >= table && address < table + count * 12U) {
                 Check(address + bytes <= table + count * 12U, "Table2 scanning stays within bounds");
-                if (address == table) {
-                    if (scan != 0U) {
-                        uint32_t expectedIssues = 0U;
-                        for (uint32_t row : expected) {
-                            const uint32_t server = uint32_t(f.table[row * 3U]) / 8U;
-                            const uint32_t distance = (server + servers - ownServer - 1U) % servers;
-                            if (distance < scan) ++expectedIssues;
-                        }
-                        Check(issued.size() == expectedIssues,
-                            "current server sends are issued before the next server starts scanning");
-                        const uint32_t previousServer = (ownServer + scan) % servers;
-                        const bool previousOwned = std::any_of(expected.begin(), expected.end(), [&](uint32_t row) {
-                            return uint32_t(f.table[row * 3U]) / 8U == previousServer;
-                        });
-                        if (previousOwned) {
-                            Check(!AscendC::PendingMte3().empty(),
-                                "next server metadata scan overlaps the preceding server's in-flight MTE3 tail");
-                            observedOverlap = true;
-                        }
-                    }
-                    ++scan;
-                }
+                if (!seededLanes.empty()) Check(bytes == 12U,
+                    "after initialization M3 reads only an owned route, never rescans Table2");
             }
             if (count && address >= expert && address < expert + uint64_t(count) * h * 2U) {
                 payloadStarted = true;
@@ -213,6 +194,28 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
                 Check(scan != 0U && server == (ownServer + scan) % servers,
                     "each server's payload begins immediately after its own scan");
             }
+        };
+        AscendC::GatherMaskObserver() = [&](uint32_t candidates, uint64_t matches) {
+            if (seededLanes.empty()) return; // type compaction and rank validation
+            Check(candidates == count, "one Vector compaction covers the full DIRECT list");
+            uint32_t expectedIssues = 0U, expectedMatches = 0U;
+            const uint32_t server = (ownServer + scan + 1U) % servers;
+            for (uint32_t row : selected) if (uint32_t(f.table[row * 3U]) / 8U == server) ++expectedMatches;
+            Check(matches == expectedMatches, "GatherMask returns the exact server token count");
+            for (uint32_t row : expected) {
+                const uint32_t distance = (uint32_t(f.table[row * 3U]) / 8U + servers - ownServer - 1U) % servers;
+                if (distance < scan) ++expectedIssues;
+            }
+            Check(issued.size() == expectedIssues, "prior server issues precede the next Vector selection");
+            if (scan != 0U) {
+                const uint32_t previous = (ownServer + scan) % servers;
+                if (std::any_of(expected.begin(), expected.end(), [&](uint32_t row) {
+                        return uint32_t(f.table[row * 3U]) / 8U == previous; })) {
+                    Check(!AscendC::PendingMte3().empty(), "Vector selection leaves previous sends in flight");
+                    observedOverlap = true;
+                }
+            }
+            ++scan;
         };
         AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID lane, bool publish) {
             if (event != AscendC::HardEvent::MTE3_V || !publish) return;
@@ -262,6 +265,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
             f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()), f.untouched.data(),
             f.untouched.data(), f.untouched.data(), f.tiling.bs, h, 3U, ranks * 2U, 0U, 0U, window, 0U);
         TileXREp::CombineModuleTestAccess::Direct(kernel);
+        Check(scan == servers, "exactly one Vector selection per server, including empty shares");
         Check(issued == expected && observed == expected,
             "striped DIRECT ownership is exact, next-server first, wrapped, and stable within each server");
         Check(AscendC::PendingMte3().empty(), "DIRECT retires all sends at M3 completion");
@@ -269,6 +273,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
         totalCounts[core] = uint32_t(observed.size());
         AscendC::EventObserver() = {};
         AscendC::GmWriteObserver() = {};
+        AscendC::GatherMaskObserver() = {};
         f.ResetHooks();
     }
     Check(allWrites.size() == count && f.table == tableBefore, "online scans cover every row without modifying GM Table2");
@@ -294,6 +299,7 @@ int main()
         DirectServerOrder(16U, 2U, 1U, 17U, 0U, false);
         DirectServerOrder(24U, 10U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U + 3U, 241U, 1U, false);
         DirectServerOrder(32U, 26U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, false);
+        DirectServerOrder(64U, 10U, 403U, 17U, 0U, false); // ~70% of 96*6, only 1-2 hits/core/server
         DirectServerOrder(128U, 122U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 1U, false);
         DirectServerOrder(32U, 10U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, true);
         DirectServerOrder(32U, 26U, TileXREp::kEpServerDedupCombineSendCoreNum * 16U + 5U, 17U, 1U, false, true);

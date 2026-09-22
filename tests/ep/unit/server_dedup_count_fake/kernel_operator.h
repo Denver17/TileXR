@@ -401,7 +401,22 @@ inline void And(LocalTensor<uint16_t> dst, LocalTensor<uint16_t> a, LocalTensor<
 template<class T> void CreateVecIndex(LocalTensor<T> dst, T first, uint32_t count) {
     for (uint32_t i = 0; i < count; ++i) dst.SetValue(i, first + T(i));
 }
+inline void Muls(LocalTensor<int32_t> dst, LocalTensor<int32_t> src, int32_t scalar, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) dst.SetValue(i, src.GetValue(i) * scalar);
+}
+template<class T> void Gather(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<uint32_t> offsets,
+    uint32_t base, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t offset = base + offsets.GetValue(i);
+        if (offset % sizeof(T)) throw std::runtime_error("unaligned Gather element offset");
+        dst.SetValue(i, src.GetValue(offset / sizeof(T)));
+    }
+}
 inline void Trap() { throw std::runtime_error("AscendC device trap"); }
+inline std::function<void(uint32_t, uint64_t)> &GatherMaskObserver() {
+    static std::function<void(uint32_t, uint64_t)> observer;
+    return observer;
+}
 struct GatherMaskParams { uint16_t src0BlockStride, repeatTimes, src0RepeatStride, src1RepeatStride; };
 template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src, LocalTensor<uint32_t> mask,
     bool, uint32_t count, GatherMaskParams p, uint64_t &selected) {
@@ -409,5 +424,6 @@ template<class T> void GatherMask(LocalTensor<T> dst, LocalTensor<T> src, LocalT
     for (uint32_t r = 0; r < p.repeatTimes; ++r) for (uint32_t i = 0; i < count; ++i)
         if ((mask.GetValue(i / 32) >> (i % 32)) & 1U)
             dst.SetValue(selected++, src.GetValue(r * p.src0RepeatStride * 32 / sizeof(T) + i));
+    if (GatherMaskObserver()) GatherMaskObserver()(count, selected);
 }
 } // namespace AscendC

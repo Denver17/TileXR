@@ -62,6 +62,21 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombinePayloadLaneCount(uint32_t tokens, 
 constexpr uint32_t kEpServerDedupCombineResidentUbBytes =
     kEpServerDedupCombineFixedUbBytes - kEpServerDedupCombineTableRows * 12U;
 constexpr uint32_t kEpServerDedupCombineM4TableRows = 32U;
+// During server selection M4's table caches and low-precision packing buffer
+// are idle. Alias only that phase range, never inputs or in-flight outputs.
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4ScanBytes(uint32_t rows)
+{
+    return rows * 12U + 2U * EpCombineAlign(rows * 4U, 256U) +
+        3U * EpCombineAlign((rows + 7U) / 8U, 32U);
+}
+TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4ScanRows(uint32_t h, uint32_t k)
+{
+    const uint32_t available = 384U + EpCombineAlign(kEpServerDedupCombineM4TableRows * k * 8U, 32U) +
+        ((h * 2U + 479U) / 480U) * 480U;
+    uint32_t rows = 32U;
+    while (rows < 512U && EpCombineM4ScanBytes(rows * 2U) <= available) rows *= 2U;
+    return rows;
+}
 TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4TaskBytes(uint32_t tokens)
 {
     return EpCombineAlign(((tokens + kEpServerDedupCombineRecvCoreNum - 1U) /

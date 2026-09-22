@@ -8,6 +8,7 @@
 #include "ep_memory_server_dedup_combine_profile.h"
 #include "tilexr_ep_server_dedup_partial.h"
 #include "tilexr_ep_server_dedup_source_aggregate.h"
+#include "tilexr_ep_server_dedup_select.h"
 #if defined(TILEXR_ENABLE_PROFILING)
 #include "tilexr_profiling.h"
 #endif
@@ -245,33 +246,58 @@ private:
             Sync<HardEvent::MTE2_S>();
         }
     }
-    __aicore__ inline uint32_t SelectDirectServer(uint32_t server, uint32_t &owner)
+    __aicore__ inline void PrepareDirectRows()
     {
-        uint32_t count = 0U, cacheBegin = 0U, cacheEnd = 0U;
-        // Every Send core scans the same original DIRECT list. Advance owner
-        // only for this server, preserving its position across server rounds.
-        for (uint32_t task = 0; task < uint32_t(selected_); ++task) {
-            const uint32_t row = uint32_t(packedUb_.GetValue(task));
-            CacheTableRows(row, 0U, task, uint32_t(selected_), cacheBegin, cacheEnd);
-            const uint32_t entry = (row - cacheBegin) * 3U;
-            const uint32_t source = uint32_t(tableUb_.GetValue(entry));
-            if (source >= uint32_t(args_->rankSize)) { Trap(); return 0U; }
-            if (source / 8U != server) continue;
-            if (owner == core_) {
-                // These arrays are Scalar-only metadata after SelectRows;
-                // outstanding MTE3 reads independent resultUb_ slots.
-                indexUb_.SetValue(count, int32_t(row));
-                for (uint32_t field = 0; field < 3U; ++field)
-                    typeUb_.SetValue(count * 3U + field, tableUb_.GetValue(entry + field));
-                ++count;
-            }
-            if (++owner == kEpServerDedupCombineSendCoreNum) owner = 0U;
+        selected_ = 0U;
+        if (tokens_ == 0U) return;
+        DataCopyPad(typeUb_, types_, {1U, tokens_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+        Sync<HardEvent::MTE2_V>();
+        Compares(maskUb_, typeUb_, int32_t(1), CMPMODE::EQ, (tokens_ + 63U) / 64U * 64U);
+        CreateVecIndex(indexUb_, int32_t(0), tokens_);
+        PipeBarrier<PIPE_V>();
+        GatherMask(packedUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
+            tokens_, {1U, 1U, 0U, 0U}, selected_);
+        Sync<HardEvent::V_S>();
+        if (selected_ == 0U) return; // no routing reads for a type2/type3-only rank
+        const uint32_t chunk = tokens_ < kEpServerDedupCombineTableRows ? tokens_ : kEpServerDedupCombineTableRows;
+        CreateVecIndex(typeUb_, int32_t(0), chunk);
+        PipeBarrier<PIPE_V>();
+        Muls(typeUb_, typeUb_, int32_t(12), chunk); // Table2 byte offsets
+        for (uint32_t begin = 0U; begin < tokens_; begin += chunk) {
+            const uint32_t span = tokens_ - begin < chunk ? tokens_ - begin : chunk;
+            Sync<HardEvent::V_MTE2>(); // table cache is no longer a Gather source
+            DataCopyPad(tableUb_, table_[uint64_t(begin) * 3U],
+                {1U, span * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+            Sync<HardEvent::MTE2_V>();
+            Gather(indexUb_[begin], tableUb_, typeUb_.ReinterpretCast<uint32_t>(), 0U, span);
         }
-        return count;
+        PipeBarrier<PIPE_V>();
+        // Keep two persistent compact arrays: ranks in typeUb_, original rows
+        // in packedUb_. indexUb_ becomes the per-server compact output list.
+        GatherMask(typeUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
+            tokens_, {1U, 1U, 0U, 0U}, selected_);
+        Sync<HardEvent::V_S>();
+        ServerDedupRankMask(maskUb_, tableUb_.ReinterpretCast<uint8_t>(), typeUb_,
+            0, int32_t(args_->rankSize), uint32_t(selected_));
+        uint64_t valid = 0U;
+        GatherMask(indexUb_, packedUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
+            uint32_t(selected_), {1U, 1U, 0U, 0U}, valid);
+        Sync<HardEvent::V_S>();
+        if (valid != selected_) Trap();
+    }
+    __aicore__ inline uint32_t SelectDirectServer(uint32_t server)
+    {
+        ServerDedupRankMask(maskUb_, tableUb_.ReinterpretCast<uint8_t>(), typeUb_,
+            int32_t(server * 8U), int32_t((server + 1U) * 8U), uint32_t(selected_));
+        uint64_t count = 0U;
+        GatherMask(indexUb_, packedUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
+            uint32_t(selected_), {1U, 1U, 0U, 0U}, count);
+        Sync<HardEvent::V_S>();
+        return uint32_t(count);
     }
     __aicore__ inline void ReturnDirectTokens()
     {
-        SelectRows(1);
+        PrepareDirectRows();
         if (selected_ == 0U) return;
         const uint32_t servers = uint32_t(args_->rankSize) / 8U;
         const uint32_t ownServer = uint32_t(args_->rank) / 8U;
@@ -286,12 +312,19 @@ private:
         }
         PipeBarrier<PIPE_V>();
         for (uint32_t step = 1U; step <= servers; ++step) {
-            const uint32_t count = SelectDirectServer((ownServer + step) % servers, owner);
-            for (uint32_t task = 0; task < count; ++task) {
+            const uint32_t count = SelectDirectServer((ownServer + step) % servers);
+            const uint32_t first = ServerDedupFirstOwned(core_, owner, kEpServerDedupCombineSendCoreNum);
+            owner = (owner + count) % kEpServerDedupCombineSendCoreNum;
+            for (uint32_t task = first; task < count; task += kEpServerDedupCombineSendCoreNum) {
                 const uint32_t row = uint32_t(indexUb_.GetValue(task));
-                const uint32_t source = uint32_t(typeUb_.GetValue(task * 3U));
-                const uint32_t token = uint32_t(typeUb_.GetValue(task * 3U + 1U));
-                const uint32_t topk = uint32_t(typeUb_.GetValue(task * 3U + 2U));
+                // Only owned rows reload a routing triple. The persistent rank
+                // and original-row arrays are untouched between server rounds.
+                DataCopyPad(tableUb_, table_[uint64_t(row) * 3U],
+                    {1U, 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+                Sync<HardEvent::MTE2_S>();
+                const uint32_t source = uint32_t(tableUb_.GetValue(0U));
+                const uint32_t token = uint32_t(tableUb_.GetValue(1U));
+                const uint32_t topk = uint32_t(tableUb_.GetValue(2U));
                 const uint32_t lane = sendSequence++ % lanes_;
                 // Input lifetime ends after Vector has consumed its last block.
                 WaitFlag<HardEvent::V_MTE2>(lane);

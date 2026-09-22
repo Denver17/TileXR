@@ -10,6 +10,7 @@
 #include "tilexr_types.h"
 #include "ep_memory_server_dedup_buffer_layout.h"
 #include "ep_memory_server_dedup_combine_config.h"
+#include "tilexr_ep_server_dedup_select.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -38,6 +39,8 @@ public:
         outputLanes_ = layout.outputLanes;
         if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
         rows_ = Allocate<int32_t>(EpCombineM4TaskBytes(tokens));
+        scan_ = scratch_[used_];
+        scanRows_ = EpCombineM4ScanRows(h, k);
         table2Ub_ = Allocate<int32_t>(EpCombineAlign(kEpServerDedupCombineM4TableRows * 12U, 32U));
         table3Ub_ = Allocate<uint32_t>(EpCombineAlign(kEpServerDedupCombineM4TableRows * k * 8U, 32U));
         cast_ = scratch.ReinterpretCast<float>();
@@ -65,7 +68,7 @@ public:
         const uint32_t ownServer = uint32_t(args_->rank) / 8U;
         uint32_t owner = 0U, completed = 0U;
         for (uint32_t step = 1U; step <= servers; ++step) {
-            const uint32_t count = SelectServer((ownServer + step) % servers, owner);
+            const uint32_t count = SelectServer((ownServer + step) % servers, owner, step == 1U);
             for (uint32_t task = 0; task < count; ++task) {
                 const uint32_t row = uint32_t(rows_.GetValue(task));
                 Mark(kEpServerDedupCombineProfilePartialTokenBegin);
@@ -81,7 +84,7 @@ public:
                 ++completed;
                 Mark(kEpServerDedupCombineProfilePartialTokenEnd);
             }
-            // Scalar metadata may be reused; no server drain or lane reset.
+            // Reuse phase scratch with its Vector dependency, not an MTE3 drain.
         }
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) WaitFlag<HardEvent::V_MTE2>(lane);
         // Output events and their UB sources remain owned by the shared ring.
@@ -112,29 +115,64 @@ private:
         const TEventID id = pipe_->FetchEventID(E);
         SetFlag<E>(id); WaitFlag<E>(id);
     }
-    __aicore__ inline uint32_t SelectServer(uint32_t server, uint32_t &owner)
+    __aicore__ inline uint32_t SelectServer(uint32_t server, uint32_t &owner, bool validateRanks)
     {
         uint32_t count = 0U;
         const uint32_t localCore = GetBlockIdx() - kEpServerDedupCombineSendCoreNum;
-        // This scan runs only after the previous token's Scalar weights/indices
-        // were consumed. Reuse the old multi-row Table3 cache for 32 type tags;
-        // no scan reads Table3 GM or aliases compute/input/in-flight output.
-        auto tags = table3Ub_.ReinterpretCast<int32_t>();
-        for (uint32_t begin = 0U; begin < tokens_; begin += kEpServerDedupCombineM4TableRows) {
-            const uint32_t left = tokens_ - begin;
-            const uint32_t span = left < kEpServerDedupCombineM4TableRows ? left : kEpServerDedupCombineM4TableRows;
-            DataCopyPad(tags, types_[begin], {1U, span * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
-            DataCopyPad(table2Ub_, table2_[uint64_t(begin) * 3U],
+        const uint32_t vectorBytes = EpCombineAlign(scanRows_ * 4U, 256U);
+        const uint32_t maskBytes = EpCombineAlign((scanRows_ + 7U) / 8U, 32U);
+        auto table = scan_.ReinterpretCast<int32_t>();
+        auto ranks = scan_[scanRows_ * 12U].ReinterpretCast<int32_t>();
+        auto indices = scan_[scanRows_ * 12U + vectorBytes].ReinterpretCast<int32_t>();
+        auto typeMask = scan_[scanRows_ * 12U + 2U * vectorBytes];
+        auto mask = typeMask[maskBytes], upper = mask[maskBytes];
+        for (uint32_t begin = 0U; begin < tokens_; begin += scanRows_) {
+            const uint32_t span = tokens_ - begin < scanRows_ ? tokens_ - begin : scanRows_;
+            // The scan aliases low_ and table caches. Retire their Vector users
+            // before MTE2 overwrites them; output slots remain independent/live.
+            // Input lanes 0..2 keep seeded V_MTE2 events live. Use a distinct
+            // event in this direction for phase scratch, never FetchEventID(0).
+            SetFlag<HardEvent::V_MTE2>(7U);
+            WaitFlag<HardEvent::V_MTE2>(7U);
+            DataCopyPad(ranks, types_[begin], {1U, span * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+            DataCopyPad(table, table2_[uint64_t(begin) * 3U],
                 {1U, span * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
-            Sync<HardEvent::MTE2_S>();
-            for (uint32_t offset = 0U; offset < span; ++offset) {
-                if (tags.GetValue(offset) != 2) continue;
-                const uint32_t source = uint32_t(table2Ub_.GetValue(offset * 3U));
-                if (source >= uint32_t(args_->rankSize)) { Trap(); return 0U; }
-                if (source / 8U != server) continue;
-                if (owner == localCore) rows_.SetValue(count++, int32_t(begin + offset));
-                if (++owner == kEpServerDedupCombineRecvCoreNum) owner = 0U;
+            SetFlag<HardEvent::MTE2_V>(7U);
+            WaitFlag<HardEvent::MTE2_V>(7U);
+            Compares(typeMask, ranks, int32_t(2), CMPMODE::EQ, (span + 63U) / 64U * 64U);
+            CreateVecIndex(indices, int32_t(0), span);
+            PipeBarrier<PIPE_V>();
+            Muls(indices, indices, int32_t(12), span);
+            PipeBarrier<PIPE_V>();
+            Gather(ranks, table, indices.ReinterpretCast<uint32_t>(), 0U, span);
+            PipeBarrier<PIPE_V>();
+            CreateVecIndex(indices, int32_t(begin), span);
+            PipeBarrier<PIPE_V>();
+            if (validateRanks) {
+                uint64_t typed = 0U, valid = 0U;
+                GatherMask(table, indices, typeMask.ReinterpretCast<uint32_t>(), true,
+                    span, {1U, 1U, 0U, 0U}, typed);
+                ServerDedupRankMask(mask, upper, ranks, 0, int32_t(args_->rankSize), span);
+                And(mask.ReinterpretCast<uint16_t>(), mask.ReinterpretCast<uint16_t>(),
+                    typeMask.ReinterpretCast<uint16_t>(), int32_t((span + 15U) / 16U));
+                PipeBarrier<PIPE_V>();
+                GatherMask(table, indices, mask.ReinterpretCast<uint32_t>(), true,
+                    span, {1U, 1U, 0U, 0U}, valid);
+                Sync<HardEvent::V_S>();
+                if (valid != typed) { Trap(); return 0U; }
             }
+            ServerDedupRankMask(mask, upper, ranks, int32_t(server * 8U), int32_t((server + 1U) * 8U), span);
+            And(mask.ReinterpretCast<uint16_t>(), mask.ReinterpretCast<uint16_t>(),
+                typeMask.ReinterpretCast<uint16_t>(), int32_t((span + 15U) / 16U));
+            PipeBarrier<PIPE_V>();
+            uint64_t selected = 0U;
+            GatherMask(table, indices, mask.ReinterpretCast<uint32_t>(), true,
+                span, {1U, 1U, 0U, 0U}, selected);
+            Sync<HardEvent::V_S>();
+            const uint32_t first = ServerDedupFirstOwned(localCore, owner, kEpServerDedupCombineRecvCoreNum);
+            owner = (owner + uint32_t(selected)) % kEpServerDedupCombineRecvCoreNum;
+            for (uint32_t task = first; task < uint32_t(selected); task += kEpServerDedupCombineRecvCoreNum)
+                rows_.SetValue(count++, table.GetValue(task));
         }
         return count;
     }
@@ -214,7 +252,7 @@ private:
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
-    LocalTensor<uint8_t> scratch_, outputs_;
+    LocalTensor<uint8_t> scratch_, outputs_, scan_;
     LocalTensor<int32_t> rows_, table2Ub_;
     LocalTensor<uint32_t> table3Ub_;
     LocalTensor<float> cast_, product_, sum_;
@@ -224,7 +262,7 @@ private:
     GlobalTensor<uint32_t> table3_;
     uint32_t used_ = 0, tokens_ = 0, bs_ = 0, h_ = 0, k_ = 0, localExperts_ = 0, dtype_ = 0;
     uint32_t blocks_ = 0, packetBytes_ = 0, inputBytes_ = 0, inputLanes_ = 0, outputLanes_ = 0;
-    uint32_t inputSequence_ = 0;
+    uint32_t inputSequence_ = 0, scanRows_ = 0;
     uint64_t stageStride_ = 0, stageBase_ = 0, window_ = 0;
 };
 } // namespace TileXREp
