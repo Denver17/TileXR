@@ -223,7 +223,16 @@ start_i=i*base+min(i,remainder)
 seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远端 Server 时暂列 DIRECT，
 第二次遇到时生成 group 并移出 DIRECT，随后扩充该 group 位图。
 每个 Token 的第一跳立即发送；DIRECT 记录 `(token,k,expert,q)` 写入 16B 的 directTasks。
-第二遍从本 Server 开始按 `(myServer+step)%serverNum` 扫描该任务表，同 Server 内保持 Token/k 顺序。
+第二遍复用 `ServerDedupHalfOrder`，先本半区、再另一半区轮转扫描该任务表，同 Server 内保持 Token/k 顺序。
+令 N=serverNum、H=floor(N/2)，两半区为 [0,H) 和 [H,N)，r 为 myServer 在自身半区的相对位置。
+依次对本半区和另一半区，目标为 `base+(r+j)%length`，j=1...length，使用各自半区长度取模。
+例如 N=8、myServer=2：3→0→1→2→7→4→5→6；N=7、myServer=6：3→4→5→6→1→2→0。
+本 Server 在本半区最后，奇数 N 的两个半区长度不同；空半区不参与取模。
+
+仅 DIRECT 使用该顺序，第一跳仍逐 Token 分类后立即发送，本核所有第一跳先于 DIRECT。
+每核连续 Token 区间、缓存的原始 q、目标地址、sourceMask/weight 和量化打包规则不变。
+累计 packets/lane 跨第一跳、Server 和半区连续，边界不增加事件、barrier 或 MTE3 drain。
+关闭去重时所有 route 走同一 DIRECT 半区顺序。
 
 | 源端 UB | 大小/职责 |
 | --- | --- |
@@ -540,3 +549,30 @@ Host/替身测试覆盖协议字节、容量、相邻行保护、lane 生命周�
 
 本文与代码保持同步：接口、字段或调度行为更新时，直接更新对应说明、公式和示例。
 只在本文保留当前实现；优化过程与已废弃方案从 Git 历史查阅。
+
+## Dispatch DIRECT 双半区优化记录（2026-09-22）
+
+基于 Combine 优化9 `a5d2b55` 的半区映射，仅替换 sender 的 DIRECT Server 遍历。
+用户反馈 Combine 优化9效果显著，未提供本次具体时延，因此不量化收益，也不推断
+Dispatch 同样获益。Dispatch 第一跳和接收 relay 的调度均沿用原实现。
+
+维护约束：q 是原始路由前缀位置，不能根据新发送顺序重算；核内所有第一跳先于
+DIRECT。跨半区继续复用同一发送环，不能按半区重置 packets 或提前排空。
+Dispatch CMake kernel 依赖显式包含共享 select 头文件，确保后续映射修改触发增量构建。
+独立 Host 参考用列表旋转验证奇偶半区顺序，延迟 MTE3 模型检查每个后续 payload
+读取时仍有上一个发送在途，同时继续校验原始 q/包头/字节、源端表和多轮双窗保护。
+
+本次验证：
+
+- blue CANN9.1.0、ccec clang15.0.5，A5 `dav-c310-vec`/`CATLASS_ARCH=3510`：
+  Dispatch kernel profiling OFF/ON 独立构建均通过，包含量化/非量化生产模板。
+- 5项 Host 回归通过：Count OFF/ON、source-send OFF/ON、receive-packet。
+  source-send 覆盖 N=2/3/7/8/16、两侧半区和绕回、空目标 Server、第一跳与 DIRECT
+  混合、原始 q/包头/权重、连续 lane、多轮双窗和相邻输出保护。
+- 默认 Send32 纳入上述回归；Send16/24/40/48 及 Send32 关闭去重分别构建并运行
+  source-send 测试，全部通过。本地 source-send OFF/ON 构建也通过。
+- 源码基线 `a5d2b55`、1113个非文档文件SHA256、编译器版本、构建/测试日志和
+  退出码0保留于 `build/dispatch-half-verification/`，最终源码与验证快照一致。
+
+Host sender 的逐字节检查使用非量化输入；量化发送的设备数值不由上述 Host 结果证明。
+本版本 A5 多卡功能（含量化）、performance 和 breakdown 尚待验证，未登记性能收益。

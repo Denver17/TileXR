@@ -6,6 +6,7 @@
 #include "tilexr_ep_server_dedup_counts.h"
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
+#include "combine_server_order_reference.h"
 #include "server_dedup_test_memory.h"
 #include "server_dedup_profile_capture.h"
 #include "../integration/server_dedup_source_send_reference.h"
@@ -107,6 +108,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     args.rankSize = ranks;
     args.rank = source;
     const uint32_t localExperts = experts / ranks;
+    const auto serverOrder = CombineServerOrderReference::Order(ranks / 8U, source / 8U);
     auto data = TileXREp::TileXREpServerDedupDataLayout(bs, h, k, experts, false);
     std::vector<int32_t> ids(bs * k);
     std::vector<float> weights(bs * k);
@@ -187,7 +189,21 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             profile.Mark(2);
             AscendC::TBufPool<AscendC::TPosition::VECCALC, 16> scratch;
             pipe.InitBufPool(scratch, 190U * 1024U);
+            uint32_t payloadLoads = 0U;
+            AscendC::DeferMte3() = true;
+            AscendC::GmReadObserver() = [&](const void *address, uint32_t bytes) {
+                const auto begin = reinterpret_cast<uintptr_t>(hidden.data());
+                const auto p = reinterpret_cast<uintptr_t>(address);
+                if (p < begin || p >= begin + hidden.size() * sizeof(uint16_t)) return;
+                Check(bytes == h * sizeof(uint16_t), "one input token per physical send");
+                if (payloadLoads++ != 0U)
+                    Check(!AscendC::PendingMte3().empty(),
+                        "next payload starts with prior sends pending, including stage/server/half boundaries");
+            };
             sender.Process(profile, scratch, 0U);
+            AscendC::GmReadObserver() = {};
+            Check(AscendC::PendingMte3().empty(), "sender drains payloads and source outputs before return");
+            AscendC::DeferMte3() = false;
             profile.Mark(3);
             const auto syncBefore = AscendC::TestSyncOperations();
             profile.Publish();
@@ -238,9 +254,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
                     const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
-                    const uint32_t serverStep = (server + ranks / 8U - source / 8U) % (ranks / 8U);
+                    const uint32_t serverStep = CombineServerOrderReference::Position(serverOrder, server);
                     Check(!directStarted || serverStep >= previousServerStep,
-                        "DIRECT visits servers cyclically starting at the source server");
+                        "DIRECT visits its own half first and wraps independently within each half");
                     Check(!directStarted || serverStep != previousServerStep || index > previousDirect,
                         "DIRECT preserves token/k order within each destination server");
                     directStarted = true; previousDirect = index; previousServerStep = serverStep;
@@ -312,7 +328,7 @@ int main()
             CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
             CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
             CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
-            for (uint32_t source : {0U, 24U, 56U}) {
+            for (uint32_t source : {0U, 16U, 24U, 48U, 56U}) {
                 const uint32_t local = source / 8U;
                 const auto expert = [local](uint32_t step, uint32_t offset = 0U) {
                     return int32_t((local + step) % 8U * 48U + offset);
@@ -326,6 +342,14 @@ int main()
                 Run(64, 384, 96, 64, 6, false, source, 3, {
                     expert(2), expert(5), expert(2, 1), expert(1), expert(0, 42), expert(0),
                     expert(7), expert(3), expert(0, 1), expert(4), expert(7, 1), expert(1, 1)});
+            }
+            // Odd halves: visit every server, with two token rows per core and
+            // a mixture of first hops and DIRECTs crossing the half boundary.
+            for (uint32_t source : {16U, 48U}) {
+                Run(56, 336, 2U * sendCoreNum, 32, 7, false, source, 3,
+                    {0, 48, 96, 144, 192, 240, 288});
+                Run(56, 336, 2U * sendCoreNum, 32, 6, false, source, 3,
+                    {0, 1, 96, 192, 240, 288, 48, 144, 145, 192, 240, 288});
             }
             Run(16, 96, 6, 64, 6, true, 0, 3, {}, 10ULL << 30);
             // Reuses each communication window across repeated calls.
