@@ -188,6 +188,12 @@ def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha, rec
             expected = (return_stage_counts(config) if config.get("implemented_through") in ("M3", "M4", "M5") else
                         m12_stage_counts(config) if config.get("implemented_through") == "M2"
                         else dict(kernel_total=64, empty_wait=64))
+            # Token stages are optional for retained module-only captures and
+            # empty M4 task sets. When present, every real task must appear once.
+            if config.get("implemented_through") in ("M4", "M5") and "m4_token_issue" in stages:
+                expected["m4_token_issue"] = record["combine_type2_rows"]
+            if config.get("implemented_through") == "M5" and "m5_token_issue" in stages:
+                expected["m5_token_issue"] = config["bs"]
             if set(stages) != set(expected) or any(stages[name].get("sample_count") != count
                                                   for name, count in expected.items()):
                 raise ValueError("Combine breakdown is missing required module/core-role intervals")

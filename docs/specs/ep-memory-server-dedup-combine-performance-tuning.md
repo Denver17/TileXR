@@ -5,14 +5,14 @@
 ## 分步性能验证版本
 
 此前 `f0d8191` 将优化点 2、3 联合提交。为分别测量收益，在已发布历史之后追加两个
-连续提交。`00fc323` 为第一步，仅启用优化点 2，M3 保留基线任务顺序；本提交为第二步，
+连续提交。`00fc323` 为第一步，仅启用优化点 2，M3 保留基线任务顺序；`6e09ad8` 为第二步，
 在其上启用优化点 3 的 server 分组预扫描和发送顺序，M4 配置保持第一步不变。
 
 | 版本 | 实际启用范围 | 收益比较对象 |
 | --- | --- | --- |
 | `a2dd290` | 优化点 1：M5 移至 Send 核 | 基线 |
 | `00fc323` | 优化点 1＋2：M4 240 KiB、最多 3 读、一套计算、剩余分配发送 | 对比 `a2dd290` 得到优化点 2 收益 |
-| 本提交：`perf(ep): apply optimization 3 after M4 buffer tuning` | 在上一步增加优化点 3：M3 按 server 分组发送 | 对比 `00fc323` 得到优化点 3 增量收益 |
+| `6e09ad8` | 在上一步增加优化点 3：M3 按 server 分组发送 | 对比 `00fc323` 得到优化点 3 增量收益 |
 
 验证环境逐个 checkout 对应提交后，重新执行 `bash build_all.sh && bash sync.sh`，再使用
 相同的 `run.sh` 参数分别测量。每笔先确认功能，再对比 performance；breakdown 独立采集。
@@ -184,3 +184,52 @@ Gather 的 V→S 同步完成后，复用已不再使用的 `typeUb_` 缓存本�
 设备验收继续检查单轮/连续多轮 yOut 与 Flag，并分别采集 performance 和 breakdown；
 M3 breakdown 区间包含新增预扫描成本。比较时固定 shape、路由、核数、dtype、loops/warmup
 及构建配置，记录最终加载的 kernel 哈希。
+
+
+## M3/M5 边界与 M4/M5 逐 token profiling
+
+基于 `6e09ad8`，新增诊断打点，用于观察各核任务下发节奏，不作为新的性能优化点。
+
+| trace 事件 | 观测边界 |
+| --- | --- |
+| `m3_mte3_complete` | 本核 M3 现有所有 lane 回收及 scratch 复用 `PIPE_ALL` 之后；无 DIRECT 任务的核也记录该点 |
+| `m5_final` | 从现有 scratch 复用 `PIPE_ALL` 之后开始，包含 M5 初始化、Flag 探测、聚合及末尾回收 |
+| `m4_token_issue[n]` | 一个任务的 Table2/3 读取、payload 读入、加权计算、打包与发送指令下发完成 |
+| `m5_token_issue[n]` | 一个已就绪任务的 payload 读入、加权计算与 yOut 写出指令下发完成；最后一个任务包含原有批量 Flag 清理下发 |
+
+`n` 为本次 capture 中该核从 0 起的实际处理顺序，不是原始 TokenId，也不是 expertOut
+行号。M5 的 pending 交换和 readiness 轮询可能改变处理顺序。每核所有 token 区间放在
+同一条 `token_issue` trace 轨道，便于比较相邻任务的下发间隔；Dispatch 和 Combine
+继续使用独立记录区与 trace。`run.sh -m 2` 使用更新后的 mapping 和解析器，无需新参数。
+
+逐 token 只增加 Scalar 时间戳记录，不增加 SetFlag/WaitFlag、PIPE_ALL 或 MTE3 完成等待。
+已有的依赖等待和 buffer 复用阻塞仍属于区间耗时，因此不能把区间长度当作纯计算耗时
+或独立的端到端传输完成耗时。M5 尚未就绪的 Flag 探测留在 `m5_final` 内、token 区间外；
+M3→M5 原有复用屏障计入 `m3_direct`，完成标记和 `m5_final` 起点均位于屏障之后。`m3_mte3_complete` 只证明本核 M3 的 MTE3
+完成，不代表其他核或远端 M4 已完成。
+
+逐 token 记录不再适合旧的 32 条固定额度。Host reservation 和 Kernel writer 共用
+65536 条/核/latest launch，沿用测试 consumer 已分配的容量，未新增 UB。直接调用公开 API
+采集 profiling 时，需在 communicator 初始化前设置 `TILEXR_PROFILING_RECORDS_PER_CORE=65536`
+或更大合法容量；runtime 默认的 4096 不满足此 reservation，`run.sh` 已自动满足。M4 每核最多
+1250 行；M5 在 190 KiB 内仅元数据就至少需要 12 B/token，每核少于 16384 个任务；
+两条记录/task 加模块边界可被覆盖。重复调用仍只保留最后一轮，初始化重置 count/drop，
+导出不解析旧尾部。解析器保留旧模块级 capture 的可读性，新 token 区间出现时额外检查
+角色及总数（M4=type2 行数，M5=BS）。性能对比继续使用 profiling OFF；新增时间戳写入
+本身有开销，breakdown 用于解释下发节奏。
+
+维护教训：增加循环内打点时需一起检查 Host/Kernel 记录额度、重复事件配对、模块覆盖
+校验和 trace 命名。仅增加事件会使旧容量截断，或被“每模块每核仅一个区间”的校验误拒；
+本次通过实际 kernel 的多 token capture 和 records.v1→trace 测试覆盖这些边界。
+`MTE3_V` 的目标是 Vector 队列，不能仅在其后读取 Scalar 时间戳就宣称 MTE3 已完成；
+这里复用已有 `PIPE_ALL` 后再打点。blue CANN 9.1 的 `kernel_reg.h` 中 A5/3510
+`PipeBarrierImpl<PIPE_ALL>` 直接发出 `pipe_barrier(PIPE_ALL)`，无须新增完成同步。
+
+2026-09-22 开发验证：最终版本 Host CTest 11/11、profiling/trace Python 回归 29/29
+通过；覆盖真实 kernel 的非空 M3、多 token M4/M5、超过旧记录额度、重复调用、区域隔离、
+runtime OFF 不写记录、ON/OFF 硬事件序列一致，以及 token 事件配对/核角色/总数与 trace
+展示。blue CANN 9.1.0 / ccec Clang 15.0.5 / A5 `dav-c310-vec` profiling OFF/ON
+分别编译 `tilexr-ep` 及 kernels 成功（exit=0），932 个非文档输入与送编快照一致。
+独立审查发现的 Scalar 完成边界问题已按上述方案修正，最终差异完成主审。
+证据位于 `build/combine-split-verification/token-profile-final/`。未执行 A5 多卡运行，
+实际 trace 时序和新增打点开销待验证环境确认。

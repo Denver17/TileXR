@@ -2,6 +2,10 @@
 #define TILEXR_EP_SERVER_DEDUP_PARTIAL_H
 
 #include "kernel_operator.h"
+#include "ep_memory_server_dedup_combine_profile.h"
+#if defined(TILEXR_ENABLE_PROFILING)
+#include "tilexr_profiling.h"
+#endif
 #include "comm_args.h"
 #include "tilexr_types.h"
 #include "ep_memory_server_dedup_buffer_layout.h"
@@ -14,6 +18,9 @@ using namespace AscendC;
 // compacted before Init; all other views and event state are local to M4.
 class ServerDedupPartial {
 public:
+#if defined(TILEXR_ENABLE_PROFILING)
+    __aicore__ inline void SetProfiling(TileXR::DirectProfilingWriter *writer) { profile_ = writer; }
+#endif
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, TPipe *pipe,
         LocalTensor<uint8_t> scratch, GM_ADDR expert, GM_ADDR table2, GM_ADDR table3,
         uint32_t tokens, uint32_t count, uint32_t bs, uint32_t h, uint32_t k,
@@ -56,6 +63,7 @@ public:
         PipeBarrier<PIPE_V>();
         for (uint32_t task = 0; task < count_; ++task) {
             const uint32_t row = uint32_t(rows_.GetValue(task));
+            Mark(kEpServerDedupCombineProfilePartialTokenBegin);
             CacheTables(task, row);
             const uint32_t localRow = row - cacheBegin_;
             const uint32_t destinationEntry = localRow * 3U;
@@ -68,6 +76,7 @@ public:
             if (dtype_ == TileXR::TILEXR_DATA_TYPE_FP16) Aggregate<half>(row, source, relay, members + 1U);
             else Aggregate<bfloat16_t>(row, source, relay, members + 1U);
             Send(task % outputLanes_, source, token, topk);
+            Mark(kEpServerDedupCombineProfilePartialTokenEnd);
         }
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) WaitFlag<HardEvent::V_MTE2>(lane);
         for (uint32_t lane = 0; lane < outputLanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
@@ -77,6 +86,17 @@ public:
     }
 
 private:
+    __aicore__ inline void Mark(uint32_t event)
+    {
+#if defined(TILEXR_ENABLE_PROFILING)
+        if (profile_ != nullptr) profile_->Record(event);
+#else
+        (void)event;
+#endif
+    }
+#if defined(TILEXR_ENABLE_PROFILING)
+    TileXR::DirectProfilingWriter *profile_ = nullptr;
+#endif
     template<class T> __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)
     {
         auto tensor = scratch_[used_].template ReinterpretCast<T>();

@@ -58,6 +58,28 @@
       "critical": false,
       "begin": 12307,
       "end": 12308
+    },
+    {
+      "name": "m3_mte3_complete",
+      "category": "diagnostic",
+      "parent": "m3_direct",
+      "instant": 12321
+    },
+    {
+      "name": "m4_token_issue",
+      "category": "issue",
+      "parent": "m4_partial",
+      "track": "token_issue",
+      "begin": 12322,
+      "end": 12323
+    },
+    {
+      "name": "m5_token_issue",
+      "category": "issue",
+      "parent": "m5_final",
+      "track": "token_issue",
+      "begin": 12324,
+      "end": 12325
     }
   ]
 }

@@ -107,6 +107,11 @@ public:
         } else {
             Mark(kEpServerDedupCombineProfileDirectBegin);
             ReturnDirectTokens();
+            // Existing M3-to-M5 scratch boundary. MTE3_V waits alone do not
+            // order Scalar timestamps: mark completion after this full drain.
+            // Also covers empty-DIRECT cores that still own source tokens.
+            PipeBarrier<PIPE_ALL>();
+            Mark(kEpServerDedupCombineProfileDirectMte3End);
             Mark(kEpServerDedupCombineProfileDirectEnd);
             Mark(kEpServerDedupCombineProfileFinalBegin);
             AggregateSourceTokens();
@@ -126,10 +131,10 @@ public:
 private:
     __aicore__ inline void AggregateSourceTokens()
     {
-        // Every M3 event is paired before overwriting its arena views. This
-        // boundary also covers empty-DIRECT cores that still own source tokens.
-        PipeBarrier<PIPE_ALL>();
         ServerDedupSourceAggregate aggregate;
+#if defined(TILEXR_ENABLE_PROFILING)
+        aggregate.SetProfiling(&profile_);
+#endif
         aggregate.Init(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
             args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
             masksAddr_, weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
@@ -332,6 +337,9 @@ private:
         for (uint32_t task = 0; task < count; ++task)
             typeUb_.SetValue(task, packedUb_.GetValue(start + task));
         ServerDedupPartial partial;
+#if defined(TILEXR_ENABLE_PROFILING)
+        partial.SetProfiling(&profile_);
+#endif
         partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
             expertAddr_, tableAddr_, relayAddr_, tokens_, count, bs_, h_, topK_, experts_, dtype_, window_);
         partial.Process();

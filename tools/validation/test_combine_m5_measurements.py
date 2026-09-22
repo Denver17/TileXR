@@ -102,6 +102,44 @@ class M5MeasurementTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.capture(events, "bad-send-" + str(send))
 
+    def test_token_issue_intervals_and_m3_completion_trace(self):
+        events = self.events()
+        for core, rows in events.items():
+            if core < 32:
+                rows.append((3450, 0x3021))
+                for task in range(3):
+                    rows.extend(((4010 + task * 100, 0x3024), (4050 + task * 100, 0x3025)))
+            elif core == 32:
+                rows.extend(((4010, 0x3022), (4050, 0x3023)))
+            rows.sort()
+        evidence = self.capture(events, "tokens")
+        self.validate(evidence)
+        self.assertEqual(evidence["stages_us"]["m4_token_issue"]["sample_count"], 1)
+        self.assertEqual(evidence["stages_us"]["m5_token_issue"]["sample_count"], 96)
+        trace = json.loads(Path(evidence["artifacts"]["perfetto_trace.json"]).read_text())["traceEvents"]
+        issued = [e for e in trace if e["name"].startswith("m5_token_issue[") and e["ph"] == "X"]
+        self.assertEqual(len(issued), 96)
+        for core in range(32):
+            tasks = [e for e in issued if e["args"]["core"] == core]
+            self.assertEqual([e["name"] for e in tasks], ["m5_token_issue[%d]" % t for t in range(3)])
+            self.assertEqual(len({e["tid"] for e in tasks}), 1)  # one row, successive tasks
+        markers = [e for e in trace if e["name"] == "m3_mte3_complete"]
+        self.assertEqual(len(markers), 32)
+        self.assertTrue(all(e["ph"] == "i" for e in markers))
+        for fault in ("missing-end", "missing-task", "wrong-role", "outside-parent"):
+            bad = copy.deepcopy(events)
+            if fault == "missing-end":
+                bad[0].remove((4050, 0x3025))
+            elif fault == "missing-task":
+                bad[0].remove((4010, 0x3024)); bad[0].remove((4050, 0x3025))
+            elif fault == "wrong-role":
+                bad[32].extend(((4100, 0x3024), (4150, 0x3025)))
+            else:
+                bad[0].extend(((4600, 0x3024), (4700, 0x3025)))
+            bad = {core: sorted(rows) for core, rows in bad.items()}
+            with self.subTest(fault=fault), self.assertRaises(ValueError):
+                self.validate(self.capture(bad, fault + "-token"))
+
     def test_multilaunch_statistics_distinguish_per_launch_and_total_bytes(self):
         path = self.root / "PROF_0/mindstudio_profiler_output/op_summary.csv"
         path.parent.mkdir(parents=True)

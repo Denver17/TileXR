@@ -2,6 +2,10 @@
 #define TILEXR_EP_SERVER_DEDUP_SOURCE_AGGREGATE_H
 
 #include "kernel_operator.h"
+#include "ep_memory_server_dedup_combine_profile.h"
+#if defined(TILEXR_ENABLE_PROFILING)
+#include "tilexr_profiling.h"
+#endif
 #include "ep_memory_server_dedup_combine_config.h"
 #include "tilexr_types.h"
 
@@ -12,6 +16,9 @@ using namespace AscendC;
 // before Init; the zero flag source remains live until the final MTE3 drain.
 class ServerDedupSourceAggregate {
 public:
+#if defined(TILEXR_ENABLE_PROFILING)
+    __aicore__ inline void SetProfiling(TileXR::DirectProfilingWriter *writer) { profile_ = writer; }
+#endif
     __aicore__ inline void Init(LocalTensor<uint8_t> scratch, GM_ADDR result,
         GM_ADDR masks, GM_ADDR weights, GM_ADDR yOut, uint32_t bs, uint32_t h,
         uint32_t k, uint8_t dtype, uint32_t participant, uint32_t participants)
@@ -68,12 +75,15 @@ public:
                 if (++scan == remaining) scan = 0U;
                 continue;
             }
+            // One interval per ready task; failed readiness probes emit no records.
+            Mark(kEpServerDedupCombineProfileFinalTokenBegin);
             // No further probes after this point: clear every original token's
             // complete K*N flags, including mask-inactive slots. This source is
             // independent of the final token's in-flight payload and yOut.
             if (remaining == 1U) ClearFlags();
             if (dtype_ == TileXR::TILEXR_DATA_TYPE_FP16) Aggregate<half>(token, mask, completed);
             else Aggregate<bfloat16_t>(token, mask, completed);
+            Mark(kEpServerDedupCombineProfileFinalTokenEnd);
             pending_.SetValue(scan, pending_.GetValue(remaining - 1U));
             --remaining; ++completed;
             if (scan == remaining) scan = 0U; // re-probe the swapped real TokenId
@@ -83,6 +93,17 @@ public:
     }
 
 private:
+    __aicore__ inline void Mark(uint32_t event)
+    {
+#if defined(TILEXR_ENABLE_PROFILING)
+        if (profile_ != nullptr) profile_->Record(event);
+#else
+        (void)event;
+#endif
+    }
+#if defined(TILEXR_ENABLE_PROFILING)
+    TileXR::DirectProfilingWriter *profile_ = nullptr;
+#endif
     template<class T> __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)
     {
         auto tensor = scratch_[used_].template ReinterpretCast<T>();

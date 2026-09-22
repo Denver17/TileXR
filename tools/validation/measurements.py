@@ -255,7 +255,9 @@ def combine_breakdown_timeline(run, config=None):
     if config and config.get("implemented_through") in ("M3", "M4", "M5"):
         if config["implemented_through"] != "M5" and (config["loops"] != 1 or config["warmup"] != 0):
             raise ValueError("M3/M4 captures exactly one launch without warmup")
+        launches = []
         for launch in run.launches:
+            lanes = []
             for lane in launch.lanes:
                 expected = {"kernel_total", "m1_init", "m1_stage", "m6_drain"}
                 expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
@@ -263,11 +265,31 @@ def combine_breakdown_timeline(run, config=None):
                     expected.add("m4_partial")
                 if config["implemented_through"] == "M5" and lane.core < config.get("combine_send_core_num", 32):
                     expected.add("m5_final")
-                actual = [sample.name for sample in lane.samples if sample.kind == "interval"]
+                token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final"}
+                actual = [sample.name for sample in lane.samples
+                          if sample.kind == "interval" and sample.name not in token_stages]
                 if set(actual) != expected or len(actual) != len(expected):
                     raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))
-        return replace(run, attributes={**run.attributes, "scope": "full" if config["implemented_through"] == "M5" else "partial", "implemented_through": config["implemented_through"],
-            "timing": "latest launch, module intervals; no fixed wait, no performance threshold"})
+                samples = []
+                sequence = 0
+                for sample in lane.samples:
+                    if sample.name in token_stages:
+                        if token_stages[sample.name] not in expected:
+                            raise ValueError("Combine token/core role coverage mismatch: " + str(lane.core))
+                        # records.v1 contains timestamps and event IDs, not TokenId.
+                        # Identify each issued task by its core-local execution order.
+                        sample = replace(sample, instance_id=sequence,
+                            attributes={**sample.attributes, "task_sequence": sequence,
+                                        "timing": "instruction issue; no completion fence"})
+                        sequence += 1
+                    if sample.name == "m3_mte3_complete" and "m3_direct" not in expected:
+                        raise ValueError("Combine M3 completion marker on non-Send core")
+                    samples.append(sample)
+                lanes.append(replace(lane, samples=tuple(samples)))
+            launches.append(replace(launch, lanes=tuple(lanes)))
+        return replace(run, launches=tuple(launches), attributes={**run.attributes,
+            "scope": "full" if config["implemented_through"] == "M5" else "partial", "implemented_through": config["implemented_through"],
+            "timing": "latest launch; module intervals and optional per-token instruction issue, no added fences"})
     if config and config.get("implemented_through") == "M2":
         common = {"kernel_total", "m1_init", "m1_select", "m1_stage_copy", "m1_prepare_publish", "m6_drain", "p21_delay_50us"}
         for launch in run.launches:

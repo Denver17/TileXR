@@ -2,7 +2,10 @@
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_PROFILE_H
 #include <cstdint>
 namespace TileXREp {
-constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 32U;
+// Latest capture only. Covers two records per token plus module boundaries:
+// M4 owns at most 1250 rows/core; M5 metadata alone costs >=12 bytes/token
+// in a 190 KiB arena, so its per-core task count stays below 16384.
+constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 65536U;
 constexpr uint32_t kEpServerDedupCombineProfileStart = 0x3001U;
 constexpr uint32_t kEpServerDedupCombineProfileEnd = 0x3002U;
 constexpr uint32_t kEpServerDedupCombineProfileInitBegin = 0x3003U;
@@ -36,5 +39,10 @@ constexpr uint32_t kEpServerDedupCombineProfilePartialBegin = 0x301dU;
 constexpr uint32_t kEpServerDedupCombineProfilePartialEnd = 0x301eU;
 constexpr uint32_t kEpServerDedupCombineProfileFinalBegin = 0x301fU;
 constexpr uint32_t kEpServerDedupCombineProfileFinalEnd = 0x3020U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectMte3End = 0x3021U;
+constexpr uint32_t kEpServerDedupCombineProfilePartialTokenBegin = 0x3022U;
+constexpr uint32_t kEpServerDedupCombineProfilePartialTokenEnd = 0x3023U;
+constexpr uint32_t kEpServerDedupCombineProfileFinalTokenBegin = 0x3024U;
+constexpr uint32_t kEpServerDedupCombineProfileFinalTokenEnd = 0x3025U;
 } // namespace TileXREp
 #endif
