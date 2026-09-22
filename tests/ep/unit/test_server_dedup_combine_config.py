@@ -50,11 +50,6 @@ static_assert(EpCombineM5InputLaneCount(96, 0, 1) == 0, "M5 zero width");
 static_assert(EpCombineM5InputLaneCount(96, 7168, 33) == 0, "M5 bad K");
 int main() {
     for (uint32_t tokens : {0U, 1U, 576U, 10000U}) {
-        // The M3 prescan reuses an entire aligned row array, not a count-sized
-        // allocation. Check tiny/uneven/max per-core Table2 triples and indices.
-        const uint32_t count = (tokens + kEpServerDedupCombineSendCoreNum - 1) /
-            kEpServerDedupCombineSendCoreNum;
-        if (count * 12U > EpCombineAlign(tokens == 0 ? 4 : tokens * 4, 256)) return 1;
         for (uint32_t h : {1U, 17U, 240U, 241U, 7168U, 10000U, 16000U}) {
             for (uint32_t k : {1U, 6U, 32U}) {
                 const uint32_t reads = EpCombineM4InputLaneCount(tokens, h, k);

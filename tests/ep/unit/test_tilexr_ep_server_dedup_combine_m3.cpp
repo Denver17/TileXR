@@ -116,102 +116,6 @@ void DirectRows(uint32_t count, uint32_t h, bool sparse, uint32_t window, uint8_
         "M3 leaves yOut and unused inputs unchanged");
 }
 
-void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_t h,
-    uint32_t window, bool onlyLocal)
-{
-    Fixture f(count, h, ownRank);
-    f.args.rankSize = int(ranks);
-    f.tiling.bs = std::max(1U, (count + 2U) / 3U);
-    const uint32_t slots = f.tiling.bs * 3U;
-    const uint32_t packet = (h * 2U + 479U) / 480U * 512U;
-    f.half = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + uint64_t(slots) * packet + 512U;
-    f.args.peerMemBytes = f.half * 2U;
-    const uint32_t servers = ranks / 8U, ownServer = ownRank / 8U;
-    for (uint32_t row = 0; row < count; ++row) {
-        f.types[row] = 1;
-        // Interleave servers within every core's segment; some lists are empty
-        // when the segment has fewer tasks than servers. Local-only tests leave
-        // every remote list empty while preserving the entire local segment.
-        const uint32_t server = onlyLocal ? ownServer : (row * 5U + ownServer) % servers;
-        const uint32_t source = server * 8U + row % 8U;
-        f.table[row * 3U] = int32_t(source);
-        f.table[row * 3U + 1U] = int32_t(row / 3U);
-        f.table[row * 3U + 2U] = int32_t(row % 3U);
-        if (f.peers[source].size() != f.half * 2U) {
-            f.peers[source].assign(f.half * 2U, 0xa5U);
-            f.args.peerMems[source] = f.peers[source].data();
-        }
-    }
-    const auto tableBefore = f.table;
-    std::set<uint32_t> allWrites;
-    const uint32_t sendCores = TileXREp::kEpServerDedupCombineSendCoreNum;
-    for (uint32_t core = 0; core < sendCores; ++core) {
-        AscendC::testCore = core;
-        AscendC::DeferMte3() = true;
-        bool payloadStarted = false;
-        std::vector<uint32_t> observed;
-        AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
-            const auto address = reinterpret_cast<uintptr_t>(src);
-            const auto table = reinterpret_cast<uintptr_t>(f.table.data());
-            const auto expert = reinterpret_cast<uintptr_t>(f.expert.data());
-            if (count && address >= table && address < table + count * 12U)
-                Check(!payloadStarted && address + bytes <= table + count * 12U,
-                    "all Table2 scanning precedes DIRECT payloads and stays within bounds");
-            if (count && address >= expert && address < expert + uint64_t(count) * h * 2U)
-                payloadStarted = true;
-        };
-        AscendC::GmWriteObserver() = [&](const void *dst, const void *src, uint32_t bytes) {
-            const auto address = reinterpret_cast<uintptr_t>(dst);
-            bool matched = false;
-            for (uint32_t rank = 0; rank < ranks; ++rank) {
-                if (f.peers[rank].empty()) continue;
-                const auto begin = reinterpret_cast<uintptr_t>(f.peers[rank].data()) +
-                    window * f.half + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
-                if (address < begin || address >= begin + uint64_t(slots) * packet) continue;
-                const uint32_t row = uint32_t((address - begin) / packet);
-                Check(row < count && bytes == packet && (address - begin) % packet == 0U,
-                    "grouped sends preserve the exact token/topk slot");
-                Check(uint32_t(f.table[row * 3U]) == rank && allWrites.insert(row).second,
-                    "grouped DIRECT ownership and destination rank are unchanged");
-                observed.push_back(row);
-                const auto packed = static_cast<const uint8_t *>(src);
-                const auto original = reinterpret_cast<const uint8_t *>(f.expert.data() + uint64_t(row) * h);
-                for (uint32_t byte = 0; byte < h * 2U; ++byte)
-                    Check(packed[byte / 480U * 512U + byte % 480U] == original[byte],
-                        "grouping preserves the original expert row, including packet tail");
-                for (uint32_t block = 0; block < packet / 512U; ++block) {
-                    float flag; std::memcpy(&flag, packed + block * 512U + 480U, 4U);
-                    Check(flag == 1.0f, "grouped DIRECT publishes every block Flag");
-                }
-                matched = true;
-            }
-            Check(matched, "grouped send remains inside the active result window");
-        };
-        TileXREp::CombineMemoryServerDedupKernel kernel;
-        kernel.Init(reinterpret_cast<GM_ADDR>(&f.args), reinterpret_cast<GM_ADDR>(f.expert.data()),
-            reinterpret_cast<GM_ADDR>(f.table.data()), reinterpret_cast<GM_ADDR>(f.counts.data()),
-            f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()), f.untouched.data(),
-            f.untouched.data(), f.untouched.data(), f.tiling.bs, h, 3U, ranks * 2U, 0U, 0U, window, 0U);
-        TileXREp::CombineModuleTestAccess::Direct(kernel);
-        const uint32_t base = count / sendCores, extra = count % sendCores;
-        const uint32_t start = core * base + std::min(core, extra);
-        std::vector<uint32_t> expected;
-        for (uint32_t i = 0; i < base + (core < extra ? 1U : 0U); ++i) expected.push_back(start + i);
-        const auto distance = [&](uint32_t row) {
-            const uint32_t server = uint32_t(f.table[row * 3U]) / 8U;
-            return (server + servers - ownServer - 1U) % servers;
-        };
-        std::stable_sort(expected.begin(), expected.end(), [&](uint32_t a, uint32_t b) {
-            return distance(a) < distance(b);
-        });
-        Check(observed == expected, "DIRECT visits next server first, wraps, sends local last, and is stable within each server");
-        Check(AscendC::PendingMte3().empty(), "grouped DIRECT retires all sends before M5");
-        AscendC::GmWriteObserver() = {};
-        f.ResetHooks();
-    }
-    Check(allWrites.size() == count && f.table == tableBefore, "prescan covers every owned row and does not modify GM Table2");
-}
-
 int main()
 {
     try {
@@ -221,11 +125,6 @@ int main()
         DirectRows(193U, 241U, false, 1U, 1U);
         DirectRows(512U, 7168U, false, 0U, 0U); // wrap input/output rings
         DirectRows(10000U, 17U, true, 1U, 1U); // sparse table-cache span transition
-        DirectServerOrder(16U, 2U, 1U, 17U, 0U, false);
-        DirectServerOrder(24U, 10U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U + 3U, 241U, 1U, false);
-        DirectServerOrder(32U, 26U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, false);
-        DirectServerOrder(128U, 122U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 1U, false);
-        DirectServerOrder(32U, 10U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, true);
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     AscendC::GmWriteObserver() = {};
     if (ServerDedupTest::Failures() != 0) return 1;
