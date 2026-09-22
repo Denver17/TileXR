@@ -492,3 +492,302 @@ M5 payload继续使用0..6，M4第8槽的`MTE3_V(7)`由共享所有者最后回�
 Host测试和真实CANN编译，没有测量硬件并发度或性能收益。对比基线使用`c1ef152`，
 两侧保持相同shape、核数、路由、机器/卡及loops/warmup；使用各自版本的kernel与
 trace解析器。拉取后按现有build/sync流程更新，`run.sh`参数不变，不新增checkpoint。
+
+## 尝试优化点 5：M3 逐 server 扫描、均衡筛选并立即发送
+
+### 状态与问题依据
+
+2026-09-22，用户反馈优化点4已有一定性能提升，但收益有限；尚未提供本轮量化数据和
+完整验收日志。用户进一步明确当前发送过程的瓶颈是MTE3，希望把筛选工作尽可能与传输
+重叠。本节方案已按用户授权实现优化点5，设备功能和性能待验证。实验以优化点4版本
+`2800dac`为比较基线，保留M4/M5共享buffer方案。
+
+Combine输入沿用Dispatch的专家排序，同一专家内部还具有源端rank局部性。当前
+`ReturnDirectTokens`先按连续区间分核，再由`GroupDirectTasks`在本核内按server排序。
+若本核区间只包含某个server的行，局部重排无法改变通信对象，其他核也不能协助处理，
+因此优化点3在这种分布下效果受限。实际影响大小仍需结合路由分布和trace评价。
+
+### 用户已明确的约束
+
+- 只调整单卡S个Send核的M3任务分配及发送顺序，不改变发送流水、数据格式或接口。
+- 各核按`(ownServer+step)%serverCount`、step=1..serverCount推进，本server最后。
+  **server轮次之间不得新增任何核间或核内同步**，不等其他核，不等本轮MTE3完成。
+- 不先筛完所有server再发送。完成一个server的扫描、筛选和计数后，立即下发本核
+  该server的发送任务，随后扫描下一个server，争取与上一轮尾部MTE3重叠。
+- 不要求核间锁步；快核可以提前进入下一server。某核在当前server没有任务时直接
+  继续扫描下一server，不能等待其他核。Recv核不参与M3重分配。
+
+据此撤销前一版“全server计数一遍、全server筛选一遍后才发送”的首版建议，不再保留
+跨server阶段屏障或共享GM建表同步作为本优化点候选。现有`SelectRows(1)`仍先产生
+完整DIRECT行号列表；取消的是随后全server分类/筛选造成的发送启动前等待。
+
+### 推荐分配规则：桶内命中序号轮询，跨 server 延续轮转位置
+
+设D为本卡DIRECT总行数，S为Send核数，c为本核Send组内编号。每核独立维护P，表示
+已经扫描过的所有server的DIRECT任务总量，初始为0。对当前server从完整DIRECT列表
+开头单调扫描；只有目标server匹配时，才递增本server的命中序号j：
+
+```text
+P = 0
+sendSequence = 0
+for step = 1..serverCount:
+    server = (ownServer + step) % serverCount
+    matched = 0
+    owned = 0
+    for row in 全部DIRECT原始行号（升序）:
+        triple = Table2[row]                 # sourceRank / tokenId / topk
+        if sourceRank / 8 != server:
+            continue
+        owner = (P + matched) % S
+        if owner == c:
+            本轮任务[owned++] = (row, triple)
+        matched += 1
+    P += matched                            # 全server总数，不是本核owned
+    for task in 本轮任务:
+        沿用现有读/打包/发送及buffer复用依赖
+        lane = sendSequence % lanes
+        sendSequence += 1
+# 所有server处理完后，才执行现有M3收尾
+```
+
+不需要预知N[server]，当前轮扫描结束时matched自然就是N。实现时可用循环核号递增并
+在S处绕回，避免每个命中任务都做取模；P的语义及任务归属保持上述公式。
+
+每个核扫描相同的只读DIRECT列表和Table2，会独立得到一致的P、matched和owner，
+因此不需要共享计数、原子抢任务或核间通信。不能只扫描旧的本核连续分片；也不能在
+本核owned为0时跳过必要计数，否则后续P和任务归属会分歧。D=0可整体跳过M3数据发送。
+
+把按server顺序连接起来的任务看成一条虚拟序列，owner就是其序号模S，因此同时保证：
+每个server的任务数在核间差≤1，所有server合计在核间差≤1，且每个DIRECT行归属唯一。
+每核总量为floor(D/S)或ceil(D/S)。跨server不能将轮转起点重置为0，否则每轮余数都
+可能落到低核号，破坏总量均衡。N[server]<S时不可能每核都有任务，允许空份额。
+
+这里采用桶内交错领取，不再坚持先前建议的桶内连续区间，因为后者需要先知道桶大小，
+会增加计数/筛选遍数或缓存需求。桶内任务仍按原始行号递增，但相邻归属本核的任务可能
+跨越S个命中项；输入读取局部性的变化应一并测量。目标server本身的流量偏斜不因分核而消失。
+
+示意使用4核（生产S仍为16/24/32/40/48/56）：
+
+| 发送次序及任务数 | core0 | core1 | core2 | core3 |
+| --- | ---: | ---: | ---: | ---: |
+| server+1：6，轮转起点0 | 2 | 2 | 1 | 1 |
+| server+2：5，轮转起点2 | 1 | 1 | 2 | 1 |
+| 本server：2，轮转起点3 | 1 | 0 | 0 | 1 |
+| 合计13 | 4 | 3 | 3 | 3 |
+
+### 流水与buffer生命周期
+
+发送lane初始化、Flag初始化及事件seed只在M3级别做一次，不能每个server重复执行。
+跨server延续sendSequence，保留既有逐槽输入/输出复用依赖；不重置lane游标、TPipe
+或buffer，不插入server级`PIPE_ALL`、`SyncAll`、事件drain/等待或完成Flag。
+所有server处理完毕后，才统一执行现有M3结束回收和完成打点。
+
+当前server的Table2和任务列表只被Scalar用于生成payload地址与目标地址，MTE3实际
+读取独立resultUb。当前server的所有发送指令下发后，可覆盖这些元数据来扫描下一server，
+无需等resultUb的旧发送结束；在途payload/result槽仍由原有事件保护，绝不能作为筛选临时区。
+
+继续保留完整packedUb行号列表；indexUb缓存**当前server本核任务的绝对原始row**，
+typeUb缓存对应三元组，下一server复用相同位置。单server本核最多ceil(N/S)个任务，
+不超过ceil(D/S)，三元组容量继续满足优化点3预算。扫描必须由packedUb原始列表驱动，
+不能覆盖后续轮次仍需要的行号，也不能沿用旧的`packedUb[start+original]`发送寻址。
+计划不增Send arena、不减少payload lane、不侵占M1常驻控制区。
+
+每个server重新开始单调Table2扫描并重置缓存范围；沿用现有表搬运及消费所需的
+MTE2→Scalar依赖，不能为了取消server屏障而读取尚未完成DMA的表。该数据依赖不是新增的
+server完成等待，但表扫描次数增加会增加其执行次数，并可能受既有流水依赖间接限制。
+首版倾向Scalar筛选，避免引入额外Vector结果交接；若后续改为Vector筛选，仍须遵守
+无server边界同步及不改发送流水的约束，单独核查其与payload打包的资源竞争。
+
+### 重叠机会与代价
+
+逻辑下发顺序为`扫s1 → 发s1 → 扫s2 → 发s2 → …`。发s1仅表示任务指令已下发，
+其尾部MTE3可继续执行，同时Scalar/MTE2推进s2扫描；不在两轮之间等s1完成。这个安排
+创造重叠机会，不能保证扫描全部被掩盖。第一轮扫描尚无本次M3数据发送可供覆盖；后续
+可覆盖窗口主要取决于上一server**仍在途的尾部发送**，不能使用整个server发送耗时估算。
+
+各server扫描整份DIRECT序列，Scalar工作量约O(serverCount*D)每核。按表缓存覆盖T行、
+每行12B粗估，全卡表请求量量级为`12*T*S*serverCount` B（不含对齐，缓存实际流量另测）。
+T=10000、S=32、8个server时约30.72 MB，16个server时约61.44 MB。元数据搬运还会
+竞争payload使用的MTE2资源；MTE3是当前主瓶颈，并不自动保证这些新增成本免费。
+
+先采用每server一遍、扫完即发的简单版本。如果后续证据表明扫描造成明显的MTE3空隙，
+再讨论缓存目标server索引或更细粒度筛选；不能为减少重复扫描恢复“先完成全server
+筛选才发送”，也不在本轮引入新的双缓冲预取或核间调度协议。
+
+### 后续验证边界
+
+本次只核查任务分配数学模型，不执行kernel测试或设备实验。已重新验证本版逐server
+扫描、在线owner判定和累计P推进：全部允许核数、1/2/3/4/8/16个server、排序/乱序及
+空任务共7200组通过，确认唯一覆盖及两项均衡界限；未沿用上一版连续区间分配的结果。
+
+后续实现覆盖专家/源rank长连续段、周期性分布、偏斜/空server、D<S、N[server]<S、取模
+绕回和最大TokenNum；检查每个DIRECT原始row恰好发送一次、payload/三元组关联、yOut、
+Flag及双窗保护。所有允许核数下检查每server及每核总量差≤1、各核非空server顺序一致。
+
+通过延迟MTE3替身验证：上一server发送仍在途时允许开始下一server筛选，旧payload不被
+元数据覆盖；第一server发包下发先于第二server筛选，未等待所有server任务表建立。
+检查lane跨server连续轮转，初始化/回收只发生一次，空份额不引入等待；通过实际事件和
+调用行为验证，不用源码文本匹配充当同步契约测试。
+
+performance固定shape/路由/核数/机器做A/B；breakdown单独观察首包启动、筛选成本、
+MTE3空隙与整体耗时。现有M3总区间不足以证明扫描已被传输覆盖；需要相应流水证据，
+任何新增观察点不得增加同步，也不能把任务更均匀直接视为性能通过。
+
+## 尝试优化点 6：M4 聚合任务按目标 server 均衡分配并轮转发送
+
+### 状态与目标
+
+2026-09-22，用户要求记录M4采用类似优化点5方案的可能性，统筹各核发出的聚合token，
+按server+1、server+2直至本server轮转。**仅记录设计方向，尚未实现或验证性能。**
+本项与M3优化点5分别记录，后续独立比较增量收益，不能同时修改后将组合收益归因给M4。
+
+用户进一步明确：**当前M4场景同样已知是MTE3瓶颈**，以此作为本项优化的设计前提。
+通过多个发送buffer保持MTE3在途，让筛选、成员表读取和聚合尽可能在传输期间完成，
+预期覆盖大部分上述工作；本节未新增设备测量或给出具体覆盖比例。
+
+当前`ReturnPartialTokens`对全部type2行按连续区间均分给R个Recv核，
+`ServerDedupPartial::Process`沿本核行序执行读成员、加权聚合和partial发送，未按目标
+server重分配。目标server取Table2的`sourceRank / 8`，即partial最终返回的源server；
+不能用Table3成员expert所在server或执行聚合的当前卡替代。
+
+只重新分配完整聚合任务及其执行顺序：一个type2原始row的self和全部成员仍由同一核
+处理，维持成员顺序、FP32权重与累加、BF16/FP16舍入、目标token/topk和DataAsFlag。
+本核M2 ready之后才能开始成员读取；M1/M2职责不变。
+
+### 候选调度：逐 server 筛选，再立即聚合并发送
+
+将优化点5的分配公式中的Send核数S替换为Recv核数R，核号采用`core-S`：
+
+```text
+P = 0                                   # 前面server的type2总任务数
+for step = 1..serverCount:
+    server = (ownServer + step) % serverCount
+    分块读取Table1(tokenType)和Table2，筛出type2且目标server匹配的候选
+    当前server第j个匹配任务的owner = (P+j) % R
+    只保存owner等于本核Recv编号的原始row
+    P += 当前server的总匹配数
+    对本核本轮任务逐个：
+        单独读取该原始row的Table3 topK聚合表
+        读self/成员 → 聚合 → 打包并下发partial
+    # 不等发送完成，继续下一server扫描
+全部server完成后，按优化点4的原有读算交接进入M5
+```
+
+不先筛完所有server。每server核间任务数差≤1，全部server合计每核任务数差≤1；每个
+type2原始row只归属一个核。P累计全体匹配数而非本核数，空server不改变P，空份额核
+直接前进。轮转起点不能在每个server重置，否则余数任务集中在低核号。
+
+这里均衡的是**partial包数量**：相同H下每包字节数相同，有利于均衡MTE3发送量。
+以当前MTE3瓶颈为前提，优先均衡发送包数，不为了按成员数加权分配而提前读取全部
+Table3。每个任务仍需读取和计算N+1个贡献，成员数差异作为重叠效果的观察指标，
+不改变本轮以发送量均衡为主的分配目标。
+
+### 两级元数据访问：先确定任务，再按 token 读取聚合表
+
+筛选阶段只根据Table1判定type2、根据Table2确定目标server和路由，结合owner公式
+确定本轮归属本核的原始row；**不读取未选中任务的Table3，不先建立全体topK成员表**。
+当前server筛选结束后立即逐任务处理，不等待其他server筛选。
+
+处理某个已选中任务时，才从`Table3 + uint64(row)*K*8`单独搬入其K个8B表项。
+首项包含完整uint32成员数N和selfWeight，其余有效项提供成员expert/q/weight；保持
+原表契约，仅消费self及有效N个成员。按单token读取整行K*8B，不恢复旧的多行跨度
+Table2/Table3成批共同加载，也不为了只读有效项而先读N、再发起第二次成员表读取。
+
+任务关联始终使用原始row，不能用server内匹配序号、本核任务序号或sourceTokenId
+寻址Table3。Table2路由若已保留则直接使用；若受元数据容量限制只保存row，可按row
+取回所需路由，但不能因此连带预读其他token的Table3。路由缓存的具体容量留待实现预算。
+
+旧`CacheTables`共同baseRow/localRow的索引契约需要拆开：Table2服务筛选和路由查询，
+Table3单独服务当前token，聚合表从本地第0项解析，不再继承旧多行缓存的localRow偏移。
+当前token的成员索引和权重已被消费后才能复用该表buffer；其partial已打包到独立输出槽
+后，MTE3只引用独立输出槽，因此下一token取表无需等待旧partial发送完成。
+
+### 与优化点5相同的流水约束
+
+- server轮次之间不新增核间或核内同步，不增加`PIPE_ALL`、全核屏障、server完成Flag
+  或输出drain；各Recv核独立推进。M3和M4采用相同方向，不要求两组核处于相同server轮次。
+- M4初始化一次，输入事件与输出Flag不按server重复初始化。输入inputSequence按已读
+  贡献数连续推进，输出序号按已发partial数连续推进，逐槽等待和原有读/算/发依赖保留。
+  不能简单地对每server重新Init/Process整个阶段对象，导致游标、seed或收尾重复。
+- 末轮之后只做原有M4→M5定向读算交接，不排空M4尾部MTE3。共享输出地址、stride及
+  完成事件继续由M5继承；`partialTasks_`必须是本核所有server的累计任务数，用于确定
+  M5首个输出槽，不能误写成最后一个server的数量。空M4仍保留共享输出seed/收尾契约。
+- 下一server扫描仅复用已消费的元数据区，不占用在途输出、输入或FP32/low工作区。
+  扫描表DMA仍要满足原有数据就绪依赖，不能将“不加server同步”解释为无依赖覆盖。
+
+### 主要实现差异：M4没有可长期保留的完整Gather列表
+
+当前实现将本核少量行号转存到共享phase区，随后M4的FP32/phase/输入/输出布局覆盖
+原M1/Gather scratch。优化点5的“保留完整packedUb、多轮扫描”不能直接照搬到M4。
+不能只在新调度中继续引用旧packedUb地址；也不能为保留全type2列表而无预算地扩展UB。
+
+优先评估**每server分块重读GM tokenType和Table2**：从原始row=0到TokenNum−1扫描，
+只有type2行才解析路由并参与j计数，保存本核本轮原始row。扫描时不加载完整Table3成员
+信息，避免所有核为被丢弃任务反复读取成员表；只有处理已选中token时才单独加载该行
+Table3。单server本核列表容量不超过ceil(TokenNum/R)，可沿用现有rows容量。
+
+可评估将扫描tokenType的小块临时放在当前未用于聚合的Table3缓存内，Table2使用原表
+缓存，或在原多行Table3区域内重新划分扫描临时区和单token聚合表区；这只是候选复用
+方式，实施前必须明确块大小、对齐、权重消费时点及DMA依赖。原Table3固定区域若可缩减，
+先满足筛选元数据需要，再评估剩余空间，不预先承诺增加输出槽数。
+不要增加额外常驻全量行表：默认优化点4的共享arena仅余480B，保留数百至上万行索引
+可能减少发送槽，改变优化2/4的收益条件。方案目标是保持240KiB及既有读/算/发槽预算。
+
+**缓存失效必须显式处理：** 每个server扫描都从小row重新开始；Table2扫描/路由缓存
+按用途切换重置，不能让旧`row < cacheEnd`命中已被覆盖的内容。Table3按当前token行号
+独立装载，不再与Table2共享cacheBegin/cacheEnd。这是软件缓存管理调整，不是新增
+server流水屏障；仍需满足表DMA可读以及旧权重已被消费的生命周期要求。
+
+### 收益判断与后续验证
+
+在已知MTE3瓶颈下，保留多个在途发送槽，使下一任务的Table3读取、成员读取和聚合与
+此前partial发送重叠；下一server的Table1/2筛选同样可与上一server尾部发送重叠。
+重点是保持MTE3持续获得已聚合的packet，而不是为了进入筛选/取表阶段排空发送。
+
+首轮筛选和首个token聚合仍属于启动成本。后续验证关注重复扫描是否造成MTE3空隙、
+单tokenTable3读取的开销是否被覆盖，以及M5启动和整体耗时；这些是优化效果的测量项，
+不再把当前场景是否为MTE3瓶颈列为待确认问题。
+
+后续验证检查type2唯一覆盖、每server和总任务量均衡、目标server环形顺序、无新增
+server等待、Table2/Table3独立寻址及在途输出保护；验证筛选不加载Table3、只有已选中
+token才读取其K*8B聚合表，且不存在额外的先读N再读成员的取表流程。覆盖空任务、
+N差异大、N[server]<R、稀疏行、非对称核数和取模绕回。保持逐token成员顺序和数值参考，验证最终partial、yOut及Flag。
+检查M4结束时累计发送数、M5首槽继承及无M5任务路径。M3优化5、M4优化6应分别开销
+归因；记录每核partial数、成员总数、M4/M5推进和整体性能，不以静态分配公式代替设备验证。
+
+设计重点是将Table1/2筛选与单token Table3读取解耦，在不减少既有发送槽的前提下，
+利用MTE3多buffer覆盖筛选和聚合工作。本次未修改代码或运行新测试、设备实验。
+
+### 优化5/6分批执行计划（2026-09-22，已授权实现）
+
+1. 第一笔仅实现优化5：M3按server扫描、全局轮询归属、本轮筛选完立即发送；复用原
+   元数据和payload槽，跨server保持事件/游标。更新M3覆盖与顺序/重叠Host测试，回归
+   M1–M5和profiling；A5 OFF/ON分别构建，检查最终差异后按SilentEmotion提交推送。
+2. 第二笔基于第一笔实现优化6：M4按Table1/2逐server筛选、单token读取Table3，保持
+   数值顺序及M4→M5共享输出继承。更新M4/M5关联测试、配置边界与核划分覆盖，分别
+   完成Host回归和A5 OFF/ON构建，再独立提交推送；不得把第二笔生产改动混入第一笔。
+3. 重点检查旧缓存状态失效、元数据与在途DMA源不重叠、全server累计任务/发送游标、
+   空任务和非对称分核。不得新增server同步或减少既有发送槽，接口和M2逻辑不变。
+4. 主代理负责生产代码、文档、编译及Git；可独立委派对应测试文件或只读审查，禁止
+   并行修改同一文件。保留用户已有四份其他文档改动；硬件功能和性能交由验证环境确认。
+
+### 优化5实现记录（2026-09-22）
+
+第一笔基于`2800dac`，生产改动仅在M3：`SelectDirectServer`每轮扫描完整DIRECT行号，
+按持续轮转owner筛选本核原始row/三元组；当前server发送下发后才开始下一轮扫描。
+跨server沿用sendSequence与原有事件/槽，M4/M5和M2实现不变。三元组与行号缓存均复用
+已有Scalar元数据，完整packed行号与在途result输出保持独立。完成主审、简化检查及独立审查。
+
+Host针对性回归10/10通过；M3另外按Send=16/24/40/48/56分别编译运行通过（默认32
+包含在回归中），覆盖长源端连续段、周期分布、10000行、空份额、双窗、精确payload/Flag、
+唯一覆盖与两项均衡界限。延迟MTE3测试观测发包下发先于下一server扫描，扫描开始时
+前一轮尾包仍在途，lane连续轮转且只seed一次。测试不证明硬件物理并发。
+
+blue CANN9.1/A5 profiling OFF/ON构建`tilexr-ep`及kernels成功，exit=0；最终生产文件
+与送编快照一致。编译期间仅Host M3测试继续完善，已单独记录快照差异并在最终Host测试
+覆盖，未混用不同生产源码。证据在`build/combine-split-verification/opt5/`以及
+`build/opt5-host-tests.log`、`build/opt5-m3-*.log`。初次Host大用例因4GiB cgroup OOM
+退出，改用16rank覆盖最大行数、较小用例单独覆盖128rank，最终上述各配置均通过。
+
+设备功能及收益待验证。维护要点：每轮都重新建立单调Table2扫描范围，owner和发送lane
+游标则必须跨轮保留；元数据扫描不能清空发送事件，也不能覆盖完整DIRECT列表。
