@@ -34,7 +34,7 @@ public:
         Mark(kEpServerDedupCombineProfileInitBegin);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         h_ = h; topK_ = topK; bs_ = bs; experts_ = experts; dtype_ = dtype;
-        expertAddr_ = expertOut; tableAddr_ = assistInfoForCombine; relayAddr_ = relayReadIndex;
+        expertAddr_ = expertOut; tableAddr_ = assistInfoForCombine; relayAddr_ = relayReadIndex; typesAddr_ = tokenType;
         weightsAddr_ = expertScales; masksAddr_ = sourceMask; outputAddr_ = yOut;
         // Load the device-produced prefix through MTE2 rather than caching a
         // mutable GM scalar across launches. This 32B temporary becomes the
@@ -322,33 +322,16 @@ private:
         // M1 payload lanes are retired; complete this core's M2 publications
         // before reusing scratch. Independent control buffers remain resident.
         PipeBarrier<PIPE_ALL>();
-        SelectRows(2);
-        const uint32_t readers = kEpServerDedupCombineRecvCoreNum;
-        const uint32_t localCore = core_ - kEpServerDedupCombineSendCoreNum;
-        const uint32_t base = uint32_t(selected_) / readers, extra = uint32_t(selected_) % readers;
-        const uint32_t count = base + (localCore < extra ? 1U : 0U);
-        const uint32_t start = localCore * base + (localCore < extra ? localCore : extra);
-        partialTasks_ = count;
         // Seed exactly once, including empty M4. M5 inherits these events.
         for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane)
             SetFlag<HardEvent::MTE3_V>(lane);
-        if (count != 0U) {
-            // First compact out of the Gather array. Then memmove backwards:
-            // for small H the new metadata target overlaps this staging range.
-            for (uint32_t task = 0; task < count; ++task)
-                typeUb_.SetValue(task, packedUb_.GetValue(start + task));
-            auto scratch = arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes];
-            auto rows = scratch[workspace_.phaseOffset].ReinterpretCast<int32_t>();
-            for (uint32_t task = count; task != 0U; --task)
-                rows.SetValue(task - 1U, typeUb_.GetValue(task - 1U));
-            ServerDedupPartial partial;
+        ServerDedupPartial partial;
 #if defined(TILEXR_ENABLE_PROFILING)
-            partial.SetProfiling(&profile_);
+        partial.SetProfiling(&profile_);
 #endif
-            partial.Init(args_, &pipe_, scratch, expertAddr_, tableAddr_, relayAddr_,
-                tokens_, count, bs_, h_, topK_, experts_, dtype_, window_, workspace_);
-            partial.Process();
-        }
+        partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
+            expertAddr_, tableAddr_, relayAddr_, typesAddr_, tokens_, bs_, h_, topK_, experts_, dtype_, window_, workspace_);
+        partialTasks_ = partial.Process();
         // Retire only input and Vector users before scalar metadata reuse.
         // M4 output slots and MTE3_V events stay live for M5's per-slot waits.
         Sync<HardEvent::MTE2_S>();
@@ -400,6 +383,7 @@ private:
     TBuf<> arena_;
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     GM_ADDR expertAddr_ = nullptr;
+    GM_ADDR typesAddr_ = nullptr;
     GM_ADDR tableAddr_ = nullptr;
     GM_ADDR relayAddr_ = nullptr;
     GM_ADDR weightsAddr_ = nullptr;

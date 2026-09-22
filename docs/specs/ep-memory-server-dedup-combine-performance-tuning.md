@@ -638,7 +638,7 @@ MTE3空隙与整体耗时。现有M3总区间不足以证明扫描已被传输�
 ### 状态与目标
 
 2026-09-22，用户要求记录M4采用类似优化点5方案的可能性，统筹各核发出的聚合token，
-按server+1、server+2直至本server轮转。**仅记录设计方向，尚未实现或验证性能。**
+按server+1、server+2直至本server轮转。**已按授权实现，设备功能与性能待验证。**
 本项与M3优化点5分别记录，后续独立比较增量收益，不能同时修改后将组合收益归因给M4。
 
 用户进一步明确：**当前M4场景同样已知是MTE3瓶颈**，以此作为本项优化的设计前提。
@@ -756,7 +756,7 @@ N差异大、N[server]<R、稀疏行、非对称核数和取模绕回。保持�
 归因；记录每核partial数、成员总数、M4/M5推进和整体性能，不以静态分配公式代替设备验证。
 
 设计重点是将Table1/2筛选与单token Table3读取解耦，在不减少既有发送槽的前提下，
-利用MTE3多buffer覆盖筛选和聚合工作。本次未修改代码或运行新测试、设备实验。
+利用MTE3多buffer覆盖筛选和聚合工作。实现与Host/编译验证见下方记录，设备实验待执行。
 
 ### 优化5/6分批执行计划（2026-09-22，已授权实现）
 
@@ -791,3 +791,40 @@ blue CANN9.1/A5 profiling OFF/ON构建`tilexr-ep`及kernels成功，exit=0；最
 
 设备功能及收益待验证。维护要点：每轮都重新建立单调Table2扫描范围，owner和发送lane
 游标则必须跨轮保留；元数据扫描不能清空发送事件，也不能覆盖完整DIRECT列表。
+
+### 优化6实现记录（2026-09-22）
+
+第二笔基于已提交推送的优化5 `693a00d`，增量只调整M4调度及其M5交接计数。Recv核
+每轮以32行小块扫描GM Table1/tokenType与Table2，按跨server持续轮转的owner选取
+本核type2原始row；当前server筛选结束后立即逐token聚合发送，再扫描下一server。
+移除旧Gather列表的分段分配、压缩和倒序搬移；不持有会被M4共享工作区覆盖的旧列表。
+
+保持240KiB arena布局与读/算/发槽数量不变：rows仍为ceil(TokenNum/RecvCoreNum)
+个int32，Table2沿用32行缓存；原Table3缓存的前128B在筛选阶段暂存32个type标签。
+处理本核选中token时按原始row重读12B路由，再读取一次完整K*8B Table3，不预读其他
+token的聚合表，也不拆成先读N再读成员。单行Table3从本地第0项解析，Scalar消费完
+索引和权重后才复用该区域；在途MTE3只引用独立输出槽。
+
+输入inputSequence、输出completed和owner跨server连续推进；事件和输出Flag仅初始化
+一次，不新增server屏障或输出drain。Process返回本核全部server累计发送数，由M5继续
+共享输出环。保留原M4→M5读算定向交接，不等待M4尾部MTE3全部完成。完成简化检查、
+主审及独立生产/测试审查，未发现需扩大范围的改动。
+
+验证证据：
+
+- Host针对性回归10/10通过，包含M1/M2、优化5 M3、M4、M5默认/Send16/Send48及
+  profiling；日志`build/opt6-host-tests.log`。
+- M4默认及Send16/24/40/48/56独立编译运行均通过，覆盖全部合法核划分。独立参考先
+  按server稳定排序再交错分核，验证精确任务顺序、唯一覆盖、每server与总量均衡、
+  单行Table3关联、FP16/BF16数值、双窗、空任务、10000行及240KiB边界。延迟MTE3
+  模型检查下一server筛选时前轮尾包仍在途、输入/输出槽不重置；日志
+  `build/opt6-m4-default.log`、`build/opt6-m4-send*.log`。
+- M5交接用例覆盖每核先发远端server 5包、再发本server 3包；验证累计8次的首槽
+  继承，且M5读算/清Flag下发先于M4尾包退休，最终payload与yOut保持正确。
+- blue CANN9.1/A5 profiling OFF/ON分别构建`tilexr-ep`及kernels通过，exit=0。
+  送编快照与最终全部非文档输入一致；源码SHA、构建日志和产物SHA保存在
+  `build/combine-split-verification/opt6/`。
+
+Host M4路由用例为两server，更多server的真实通信、硬件物理重叠和性能收益待验证。
+验证时分别比较`2800dac`→`693a00d`（优化5）和`693a00d`→本笔（优化6），使用相同
+构建配置、输入与轮次；本笔不修改run.sh或验收入口，也不将Host替身结果视为设备验收。

@@ -312,20 +312,24 @@ void TestEightPartialSlots(bool bf16)
     f.types.assign(f.tokens, 2); f.counts.assign(32U, int32_t(f.tokens));
     f.expert.resize(uint64_t(f.tokens) * f.h);
     f.table.resize(f.tokens * 3U); f.relay.assign(f.tokens * f.k * 2U, 0U);
+    f.peers[6].assign(f.half * 2U, 0xa5U); f.args.peerMems[6] = f.peers[6].data();
     const float one = 1.0f;
     for (uint32_t row = 0; row < f.tokens; ++row) {
-        f.table[row * 3U] = 8; f.table[row * 3U + 1U] = row % f.bs; f.table[row * 3U + 2U] = 0;
+        const uint32_t ordinal = row / kEpServerDedupCombineRecvCoreNum;
+        // Five remote-server sends, then three local-server sends per core.
+        f.table[row * 3U] = ordinal < 5U ? 6 : 8;
+        f.table[row * 3U + 1U] = ordinal; f.table[row * 3U + 2U] = 0;
         f.relay[row * f.k * 2U] = 1; f.relay[row * f.k * 2U + 2U] = f.rank * 2U;
         std::memcpy(&f.relay[row * f.k * 2U + 1U], &one, 4U);
         for (uint32_t col = 0; col < f.h; ++col) f.expert[uint64_t(row) * f.h + col] = Ref::ExpertBits(bf16, 8, row, col);
     }
     auto stage = f.peers[f.rank].data() + f.stageOffset + uint64_t(4U * f.bs) * f.stageStride;
     std::memset(stage, 0, f.h * 2U); // zero-weight member, still read from a valid slot
+    std::memset(f.peers[f.rank].data() + f.stageOffset, 0, f.h * 2U);
     f.Seed(0U);
     f.Hooks(kEpServerDedupCombineSendCoreNum, 0U);
     const auto controlRead = AscendC::GmReadObserver();
-    const auto target = f.peers[8].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
-    bool loaded = false, computed = false, clearPublished = false;
+    bool loaded = false, computed = false, clearPublished = false, inheritedWait = false;
     uint32_t retired = 0U;
     AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
         controlRead(src, bytes);
@@ -341,12 +345,21 @@ void TestEightPartialSlots(bool bf16)
                 "clear publishes in a distinct event direction while all eight partials remain pending");
             clearPublished = true;
         }
+        if (clearPublished && event == AscendC::HardEvent::MTE3_V && !set && !inheritedWait) {
+            Check(id == 0U, "M5 inherits cumulative eight sends, not the final server's three");
+            inheritedWait = true;
+        }
     };
     AscendC::GmWriteObserver() = [&](const void *dst, const void *src, uint32_t bytes) {
-        const auto offset = reinterpret_cast<uintptr_t>(dst) - reinterpret_cast<uintptr_t>(target);
+        uint64_t offset = UINT64_MAX;
+        for (uint32_t rank : {6U, 8U}) {
+            const auto target = reinterpret_cast<uintptr_t>(f.peers[rank].data()) + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
+            const auto address = reinterpret_cast<uintptr_t>(dst);
+            if (address >= target && address < target + uint64_t(f.bs) * f.k * f.packet) offset = address - target;
+        }
         Check(offset < uint64_t(8U) * f.k * f.packet && bytes == f.packet, "M4 writes one of eight original destinations");
         Check(loaded && computed && clearPublished, "M5 clear, payload and compute precede M4 tail retirement");
-        const uint32_t row = uint32_t(offset / (f.k * f.packet));
+        const uint32_t row = uint32_t(offset / (f.k * f.packet)) * kEpServerDedupCombineRecvCoreNum;
         const auto packet = static_cast<const uint8_t *>(src);
         for (uint32_t col = 0; col < f.h; ++col) {
             uint16_t actual; std::memcpy(&actual, packet + col / 240U * 512U + col % 240U * 2U, 2U);
@@ -356,7 +369,7 @@ void TestEightPartialSlots(bool bf16)
     };
     f.Run(kEpServerDedupCombineSendCoreNum, 0U);
     AscendC::GmWriteObserver() = {}; AscendC::MulsObserver() = {}; AscendC::EventObserver() = {}; f.ResetHooks();
-    Check(retired == 8U && std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()),
+    Check(retired == 8U && inheritedWait && std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()),
         "O8/O5=7 handoff produces yOut and retires unused slot7 exactly once");
     Check(AscendC::PendingMte3().empty(), "no inherited packet or clear remains after M6");
 }
