@@ -116,18 +116,17 @@ private:
     }
     __aicore__ inline bool Probe(uint32_t token, uint32_t mask)
     {
-        Sync<HardEvent::V_MTE2>();
-        uint32_t flags = 0U;
-        for (uint32_t k = 0; k < k_; ++k) if ((mask >> k) & 1U) {
-            auto src = resultFlags_[(uint64_t(token) * k_ + k) * packetBytes_ / 4U + 120U];
-            DataCopy(flags_[flags * 8U], src,
-                {uint16_t(blocks_), 1U, 15U, 0U});
-            flags += blocks_;
-        }
+        // The previous probe's V_S retired its flag-buffer reader. This UB is
+        // independent of payload compute/output, so do not wait for that Vector
+        // work before issuing the next flag read. Inactive slot flags stay zero.
+        const uint32_t flags = k_ * blocks_;
+        const uint32_t expected = uint32_t(GetBitCount<1>(uint64_t(mask))) * blocks_;
+        auto src = resultFlags_[uint64_t(token) * k_ * packetBytes_ / 4U + 120U];
+        DataCopy(flags_, src, {uint16_t(flags), 1U, 15U, 0U});
         Sync<HardEvent::MTE2_V>();
         ReduceSum(probeSum_, flags_, work_, 1U, flags, 1U);
         Sync<HardEvent::V_S>();
-        return probeSum_.GetValue(0U) == float(flags);
+        return probeSum_.GetValue(0U) == float(expected);
     }
     __aicore__ inline void ClearFlags()
     {

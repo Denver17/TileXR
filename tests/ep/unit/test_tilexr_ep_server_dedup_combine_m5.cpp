@@ -67,18 +67,27 @@ struct SourceFixture : CombineM12Test::Fixture {
         }
         return Ref::ExpertBits(bf16, rank, uint64_t(p) * k + j, col);
     }
-    void Seed(uint32_t w)
+    void Seed(uint32_t w, bool freshWindow = true)
     {
         std::fill(output.begin(), output.end(), 0x6b6bU);
         for (uint32_t p = 0; p < bs; ++p) for (uint32_t j = 0; j < k; ++j) {
-            auto slot = Slot(w, p, j); std::memset(slot, 0x93, packet);
+            auto slot = Slot(w, p, j);
+            if (freshWindow) std::memset(slot, 0x93, packet);
             for (uint32_t col = 0; col < h; ++col) {
                 const uint16_t bits = Bits(p, j, col);
                 std::memcpy(slot + (col / 240U) * 512U + (col % 240U) * 2U, &bits, 2U);
             }
             for (uint32_t b = 0; b < blocks; ++b) {
-                const float value = (masks[p] >> j) & 1U ? 1.0f : 7.0f;
-                std::memcpy(slot + b * 512U + 480U, &value, 4U);
+                auto flag = slot + b * 512U + 480U;
+                const bool active = (masks[p] >> j) & 1U;
+                if (!freshWindow) Check(std::all_of(flag, flag + 32U,
+                    [](uint8_t v) { return v == 0U; }), "reused window flags cleared by production M5");
+                // On window reuse, publish active slots only. Inactive slots
+                // rely entirely on the preceding production clear, not this fixture.
+                if (freshWindow || active) {
+                    const float value = active ? 1.0f : 0.0f;
+                    std::memcpy(flag, &value, 4U);
+                }
             }
         }
         for (uint32_t p = 0; p < bs; ++p) for (uint32_t col = 0; col < h; ++col) {
@@ -107,10 +116,16 @@ struct SourceFixture : CombineM12Test::Fixture {
 void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
 {
     SourceFixture f(bs, h, k, bf16, partial);
-    const auto masks = f.masks; const auto weights = f.weights;
+    const auto weights = f.weights;
     for (uint32_t round = 0; round < 3U; ++round) {
         const uint32_t w = round % 2U;
-        f.Seed(w);
+        if (round == 2U && !partial) {
+            // Reuse window zero with changed routing: previously active slots
+            // become inactive, and a previous sparse token can gain a new slot.
+            for (uint32_t p = 0; p < bs; ++p) f.masks[p] = 1U << (p % k);
+        }
+        const auto masks = f.masks;
+        f.Seed(w, round < 2U);
         const auto inactive = f.peers[f.rank];
         // Schedule M1's local member before the Read producer. This Host model
         // has no concurrent cores; later hooks supply delayed result arrivals.
@@ -137,15 +152,17 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
                 const uint64_t relative = address - result;
                 const uint32_t p = uint32_t(relative / (k * f.packet));
                 const uint32_t j = uint32_t(relative / f.packet % k);
-                if (relative % f.packet == 480U && bytes == f.blocks * 32U) {
+                if (relative % f.packet == 480U && bytes == k * f.blocks * 32U) {
                     ++flagCopies;
-                    uint32_t firstK = 0U; while (((f.masks[p] >> firstK) & 1U) == 0U) ++firstK;
-                    if (j == firstK) {
-                        probes.push_back(p);
-                        if (p == begin && count > 1U) {
-                            const float ready = ++firstAttempts > 1U ? 1.0f : 0.0f;
-                            std::memcpy(f.Slot(w, p, j) + 480U, &ready, 4U);
-                        }
+                    Check(j == 0U, "full TopK probe starts at slot zero even for a sparse mask");
+                    probes.push_back(p);
+                    if (p == begin && count > 1U) {
+                        const float ready = ++firstAttempts > 1U ? 1.0f : 0.0f;
+                        // Only the last block of the highest active slot is late;
+                        // every other required flag is ready, including zero-weight slots.
+                        uint32_t lastK = k - 1U;
+                        while (((f.masks[p] >> lastK) & 1U) == 0U) --lastK;
+                        std::memcpy(f.Slot(w, p, lastK) + (f.blocks - 1U) * 512U + 480U, &ready, 4U);
                     }
                     Check(probes.size() < count * 3U + 3U, "pending scan makes bounded progress");
                 } else if (relative % f.packet == 0U && bytes == f.blocks * 480U) {
@@ -155,10 +172,8 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
             };
             AscendC::ReduceSumObserver() = [&](uint32_t mask, uint32_t repeats, uint32_t stride) {
                 if (probes.empty()) return; // preceding M2 reductions use their own buffers
-                uint32_t expectedFlags = 0U;
-                for (uint32_t j = 0; j < k; ++j) expectedFlags += ((f.masks[probes.back()] >> j) & 1U) * f.blocks;
-                Check(mask == 1U && stride == 1U && repeats == expectedFlags,
-                    "one reduction consumes all effective 32B flag blocks using only their leading float");
+                Check(mask == 1U && stride == 1U && repeats == k * f.blocks,
+                    "one reduction consumes full TopK flag blocks using only their leading float");
                 ++reductions;
             };
             AscendC::PaddedWriteObserver() = [&](const void *dst, const void *src, uint32_t bytes) {
@@ -184,11 +199,9 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
             if (count > 1U) Check(writes.front() == begin + 1U && writes.back() == begin,
                 "unready first token does not block later ready tokens");
             Check(reductions == probes.size(), "exactly one ReduceSum per nonempty probe");
-            uint32_t expectedFlagCopies = 0U;
-            for (uint32_t p : probes) for (uint32_t j = 0; j < k; ++j) expectedFlagCopies += (f.masks[p] >> j) & 1U;
-            Check(flagCopies == expectedFlagCopies, "one multiblock flag copy per effective k");
+            Check(flagCopies == probes.size(), "one full TopK multiblock flag copy per probe");
             AscendC::ReduceSumObserver() = {};
-            Check(clears == count * k * f.blocks, "cleanup covers full K, including inactive poison flags");
+            Check(clears == count * k * f.blocks, "cleanup covers full K, including inactive slots and nonleading poison bytes");
             uint32_t expectedReads = 0U;
             for (uint32_t p = begin; p < begin + count; ++p) for (uint32_t j = 0; j < k; ++j)
                 expectedReads += (f.masks[p] >> j) & 1U;

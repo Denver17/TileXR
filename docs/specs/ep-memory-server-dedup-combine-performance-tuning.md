@@ -957,3 +957,143 @@ FP32乘加及最终舍入不变。M4总发送数仍由M5继承，M4尾部发送�
 本次没有新增设备测试或性能数字。用户可对照`4861815`验证本次筛选修正的增量，并与
 优化5之前的`2800dac`比较最终整体收益；后者同时缺少优化6和后续M2细分打点，不能
 将跨版本总差值全部归因于单独一个模块。
+
+## 尝试优化点 7：M5 放宽 Flag 预读依赖，一次搬入全 TopK Flag
+
+### 状态与目标
+
+2026-09-22：最初按用户要求记录方案，随后获授权开始实现。以优化5/6 Vector筛选
+修订版本`7d737b6`为基线；本节方案已落实到kernel，开发验证记录见本节末尾，
+设备功能和性能收益仍待验证。
+
+目标是减少每次probe的Scalar循环及MTE2搬运指令下发，并允许下一token的Flag读取
+与上一token的Vector聚合/最终Cast重叠。仅改变M5检测路径，payload仍按SourceMask
+精确读取，权重、FP32聚合顺序、输出槽复用、pending调度及M4→M5交接保持原逻辑。
+本节记录本次性能实验对主设计CB05-02按mask密排Flag方案的修订；本次kernel改为
+全TopK检测，实验正确性前提和验证边界以本节为准。
+
+### 1. 去掉probe入口的过强同步
+
+基线`EpServerDedupSourceAggregate::Probe()`入口执行`Sync<V_MTE2>()`，会让Flag
+读取等待此前Vector队列中的聚合和最终Cast，甚至间接受输出槽`MTE3_V`等待影响。
+本次删除这一入口同步，保留搬入后的`MTE2_V`和ReduceSum后的`V_S`。
+
+正确性依据：检测的flags/work/probeSum与payload输入、计算和输出区域不重叠；
+上一probe返回前已有`V_S`，保证Vector不再读取检测buffer；首次probe之前的
+M4→M5阶段scratch复用已有MTE2/Vector到Scalar的交接；ClearFlags仅在最后一个
+就绪token之后复用flags区，此后不再probe。删除入口同步不应删除这些真实生命周期
+依赖，也不增加PIPE_ALL、核间同步或输出排空。
+
+效果边界：下一token的Flag MTE2可提前，但其ReduceSum仍与上一token聚合共用
+Vector队列，不会并行执行；输出槽复用导致的Vector阻塞也不会因此消失。当前token
+的yOut MTE3本来就可与后续检测重叠，本项不是首次开启该重叠。
+
+### 2. 全TopK Flag一次跨步读取，按mask的置位数量判断
+
+定义`N=ceilDiv(H*2,480)`，每个副本有N个512B包块，每块前480B为payload，后32B
+为Flag。一个源token的K个副本槽连续，因此它的K*N个Flag区形成统一512B步长。
+从该token的第0槽首个Flag开始，一次带步长DataCopy读取全部K槽的Flag：
+
+```cpp
+// 方案示意；结果GM按float寻址，packetBytes = N * 512。
+const uint32_t totalFlags = K * N;
+const uint32_t requiredCopies =
+    static_cast<uint32_t>(AscendC::GetBitCount<1>(static_cast<uint64_t>(mask)));
+const uint32_t expectedFlags = requiredCopies * N;
+auto src = resultFlags[(uint64_t(token) * K) * packetBytes / 4U + 120U];
+DataCopy(flagsUb, src, {uint16_t(totalFlags), 1U, 15U, 0U});
+Sync<HardEvent::MTE2_V>();
+ReduceSum(probeSum, flagsUb, work, 1U, totalFlags, 1U);
+Sync<HardEvent::V_S>();
+const bool ready = probeSum.GetValue(0U) == float(expectedFlags);
+```
+
+这里归约范围是`K*N`，期望值是`popcount(mask)*N`，两者不能混淆。每个32B Flag区
+只取首个FP32求和，其余7个float不参与判定；不按k拆成多次搬运或多次归约。
+“一次搬运”指一次DataCopy API提交，设备仍访问K*N个分散的32B区域，并非一个
+连续GM事务。实现时核对合法K/H下blockCount和ReduceSum参数上限，不能窄化截断。
+
+检测通过之后，Aggregate/Load仍只遍历mask置位的k，读取对应payload并乘对应
+weight；不读取无效槽payload，不使用weight是否为零代替mask，也不更改求和顺序。
+保留mask非零且无K范围外置位的输入检查；实际mask当前为uint32_t，零扩展为uint64_t
+即可使用位计数接口，不扩大接口位宽。
+
+### 3. 位计数接口与UB预算
+
+已直接核对blue目标CANN9.1.0安装树中的：
+
+- `ascendc/include/basic_api/interface/kernel_operator_scalar_intf.h`：
+  `template<int countValue> __aicore__ inline int64_t GetBitCount(uint64_t valueIn)`；
+  同文件注明旧`ScalarGetCountOfValue`应改用GetBitCount。
+- `ascendc/include/basic_api/impl/kernel_scalar.h`：`GetBitCountImpl<1>`调用`bcnt1`，
+  `<0>`调用`bcnt0`。本方案使用`GetBitCount<1>`，不使用查找首置位位置的接口。
+
+本次是头文件核实，不代表修改后的A5 kernel编译或性能验证已通过。实现优先在每次
+probe根据当前UB mask用Scalar位计数得到expected，无需新增每token常驻计数数组。
+
+当前`EpCombineM5FlagBytes/WorkBytes`已按完整K*N预留，并包含Vector完整读取所需
+尾部余量，故全K读取无需增加Flag/work容量，不挤占M4/M5共享payload输出槽，继续
+遵守240KiB预算。实现时仍需覆盖所有合法核划分和最大K/H布局。
+
+### 4. 全量求和成立的必要前提
+
+- 每个有效槽的N个Flag首值只能由本轮0单调变为1，并保留既有DataAsFlag发布契约。
+- mask无效槽在整轮内必须为0，M3/M4不能向这些槽发布；有效槽必须与mask一致。
+- 首次调用的结果区完成初始化清零；后续轮次继续执行已有全K槽Flag清理及窗口复用
+  完成约束，不只清理mask有效槽，不在每轮额外添加Host清零或阶段同步。
+
+在这些前提下，全部K*N个首值之和达到expected，当且仅当mask要求的所有分块到齐。
+不能把这个方案扩展成任意脏窗口也正确：例如无效槽残留1，可能抵消一个尚未到达的
+有效分块，导致假就绪；把等号改成大于等于并不能解决。该优化会让无效槽零值成为
+检测正确性的直接前提，必须在验证中显式覆盖。
+
+沿用现有Flag遗留边界：未重新初始化的通信域改变BS/K/H、数据角色或wire布局，
+不属于当前已确认复用范围。本项不关闭或扩张该遗留问题。
+
+### 5. 成本与验证计划
+
+设有效副本数m=popcount(mask)：旧probe为m次DataCopy、搬入32*m*N字节并归约
+m*N个首值；新probe为1次DataCopy、搬入32*K*N字节并归约K*N个首值。H=7168、
+K=6时N=30，读取固定5760B；若m=2，旧路径为2次/1920B，新路径1次/5760B；
+若m=6，读取量不变，调用数由6降至1；若m=1，调用数不变但读取量增加6倍。
+故减少指令下发不等同于必然降低总耗时，尤其要单独观察稀疏mask。
+
+后续实现验收应覆盖：
+
+1. 稀疏/全K/最高有效位、零权重但mask有效、乱序和分块部分到达；缺任一有效分块
+   时不得提前ready，未就绪仍继续扫描pending，yOut与原有oracle一致。
+2. 输入契约验证无效槽初始为零且没有发布者，全K清理后仍为零；反例说明脏无效槽
+   可能产生假就绪，不把违反前提的场景标记为受支持。
+3. 单轮、连续多轮、双窗口及合法mask变化，确认上一轮Flag不会干扰当前轮检测；
+   同时覆盖单token核、空任务核和最后一次probe转ClearFlags的buffer生命周期。
+4. Host替身核对全K跨步搬运范围、首float归约、payload仍仅按mask读取及精确数值；
+   Host同步替身不能证明真实MTE2/Vector/MTE3重叠，需目标编译及设备trace补充。
+5. CANN9.1/A5 profiling OFF/ON构建；使用现有run.sh的combine/both功能、多轮性能
+   和breakdown流程，与同配置基线比较M5及端到端时间。实验分析分别观察同步删除、
+   全K读取和二者组合，区分指令下发收益与额外Flag读取/规约成本，不预先宣称收益。
+
+### 实现及开发验证记录
+
+本次实现只调整M5 Probe：删除入口V_MTE2，GetBitCount<1>计算有效副本数，一次跨步
+读取全K*N Flag并做一次首float ReduceSum；payload和清理路径未改变。实现使用
+原有完整K预算，不新增buffer或同步。既有配置对全K清理的4095 blockCount上界
+也覆盖本次全K读取，合法参数不会在uint16_t转换时截断。
+
+- 本机最终M5默认32/32、Send16/Recv48、Send48/Recv16及profiling替身共4/4通过。
+  覆盖K1/6/32、BF16/FP16、最高位mask、超过255个Flag、部分分块未到齐、pending
+  乱序完成、mask有效但weight为零、payload精确读取、M4尾部和M5交接。
+- 补充同一窗口第三轮mask变化：前两轮分别使用双窗，第三轮复用窗口0，仅发布本轮
+  active槽；inactive槽不由夹具重新清零，先检查上一轮生产清理留下的完整32B零值。
+  包含旧active变inactive及旧inactive变active；全K检测不能依赖每轮测试重置窗口。
+- 旧M5夹具曾向inactive槽的Flag首值写7，现按新方案的零值前提改为0，其他7个float
+  仍保留毒值用于验证只归约首float。profiling夹具也显式建立合法的零值结果窗口。
+- 独立只读审查未发现可达实现缺陷；已补齐审查指出的同窗mask变化验证缺口。主线程
+  完成差异和简化检查，未引入新的抽象或改变其他模块行为。
+- 同一最终源码在blue的Combine及共享替身Dispatch回归共15/15通过，覆盖M1–M5、
+  profiling、count、source send和receive packet。
+- blue真实CANN9.1/A5的Combine及Dispatch kernel均完成profiling OFF/ON编译。
+  最终933个非文档源码/构建文件与远端快照摘要一致。证据、编译器版本、配置、产物
+  哈希与日志保存在`build/opt7-verification/`；本机记录为`build/opt7-host-tests.log`。
+
+这些检查不证明设备流水重叠或性能收益；用户A5设备上的单/多轮功能、performance和
+breakdown仍待验证。未将无效槽残留非零的通信窗口纳入支持范围。

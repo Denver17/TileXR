@@ -44,6 +44,12 @@ inline std::function<void(const void *, const void *, uint32_t)> &GmWriteObserve
     static std::function<void(const void *, const void *, uint32_t)> observer;
     return observer;
 }
+template<int countValue> inline int64_t GetBitCount(uint64_t value) {
+    static_assert(countValue == 0 || countValue == 1, "bit value must be zero or one");
+    int64_t ones = 0;
+    for (uint32_t bit = 0; bit < 64U; ++bit) ones += (value >> bit) & 1U;
+    return countValue == 1 ? ones : 64 - ones;
+}
 inline uint32_t GetBlockIdx() { return testCore; }
 inline std::function<void(const void *, uint32_t)> &GmReadObserver() {
     static std::function<void(const void *, uint32_t)> observer;

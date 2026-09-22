@@ -38,8 +38,11 @@ int main()
         };
         std::vector<uint32_t> synchronizationByCore[2][64];
         auto seedResults = [&]() {
-            // Remote return arrivals for all source slots, renewed each round.
+            // A fresh result window has zero inactive flags; only mask bit 0
+            // receives a remote return. Match the production initialization contract.
             const uint32_t blocks = (f.h * 2U + 479U) / 480U;
+            std::memset(f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
+                0, uint64_t(f.tiling.bs) * f.tiling.topK * blocks * 512U);
             for (uint32_t p = 0; p < f.tiling.bs; ++p) for (uint32_t b = 0; b < blocks; ++b) {
                 auto slot = f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
                     (uint64_t(p) * f.tiling.topK * blocks + b) * 512U;
