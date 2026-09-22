@@ -21,33 +21,18 @@ static_assert(kEpServerDedupCombineSendCoreNum + kEpServerDedupCombineRecvCoreNu
 static_assert(kEpServerDedupCombineRecvCoreNum >= 8, "eight notifier cores are Read cores");
 static_assert(56 - kEpServerDedupCombineSendCoreNum == kEpServerDedupCombineRecvCoreNum - 8,
     "notifier LocalID");
-static_assert(EpCombineM4InputLaneCount(10000, 7168, 1) > 0, "K1 budget");
-static_assert(EpCombineM4InputLaneCount(10000, 7168, 6) > 0, "main shape input budget");
-static_assert(EpCombineM4OutputLaneCount(10000, 7168, 6) > 0, "main shape output budget");
-static_assert(EpCombineM4InputLaneCount(10000, 7168, 32) > 0, "K32 budget");
-static_assert(EpCombineM4OutputLaneCount(10000, 7168, 32) > 0, "K32 output budget");
-static_assert(EpCombineM4InputLaneCount(10001, 7168, 6) == 0, "too many rows");
-static_assert(EpCombineM4InputLaneCount(10000, 0, 6) == 0, "zero width");
-static_assert(EpCombineM4InputLaneCount(10000, 7168, 0) == 0, "zero topk");
-static_assert(EpCombineM4InputLaneCount(10000, 7168, 33) == 0, "unsupported topk");
-static_assert(EpCombineM4FixedUbBytes(10000, 7168, 32) +
-    EpCombineM4InputLaneCount(10000, 7168, 32) * EpCombineAlign(7168 * 2, 32) +
-    EpCombineM4OutputLaneCount(10000, 7168, 32) * ((7168 * 2 + 479) / 480 * 512) <=
-    kEpServerDedupCombineM4UbBytes, "simultaneous resources fit the arena");
-static_assert(EpCombineM5InputLaneCount(96, 7168, 1) > 0, "M5 K1");
-static_assert(EpCombineM5InputLaneCount(96, 7168, 6) > 0, "M5 default");
-static_assert(EpCombineM5OutputLaneCount(96, 7168, 6) > 0, "M5 output");
-static_assert(EpCombineM5InputLaneCount(96, 7168, 32) > 0, "M5 K32");
-static_assert(EpCombineM5OutputLaneCount(96, 7168, 32) > 0, "M5 K32 output");
-static_assert(EpCombineM5TokenCount(0) == 0, "empty M5 partition budget");
-static_assert(EpCombineM5TokenCount(1) == 1, "M5 underfilled Send group");
-static_assert(EpCombineM5TokenCount(3 * kEpServerDedupCombineSendCoreNum) == 3,
-    "M5 partitions by Send cores");
-static_assert(EpCombineM5TokenCount(3 * kEpServerDedupCombineSendCoreNum + 1) == 4,
-    "M5 reserves the largest uneven Send segment");
-static_assert(EpCombineM5InputLaneCount(UINT32_MAX, 7168, 32) == 0, "BS metadata does not wrap");
-static_assert(EpCombineM5InputLaneCount(96, 0, 1) == 0, "M5 zero width");
-static_assert(EpCombineM5InputLaneCount(96, 7168, 33) == 0, "M5 bad K");
+static_assert(EpCombineM45Layout(10000, 96, 7168, 1).inputLanes > 0, "K1");
+static_assert(EpCombineM45Layout(10000, 96, 7168, 6).outputLanes > 0, "K6");
+static_assert(EpCombineM45Layout(10000, 96, 7168, 32).finalOutputLanes > 0, "K32");
+static_assert(EpCombineM45Layout(10001, 96, 7168, 6).inputLanes == 0, "row limit");
+static_assert(EpCombineM45Layout(10000, UINT32_MAX, 7168, 32).inputLanes == 0, "BS overflow");
+static_assert(EpCombineM45Layout(10000, 0, 7168, 6).inputLanes == 0, "zero BS");
+static_assert(EpCombineM45Layout(10000, 96, 0, 6).inputLanes == 0, "zero H");
+static_assert(EpCombineM45Layout(10000, 96, UINT32_MAX, 6).inputLanes == 0, "H overflow");
+static_assert(EpCombineM45Layout(10000, 96, 7168, 0).inputLanes == 0, "zero K");
+static_assert(EpCombineM45Layout(10000, 96, 7168, 33).inputLanes == 0, "K limit");
+static_assert(EpCombineM5TokenCount(3 * kEpServerDedupCombineRecvCoreNum + 1) == 4,
+    "largest uneven Recv segment");
 int main() {
     for (uint32_t tokens : {0U, 1U, 576U, 10000U}) {
         // The M3 prescan reuses an entire aligned row array, not a count-sized
@@ -55,22 +40,29 @@ int main() {
         const uint32_t count = (tokens + kEpServerDedupCombineSendCoreNum - 1) /
             kEpServerDedupCombineSendCoreNum;
         if (count * 12U > EpCombineAlign(tokens == 0 ? 4 : tokens * 4, 256)) return 1;
+        for (uint32_t bs : {1U, 96U, 512U, 16384U})
         for (uint32_t h : {1U, 17U, 240U, 241U, 7168U, 10000U, 16000U}) {
             for (uint32_t k : {1U, 6U, 32U}) {
-                const uint32_t reads = EpCombineM4InputLaneCount(tokens, h, k);
-                const uint32_t sends = EpCombineM4OutputLaneCount(tokens, h, k);
-                if (reads > 3 || sends > 8 || (reads == 0) != (sends == 0)) return 2;
-                if (!reads) continue;
-                const uint32_t packet = (h * 2U + 479U) / 480U * 512U;
-                const uint32_t used = EpCombineM4FixedUbBytes(tokens, h, k) +
-                    reads * EpCombineAlign(h * 2U, 32U) + sends * packet;
-                if (used > kEpServerDedupCombineM4UbBytes) return 3;
-                if (sends < 8 && used + packet <= kEpServerDedupCombineM4UbBytes) return 4;
+                const auto p = EpCombineM45Layout(tokens, bs, h, k);
+                if (p.inputLanes > 3 || p.outputLanes > 8 || p.finalOutputLanes > 7) return 2;
+                if (!p.inputLanes) { if (p.outputLanes) return 3; continue; }
+                if (p.totalBytes > kEpServerDedupCombineRecvUbBytes) return 4;
+                if (p.outputLanes < 8 && p.totalBytes + p.outputBytes <= kEpServerDedupCombineRecvUbBytes) return 5;
+                if (p.phaseOffset != 3 * p.computeBytes || p.inputOffset < p.phaseOffset + p.phaseBytes ||
+                    p.outputOffset < p.inputOffset + p.inputLanes * p.inputBytes ||
+                    p.totalBytes != kEpServerDedupCombineResidentUbBytes + p.outputOffset + p.outputLanes * p.outputBytes) return 6;
+                if (p.inputBytes < h * 2 || p.outputBytes < p.inputBytes || p.inputOffset % 32 || p.outputOffset % 32) return 7;
+                const uint32_t m4 = EpCombineM4TaskBytes(tokens) + 384 + 32*k*8 + p.inputBytes;
+                const uint64_t n = EpCombineM5TokenCount(bs);
+                const uint64_t m5 = 2*((n*4+31)/32*32) + (n*k*4+31)/32*32 +
+                    EpCombineM5FlagBytes(h,k) + EpCombineM5WorkBytes(h,k) + 32;
+                if (p.phaseBytes < m4 || p.phaseBytes < m5) return 8;
             }
         }
     }
-    if (EpCombineM4InputLaneCount(576, 7168, 6) != 3 ||
-        EpCombineM4OutputLaneCount(576, 7168, 6) != 6) return 5;
+    const auto main = EpCombineM45Layout(576, 96, 7168, 6);
+    if (main.inputLanes != 3 || main.outputLanes != 6 || main.finalOutputLanes != 6) return 9;
+    if (kEpServerDedupCombineSendCoreNum == 32 && main.totalBytes != 245280) return 10;
     return 0;
 }
 ''')

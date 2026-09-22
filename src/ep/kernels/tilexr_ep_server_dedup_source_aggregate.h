@@ -12,8 +12,8 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// M5 owns only the scratch beyond resident controls. Its caller drains M3
-// before Init; the zero flag source remains live until the final MTE3 drain.
+// M5 inherits M4 output slots and their completion events. Metadata/compute/input
+// are handed off after MTE2/Vector completion, while M4 MTE3 may still run.
 class ServerDedupSourceAggregate {
 public:
 #if defined(TILEXR_ENABLE_PROFILING)
@@ -21,19 +21,21 @@ public:
 #endif
     __aicore__ inline void Init(LocalTensor<uint8_t> scratch, GM_ADDR result,
         GM_ADDR masks, GM_ADDR weights, GM_ADDR yOut, uint32_t bs, uint32_t h,
-        uint32_t k, uint8_t dtype, uint32_t participant, uint32_t participants)
+        uint32_t k, uint8_t dtype, uint32_t participant, uint32_t participants,
+        const EpCombineM45WorkspaceLayout &layout, uint32_t outputStart)
     {
-        scratch_ = scratch; h_ = h; k_ = k; dtype_ = dtype;
+        scratch_ = scratch[layout.phaseOffset]; h_ = h; k_ = k; dtype_ = dtype;
         const uint32_t base = bs / participants, extra = bs % participants;
         count_ = base + (participant < extra ? 1U : 0U);
         begin_ = participant * base + (participant < extra ? participant : extra);
         blocks_ = (h * 2U + 479U) / 480U;
         inputBytes_ = blocks_ * 480U; packetBytes_ = blocks_ * 512U;
-        outputBytes_ = EpCombineAlign(h * 2U, 32U);
-        inputLanes_ = EpCombineM5InputLaneCount(bs, h, k);
-        outputLanes_ = EpCombineM5OutputLaneCount(bs, h, k);
+        outputBytes_ = layout.outputBytes;
+        outputStart_ = outputStart;
+        inputLanes_ = layout.inputLanes;
+        outputLanes_ = layout.finalOutputLanes;
         if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
-        // The shared Host budget uses the largest contiguous Send-core segment.
+        // The shared Host budget uses the largest contiguous Recv-core segment.
         const uint32_t owned = EpCombineM5TokenCount(bs);
         masks_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
         pending_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
@@ -41,11 +43,11 @@ public:
         flags_ = Allocate<float>(EpCombineM5FlagBytes(h, k));
         work_ = Allocate<float>(EpCombineM5WorkBytes(h, k));
         probeSum_ = Allocate<float>(32U);
-        cast_ = Allocate<float>(EpCombineAlign(h * 4U, 256U));
-        product_ = Allocate<float>(EpCombineAlign(h * 4U, 256U));
-        sum_ = Allocate<float>(EpCombineAlign(h * 4U, 256U));
-        inputs_ = Allocate<uint16_t>(inputLanes_ * inputBytes_);
-        outputs_ = Allocate<uint16_t>(outputLanes_ * outputBytes_);
+        cast_ = scratch.ReinterpretCast<float>();
+        product_ = scratch[layout.computeBytes].ReinterpretCast<float>();
+        sum_ = scratch[2U * layout.computeBytes].ReinterpretCast<float>();
+        inputs_ = scratch[layout.inputOffset].ReinterpretCast<uint16_t>();
+        outputs_ = scratch[layout.outputOffset].ReinterpretCast<uint16_t>();
         result_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(result));
         resultFlags_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(result));
         output_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(yOut));
@@ -65,7 +67,6 @@ public:
     {
         if (count_ == 0U) return;
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) SetFlag<HardEvent::V_MTE2>(lane);
-        for (uint32_t lane = 0; lane < outputLanes_; ++lane) SetFlag<HardEvent::MTE3_V>(lane);
         uint32_t remaining = count_, scan = 0U, completed = 0U;
         while (remaining != 0U) {
             const uint32_t token = pending_.GetValue(scan);
@@ -89,7 +90,6 @@ public:
             if (scan == remaining) scan = 0U; // re-probe the swapped real TokenId
         }
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) WaitFlag<HardEvent::V_MTE2>(lane);
-        for (uint32_t lane = 0; lane < outputLanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
     }
 
 private:
@@ -133,7 +133,11 @@ private:
     {
         const uint32_t flags = k_ * blocks_;
         Duplicate<float>(flags_, 0.0f, flags * 8U);
-        Sync<HardEvent::V_MTE3>();
+        // M4 may still own an unconsumed V_MTE3(7) publication for slot 7.
+        // Publish zero via Scalar instead: neither wait drains MTE3, and
+        // S_MTE3(7) is independent of the inherited payload event directions.
+        Sync<HardEvent::V_S>();
+        Sync<HardEvent::S_MTE3>();
         for (uint32_t p = begin_; p < begin_ + count_; ++p) {
             auto target = resultFlags_[uint64_t(p) * k_ * packetBytes_ / 4U + 120U];
             DataCopyPad(target, flags_,
@@ -174,7 +178,7 @@ private:
             ++member;
         }
         inputSequence_ += member;
-        const uint32_t outputLane = completed % outputLanes_;
+        const uint32_t outputLane = (outputStart_ + completed) % outputLanes_;
         WaitFlag<HardEvent::MTE3_V>(outputLane);
         auto output = outputs_[outputLane * outputBytes_ / 2U];
         Cast(output.template ReinterpretCast<T>(), sum_, RoundMode::CAST_RINT, h_);
@@ -191,7 +195,7 @@ private:
     GlobalTensor<float> resultFlags_;
     uint32_t used_ = 0U, h_ = 0U, k_ = 0U, dtype_ = 0U, begin_ = 0U, count_ = 0U;
     uint32_t blocks_ = 0U, inputBytes_ = 0U, packetBytes_ = 0U, outputBytes_ = 0U;
-    uint32_t inputLanes_ = 0U, outputLanes_ = 0U, inputSequence_ = 0U;
+    uint32_t inputLanes_ = 0U, outputLanes_ = 0U, inputSequence_ = 0U, outputStart_ = 0U;
 };
 } // namespace TileXREp
 #endif

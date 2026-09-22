@@ -55,19 +55,18 @@ int main()
             std::vector<uint32_t> expected {kEpServerDedupCombineProfileStart,
                 kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd,
                 kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd};
-            if (core >= kEpServerDedupCombineSendCoreNum) expected.insert(expected.end(), {
-                kEpServerDedupCombineProfileControlBegin, kEpServerDedupCombineProfileControlEnd,
-                kEpServerDedupCombineProfilePartialBegin, kEpServerDedupCombineProfilePartialEnd});
-            else {
-                expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
-                    kEpServerDedupCombineProfileDirectMte3End, kEpServerDedupCombineProfileDirectEnd,
-                    kEpServerDedupCombineProfileFinalBegin});
-                const uint32_t tasks = f.tiling.bs / kEpServerDedupCombineSendCoreNum +
-                    (core < f.tiling.bs % kEpServerDedupCombineSendCoreNum ? 1U : 0U);
+            if (core >= kEpServerDedupCombineSendCoreNum) {
+                expected.insert(expected.end(), {kEpServerDedupCombineProfileControlBegin,
+                    kEpServerDedupCombineProfileControlEnd, kEpServerDedupCombineProfilePartialBegin,
+                    kEpServerDedupCombineProfilePartialEnd, kEpServerDedupCombineProfileFinalBegin});
+                const uint32_t local = core - kEpServerDedupCombineSendCoreNum;
+                const uint32_t tasks = f.tiling.bs / kEpServerDedupCombineRecvCoreNum +
+                    (local < f.tiling.bs % kEpServerDedupCombineRecvCoreNum ? 1U : 0U);
                 for (uint32_t task = 0; task < tasks; ++task) expected.insert(expected.end(), {
                     kEpServerDedupCombineProfileFinalTokenBegin, kEpServerDedupCombineProfileFinalTokenEnd});
                 expected.push_back(kEpServerDedupCombineProfileFinalEnd);
-            }
+            } else expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
+                kEpServerDedupCombineProfileDirectMte3End, kEpServerDedupCombineProfileDirectEnd});
             expected.insert(expected.end(), {kEpServerDedupCombineProfileDrainBegin, kEpServerDedupCombineProfileDrainEnd,
                 kEpServerDedupCombineProfileEnd});
             Check(counts[core * 16U] == (expected.size() + 7U) / 8U * 8U && dropped[core * 16U] == 0U, "latest capture publishes actual padded count and resets dropped");
@@ -101,6 +100,12 @@ int main()
         std::vector<uint32_t> synchronization[2];
         for (uint32_t enabled = 0; enabled < 2U; ++enabled) {
             f.Hooks(reader, 0U);
+            for (uint32_t p = 0; p < f.tiling.bs; ++p) {
+                const float one = 1.0f;
+                auto slot = f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
+                    uint64_t(p) * f.tiling.topK * 512U;
+                std::memcpy(slot + 480U, &one, 4U);
+            }
             AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
                 synchronization[enabled].push_back(uint32_t(event) * 32U + id * 2U + uint32_t(set));
             };
@@ -115,7 +120,7 @@ int main()
             AscendC::EventObserver() = {};
             f.ResetHooks();
         }
-        Check(synchronization[0] == synchronization[1], "M4 profiling adds no hard-event synchronization");
+        Check(synchronization[0] == synchronization[1], "M4/M5 profiling adds no hard-event synchronization");
         const uint32_t tasks = (f.tokens + kEpServerDedupCombineRecvCoreNum - 1U) / kEpServerDedupCombineRecvCoreNum;
         const auto first = events.begin() + reader * capacity;
         const auto last = first + counts[reader * 16U];

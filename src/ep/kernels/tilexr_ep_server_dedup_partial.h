@@ -14,8 +14,8 @@
 namespace TileXREp {
 using namespace AscendC;
 
-// Read-core M4 owns this scratch only after M1/M2 completion. Task rows are
-// compacted before Init; all other views and event state are local to M4.
+// Recv-core M4 takes scratch after M1/M2. Task rows are compacted before Init;
+// output addresses and completion events remain live through the M5 handoff.
 class ServerDedupPartial {
 public:
 #if defined(TILEXR_ENABLE_PROFILING)
@@ -24,28 +24,28 @@ public:
     __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, TPipe *pipe,
         LocalTensor<uint8_t> scratch, GM_ADDR expert, GM_ADDR table2, GM_ADDR table3,
         uint32_t tokens, uint32_t count, uint32_t bs, uint32_t h, uint32_t k,
-        uint32_t experts, uint8_t dtype, uint64_t window)
+        uint32_t experts, uint8_t dtype, uint64_t window, const EpCombineM45WorkspaceLayout &layout)
     {
-        args_ = args; pipe_ = pipe; scratch_ = scratch; count_ = count;
+        args_ = args; pipe_ = pipe; scratch_ = scratch[layout.phaseOffset]; count_ = count;
         bs_ = bs; h_ = h; k_ = k; localExperts_ = experts / uint32_t(args->rankSize); dtype_ = dtype;
         window_ = window;
         blocks_ = (h * 2U + 479U) / 480U;
         packetBytes_ = blocks_ * 512U;
-        inputBytes_ = EpCombineAlign(h * 2U, 32U);
+        inputBytes_ = layout.inputBytes;
         stageStride_ = EpCombineAlign(h * 2U, 512U);
         stageBase_ = window + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + uint64_t(bs) * k * packetBytes_;
-        inputLanes_ = EpCombineM4InputLaneCount(tokens, h, k);
-        outputLanes_ = EpCombineM4OutputLaneCount(tokens, h, k);
+        inputLanes_ = layout.inputLanes;
+        outputLanes_ = layout.outputLanes;
         if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
         rows_ = Allocate<int32_t>(EpCombineM4TaskBytes(tokens));
         table2Ub_ = Allocate<int32_t>(EpCombineAlign(kEpServerDedupCombineM4TableRows * 12U, 32U));
         table3Ub_ = Allocate<uint32_t>(EpCombineAlign(kEpServerDedupCombineM4TableRows * k * 8U, 32U));
-        cast_ = Allocate<float>(EpCombineAlign(h * 4U, 256U));
-        product_ = Allocate<float>(EpCombineAlign(h * 4U, 256U));
-        sum_ = Allocate<float>(EpCombineAlign(h * 4U, 256U));
+        cast_ = scratch.ReinterpretCast<float>();
+        product_ = scratch[layout.computeBytes].ReinterpretCast<float>();
+        sum_ = scratch[2U * layout.computeBytes].ReinterpretCast<float>();
         low_ = Allocate<uint16_t>(blocks_ * 480U);
-        inputs_ = Allocate<uint16_t>(inputLanes_ * inputBytes_);
-        outputs_ = Allocate<uint8_t>(outputLanes_ * packetBytes_);
+        inputs_ = scratch[layout.inputOffset].ReinterpretCast<uint16_t>();
+        outputs_ = scratch[layout.outputOffset];
         expert_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(expert));
         table2_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(table2));
         table3_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(table3));
@@ -58,7 +58,6 @@ public:
         for (uint32_t lane = 0; lane < outputLanes_; ++lane) {
             Duplicate<float>(outputs_[lane * packetBytes_].ReinterpretCast<float>()[120U],
                 1.0f, flagMask, uint8_t(blocks_), 1U, 16U);
-            SetFlag<HardEvent::MTE3_V>(lane);
         }
         PipeBarrier<PIPE_V>();
         for (uint32_t task = 0; task < count_; ++task) {
@@ -79,10 +78,8 @@ public:
             Mark(kEpServerDedupCombineProfilePartialTokenEnd);
         }
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) WaitFlag<HardEvent::V_MTE2>(lane);
-        for (uint32_t lane = 0; lane < outputLanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
-        // Events are paired before the boundary. A future M5 may now overwrite
-        // scratch and establish its own views, without inheriting M4 state.
-        PipeBarrier<PIPE_ALL>();
+        // Output events and their UB sources remain owned by the shared ring.
+        // The caller hands off only MTE2/Vector before M5 reuses phase metadata.
     }
 
 private:

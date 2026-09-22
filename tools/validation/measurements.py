@@ -263,7 +263,7 @@ def combine_breakdown_timeline(run, config=None):
                 expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
                 if config["implemented_through"] in ("M4", "M5") and lane.core >= config.get("combine_send_core_num", 32):
                     expected.add("m4_partial")
-                if config["implemented_through"] == "M5" and lane.core < config.get("combine_send_core_num", 32):
+                if config["implemented_through"] == "M5" and lane.core >= config.get("combine_send_core_num", 32):
                     expected.add("m5_final")
                 token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final"}
                 actual = [sample.name for sample in lane.samples
@@ -271,17 +271,24 @@ def combine_breakdown_timeline(run, config=None):
                 if set(actual) != expected or len(actual) != len(expected):
                     raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))
                 samples = []
-                sequence = 0
+                sequences = {name: 0 for name in token_stages}
                 for sample in lane.samples:
                     if sample.name in token_stages:
                         if token_stages[sample.name] not in expected:
                             raise ValueError("Combine token/core role coverage mismatch: " + str(lane.core))
                         # records.v1 contains timestamps and event IDs, not TokenId.
-                        # Identify each issued task by its core-local execution order.
+                        # M4 and M5 share a core, but have independent task sets.
+                        # Identify each task by its module-local execution order.
+                        sequence = sequences[sample.name]
                         sample = replace(sample, instance_id=sequence,
                             attributes={**sample.attributes, "task_sequence": sequence,
+                                        "task_sequence_scope": "module/core",
                                         "timing": "instruction issue; no completion fence"})
-                        sequence += 1
+                        sequences[sample.name] += 1
+                    if sample.name == "m4_partial" and config["implemented_through"] == "M5":
+                        sample = replace(sample, attributes={**sample.attributes,
+                            "timing": "instruction issue and read/vector handoff; MTE3 may remain in flight",
+                            "mte3_completion_required": False})
                     if sample.name == "m3_mte3_complete" and "m3_direct" not in expected:
                         raise ValueError("Combine M3 completion marker on non-Send core")
                     samples.append(sample)
@@ -289,6 +296,8 @@ def combine_breakdown_timeline(run, config=None):
             launches.append(replace(launch, lanes=tuple(lanes)))
         return replace(run, launches=tuple(launches), attributes={**run.attributes,
             "scope": "full" if config["implemented_through"] == "M5" else "partial", "implemented_through": config["implemented_through"],
+            **({"m4_m5_handoff": "read/vector retired; output slots inherited without MTE3 drain"}
+               if config["implemented_through"] == "M5" else {}),
             "timing": "latest launch; module intervals and optional per-token instruction issue, no added fences"})
     if config and config.get("implemented_through") == "M2":
         common = {"kernel_total", "m1_init", "m1_select", "m1_stage_copy", "m1_prepare_publish", "m6_drain", "p21_delay_50us"}

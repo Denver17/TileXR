@@ -36,8 +36,10 @@ class M5MeasurementTests(unittest.TestCase):
         events = {}
         for core in range(64):
             reader = core >= self.config["combine_send_core_num"]
-            pairs = [0x3003, 0x3017, 0x3019 if reader else 0x301b,
-                     0x301d if reader else 0x301f, 0x3013]
+            pairs = [0x3003, 0x3017, 0x3019 if reader else 0x301b]
+            if reader:
+                pairs.extend((0x301d, 0x301f))
+            pairs.append(0x3013)
             rows = [(0, 0x3001)]
             for index, event in enumerate(pairs, 1):
                 rows.extend(((index * 1000, event), (index * 1000 + 500, event + 1)))
@@ -74,7 +76,7 @@ class M5MeasurementTests(unittest.TestCase):
             elif fault == "missing-module":
                 events[0] = [item for item in events[0] if item[1] not in (0x301b, 0x301c)]
             elif fault == "missing-final":
-                events[0] = [item for item in events[0] if item[1] not in (0x301f, 0x3020)]
+                events[32] = [item for item in events[32] if item[1] not in (0x301f, 0x3020)]
             else:
                 events[0].pop()
             with self.subTest(fault=fault), self.assertRaises(ValueError):
@@ -85,20 +87,20 @@ class M5MeasurementTests(unittest.TestCase):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 self.validate(bad)
 
-    def test_final_uses_send_cores_for_asymmetric_splits(self):
+    def test_final_uses_recv_cores_for_asymmetric_splits(self):
         for send in (16, 24, 40, 48, 56):
             with self.subTest(send=send):
                 self.config["combine_send_core_num"] = send
                 self.row["combine_control_publish_bytes"] = (64 * 8 + 8 * (64 - send)) * 32
                 evidence = self.capture(suffix="send-" + str(send))
                 self.validate(evidence)
-                self.assertEqual(evidence["stages_us"]["m5_final"]["sample_count"], send)
+                self.assertEqual(evidence["stages_us"]["m5_final"]["sample_count"], 64 - send)
                 self.assertEqual(evidence["stages_us"]["m4_partial"]["sample_count"], 64 - send)
                 events = self.events()
-                # Move only M5 to a Read core; the old role rule must be rejected.
-                final = [item for item in events[0] if item[1] in (0x301f, 0x3020)]
-                events[0] = [item for item in events[0] if item not in final]
-                events[send] = sorted(events[send] + final)
+                # Move only M5 back to a Send core; reject the old role rule.
+                final = [item for item in events[send] if item[1] in (0x301f, 0x3020)]
+                events[send] = [item for item in events[send] if item not in final]
+                events[0] = sorted(events[0] + final)
                 with self.assertRaises(ValueError):
                     self.capture(events, "bad-send-" + str(send))
 
@@ -107,9 +109,10 @@ class M5MeasurementTests(unittest.TestCase):
         for core, rows in events.items():
             if core < 32:
                 rows.append((3450, 0x3021))
+            else:
                 for task in range(3):
-                    rows.extend(((4010 + task * 100, 0x3024), (4050 + task * 100, 0x3025)))
-            elif core == 32:
+                    rows.extend(((5010 + task * 100, 0x3024), (5050 + task * 100, 0x3025)))
+            if core == 32:
                 rows.extend(((4010, 0x3022), (4050, 0x3023)))
             rows.sort()
         evidence = self.capture(events, "tokens")
@@ -119,23 +122,30 @@ class M5MeasurementTests(unittest.TestCase):
         trace = json.loads(Path(evidence["artifacts"]["perfetto_trace.json"]).read_text())["traceEvents"]
         issued = [e for e in trace if e["name"].startswith("m5_token_issue[") and e["ph"] == "X"]
         self.assertEqual(len(issued), 96)
-        for core in range(32):
+        for core in range(32, 64):
             tasks = [e for e in issued if e["args"]["core"] == core]
             self.assertEqual([e["name"] for e in tasks], ["m5_token_issue[%d]" % t for t in range(3)])
             self.assertEqual(len({e["tid"] for e in tasks}), 1)  # one row, successive tasks
+            self.assertEqual([e["args"]["attributes"]["task_sequence"] for e in tasks], list(range(3)))
+        partial_tokens = [e for e in trace if e["name"].startswith("m4_token_issue[") and e["ph"] == "X"]
+        self.assertEqual([e["name"] for e in partial_tokens], ["m4_token_issue[0]"])
+        partial_stages = [e for e in trace if e["name"] == "m4_partial" and e["ph"] == "X"]
+        self.assertEqual(len(partial_stages), 32)
+        self.assertTrue(all(e["args"]["attributes"]["mte3_completion_required"] is False for e in partial_stages))
+        self.assertTrue(all("MTE3 may remain in flight" in e["args"]["attributes"]["timing"] for e in partial_stages))
         markers = [e for e in trace if e["name"] == "m3_mte3_complete"]
         self.assertEqual(len(markers), 32)
         self.assertTrue(all(e["ph"] == "i" for e in markers))
         for fault in ("missing-end", "missing-task", "wrong-role", "outside-parent"):
             bad = copy.deepcopy(events)
             if fault == "missing-end":
-                bad[0].remove((4050, 0x3025))
+                bad[32].remove((5050, 0x3025))
             elif fault == "missing-task":
-                bad[0].remove((4010, 0x3024)); bad[0].remove((4050, 0x3025))
+                bad[32].remove((5010, 0x3024)); bad[32].remove((5050, 0x3025))
             elif fault == "wrong-role":
-                bad[32].extend(((4100, 0x3024), (4150, 0x3025)))
+                bad[0].extend(((3100, 0x3024), (3150, 0x3025)))
             else:
-                bad[0].extend(((4600, 0x3024), (4700, 0x3025)))
+                bad[32].extend(((5600, 0x3024), (5700, 0x3025)))
             bad = {core: sorted(rows) for core, rows in bad.items()}
             with self.subTest(fault=fault), self.assertRaises(ValueError):
                 self.validate(self.capture(bad, fault + "-token"))

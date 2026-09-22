@@ -133,20 +133,20 @@ int main()
     auto unsupportedLane = valid;
     unsupportedLane.combine.h = 100000;
     Rejected(unsupportedLane, TILEXR_ERROR_NOT_SUPPORT);
-    // M4 now uses a 240KiB budget on A5. Its old 190KiB boundary no longer
-    // limits this shape; M5's unchanged workspace becomes the limiting stage.
+    // The shared 240KiB layout includes live M4 output while M5 reads/computes.
+    // Check the admitted/rejected side of the new full-workspace boundaries.
     g_args.peerMemBytes = 8ULL * 1024U * 1024U * 1024U;
     auto laneBoundary = valid;
     laneBoundary.combine.h = 10145;
     Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "old M4 UB boundary now fits");
-    laneBoundary.combine.h = 11008;
-    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last complete M5 lane fits UB");
-    laneBoundary.combine.h = 11009;
+    laneBoundary.combine.h = 12960;
+    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last shared input/output pair fits UB");
+    laneBoundary.combine.h = 12961;
     Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
     laneBoundary.combine.topK = 32;
-    laneBoundary.combine.h = 8896;
+    laneBoundary.combine.h = 11280;
     Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "K32 fits M5 probe and aggregate buffers");
-    laneBoundary.combine.h = 8897;
+    laneBoundary.combine.h = 11281;
     Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
     auto oversizedMetadata = valid;
     oversizedMetadata.combine.bs = UINT32_MAX;

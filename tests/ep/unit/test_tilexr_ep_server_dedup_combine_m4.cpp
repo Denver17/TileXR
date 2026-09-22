@@ -209,12 +209,17 @@ void TestArenaBudget()
     for (uint32_t tokens : {0U, 10000U}) for (uint32_t k : {1U, 6U, 32U}) {
         AscendC::TPipe pipe;
         AscendC::TBuf<> arena;
-        pipe.InitBuffer(arena, TileXREp::kEpServerDedupCombineM4UbBytes);
+        pipe.InitBuffer(arena, TileXREp::kEpServerDedupCombineRecvUbBytes);
         TileXR::CommArgs args {}; args.rankSize = 16;
         TileXREp::ServerDedupPartial partial;
+        const auto layout = TileXREp::EpCombineM45Layout(tokens, 96U, 7168U, k);
+        for (uint32_t lane = 0; lane < layout.outputLanes; ++lane)
+            AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(lane);
         partial.Init(&args, &pipe, arena.Get<uint8_t>()[TileXREp::kEpServerDedupCombineResidentUbBytes],
-            nullptr, nullptr, nullptr, tokens, 0U, 96U, 7168U, k, 96U, TileXR::TILEXR_DATA_TYPE_BFP16, 0U);
+            nullptr, nullptr, nullptr, tokens, 0U, 96U, 7168U, k, 96U, TileXR::TILEXR_DATA_TYPE_BFP16, 0U, layout);
         partial.Process(); // touches every output lane's last flag, checking actual UB bounds
+        for (uint32_t lane = 0; lane < layout.outputLanes; ++lane)
+            AscendC::WaitFlag<AscendC::HardEvent::MTE3_V>(lane);
     }
 }
 void TestFullWidthHeader()
@@ -247,6 +252,9 @@ int main()
                 7168U, 6U, bf16, false, 0U);
         }
         TestPartial(10000U, 17U, 6U, true, true, 0U);
+        // Dense tiny-H tasks overlap the old type staging and new phase rows;
+        // relocation must preserve unread source indices (backward memmove).
+        TestPartial(10000U, 1U, 2U, true, false, 0U);
         TestFullWidthHeader();
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     AscendC::GmWriteObserver() = {};

@@ -115,15 +115,16 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
         // Schedule M1's local member before the Read producer. This Host model
         // has no concurrent cores; later hooks supply delayed result arrivals.
         if (partial) { f.Hooks(0U, w); f.Run(0U, w, true); f.ResetHooks(); }
-        for (uint32_t core = kEpServerDedupCombineSendCoreNum; core < 64U; ++core) {
+        for (uint32_t core = 0U; core < kEpServerDedupCombineSendCoreNum; ++core) {
             f.Hooks(core, w); f.Run(core, w); f.ResetHooks();
         }
         Check(std::all_of(f.output.begin(), f.output.end(), [](uint16_t v) { return v == 0x6b6bU; }),
-            "Read cores never aggregate source tokens or write yOut");
-        for (uint32_t core = 0; core < kEpServerDedupCombineSendCoreNum; ++core) {
+            "Send cores never aggregate source tokens or write yOut");
+        for (uint32_t core = kEpServerDedupCombineSendCoreNum; core < 64U; ++core) {
             f.Hooks(core, w);
-            const uint32_t base = bs / kEpServerDedupCombineSendCoreNum, extra = bs % kEpServerDedupCombineSendCoreNum;
-            const uint32_t begin = core * base + std::min(core, extra), count = base + (core < extra);
+            const uint32_t local = core - kEpServerDedupCombineSendCoreNum;
+            const uint32_t base = bs / kEpServerDedupCombineRecvCoreNum, extra = bs % kEpServerDedupCombineRecvCoreNum;
+            const uint32_t begin = local * base + std::min(local, extra), count = base + (local < extra);
             std::vector<uint32_t> probes, writes;
             uint32_t firstAttempts = 0U, clears = 0U, payloadReads = 0U, reductions = 0U, flagCopies = 0U;
             auto priorRead = AscendC::GmReadObserver();
@@ -176,7 +177,7 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
                 }
             };
             f.Run(core, w);
-            Check(f.prepareProbes == 0U && f.readyProbes == 0U, "M5 Send cores do not wait on M2");
+            Check(f.readyProbes != 0U, "Recv cores execute M2 before M4/M5");
             Check(AscendC::PendingMte3().empty(), "full Process M6 drains flag clears and yOut");
             Check(writes.size() == count && std::set<uint32_t>(writes.begin(), writes.end()).size() == count,
                 "pending swap deletes each true TokenId once");
@@ -222,8 +223,7 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
 void TestDirectThenFinal(bool bf16)
 {
     SourceFixture f(1U, 257U, 6U, bf16, true);
-    // Reuse the two-row backing for one DIRECT and one stage row. Send core 0
-    // must return its real DIRECT before repurposing the scratch for M5.
+    // Send core returns DIRECT; a separate Recv core owns the final token.
     f.partial = false; f.types[0] = 1;
     f.masks[0] = 3U; f.weights[0] = 0.375f; f.weights[1] = -0.125f;
     for (uint32_t col = 0; col < f.h; ++col) f.expert[col] = f.Bits(0U, 0U, col);
@@ -242,6 +242,14 @@ void TestDirectThenFinal(bool bf16)
             }
         };
         f.Run(0U, w);
+        f.ResetHooks();
+        f.Hooks(kEpServerDedupCombineSendCoreNum, w);
+        auto controlRead = AscendC::GmReadObserver();
+        AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
+            controlRead(src, bytes);
+            if (src == f.Slot(w, 0U, 0U) + 480U) ++probes;
+        };
+        f.Run(kEpServerDedupCombineSendCoreNum, w);
         Check(probes == 1U && std::equal(f.expected.begin(), f.expected.end(), f.output.begin()),
             "nonempty M3 followed by M5 preserves DIRECT payload and produces yOut");
         Check(AscendC::PendingMte3().empty(), "Send core drains output and flag clear");
@@ -249,17 +257,141 @@ void TestDirectThenFinal(bool bf16)
     }
 }
 
+// Deferred copies retire up to the waited event's publication position.
+// This checks ownership and issue order, not physical hardware overlap.
+void TestPartialTailOverlap(bool bf16)
+{
+    SourceFixture f(2U * kEpServerDedupCombineRecvCoreNum, 257U, 6U, bf16, true);
+    f.Seed(0U);
+    f.Hooks(0U, 0U); f.Run(0U, 0U, true); f.ResetHooks(); // M1 stage producer
+    std::memset(f.Slot(0U, 0U, 0U), 0, f.packet); // real M4 must publish this partial
+    f.Hooks(kEpServerDedupCombineSendCoreNum, 0U);
+    const auto controlRead = AscendC::GmReadObserver();
+    bool probedPending = false, loadedPending = false, computedPending = false, partialWritten = false;
+    AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
+        controlRead(src, bytes);
+        if (src == f.Slot(0U, 0U, 0U) + 480U && !partialWritten) {
+            probedPending = !AscendC::PendingMte3().empty();
+            // Model eventual DMA progress after M5 has processed the ready
+            // token. Reusing an unused output seed no longer flushes M4.
+            if (computedPending) AscendC::CompleteMte3();
+        }
+        if (src == f.Slot(0U, 1U, 0U) && bytes == f.blocks * 480U)
+            loadedPending = !AscendC::PendingMte3().empty();
+    };
+    AscendC::MulsObserver() = [&]() {
+        if (loadedPending && !partialWritten && !AscendC::PendingMte3().empty()) computedPending = true;
+    };
+    AscendC::GmWriteObserver() = [&](const void *dst, const void *src, uint32_t bytes) {
+        if (dst != f.Slot(0U, 0U, 0U)) return;
+        Check(probedPending && loadedPending && computedPending,
+            "M5 probes, reads and computes before M4 tail MTE3 completes");
+        Check(bytes == f.packet, "retained M4 output has original packet size");
+        const auto packet = static_cast<const uint8_t *>(src);
+        for (uint32_t col = 0; col < f.h; ++col) {
+            uint16_t actual; std::memcpy(&actual, packet + col / 240U * 512U + col % 240U * 2U, 2U);
+            Check(actual == f.Bits(0U, 0U, col), "M5 metadata/compute did not overwrite in-flight partial");
+        }
+        partialWritten = true;
+    };
+    f.Run(kEpServerDedupCombineSendCoreNum, 0U);
+    AscendC::GmWriteObserver() = {}; AscendC::MulsObserver() = {}; f.ResetHooks();
+    Check(partialWritten && computedPending, "nonempty M4 and M5 asynchronous handoff exercised");
+    Check(std::equal(f.expected.begin(), f.expected.begin() + 2U * f.h, f.output.begin()),
+        "ready token then delayed partial produce correct yOut");
+    Check(AscendC::PendingMte3().empty(), "all leftover M4 slots and M5 clears drained");
+}
+
+void TestEightPartialSlots(bool bf16)
+{
+    // One source token on this Recv core; last-token flag clear occurs while
+    // all eight M4 output slots (including V_MTE3 event 7) are still in flight.
+    SourceFixture f(kEpServerDedupCombineRecvCoreNum, 257U, 6U, bf16, true);
+    f.partial = false;
+    f.tokens = 8U * kEpServerDedupCombineRecvCoreNum;
+    f.types.assign(f.tokens, 2); f.counts.assign(32U, int32_t(f.tokens));
+    f.expert.resize(uint64_t(f.tokens) * f.h);
+    f.table.resize(f.tokens * 3U); f.relay.assign(f.tokens * f.k * 2U, 0U);
+    const float one = 1.0f;
+    for (uint32_t row = 0; row < f.tokens; ++row) {
+        f.table[row * 3U] = 8; f.table[row * 3U + 1U] = row % f.bs; f.table[row * 3U + 2U] = 0;
+        f.relay[row * f.k * 2U] = 1; f.relay[row * f.k * 2U + 2U] = f.rank * 2U;
+        std::memcpy(&f.relay[row * f.k * 2U + 1U], &one, 4U);
+        for (uint32_t col = 0; col < f.h; ++col) f.expert[uint64_t(row) * f.h + col] = Ref::ExpertBits(bf16, 8, row, col);
+    }
+    auto stage = f.peers[f.rank].data() + f.stageOffset + uint64_t(4U * f.bs) * f.stageStride;
+    std::memset(stage, 0, f.h * 2U); // zero-weight member, still read from a valid slot
+    f.Seed(0U);
+    f.Hooks(kEpServerDedupCombineSendCoreNum, 0U);
+    const auto controlRead = AscendC::GmReadObserver();
+    const auto target = f.peers[8].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
+    bool loaded = false, computed = false, clearPublished = false;
+    uint32_t retired = 0U;
+    AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
+        controlRead(src, bytes);
+        if (src == f.Slot(0U, 0U, 0U) && bytes == f.blocks * 480U)
+            loaded = !AscendC::PendingMte3().empty();
+    };
+    AscendC::MulsObserver() = [&]() {
+        if (loaded && retired == 0U) computed = !AscendC::PendingMte3().empty();
+    };
+    AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
+        if (event == AscendC::HardEvent::S_MTE3 && id == 7U && set) {
+            Check(retired == 0U && AscendC::PendingMte3().size() == 8U,
+                "clear publishes in a distinct event direction while all eight partials remain pending");
+            clearPublished = true;
+        }
+    };
+    AscendC::GmWriteObserver() = [&](const void *dst, const void *src, uint32_t bytes) {
+        const auto offset = reinterpret_cast<uintptr_t>(dst) - reinterpret_cast<uintptr_t>(target);
+        Check(offset < uint64_t(8U) * f.k * f.packet && bytes == f.packet, "M4 writes one of eight original destinations");
+        Check(loaded && computed && clearPublished, "M5 clear, payload and compute precede M4 tail retirement");
+        const uint32_t row = uint32_t(offset / (f.k * f.packet));
+        const auto packet = static_cast<const uint8_t *>(src);
+        for (uint32_t col = 0; col < f.h; ++col) {
+            uint16_t actual; std::memcpy(&actual, packet + col / 240U * 512U + col % 240U * 2U, 2U);
+            Check(actual == f.expert[uint64_t(row) * f.h + col], "all eight retained M4 source slots preserve payload");
+        }
+        ++retired;
+    };
+    f.Run(kEpServerDedupCombineSendCoreNum, 0U);
+    AscendC::GmWriteObserver() = {}; AscendC::MulsObserver() = {}; AscendC::EventObserver() = {}; f.ResetHooks();
+    Check(retired == 8U && std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()),
+        "O8/O5=7 handoff produces yOut and retires unused slot7 exactly once");
+    Check(AscendC::PendingMte3().empty(), "no inherited packet or clear remains after M6");
+}
+
+void TestPartialWithoutSource(bool bf16)
+{
+    SourceFixture f(1U, 17U, 6U, bf16, true);
+    f.types = {2, 2};
+    std::copy(f.table.begin(), f.table.begin() + 3, f.table.begin() + 3);
+    std::copy(f.relay.begin(), f.relay.begin() + 12, f.relay.begin() + 12);
+    f.Seed(0U);
+    // Both partials address a valid staged member; only Recv local 1 runs here.
+    auto stage = f.peers[f.rank].data() + f.stageOffset + 8U * f.stageStride;
+    std::memcpy(stage, f.expert.data() + f.h, f.h * 2U);
+    f.Hooks(kEpServerDedupCombineSendCoreNum + 1U, 0U);
+    uint32_t writes = 0;
+    AscendC::GmWriteObserver() = [&](const void *dst, const void *, uint32_t) {
+        if (dst == f.Slot(0U, 0U, 0U)) ++writes;
+    };
+    f.Run(kEpServerDedupCombineSendCoreNum + 1U, 0U);
+    AscendC::GmWriteObserver() = {}; f.ResetHooks();
+    Check(writes == 1 && AscendC::PendingMte3().empty(), "empty M5 still retires nonempty M4 and all seeded outputs");
+    Check(std::all_of(f.output.begin(), f.output.end(), [](uint16_t x) { return x == 0x6b6b; }),
+        "zero-owned source role never writes yOut");
+}
+
 void TestBudget()
 {
     for (uint32_t k : {1U, 6U, 32U}) {
-        Check(EpCombineM5InputLaneCount(96U, 7168U, k) != 0U, "main H7168 shape fits for K1/K6/K32");
-        const uint64_t used = EpCombineM5FixedUbBytes(96U, 7168U, k) +
-            EpCombineM5InputLaneCount(96U, 7168U, k) * ((7168U * 2U + 479U) / 480U * 480U) +
-            EpCombineM5OutputLaneCount(96U, 7168U, k) * EpCombineAlign(7168U * 2U, 32U);
-        Check(used <= kEpServerDedupCombineUbBytes, "M5 simultaneous resource budget");
+        const auto layout = EpCombineM45Layout(10000U, 96U, 7168U, k);
+        Check(layout.inputLanes != 0U && layout.totalBytes <= kEpServerDedupCombineRecvUbBytes,
+            "simultaneous shared M4/M5 resources fit Recv arena");
     }
-    Check(EpCombineM5InputLaneCount(UINT32_MAX, 7168U, 32U) == 0U, "large BS cannot wrap metadata budget");
-    Check(EpCombineM5InputLaneCount(1U, 0U, 1U) == 0U, "zero H rejected");
+    Check(EpCombineM45Layout(0U, UINT32_MAX, 7168U, 32U).inputLanes == 0U, "metadata cannot wrap");
+    Check(EpCombineM45Layout(0U, 1U, 0U, 1U).inputLanes == 0U, "zero H rejected");
 }
 
 int main()
@@ -268,9 +400,13 @@ int main()
         TestBudget();
         for (bool bf16 : {true, false}) {
             TestDirectThenFinal(bf16);
-            RunCase(1U, 17U, 1U, bf16, false); // zero-owned Send roles, single-bit mask
-            RunCase(3U * kEpServerDedupCombineSendCoreNum + 1U, 257U, 6U, bf16, true);
-            RunCase(3U * kEpServerDedupCombineSendCoreNum + 1U, 257U, 32U, bf16, false);
+            TestPartialTailOverlap(bf16);
+            TestEightPartialSlots(bf16);
+            TestPartialWithoutSource(bf16);
+            RunCase(1U, 17U, 1U, bf16, false); // zero-owned Recv roles, single-bit mask
+            RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 6U, bf16, true);
+            RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 32U, bf16, false);
+            RunCase(9U * kEpServerDedupCombineRecvCoreNum + 1U, 17U, 6U, bf16, false); // wrap inherited output slots
             RunCase(1U, 7168U, 32U, bf16, false); // >255 total flag repeats and wide tails
         }
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }

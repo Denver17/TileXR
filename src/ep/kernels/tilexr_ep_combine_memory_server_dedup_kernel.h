@@ -40,7 +40,7 @@ public:
         // mutable GM scalar across launches. This 32B temporary becomes the
         // independent M2 prepare sum only after the scalar count is consumed.
         pipe_.InitBuffer(arena_, core_ >= kEpServerDedupCombineSendCoreNum ?
-            kEpServerDedupCombineM4UbBytes : kEpServerDedupCombineUbBytes);
+            kEpServerDedupCombineRecvUbBytes : kEpServerDedupCombineUbBytes);
         prepareSum_ = Allocate<float>(32U);
         GlobalTensor<int32_t> prefix;
         prefix.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(sendCounts));
@@ -57,9 +57,9 @@ public:
         }
         tokens_ = uint32_t(tokens);
         lanes_ = EpCombinePayloadLaneCount(tokens_, h_);
-        if (lanes_ == 0U || EpCombineM4InputLaneCount(tokens_, h_, topK_) == 0U ||
-            EpCombineM4OutputLaneCount(tokens_, h_, topK_) == 0U ||
-            EpCombineM5InputLaneCount(bs_, h_, topK_) == 0U || EpCombineM5OutputLaneCount(bs_, h_, topK_) == 0U) { Trap(); return; } // Also enforced by Host for the maximum valid count.
+        workspace_ = EpCombineM45Layout(tokens_, bs_, h_, topK_);
+        if (lanes_ == 0U || workspace_.inputLanes == 0U) { Trap(); return; }
+
         blocks_ = (h_ * 2U + 479U) / 480U;
         laneBytes_ = blocks_ * 480U;
         resultStride_ = blocks_ * 512U;
@@ -104,18 +104,18 @@ public:
             Mark(kEpServerDedupCombineProfilePartialBegin);
             ReturnPartialTokens();
             Mark(kEpServerDedupCombineProfilePartialEnd);
+            Mark(kEpServerDedupCombineProfileFinalBegin);
+            AggregateSourceTokens();
+            DrainSharedOutputs();
+            Mark(kEpServerDedupCombineProfileFinalEnd);
         } else {
             Mark(kEpServerDedupCombineProfileDirectBegin);
             ReturnDirectTokens();
-            // Existing M3-to-M5 scratch boundary. MTE3_V waits alone do not
-            // order Scalar timestamps: mark completion after this full drain.
-            // Also covers empty-DIRECT cores that still own source tokens.
+            // MTE3_V alone does not order Scalar timestamps. Keep the existing
+            // full drain for the M3 completion marker on Send cores.
             PipeBarrier<PIPE_ALL>();
             Mark(kEpServerDedupCombineProfileDirectMte3End);
             Mark(kEpServerDedupCombineProfileDirectEnd);
-            Mark(kEpServerDedupCombineProfileFinalBegin);
-            AggregateSourceTokens();
-            Mark(kEpServerDedupCombineProfileFinalEnd);
         }
         Mark(kEpServerDedupCombineProfileDrainBegin);
         // Retires prepare publication, both zero sources and server notification;
@@ -138,8 +138,15 @@ private:
         aggregate.Init(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
             args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
             masksAddr_, weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
-            core_, kEpServerDedupCombineSendCoreNum);
+            core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum,
+            workspace_, (partialTasks_ % workspace_.outputLanes) % workspace_.finalOutputLanes);
         aggregate.Process();
+    }
+    __aicore__ inline void DrainSharedOutputs()
+    {
+        // Includes unused seeds, leftover M4 sends and slot 7 when M5 uses 0..6.
+        for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane)
+            WaitFlag<HardEvent::MTE3_V>(lane);
     }
     __aicore__ inline void Mark(uint32_t event)
     {
@@ -331,18 +338,31 @@ private:
         const uint32_t base = uint32_t(selected_) / readers, extra = uint32_t(selected_) % readers;
         const uint32_t count = base + (localCore < extra ? 1U : 0U);
         const uint32_t start = localCore * base + (localCore < extra ? localCore : extra);
-        if (count == 0U) return;
-        // The compact destination lies in the old type array, disjoint from
-        // packedUb_. Only this core's rows survive subsequent scratch reuse.
-        for (uint32_t task = 0; task < count; ++task)
-            typeUb_.SetValue(task, packedUb_.GetValue(start + task));
-        ServerDedupPartial partial;
+        partialTasks_ = count;
+        // Seed exactly once, including empty M4. M5 inherits these events.
+        for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane)
+            SetFlag<HardEvent::MTE3_V>(lane);
+        if (count != 0U) {
+            // First compact out of the Gather array. Then memmove backwards:
+            // for small H the new metadata target overlaps this staging range.
+            for (uint32_t task = 0; task < count; ++task)
+                typeUb_.SetValue(task, packedUb_.GetValue(start + task));
+            auto scratch = arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes];
+            auto rows = scratch[workspace_.phaseOffset].ReinterpretCast<int32_t>();
+            for (uint32_t task = count; task != 0U; --task)
+                rows.SetValue(task - 1U, typeUb_.GetValue(task - 1U));
+            ServerDedupPartial partial;
 #if defined(TILEXR_ENABLE_PROFILING)
-        partial.SetProfiling(&profile_);
+            partial.SetProfiling(&profile_);
 #endif
-        partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
-            expertAddr_, tableAddr_, relayAddr_, tokens_, count, bs_, h_, topK_, experts_, dtype_, window_);
-        partial.Process();
+            partial.Init(args_, &pipe_, scratch, expertAddr_, tableAddr_, relayAddr_,
+                tokens_, count, bs_, h_, topK_, experts_, dtype_, window_, workspace_);
+            partial.Process();
+        }
+        // Retire only input and Vector users before scalar metadata reuse.
+        // M4 output slots and MTE3_V events stay live for M5's per-slot waits.
+        Sync<HardEvent::MTE2_S>();
+        Sync<HardEvent::V_S>();
     }
     __aicore__ inline void WaitFlags(GlobalTensor<float> gm, LocalTensor<float> input,
         LocalTensor<float> work, LocalTensor<float> sum, uint32_t flags)
@@ -384,6 +404,8 @@ private:
         DataCopyPad(ready, readyZero_, {1U, 512U, 0U, 0U, 0U});
     }
 
+    EpCombineM45WorkspaceLayout workspace_ {};
+    uint32_t partialTasks_ = 0U;
     TPipe pipe_;
     TBuf<> arena_;
     const __gm__ TileXR::CommArgs *args_ = nullptr;

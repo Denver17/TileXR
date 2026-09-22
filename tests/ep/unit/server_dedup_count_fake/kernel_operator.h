@@ -62,11 +62,17 @@ inline std::vector<std::function<void()>> &PendingMte3() {
     static std::vector<std::function<void()>> pending;
     return pending;
 }
-inline void CompleteMte3() {
-    auto pending = std::move(PendingMte3());
-    PendingMte3().clear();
+inline uint64_t &CompletedMte3() { static uint64_t count = 0; return count; }
+inline void CompleteMte3Through(uint64_t position) {
+    if (position <= CompletedMte3()) return;
+    auto &queue = PendingMte3();
+    const size_t count = std::min<uint64_t>(position - CompletedMte3(), queue.size());
+    std::vector<std::function<void()>> pending(queue.begin(), queue.begin() + count);
+    queue.erase(queue.begin(), queue.begin() + count);
+    CompletedMte3() += count;
     for (const auto &copy : pending) copy();
 }
+inline void CompleteMte3() { CompleteMte3Through(CompletedMte3() + PendingMte3().size()); }
 inline void IssueMte3(std::function<void()> copy) {
     if (DeferMte3()) PendingMte3().push_back(std::move(copy));
     else copy();
@@ -81,10 +87,14 @@ inline std::function<void(const void *, const void *, uint32_t)> &PaddedWriteObs
     return observer;
 }
 template<HardEvent> std::array<bool, 8> &Events() { static std::array<bool, 8> state {}; return state; }
+template<HardEvent> std::array<uint64_t, 8> &EventMte3Positions() {
+    static std::array<uint64_t, 8> positions {}; return positions;
+}
 template<HardEvent E> void SetFlag(TEventID id) {
     ++TestSyncOperations();
     if (id >= 8 || Events<E>()[id]) throw std::runtime_error("duplicate or invalid event publication");
     Events<E>()[id] = true;
+    EventMte3Positions<E>()[id] = CompletedMte3() + PendingMte3().size();
     if (EventObserver()) EventObserver()(E, id, true);
 }
 template<HardEvent E> void WaitFlag(TEventID id) {
@@ -92,7 +102,8 @@ template<HardEvent E> void WaitFlag(TEventID id) {
     if (id >= 8 || !Events<E>()[id]) throw std::runtime_error("waiting on an unpublished event");
     Events<E>()[id] = false;
     if (E == HardEvent::MTE3_V || E == HardEvent::MTE3_S || E == HardEvent::MTE3_MTE2)
-        CompleteMte3();
+        // A seeded slot cannot retire writes issued after its publication.
+        CompleteMte3Through(EventMte3Positions<E>()[id]);
     if (EventObserver()) EventObserver()(E, id, false);
 }
 template<Pipeline P> void PipeBarrier() {

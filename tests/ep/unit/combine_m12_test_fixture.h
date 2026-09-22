@@ -27,6 +27,7 @@ struct CombineModuleTestAccess {
             if (kernel.core_ >= 56U) kernel.NotifyServerCard();
             kernel.WaitServerReady();
             kernel.ReturnPartialTokens();
+            kernel.DrainSharedOutputs();
         } else kernel.ReturnDirectTokens();
         AscendC::PipeBarrier<PIPE_ALL>();
     }

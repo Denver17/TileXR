@@ -19,8 +19,8 @@ constexpr uint32_t kEpServerDedupCombineMaxTokenNum = 10000U;
 // 512-row table-2 cache, per-level detector/work/result/zero buffers and flags.
 constexpr uint32_t kEpServerDedupCombineUbBytes = 190U * 1024U;
 // CANN 9.1 __NPU_ARCH__=3510 exposes 248 KiB after the 8 KiB system
-// reservation. M4 keeps another 8 KiB margin; M1/M3/M5 retain their budgets.
-constexpr uint32_t kEpServerDedupCombineM4UbBytes = 240U * 1024U;
+// reservation. Recv M4/M5 share 240 KiB; M1/M3 retain their budget.
+constexpr uint32_t kEpServerDedupCombineRecvUbBytes = 240U * 1024U;
 constexpr uint32_t kEpServerDedupCombineM4MaxInputLanes = 3U;
 constexpr uint32_t kEpServerDedupCombineTableRows = 512U;
 // Even before metadata is reserved, one admitted input/output pair has fewer
@@ -67,40 +67,10 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4TaskBytes(uint32_t tokens)
     return EpCombineAlign(((tokens + kEpServerDedupCombineRecvCoreNum - 1U) /
         kEpServerDedupCombineRecvCoreNum) * 4U, 32U);
 }
-TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4FixedUbBytes(uint32_t tokens, uint32_t h, uint32_t k)
-{
-    return kEpServerDedupCombineResidentUbBytes + EpCombineM4TaskBytes(tokens) +
-        EpCombineAlign(kEpServerDedupCombineM4TableRows * 12U, 32U) +
-        EpCombineAlign(kEpServerDedupCombineM4TableRows * k * 8U, 32U) +
-        3U * EpCombineAlign(h * 4U, 256U) + ((h * 2U + 479U) / 480U) * 480U;
-}
-TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4InputLaneCount(uint32_t tokens, uint32_t h, uint32_t k)
-{
-    if (tokens > kEpServerDedupCombineMaxTokenNum || h == 0U ||
-        h > kEpServerDedupCombineM4UbBytes / 2U || k == 0U || k > 32U) return 0U;
-    const uint32_t fixed = EpCombineM4FixedUbBytes(tokens, h, k);
-    const uint32_t output = ((h * 2U + 479U) / 480U) * 512U;
-    if (fixed + output > kEpServerDedupCombineM4UbBytes) return 0U;
-    // Keep one compute workspace and at most three rolling input lanes.
-    // All remaining capacity goes to independent output lanes below.
-    const uint32_t lanes = (kEpServerDedupCombineM4UbBytes - fixed - output) / EpCombineAlign(h * 2U, 32U);
-    return lanes > kEpServerDedupCombineM4MaxInputLanes ? kEpServerDedupCombineM4MaxInputLanes : lanes;
-}
-TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4OutputLaneCount(uint32_t tokens, uint32_t h, uint32_t k)
-{
-    const uint32_t input = EpCombineM4InputLaneCount(tokens, h, k);
-    if (input == 0U) return 0U;
-    const uint32_t free = kEpServerDedupCombineM4UbBytes - EpCombineM4FixedUbBytes(tokens, h, k) -
-        input * EpCombineAlign(h * 2U, 32U);
-    const uint32_t lanes = free / (((h * 2U + 479U) / 480U) * 512U);
-    return lanes > 8U ? 8U : lanes;
-}
-// M5 reserves event 7 for the shared flag probe/clear, independently of both
-// payload rings (events 0..6). M3 releases every event before this arena reuse.
-constexpr uint32_t kEpServerDedupCombineM5MaxLanes = 7U;
+// M5 uses payload event IDs 0..6 and reserves 7 for probe/clear.
 TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5TokenCount(uint32_t bs)
 {
-    return bs / kEpServerDedupCombineSendCoreNum + (bs % kEpServerDedupCombineSendCoreNum != 0U);
+    return bs / kEpServerDedupCombineRecvCoreNum + (bs % kEpServerDedupCombineRecvCoreNum != 0U);
 }
 TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5FlagBytes(uint32_t h, uint32_t k)
 {
@@ -113,36 +83,51 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5WorkBytes(uint32_t h, uint32_t k
     // The intermediate B floats are reduced with full 256B vector loads.
     return EpCombineAlign(k * ((h * 2U + 479U) / 480U) * 4U, 256U);
 }
-TILEXR_EP_COMBINE_CONSTEXPR uint64_t EpCombineM5FixedUbBytes(uint32_t bs, uint32_t h, uint32_t k)
+// Offsets are relative to the scratch after resident control buffers. Only
+// phase metadata changes meaning; output slots stay live across M4 -> M5.
+struct EpCombineM45WorkspaceLayout {
+    uint32_t computeBytes = 0U, phaseOffset = 0U, phaseBytes = 0U;
+    uint32_t inputOffset = 0U, outputOffset = 0U;
+    uint32_t inputBytes = 0U, outputBytes = 0U;
+    uint32_t inputLanes = 0U, outputLanes = 0U, finalOutputLanes = 0U;
+    uint32_t totalBytes = 0U;
+};
+TILEXR_EP_COMBINE_CONSTEXPR EpCombineM45WorkspaceLayout EpCombineM45Layout(
+    uint32_t tokens, uint32_t bs, uint32_t h, uint32_t k)
 {
+    EpCombineM45WorkspaceLayout result {};
+    if (tokens > kEpServerDedupCombineMaxTokenNum || bs == 0U || h == 0U ||
+        h > kEpServerDedupCombineRecvUbBytes / 12U || k == 0U || k > 32U) return result;
     const uint64_t owned = EpCombineM5TokenCount(bs);
-    return kEpServerDedupCombineResidentUbBytes +
-        2U * ((owned * 4U + 31U) / 32U * 32U) +
+    const uint64_t partial = EpCombineM4TaskBytes(tokens) + 384U +
+        EpCombineAlign(kEpServerDedupCombineM4TableRows * k * 8U, 32U) +
+        ((h * 2U + 479U) / 480U) * 480U;
+    const uint64_t final = 2U * ((owned * 4U + 31U) / 32U * 32U) +
         (owned * k * 4U + 31U) / 32U * 32U + EpCombineM5FlagBytes(h, k) +
-        EpCombineM5WorkBytes(h, k) + 32U + 3U * EpCombineAlign(h * 4U, 256U);
-}
-TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5InputLaneCount(uint32_t bs, uint32_t h, uint32_t k)
-{
-    if (bs == 0U || h == 0U || h > kEpServerDedupCombineUbBytes / 2U || k == 0U || k > 32U) return 0U;
-    const uint64_t fixed = EpCombineM5FixedUbBytes(bs, h, k);
-    const uint32_t output = EpCombineAlign(h * 2U, 32U);
-    if (fixed + output > kEpServerDedupCombineUbBytes) return 0U;
-    const uint32_t lanes = uint32_t((kEpServerDedupCombineUbBytes - fixed - output) /
-        (((h * 2U + 479U) / 480U) * 480U));
-    return lanes > kEpServerDedupCombineM5MaxLanes ? kEpServerDedupCombineM5MaxLanes : lanes;
-}
-TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5OutputLaneCount(uint32_t bs, uint32_t h, uint32_t k)
-{
-    const uint32_t input = EpCombineM5InputLaneCount(bs, h, k);
-    if (input == 0U) return 0U;
-    const uint64_t free = kEpServerDedupCombineUbBytes - EpCombineM5FixedUbBytes(bs, h, k) -
-        input * (((h * 2U + 479U) / 480U) * 480U);
-    const uint32_t lanes = uint32_t(free / EpCombineAlign(h * 2U, 32U));
-    return lanes > kEpServerDedupCombineM5MaxLanes ? kEpServerDedupCombineM5MaxLanes : lanes;
+        EpCombineM5WorkBytes(h, k) + 32U;
+    const uint64_t phase = partial > final ? partial : final;
+    const uint32_t compute = EpCombineAlign(h * 4U, 256U);
+    const uint64_t fixed = kEpServerDedupCombineResidentUbBytes + 3U * compute + phase;
+    const uint32_t input = ((h * 2U + 479U) / 480U) * 480U;
+    const uint32_t output = ((h * 2U + 479U) / 480U) * 512U;
+    if (fixed + input + output > kEpServerDedupCombineRecvUbBytes) return result;
+    const uint32_t reads = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - output) / input);
+    result.inputLanes = reads > kEpServerDedupCombineM4MaxInputLanes ?
+        kEpServerDedupCombineM4MaxInputLanes : reads;
+    const uint32_t writes = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - result.inputLanes * input) / output);
+    result.outputLanes = writes > 8U ? 8U : writes;
+    result.finalOutputLanes = result.outputLanes > 7U ? 7U : result.outputLanes;
+    result.computeBytes = compute;
+    result.phaseOffset = 3U * compute; result.phaseBytes = uint32_t(phase);
+    result.inputOffset = result.phaseOffset + result.phaseBytes;
+    result.outputOffset = result.inputOffset + result.inputLanes * input;
+    result.inputBytes = input; result.outputBytes = output;
+    result.totalBytes = kEpServerDedupCombineResidentUbBytes + result.outputOffset + result.outputLanes * output;
+    return result;
 }
 // Three FP32 H buffers alone bound H, and therefore K*N. The admitted
 // per-token flag clear fits CANN's 12-bit DataCopyPad blockCount (4095).
-static_assert(32U * ((2U * (kEpServerDedupCombineUbBytes / 12U) + 479U) / 480U) <= 4095U,
+static_assert(32U * ((2U * (kEpServerDedupCombineRecvUbBytes / 12U) + 479U) / 480U) <= 4095U,
     "M5 flag clear blockCount budget");
 #undef TILEXR_EP_COMBINE_CONSTEXPR
 } // namespace TileXREp

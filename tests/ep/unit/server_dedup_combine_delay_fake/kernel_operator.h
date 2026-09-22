@@ -54,9 +54,15 @@ template<class T> void Cast(LocalTensor<T> dst, LocalTensor<float> src, RoundMod
     if (mode != RoundMode::CAST_RINT) throw std::runtime_error("downcast requires nearest-even CAST_RINT");
     for (uint32_t i = 0; i < count; ++i) { T value; TestEncode(value, src.GetValue(i)); dst.SetValue(i, value); }
 }
+inline std::function<void()> &MulsObserver()
+{
+    static std::function<void()> observer;
+    return observer;
+}
 inline void Muls(LocalTensor<float> dst, LocalTensor<float> src, float scalar, uint32_t count)
 {
     for (uint32_t i = 0; i < count; ++i) { volatile float value = src.GetValue(i) * scalar; dst.SetValue(i, value); }
+    if (MulsObserver()) MulsObserver()();
 }
 inline void Add(LocalTensor<float> dst, LocalTensor<float> a, LocalTensor<float> b, uint32_t count)
 {

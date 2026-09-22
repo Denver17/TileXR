@@ -3,8 +3,8 @@
 #include <cstdint>
 namespace TileXREp {
 // Latest capture only. Covers two records per token plus module boundaries:
-// M4 owns at most 1250 rows/core; M5 metadata alone costs >=12 bytes/token
-// in a 190 KiB arena, so its per-core task count stays below 16384.
+// Each Recv core owns M4 <=1250 rows and M5 <20480 tokens (metadata alone
+// costs >=12 bytes/token in 240 KiB). Their combined capture fits 65536.
 constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 65536U;
 constexpr uint32_t kEpServerDedupCombineProfileStart = 0x3001U;
 constexpr uint32_t kEpServerDedupCombineProfileEnd = 0x3002U;
