@@ -22,6 +22,8 @@ constexpr uint32_t kEpServerDedupCombineUbBytes = 190U * 1024U;
 // reservation. Recv M4/M5 share 240 KiB; M1/M3 retain their budget.
 constexpr uint32_t kEpServerDedupCombineRecvUbBytes = 240U * 1024U;
 constexpr uint32_t kEpServerDedupCombineM4MaxInputLanes = 3U;
+constexpr uint32_t kEpServerDedupCombineM5MaxInputLanes = 7U; // MTE2_V(7) belongs to probe
+constexpr uint32_t kEpServerDedupCombineM5MaxOutputLanes = 2U;
 constexpr uint32_t kEpServerDedupCombineTableRows = 512U;
 // Even before metadata is reserved, one admitted input/output pair has fewer
 // than 256 blocks, so packing never narrows an oversized vector repeat count.
@@ -82,7 +84,7 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM4TaskBytes(uint32_t tokens)
     return EpCombineAlign(((tokens + kEpServerDedupCombineRecvCoreNum - 1U) /
         kEpServerDedupCombineRecvCoreNum) * 4U, 32U);
 }
-// M5 uses payload event IDs 0..6 and reserves 7 for probe/clear.
+// M5 input events use IDs 0..6; MTE2_V(7) is reserved for probe.
 TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5TokenCount(uint32_t bs)
 {
     return bs / kEpServerDedupCombineRecvCoreNum + (bs % kEpServerDedupCombineRecvCoreNum != 0U);
@@ -102,7 +104,7 @@ TILEXR_EP_COMBINE_CONSTEXPR uint32_t EpCombineM5WorkBytes(uint32_t h, uint32_t k
 // phase metadata changes meaning; output slots stay live across M4 -> M5.
 struct EpCombineM45WorkspaceLayout {
     uint32_t computeBytes = 0U, phaseOffset = 0U, phaseBytes = 0U;
-    uint32_t inputOffset = 0U, outputOffset = 0U;
+    uint32_t inputOffset = 0U, outputOffset = 0U, finalInputOffset = 0U;
     uint32_t inputBytes = 0U, outputBytes = 0U;
     uint32_t inputLanes = 0U, outputLanes = 0U, finalOutputLanes = 0U;
     uint32_t totalBytes = 0U;
@@ -131,13 +133,57 @@ TILEXR_EP_COMBINE_CONSTEXPR EpCombineM45WorkspaceLayout EpCombineM45Layout(
         kEpServerDedupCombineM4MaxInputLanes : reads;
     const uint32_t writes = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - result.inputLanes * input) / output);
     result.outputLanes = writes > 8U ? 8U : writes;
-    result.finalOutputLanes = result.outputLanes > 7U ? 7U : result.outputLanes;
+    result.finalOutputLanes = result.outputLanes > kEpServerDedupCombineM5MaxOutputLanes ?
+        kEpServerDedupCombineM5MaxOutputLanes : result.outputLanes;
     result.computeBytes = compute;
     result.phaseOffset = 3U * compute; result.phaseBytes = uint32_t(phase);
     result.inputOffset = result.phaseOffset + result.phaseBytes;
+    result.finalInputOffset = result.phaseOffset + uint32_t(final);
     result.outputOffset = result.inputOffset + result.inputLanes * input;
     result.inputBytes = input; result.outputBytes = output;
     result.totalBytes = kEpServerDedupCombineResidentUbBytes + result.outputOffset + result.outputLanes * output;
+    return result;
+}
+// M5 reuses all space after its own metadata except the retained physical
+// output slots. Each input remembers which M4 sends must retire before overwrite.
+struct EpCombineM5WorkspaceLayout {
+    uint32_t inputLanes = 0U;
+    uint32_t inputOffsets[kEpServerDedupCombineM5MaxInputLanes] = {};
+    uint32_t inputRetireMasks[kEpServerDedupCombineM5MaxInputLanes] = {};
+    uint32_t outputSlots[kEpServerDedupCombineM5MaxOutputLanes] = {};
+};
+TILEXR_EP_COMBINE_CONSTEXPR EpCombineM5WorkspaceLayout EpCombineM5Layout(
+    const EpCombineM45WorkspaceLayout &shared, uint32_t partialTasks)
+{
+    EpCombineM5WorkspaceLayout result {};
+    if (shared.outputLanes == 0U || shared.inputBytes == 0U) return result;
+    // Keep the two latest M4 sends; with fewer sends include unused slots.
+    const uint32_t retained = partialTasks < shared.finalOutputLanes ? partialTasks : shared.finalOutputLanes;
+    const uint32_t first = (partialTasks - retained) % shared.outputLanes;
+    for (uint32_t lane = 0; lane < shared.finalOutputLanes; ++lane)
+        result.outputSlots[lane] = (first + lane) % shared.outputLanes;
+    const uint32_t limit = kEpServerDedupCombineRecvUbBytes - kEpServerDedupCombineResidentUbBytes;
+    uint32_t cursor = shared.finalInputOffset;
+    while (result.inputLanes < kEpServerDedupCombineM5MaxInputLanes && cursor + shared.inputBytes <= limit) {
+        bool overlapsOutput = false;
+        for (uint32_t lane = 0; lane < shared.finalOutputLanes; ++lane) {
+            const uint32_t begin = shared.outputOffset + result.outputSlots[lane] * shared.outputBytes;
+            if (cursor < begin + shared.outputBytes && cursor + shared.inputBytes > begin) {
+                cursor = begin + shared.outputBytes;
+                overlapsOutput = true;
+                break;
+            }
+        }
+        if (overlapsOutput) continue;
+        const uint32_t inputLane = result.inputLanes++;
+        result.inputOffsets[inputLane] = cursor;
+        for (uint32_t slot = 0; slot < shared.outputLanes; ++slot) {
+            const uint32_t begin = shared.outputOffset + slot * shared.outputBytes;
+            if (cursor < begin + shared.outputBytes && cursor + shared.inputBytes > begin)
+                result.inputRetireMasks[inputLane] |= 1U << slot;
+        }
+        cursor += shared.inputBytes;
+    }
     return result;
 }
 // Three FP32 H buffers alone bound H, and therefore K*N. The admitted

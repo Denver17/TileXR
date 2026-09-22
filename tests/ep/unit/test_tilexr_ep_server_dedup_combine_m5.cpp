@@ -359,7 +359,7 @@ void TestEightPartialSlots(bool bf16)
             clearPublished = true;
         }
         if (clearPublished && event == AscendC::HardEvent::MTE3_V && !set && !inheritedWait) {
-            Check(id == 0U, "M5 inherits cumulative eight sends, not the final server's three");
+            Check(id == 6U, "M5 keeps the latest two of eight sends, not the final server's three");
             inheritedWait = true;
         }
     };
@@ -383,7 +383,7 @@ void TestEightPartialSlots(bool bf16)
     f.Run(kEpServerDedupCombineSendCoreNum, 0U);
     AscendC::GmWriteObserver() = {}; AscendC::MulsObserver() = {}; AscendC::EventObserver() = {}; f.ResetHooks();
     Check(retired == 8U && inheritedWait && std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()),
-        "O8/O5=7 handoff produces yOut and retires unused slot7 exactly once");
+        "O8/O5=2 handoff produces yOut and retires retained slot7 exactly once");
     Check(AscendC::PendingMte3().empty(), "no inherited packet or clear remains after M6");
 }
 
@@ -409,6 +409,73 @@ void TestPartialWithoutSource(bool bf16)
         "zero-owned source role never writes yOut");
 }
 
+// Wide inputs cross old output boundaries; deferred M4 copies inspect their UB
+// sources at retirement, catching premature overwrite rather than just layout errors.
+void TestInputReclaimsPartialSlots(bool bf16, uint32_t tasksPerCore, uint32_t topk = 6U)
+{
+    SourceFixture f(std::max(kEpServerDedupCombineRecvCoreNum, tasksPerCore), 7168U, topk, bf16, false);
+    f.tokens = tasksPerCore * kEpServerDedupCombineRecvCoreNum;
+    f.types.assign(f.tokens, 2); f.counts.assign(32U, int32_t(f.tokens));
+    f.expert.resize(uint64_t(f.tokens) * f.h);
+    f.table.resize(f.tokens * 3U); f.relay.assign(f.tokens * f.k * 2U, 0U);
+    f.half = f.stageOffset + f.stageStride + 512U; f.args.peerMemBytes = 2U * f.half;
+    for (uint32_t r = 8; r < 16; ++r) {
+        f.peers[r].resize(2U * f.half, 0U); f.args.peerMems[r] = f.peers[r].data();
+    }
+    f.peers[6].resize(2U * f.half, 0U); f.args.peerMems[6] = f.peers[6].data();
+    std::memset(f.peers[f.rank].data() + f.stageOffset, 0, f.h * 2U);
+    const float one = 1.0f;
+    for (uint32_t row = 0; row < f.tokens; ++row) {
+        f.table[row * 3U] = 6; f.table[row * 3U + 1U] = row / kEpServerDedupCombineRecvCoreNum;
+        f.table[row * 3U + 2U] = 0;
+        f.relay[row * f.k * 2U] = 1; f.relay[row * f.k * 2U + 2U] = f.rank * 2U;
+        std::memcpy(&f.relay[row * f.k * 2U + 1U], &one, 4U);
+        for (uint32_t col = 0; col < f.h; ++col)
+            f.expert[uint64_t(row) * f.h + col] = Ref::ExpertBits(bf16, 8U, row, col);
+    }
+    f.masks[0] = topk == 32U ? 0xffffffffU : (1U << topk) - 1U; f.Seed(0U);
+    f.Hooks(kEpServerDedupCombineSendCoreNum, 0U);
+    const auto controlRead = AscendC::GmReadObserver();
+    uint32_t retired = 0U, payloadReads = 0U, reclaimWaits = 0U;
+    bool m5Started = false, bridgePending = false;
+    AscendC::GmReadObserver() = [&](const void *src, uint32_t bytes) {
+        controlRead(src, bytes);
+        if (src == f.Slot(0U, 0U, 0U) + 480U) m5Started = true;
+        if (bytes != f.blocks * 480U) return;
+        for (uint32_t k = 0; k < f.k; ++k) if (src == f.Slot(0U, 0U, k)) {
+            ++payloadReads;
+            Check(!bridgePending, "MTE3-to-Vector reclaim is bridged to MTE2 before overwrite");
+            Check(retired <= tasksPerCore - 2U, "new input reads do not drain retained M4 tail sends");
+        }
+    };
+    AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID, bool set) {
+        if (m5Started && payloadReads < f.k && event == AscendC::HardEvent::MTE3_V && !set) {
+            bridgePending = true; ++reclaimWaits;
+        }
+        if (event == AscendC::HardEvent::V_MTE2 && !set) bridgePending = false;
+    };
+    AscendC::GmWriteObserver() = [&](const void *dst, const void *src, uint32_t bytes) {
+        const uintptr_t base = reinterpret_cast<uintptr_t>(f.peers[6].data()) + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
+        const uintptr_t address = reinterpret_cast<uintptr_t>(dst);
+        Check(address >= base && address < base + uint64_t(tasksPerCore) * f.k * f.packet,
+            "partial uses original remote destination");
+        const uint32_t row = uint32_t((address - base) / (f.k * f.packet)) * kEpServerDedupCombineRecvCoreNum;
+        Check(bytes == f.packet, "partial retains its original wire stride");
+        const auto packet = static_cast<const uint8_t *>(src);
+        for (uint32_t col = 0; col < f.h; ++col) {
+            uint16_t actual;
+            std::memcpy(&actual, packet + (col / 240U) * 512U + (col % 240U) * 2U, 2U);
+            Check(actual == f.expert[uint64_t(row) * f.h + col], "input reclamation preserves pending M4 payload");
+        }
+        ++retired;
+    };
+    f.Run(kEpServerDedupCombineSendCoreNum, 0U);
+    AscendC::GmWriteObserver() = {}; AscendC::EventObserver() = {}; f.ResetHooks();
+    Check(payloadReads == topk && reclaimWaits != 0U, "payload inputs exercise inherited output reclamation and lane reuse");
+    Check(retired == tasksPerCore && AscendC::PendingMte3().empty(), "every M4 send retires once");
+    Check(std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()), "reclaimed inputs produce exact yOut");
+}
+
 void TestBudget()
 {
     for (uint32_t k : {1U, 6U, 32U}) {
@@ -428,6 +495,10 @@ int main()
             TestDirectThenFinal(bf16);
             TestPartialTailOverlap(bf16);
             TestEightPartialSlots(bf16);
+            TestInputReclaimsPartialSlots(bf16, 6U);
+            TestInputReclaimsPartialSlots(bf16, 7U); // retained outputs wrap the physical ring
+            TestInputReclaimsPartialSlots(bf16, 11U);
+            TestInputReclaimsPartialSlots(bf16, 11U, 32U);
             TestPartialWithoutSource(bf16);
             RunCase(1U, 17U, 1U, bf16, false); // zero-owned Recv roles, single-bit mask
             RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 6U, bf16, true);

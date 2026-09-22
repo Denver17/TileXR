@@ -113,8 +113,8 @@ public:
             ReturnPartialTokens();
             Mark(kEpServerDedupCombineProfilePartialEnd);
             Mark(kEpServerDedupCombineProfileFinalBegin);
-            AggregateSourceTokens();
-            DrainSharedOutputs();
+            const uint32_t retiredOutputs = AggregateSourceTokens();
+            DrainSharedOutputs(retiredOutputs);
             Mark(kEpServerDedupCombineProfileFinalEnd);
         } else {
             Mark(kEpServerDedupCombineProfileDirectBegin);
@@ -137,7 +137,7 @@ public:
     }
 
 private:
-    __aicore__ inline void AggregateSourceTokens()
+    __aicore__ inline uint32_t AggregateSourceTokens()
     {
         ServerDedupSourceAggregate aggregate;
 #if defined(TILEXR_ENABLE_PROFILING)
@@ -147,14 +147,15 @@ private:
             args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
             masksAddr_, weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
             core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum,
-            workspace_, (partialTasks_ % workspace_.outputLanes) % workspace_.finalOutputLanes);
-        aggregate.Process();
+            workspace_, partialTasks_);
+        return aggregate.Process();
     }
-    __aicore__ inline void DrainSharedOutputs()
+    __aicore__ inline void DrainSharedOutputs(uint32_t retiredOutputs = 0U)
     {
-        // Includes unused seeds, leftover M4 sends and slot 7 when M5 uses 0..6.
+        // M5 already consumed slots repurposed as inputs. Retire the remaining
+        // physical slots exactly once, including unused seeds and M5 outputs.
         for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane)
-            WaitFlag<HardEvent::MTE3_V>(lane);
+            if (((retiredOutputs >> lane) & 1U) == 0U) WaitFlag<HardEvent::MTE3_V>(lane);
     }
     __aicore__ inline void Mark(uint32_t event)
     {

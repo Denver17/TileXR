@@ -15,6 +15,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="tilexr-combine-config-") as directory:
         source = Path(directory) / "config.cpp"
         source.write_text('''#include <initializer_list>
+#include <algorithm>
 #include "ep_memory_server_dedup_combine_config.h"
 using namespace TileXREp;
 static_assert(kEpServerDedupCombineSendCoreNum + kEpServerDedupCombineRecvCoreNum == 64, "all cores");
@@ -44,7 +45,7 @@ int main() {
         for (uint32_t h : {1U, 17U, 240U, 241U, 7168U, 10000U, 16000U}) {
             for (uint32_t k : {1U, 6U, 32U}) {
                 const auto p = EpCombineM45Layout(tokens, bs, h, k);
-                if (p.inputLanes > 3 || p.outputLanes > 8 || p.finalOutputLanes > 7) return 2;
+                if (p.inputLanes > 3 || p.outputLanes > 8 || p.finalOutputLanes > 2) return 2;
                 if (!p.inputLanes) { if (p.outputLanes) return 3; continue; }
                 if (p.totalBytes > kEpServerDedupCombineRecvUbBytes) return 4;
                 if (p.outputLanes < 8 && p.totalBytes + p.outputBytes <= kEpServerDedupCombineRecvUbBytes) return 5;
@@ -56,13 +57,49 @@ int main() {
                 const uint64_t n = EpCombineM5TokenCount(bs);
                 const uint64_t m5 = 2*((n*4+31)/32*32) + (n*k*4+31)/32*32 +
                     EpCombineM5FlagBytes(h,k) + EpCombineM5WorkBytes(h,k) + 32;
-                if (p.phaseBytes < m4 || p.phaseBytes < m5) return 8;
+                if (p.phaseBytes < m4 || p.phaseBytes < m5 || p.finalInputOffset != p.phaseOffset + m5) return 8;
+                for (uint32_t tasks = 0; tasks < 3 * p.outputLanes + 2; ++tasks) {
+                    const auto f = EpCombineM5Layout(p, tasks);
+                    if (!f.inputLanes || f.inputLanes > 7 || f.inputLanes < p.inputLanes) return 11;
+                    uint32_t kept = 0, boundaries[2] = {};
+                    for (uint32_t o = 0; o < p.finalOutputLanes; ++o) {
+                        if (f.outputSlots[o] >= p.outputLanes || (kept >> f.outputSlots[o] & 1)) return 12;
+                        kept |= 1U << f.outputSlots[o];
+                        boundaries[o] = p.outputOffset + f.outputSlots[o] * p.outputBytes;
+                    }
+                    for (uint32_t recent = 0; recent < std::min(tasks, p.finalOutputLanes); ++recent)
+                        if (!(kept & (1U << ((tasks - 1 - recent) % p.outputLanes)))) return 13;
+                    const uint32_t limit = kEpServerDedupCombineRecvUbBytes - kEpServerDedupCombineResidentUbBytes;
+                    for (uint32_t i = 0; i < f.inputLanes; ++i) {
+                        const uint32_t begin = f.inputOffsets[i], end = begin + p.inputBytes;
+                        if (begin < p.finalInputOffset || end > limit || begin % 32 ||
+                            (i && begin < f.inputOffsets[i-1] + p.inputBytes)) return 14;
+                        uint32_t overlap = 0;
+                        for (uint32_t old = 0; old < p.outputLanes; ++old) {
+                            const uint32_t ob = p.outputOffset + old * p.outputBytes;
+                            if (begin < ob + p.outputBytes && end > ob) overlap |= 1U << old;
+                        }
+                        if ((overlap & kept) || overlap != f.inputRetireMasks[i]) return 15;
+                    }
+                    // Independent capacity oracle: sum complete buffers in free
+                    // intervals bounded by the two retained physical outputs.
+                    std::sort(boundaries, boundaries + p.finalOutputLanes);
+                    uint32_t available = 0, start = p.finalInputOffset;
+                    for (uint32_t o = 0; o < p.finalOutputLanes; ++o) {
+                        available += (boundaries[o] - start) / p.inputBytes;
+                        start = boundaries[o] + p.outputBytes;
+                    }
+                    available += (limit - start) / p.inputBytes;
+                    if (f.inputLanes != std::min(available, 7U)) return 16;
+                }
             }
         }
     }
     const auto main = EpCombineM45Layout(576, 96, 7168, 6);
-    if (main.inputLanes != 3 || main.outputLanes != 6 || main.finalOutputLanes != 6) return 9;
+    if (main.inputLanes != 3 || main.outputLanes != 6 || main.finalOutputLanes != 2) return 9;
     if (kEpServerDedupCombineSendCoreNum == 32 && main.totalBytes != 245280) return 10;
+    for (uint32_t tasks = 0; tasks < 20; ++tasks)
+        if (EpCombineM5Layout(main, tasks).inputLanes != 7) return 17;
     return 0;
 }
 ''')
