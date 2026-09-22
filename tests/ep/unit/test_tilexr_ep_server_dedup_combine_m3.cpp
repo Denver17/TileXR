@@ -3,6 +3,7 @@
 #include "combine_m12_test_fixture.h"
 #include "../../../src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
 #include <set>
+#include "combine_server_order_reference.h"
 
 using ServerDedupTest::Check;
 using CombineM12Test::Fixture;
@@ -14,8 +15,9 @@ std::vector<uint32_t> DirectSchedule(const Fixture &f, const std::vector<uint32_
     auto schedule = selected;
     const uint32_t servers = uint32_t(f.args.rankSize) / 8U;
     const uint32_t ownServer = uint32_t(f.args.rank) / 8U;
+    const auto order = CombineServerOrderReference::Order(servers, ownServer);
     const auto distance = [&](uint32_t row) {
-        return (uint32_t(f.table[row * 3U]) / 8U + servers - ownServer - 1U) % servers;
+        return CombineServerOrderReference::Position(order, uint32_t(f.table[row * 3U]) / 8U);
     };
     std::stable_sort(schedule.begin(), schedule.end(), [&](uint32_t a, uint32_t b) {
         return distance(a) < distance(b);
@@ -143,6 +145,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
     f.half = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + uint64_t(slots) * packet + 512U;
     f.args.peerMemBytes = f.half * 2U;
     const uint32_t servers = ranks / 8U, ownServer = ownRank / 8U;
+    const auto order = CombineServerOrderReference::Order(servers, ownServer);
     for (uint32_t row = 0; row < count; ++row) {
         f.types[row] = 1;
         // Cover both periodic routing and expert-sorted source-local clusters.
@@ -191,7 +194,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
                 payloadStarted = true;
                 currentRow = uint32_t((address - expert) / (h * 2U));
                 const uint32_t server = uint32_t(f.table[currentRow * 3U]) / 8U;
-                Check(scan != 0U && server == (ownServer + scan) % servers,
+                Check(scan != 0U && server == order[scan - 1U],
                     "each server's payload begins immediately after its own scan");
             }
         };
@@ -199,16 +202,16 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
             if (seededLanes.empty()) return; // type compaction and rank validation
             Check(candidates == count, "one Vector compaction covers the full DIRECT list");
             uint32_t expectedIssues = 0U, expectedMatches = 0U;
-            const uint32_t server = (ownServer + scan + 1U) % servers;
+            const uint32_t server = order[scan];
             for (uint32_t row : selected) if (uint32_t(f.table[row * 3U]) / 8U == server) ++expectedMatches;
             Check(matches == expectedMatches, "GatherMask returns the exact server token count");
             for (uint32_t row : expected) {
-                const uint32_t distance = (uint32_t(f.table[row * 3U]) / 8U + servers - ownServer - 1U) % servers;
+                const uint32_t distance = CombineServerOrderReference::Position(order, uint32_t(f.table[row * 3U]) / 8U);
                 if (distance < scan) ++expectedIssues;
             }
             Check(issued.size() == expectedIssues, "prior server issues precede the next Vector selection");
             if (scan != 0U) {
-                const uint32_t previous = (ownServer + scan) % servers;
+                const uint32_t previous = order[scan - 1U];
                 if (std::any_of(expected.begin(), expected.end(), [&](uint32_t row) {
                         return uint32_t(f.table[row * 3U]) / 8U == previous; })) {
                     Check(!AscendC::PendingMte3().empty(), "Vector selection leaves previous sends in flight");
@@ -267,7 +270,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
         TileXREp::CombineModuleTestAccess::Direct(kernel);
         Check(scan == servers, "exactly one Vector selection per server, including empty shares");
         Check(issued == expected && observed == expected,
-            "striped DIRECT ownership is exact, next-server first, wrapped, and stable within each server");
+            "striped DIRECT ownership is exact, own-half first, wrapped, and stable within each server");
         Check(AscendC::PendingMte3().empty(), "DIRECT retires all sends at M3 completion");
         for (uint32_t row : observed) ++serverCounts[uint32_t(f.table[row * 3U]) / 8U][core];
         totalCounts[core] = uint32_t(observed.size());
@@ -286,9 +289,32 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
         Check(observedOverlap, "multi-server routing exercised metadata scanning with MTE3 still pending");
 }
 
+void TestHalfOrder()
+{
+    using CombineServerOrderReference::Order;
+    Check(Order(8U, 2U) == std::vector<uint32_t>({3, 0, 1, 2, 7, 4, 5, 6}), "eight-server example");
+    Check(Order(7U, 2U) == std::vector<uint32_t>({0, 1, 2, 6, 3, 4, 5}), "odd lower-half example");
+    Check(Order(7U, 6U) == std::vector<uint32_t>({3, 4, 5, 6, 1, 2, 0}), "odd upper-half example");
+    for (uint32_t servers = 1U; servers <= 128U; ++servers) {
+        for (uint32_t own = 0U; own < servers; ++own) {
+            const auto expected = Order(servers, own);
+            std::set<uint32_t> visited;
+            for (uint32_t i = 0; i < servers; ++i) {
+                const uint32_t actual = TileXREp::ServerDedupHalfOrder(servers, own, i);
+                Check(actual == expected[i], "production mapping matches independent half rotation");
+                Check(actual < servers && visited.insert(actual).second, "mapping covers each server exactly once");
+            }
+        }
+    }
+}
+
 int main()
 {
     try {
+        TestHalfOrder();
+        for (uint32_t rank : {18U, 50U})
+            DirectServerOrder(56U, rank, 403U, 17U, 1U, false);
+        DirectServerOrder(64U, 18U, 403U, 17U, 0U, false);
         DirectRows(0U, 17U, false, 0U, 0U);
         DirectRows(1U, 17U, false, 1U, 1U);
         DirectRows(97U, 240U, false, 0U, 0U);

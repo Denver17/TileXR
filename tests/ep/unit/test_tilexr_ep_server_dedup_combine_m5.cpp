@@ -329,7 +329,7 @@ void TestEightPartialSlots(bool bf16)
     const float one = 1.0f;
     for (uint32_t row = 0; row < f.tokens; ++row) {
         const uint32_t ordinal = row / kEpServerDedupCombineRecvCoreNum;
-        // Five remote-server sends, then three local-server sends per core.
+        // Three local-server sends, then five remote-server sends per core.
         f.table[row * 3U] = ordinal < 5U ? 6 : 8;
         f.table[row * 3U + 1U] = ordinal; f.table[row * 3U + 2U] = 0;
         f.relay[row * f.k * 2U] = 1; f.relay[row * f.k * 2U + 2U] = f.rank * 2U;
@@ -359,7 +359,7 @@ void TestEightPartialSlots(bool bf16)
             clearPublished = true;
         }
         if (clearPublished && event == AscendC::HardEvent::MTE3_V && !set && !inheritedWait) {
-            Check(id == 6U, "M5 keeps the latest two of eight sends, not the final server's three");
+            Check(id == 6U, "M5 keeps the latest two of eight sends, not the final server's subtotal");
             inheritedWait = true;
         }
     };

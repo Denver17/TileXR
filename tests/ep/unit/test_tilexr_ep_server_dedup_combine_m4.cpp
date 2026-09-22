@@ -4,6 +4,7 @@
 #include "../../../src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
 #include "../integration/server_dedup_combine_m4_reference.h"
 #include <set>
+#include "combine_server_order_reference.h"
 
 using ServerDedupTest::Check;
 using CombineM12Test::Fixture;
@@ -15,17 +16,18 @@ struct PartialFixture : Fixture {
     uint64_t packet;
     std::vector<uint32_t> relay, selected, destinationRows;
     PartialFixture(uint32_t n, uint32_t width, uint32_t topk, uint32_t selectedWindow,
-        bool bfloat, bool sparse, bool rounding = false, uint32_t routing = 0U)
-        : Fixture(n, width), k(topk), bs(std::max(16U, (n + 31U) / 32U)), slots(bs * k),
-          stageRows(32U * bs), window(selectedWindow), bf16(bfloat), ties(rounding)
+        bool bfloat, bool sparse, bool rounding = false, uint32_t routing = 0U, uint32_t ranks = 16U, uint32_t ownRank = 10U)
+        : Fixture(n, width, ownRank), k(topk), bs(std::max(16U, (n + 31U) / 32U)), slots(bs * k),
+          stageRows(ranks * 2U * bs), window(selectedWindow), bf16(bfloat), ties(rounding)
     {
+        args.rankSize = int(ranks);
         packet = ((uint64_t(h) * 2U + 479U) / 480U) * 512U;
         stageOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + slots * packet;
         half = stageOffset + stageRows * stageStride + 512U;
         args.peerMemBytes = half * 2U;
-        counts.assign(32U, int32_t(n));
+        counts.assign(ranks * 2U, int32_t(n));
         relay.assign(uint64_t(n) * k * 2U, 0x7fa12345U); // unused entries must never be parsed
-        for (uint32_t r = 0; r < 16U; ++r) {
+        for (uint32_t r = 0; r < ranks; ++r) {
             peers[r].assign(half * 2U, 0xa5U);
             args.peerMems[r] = peers[r].data();
             for (uint32_t w = 0; w < 2U; ++w) std::memset(LocalFor(r, w,
@@ -35,17 +37,17 @@ struct PartialFixture : Fixture {
                 std::memcpy(LocalFor(r, window, stageOffset + slot * stageStride) + col * 2U, &value, 2U);
             }
         }
-        destinationRows.assign(16U * slots, UINT32_MAX);
+        destinationRows.assign(ranks * slots, UINT32_MAX);
         for (uint32_t row = 0; row < n; ++row) {
             const bool active = !sparse || row < 32U || (row >= 9500U && row < 9533U);
             types[row] = active ? 2 : 0; // inactive synthetic rows isolate M4 selection
             uint32_t source = row / slots, destination = row % slots;
             if (routing != 0U) {
                 const uint32_t group = routing == 1U ? row : row / (3U * TileXREp::kEpServerDedupCombineRecvCoreNum + 1U);
-                source = ((group + rank / 8U) % 2U) * 8U + row % 8U;
+                source = ((group + rank / 8U) % (ranks / 8U)) * 8U + row % 8U;
                 destination = row / 8U;
             }
-            Check(source < 16U && destination < slots, "fixture routes fit independent result slots");
+            Check(source < ranks && destination < slots, "fixture routes fit independent result slots");
             table[row * 3U] = int32_t(source);
             table[row * 3U + 1U] = int32_t(destination / k);
             table[row * 3U + 2U] = int32_t(destination % k);
@@ -58,7 +60,7 @@ struct PartialFixture : Fixture {
             const uint32_t members = ties ? 1U : 1U + row % (k - 1U);
             relay[uint64_t(row) * k * 2U] = members;
             for (uint32_t j = 0; j <= members; ++j) {
-                const uint32_t memberRank = j == 1U ? rank : 8U + (row + j) % 8U;
+                const uint32_t memberRank = j == 1U ? rank : rank / 8U * 8U + (row + j) % 8U;
                 const uint32_t q = (row * 3U + j * 7U) % bs;
                 if (j) relay[(uint64_t(row) * k + j) * 2U] = (memberRank * 2U + (row + j) % 2U) | (q << 16U);
                 const float weight = ties ? (j ? std::ldexp(1.0f, bf16 ? -8 : -11) : 1.0f) :
@@ -87,7 +89,7 @@ struct PartialFixture : Fixture {
             const uint32_t entry = relay[(uint64_t(row) * k + j) * 2U];
             const uint32_t expertId = entry & 0xffffU, q = entry >> 16U;
             const uint32_t r = expertId / 2U, localExpert = expertId % 2U;
-            const uint32_t slot = (((source + r) % 16U) * 2U + localExpert) * bs + q;
+            const uint32_t slot = (((source + r) % uint32_t(args.rankSize)) * 2U + localExpert) * bs + q;
             sum = Ref::Accumulate(sum, Ref::Decode(StageBits(r, slot, col), bf16), Weight(row, j));
         }
         return Ref::Encode(sum, bf16);
@@ -98,16 +100,16 @@ struct PartialFixture : Fixture {
         kernel.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(expert.data()),
             reinterpret_cast<GM_ADDR>(table.data()), reinterpret_cast<GM_ADDR>(counts.data()), untouched.data(),
             reinterpret_cast<GM_ADDR>(types.data()), reinterpret_cast<GM_ADDR>(relay.data()), untouched.data(),
-            untouched.data(), bs, h, k, 32U, bf16 ? TileXR::TILEXR_DATA_TYPE_BFP16 : TileXR::TILEXR_DATA_TYPE_FP16,
+            untouched.data(), bs, h, k, uint32_t(args.rankSize) * 2U, bf16 ? TileXR::TILEXR_DATA_TYPE_BFP16 : TileXR::TILEXR_DATA_TYPE_FP16,
             0U, window, 0U);
         TileXREp::CombineModuleTestAccess::ThroughM4(kernel);
     }
 };
 
 void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse, uint32_t window,
-    bool ties = false, uint32_t routing = 0U)
+    bool ties = false, uint32_t routing = 0U, uint32_t ranks = 16U, uint32_t ownRank = 10U)
 {
-    PartialFixture f(count, h, k, window, bf16, sparse, ties, routing);
+    PartialFixture f(count, h, k, window, bf16, sparse, ties, routing, ranks, ownRank);
     const auto savedExpert = f.expert;
     const auto beforeTable = f.table;
     const auto beforeRelay = f.relay;
@@ -116,15 +118,16 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
     bool overlapped = false, serverOverlap = false;
     auto schedule = f.selected;
     const uint32_t readers = TileXREp::kEpServerDedupCombineRecvCoreNum;
+    const auto order = CombineServerOrderReference::Order(ranks / 8U, f.rank / 8U);
     const auto distance = [&](uint32_t row) {
-        return (uint32_t(f.table[row * 3U]) / 8U + 2U - f.rank / 8U - 1U) % 2U;
+        return CombineServerOrderReference::Position(order, uint32_t(f.table[row * 3U]) / 8U);
     };
     std::stable_sort(schedule.begin(), schedule.end(), [&](uint32_t a, uint32_t b) {
         return distance(a) < distance(b);
     });
     const auto layout = TileXREp::EpCombineM45Layout(count, f.bs, h, k);
     std::vector<uint32_t> totals(readers);
-    std::vector<std::vector<uint32_t>> serverCounts(2U, std::vector<uint32_t>(readers));
+    std::vector<std::vector<uint32_t>> serverCounts(ranks / 8U, std::vector<uint32_t>(readers));
     for (uint32_t core = 0; core < 64U; ++core) {
         f.Hooks(core, window);
         const auto controlRead = AscendC::GmReadObserver();
@@ -213,7 +216,7 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
                 table3Rows.push_back(row);
                 currentRow = row;
             }
-            for (uint32_t rank = 0; rank < 16U; ++rank) {
+            for (uint32_t rank = 0; rank < ranks; ++rank) {
                 const auto stage = reinterpret_cast<uintptr_t>(f.LocalFor(rank, window, f.stageOffset));
                 if (p >= stage && p < stage + f.stageRows * f.stageStride) {
                     ++stageReads;
@@ -225,7 +228,7 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
         };
         AscendC::GmWriteObserver() = [&](const void *dst, const void *, uint32_t bytes) {
             bool matched = false;
-            for (uint32_t rank = 0; rank < 16U; ++rank) {
+            for (uint32_t rank = 0; rank < ranks; ++rank) {
                 const auto begin = reinterpret_cast<uintptr_t>(f.LocalFor(rank, window, TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET));
                 const auto p = reinterpret_cast<uintptr_t>(dst);
                 if (p < begin || p >= begin + f.slots * f.packet) continue;
@@ -244,8 +247,8 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
             "server-sorted striped ownership preserves exact token, routing, aggregation-table and send order");
         if (core >= TileXREp::kEpServerDedupCombineSendCoreNum) {
             const uint32_t chunk = TileXREp::EpCombineM4ScanRows(h, k);
-            Check(compactions == 4U * ((count + chunk - 1U) / chunk),
-                "two server selections plus two one-time validation compactions per tile");
+            Check(compactions == (ranks / 8U + 2U) * ((count + chunk - 1U) / chunk),
+                "one selection per server plus two one-time validation compactions per tile");
             const uint32_t local = core - TileXREp::kEpServerDedupCombineSendCoreNum;
             totals[local] = uint32_t(observed.size());
             for (uint32_t row : observed) ++serverCounts[uint32_t(f.table[row * 3U]) / 8U][local];
@@ -268,7 +271,7 @@ void TestPartial(uint32_t count, uint32_t h, uint32_t k, bool bf16, bool sparse,
     if (f.selected.size() > TileXREp::kEpServerDedupCombineRecvCoreNum)
         Check(overlapped, "next token reads and aggregates while prior output MTE3 remains in flight");
     if (sparse) Check(tableReads > TileXREp::kEpServerDedupCombineRecvCoreNum, "sparse original-row gaps require bounded Table2 scanning");
-    for (uint32_t rank = 0; rank < 16U; ++rank) for (uint32_t slot = 0; slot < f.slots; ++slot) {
+    for (uint32_t rank = 0; rank < ranks; ++rank) for (uint32_t slot = 0; slot < f.slots; ++slot) {
         const uint32_t row = f.destinationRows[rank * f.slots + slot];
         const auto dst = f.LocalFor(rank, window, TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + slot * f.packet);
         const auto other = f.LocalFor(rank, 1U - window, TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + slot * f.packet);
@@ -356,6 +359,10 @@ int main()
         for (uint32_t routing : {1U, 2U})
             TestPartial(10U * TileXREp::kEpServerDedupCombineRecvCoreNum + 5U,
                 257U, 6U, true, false, 1U, false, routing);
+        for (uint32_t ranks : {24U, 56U, 64U, 128U})
+            for (uint32_t ownRank : {2U, ranks - 6U})
+                TestPartial(10U * TileXREp::kEpServerDedupCombineRecvCoreNum + 5U,
+                    17U, 6U, true, false, 1U, false, 1U, ranks, ownRank);
         TestFullWidthHeader();
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     AscendC::EventObserver() = {};

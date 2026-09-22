@@ -68,7 +68,7 @@ public:
         const uint32_t ownServer = uint32_t(args_->rank) / 8U;
         uint32_t owner = 0U, completed = 0U;
         for (uint32_t step = 1U; step <= servers; ++step) {
-            const uint32_t count = SelectServer((ownServer + step) % servers, owner, step == 1U);
+            const uint32_t count = SelectServer(ServerDedupHalfOrder(servers, ownServer, step - 1U), owner, step == 1U);
             for (uint32_t task = 0; task < count; ++task) {
                 const uint32_t row = uint32_t(rows_.GetValue(task));
                 Mark(kEpServerDedupCombineProfilePartialTokenBegin);
