@@ -39,7 +39,8 @@ public:
         // Load the device-produced prefix through MTE2 rather than caching a
         // mutable GM scalar across launches. This 32B temporary becomes the
         // independent M2 prepare sum only after the scalar count is consumed.
-        pipe_.InitBuffer(arena_, kEpServerDedupCombineUbBytes);
+        pipe_.InitBuffer(arena_, core_ >= kEpServerDedupCombineSendCoreNum ?
+            kEpServerDedupCombineM4UbBytes : kEpServerDedupCombineUbBytes);
         prepareSum_ = Allocate<float>(32U);
         GlobalTensor<int32_t> prefix;
         prefix.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(sendCounts));
@@ -225,6 +226,41 @@ private:
             Sync<HardEvent::MTE2_S>();
         }
     }
+    __aicore__ inline void GroupDirectTasks(uint32_t start, uint32_t count)
+    {
+        constexpr uint32_t maxServers = TileXR::TILEXR_MAX_RANK_SIZE / 8U;
+        uint32_t lengths[maxServers] = {};
+        uint32_t next[maxServers] = {};
+        const uint32_t servers = uint32_t(args_->rankSize) / 8U;
+        const uint32_t ownServer = uint32_t(args_->rank) / 8U;
+        uint32_t cacheBegin = 0U, cacheEnd = 0U;
+        // SelectRows has retired all Vector users of typeUb_/indexUb_. Cache
+        // this core's Table2 triples there before changing the traversal order.
+        // 12*ceil(tokens/SendCoreNum) fits the aligned 4*tokens row array,
+        // including tiny counts (minimum allocation 256B, SendCoreNum >= 16).
+        for (uint32_t task = 0; task < count; ++task) {
+            const uint32_t row = uint32_t(packedUb_.GetValue(start + task));
+            CacheTableRows(row, start, task, count, cacheBegin, cacheEnd);
+            const uint32_t entry = (row - cacheBegin) * 3U;
+            const uint32_t source = uint32_t(tableUb_.GetValue(entry));
+            if (source >= uint32_t(args_->rankSize)) { Trap(); return; }
+            ++lengths[source / 8U];
+            for (uint32_t field = 0; field < 3U; ++field)
+                typeUb_.SetValue(task * 3U + field, tableUb_.GetValue(entry + field));
+        }
+        // Each server owns a contiguous sublist with its own valid length.
+        // Rotate their bases so the local server is last, skipping empty lists.
+        uint32_t offset = 0U;
+        for (uint32_t step = 1U; step <= servers; ++step) {
+            const uint32_t server = (ownServer + step) % servers;
+            next[server] = offset;
+            offset += lengths[server];
+        }
+        for (uint32_t task = 0; task < count; ++task) {
+            const uint32_t server = uint32_t(typeUb_.GetValue(task * 3U)) / 8U;
+            indexUb_.SetValue(next[server]++, int32_t(task));
+        }
+    }
     __aicore__ inline void ReturnDirectTokens()
     {
         SelectRows(1);
@@ -233,6 +269,7 @@ private:
         const uint32_t count = base + (core_ < extra ? 1U : 0U);
         const uint32_t start = core_ * base + (core_ < extra ? core_ : extra);
         if (count == 0U) return;
+        GroupDirectTasks(start, count);
         uint64_t flagMask[2] = {0xffU, 0U};
         for (uint32_t lane = 0; lane < lanes_; ++lane) {
             // The entire 32B Flag is initialized once and is not touched by Copy.
@@ -242,14 +279,12 @@ private:
             SetFlag<HardEvent::MTE3_V>(lane);
         }
         PipeBarrier<PIPE_V>();
-        uint32_t cacheBegin = 0U, cacheEnd = 0U;
         for (uint32_t task = 0; task < count; ++task) {
-            const uint32_t row = uint32_t(packedUb_.GetValue(start + task));
-            CacheTableRows(row, start, task, count, cacheBegin, cacheEnd);
-            const uint32_t entry = (row - cacheBegin) * 3U;
-            const uint32_t source = uint32_t(tableUb_.GetValue(entry));
-            const uint32_t token = uint32_t(tableUb_.GetValue(entry + 1U));
-            const uint32_t topk = uint32_t(tableUb_.GetValue(entry + 2U));
+            const uint32_t original = uint32_t(indexUb_.GetValue(task));
+            const uint32_t row = uint32_t(packedUb_.GetValue(start + original));
+            const uint32_t source = uint32_t(typeUb_.GetValue(original * 3U));
+            const uint32_t token = uint32_t(typeUb_.GetValue(original * 3U + 1U));
+            const uint32_t topk = uint32_t(typeUb_.GetValue(original * 3U + 2U));
             const uint32_t lane = task % lanes_;
             // Input lifetime ends after Vector has consumed its last block.
             WaitFlag<HardEvent::V_MTE2>(lane);

@@ -209,7 +209,7 @@ void TestArenaBudget()
     for (uint32_t tokens : {0U, 10000U}) for (uint32_t k : {1U, 6U, 32U}) {
         AscendC::TPipe pipe;
         AscendC::TBuf<> arena;
-        pipe.InitBuffer(arena, TileXREp::kEpServerDedupCombineUbBytes);
+        pipe.InitBuffer(arena, TileXREp::kEpServerDedupCombineM4UbBytes);
         TileXR::CommArgs args {}; args.rankSize = 16;
         TileXREp::ServerDedupPartial partial;
         partial.Init(&args, &pipe, arena.Get<uint8_t>()[TileXREp::kEpServerDedupCombineResidentUbBytes],
@@ -241,6 +241,10 @@ int main()
             TestPartial(1U, 17U, 2U, bf16, false, 1U, true);
             TestPartial(257U, 257U, 6U, bf16, false, 0U);
             TestPartial(97U, 7168U, 6U, bf16, false, 1U);
+            // More than six tasks per Read core wraps the larger output ring;
+            // K=6 also forces rolling reuse of the three input lanes.
+            TestPartial(7U * TileXREp::kEpServerDedupCombineRecvCoreNum + 1U,
+                7168U, 6U, bf16, false, 0U);
         }
         TestPartial(10000U, 17U, 6U, true, true, 0U);
         TestFullWidthHeader();

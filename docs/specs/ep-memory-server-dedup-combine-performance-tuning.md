@@ -71,3 +71,85 @@ Send 核，使其在本核 DIRECT 返回完成后即可探测结果，与其他�
 
 未运行本次 A5 多卡设备用例，Host 替身不证明真实异步流水或设备数值正确性。
 实际功能及性能收益仍需用户环境比较；当前状态为“实现与开发侧验证完成，设备收益待验证”。
+
+## 尝试优化点 2：M4 限制读 buffer，增加发送 buffer
+
+### 方案与容量依据
+
+- M4 输入 buffer 上限改为 3，保留一套 `cast/product/sum/low` 计算工作区。
+  先保证至少一组输入/输出可用，再按实际剩余 UB 尽量分配发送 buffer，发送上限仍为
+  每个事件方向的 8 个 lane。大 shape 放不下 3 个输入时允许更少，不能挤占最小输出槽。
+- M4 总预算为 **240 KiB**，包含常驻控制区、任务/表缓存、计算区和读/发 buffer。
+  CANN 9.1.0 `tikcpp/tikcfw/impl/utils/kernel_utils_constants.h` 的 `__NPU_ARCH__ == 3510`
+  分支定义 `TOTAL_UB_SIZE = 248 * 1024`；同版本 Ascend950 平台 ini 的 `ub_size=253952`。
+  物理 256 KiB 中默认预留 6 KiB VF 栈和 2 KiB Ascend C 空间，240 KiB 再额外留 8 KiB
+  余量。参见[华为 asc-devkit 3510 架构说明](https://asc.gitcode.com/guide/programming_guide/advanced_programming/hardware_implementation/architecture_spec/npu_arch_3510.html)
+  （master 预览文档，容量已与服务器安装的 CANN 9.1 交叉核对）。
+- 仅 Read 核的 arena 扩至 240 KiB；M1 的 lane 算法、Send 核的 M3/M5 预算仍为原有
+  190 KiB。Host 和 Kernel 共用 M4 预算函数，避免允许的 shape 和实际分配不一致。
+- 32 Send / 32 Read、H=7168、K=6、TokenNum=576 时：固定占用 109,920 B，
+  3 个输入共 43,008 B，6 个输出共 92,160 B，总计 245,088 B，预算内剩余 672 B，
+  此外保留上述 8 KiB 余量。TokenNum=10000 时输出降为 5 个；不把 6 个写成固定值。
+- 输入在 Cast 消费完成后复用；输出只在自身 MTE3 完成后复用。保留原 FP32 乘加顺序、
+  最后一次低精度转换和 DataAsFlag 格式，不增加逐 task 的 PIPE_ALL。
+
+### 收益与维护边界
+
+目标是减少发送尚未完成时对 Vector 打包及后续计算的阻塞；不保证读带宽仍能完全隐藏。
+需要以相同参数比较整体 Combine、M4 耗时和流水等待。190 KiB 是旧软件预算，不能再作为
+A5 物理上限引用；改动单个阶段预算时必须同时检查 arena 实际容量、Host 准入、边界测试
+及事件上限。Host 替身按 CANN 可用 248 KiB 检查分配，而算子自行保留 240 KiB 预算。
+
+## 尝试优化点 3：M3 按目标 server 分组，跨 server 优先发送
+
+### 方案与所有权
+
+1. DIRECT Gather 后沿用原来的 Send 核均分，每核仅处理自己实际分到的 `count` 个任务。
+2. 发送前顺序扫描这些任务的 Table2，按目标 `sourceRank / 8` 计数，形成每个 server
+   子 list 的有效长度及连续索引区间。缓存完整的 source/token/topk 三元组。
+3. 使用稳定分组：组内保持原任务顺序；组间按 `(本 server + step) % server数`，
+   `step=1..server数` 遍历，所以本 server 最后。空 list 自动跳过。
+4. payload 始终通过索引映射回原始 expertOut 行，目标 rank、token/topk 槽位和 Flag
+   不变；lane 按实际发送序号轮转，跨 server 不额外排空流水。
+5. 本核所有 M3 发送回收后，仍按优化点 1 进入 M5；分组不引入跨核等待。
+
+Gather 的 V→S 同步完成后，复用已不再使用的 `typeUb_` 缓存本核 Table2，复用 `indexUb_`
+存放分组任务索引，保留 `packedUb_` 的原始行映射。由于 Send 核数至少为 16，
+`12 * ceil(TokenNum / SendCoreNum)` 可放入按 256 B 对齐的 `4 * TokenNum` 数组，
+极小任务由最小 256 B 分配覆盖。分组使用至多 16 个 server 的标量长度/游标数组，
+不新增 UB 分配或通信区，也不减少 payload lane。
+
+预扫描仍使用原来的有序 Table2 缓存，避免按重排后的行复用仅支持单调前进的缓存。
+发送阶段直接消费已缓存三元组，不再读 GM Table2；维护时不能仅重排 packed 行号而
+继续使用 `row >= cacheEnd` 的旧缓存判断，否则绕回较小行号会命中错误表项。
+
+### 收益边界
+
+目标是让跨 server DIRECT 更早发出、覆盖远端传输时间；每核预扫描和稳定分组增加了标量
+工作，收益须实测。当前优化点 2、3 一起交付时只能报告组合收益，不能把同一次性能变化
+分别归因给两项；若要单项归因，需要固定其他变量进行独立 A/B。
+
+### 优化点 2、3 验证记录
+
+2026-09-22：基于 `a2dd290` 加本次修改，240 KiB 最终版本开发验证完成，设备功能和性能
+收益待验证。已覆盖：
+
+- M3：2/3/4/16 server、本 server 为首/中/末、取模绕回、空 list、仅本 server、
+  空任务/极小任务、每核 12 个任务及余数、稀疏行和缓存换块；检查实际发送顺序、
+  Table2 先扫描后发 payload、原始行内容/目标槽位/Flag 和双窗保护。
+- M4：BF16/FP16、3 读 buffer 滚动补取、发送槽轮转、常驻控制区和工作区边界，
+  K=1/6/32 及全部允许核数的容量检查；M1/M2/M5 和实际 kernel profiling 回归。
+- Combine Host CTest 9/9 通过，包含 M1/M2、M3、M4、M5、M5 的 16/48 和 48/16
+  非对称核数、Host 准入、配置预算及实际 kernel profiling。M4 扩容后，旧 H=10145
+  拒绝断言失效；更新为该形状接受，并检查 K=6 下 M5 的 H=11008/11009 准入边界。
+- 共享 Host 替身的 Dispatch counts/source_send/receive_packet 回归 3/3 通过。
+- blue CANN 9.1.0 / ccec Clang 15.0.5 / A5 `dav-c310-vec`，profiling OFF/ON 分别
+  编译 `tilexr-ep` 及所属 kernels 成功，exit=0；非文档输入已与送编快照逐文件核对。
+- 主审与独立审查未发现需修复缺陷。源码快照、差异、配置/命令、工具链、产物哈希和
+  编译/Host 日志保存在 `build/combine-opt23-verification/`，本地 Host 构建目录为
+  `build/combine-opt23-host/`。送编后仅补充本文验证记录。
+
+未运行本次 A5 多卡设备用例，Host 替身和交叉编译不能证明设备异步重叠或加速。
+设备验收继续检查单轮/连续多轮 yOut 与 Flag，并分别采集 performance 和 breakdown；
+M3 breakdown 区间包含新增预扫描成本。比较时固定 shape、路由、核数、dtype、loops/warmup
+及构建配置，记录最终加载的 kernel 哈希。

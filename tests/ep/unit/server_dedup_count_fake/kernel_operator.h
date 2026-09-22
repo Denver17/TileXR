@@ -209,7 +209,8 @@ struct TPipe {
     std::vector<std::shared_ptr<Storage>> buffers;
     uint64_t bytes = 0;
     void InitBuffer(TBuf<> &buf, uint64_t size) {
-        if (!size || size % 32 || bytes + size > 190 * 1024) throw std::runtime_error("UB allocation overflow/alignment");
+        // A5/CANN 9.1 default usable capacity; operator budgets may be smaller.
+        if (!size || size % 32 || bytes + size > 248 * 1024) throw std::runtime_error("UB allocation overflow/alignment");
         buf.storage = std::make_shared<Storage>();
         buf.storage->bytes.assign(size, 0xcd);
         buf.offset = 0; buf.bytes = size;

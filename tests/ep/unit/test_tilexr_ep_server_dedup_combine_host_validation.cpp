@@ -133,14 +133,15 @@ int main()
     auto unsupportedLane = valid;
     unsupportedLane.combine.h = 100000;
     Rejected(unsupportedLane, TILEXR_ERROR_NOT_SUPPORT);
-    // At capacityRows=768/K=6, M4's resident controls, compact task list,
-    // tables, three FP32 workspaces and one independent input/output lane
-    // admit H=10144. The next 32B input allocation exceeds the 190KiB budget.
+    // M4 now uses a 240KiB budget on A5. Its old 190KiB boundary no longer
+    // limits this shape; M5's unchanged workspace becomes the limiting stage.
     g_args.peerMemBytes = 8ULL * 1024U * 1024U * 1024U;
     auto laneBoundary = valid;
-    laneBoundary.combine.h = 10144;
-    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last complete M4 lane fits UB");
     laneBoundary.combine.h = 10145;
+    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "old M4 UB boundary now fits");
+    laneBoundary.combine.h = 11008;
+    Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last complete M5 lane fits UB");
+    laneBoundary.combine.h = 11009;
     Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
     laneBoundary.combine.topK = 32;
     laneBoundary.combine.h = 8896;
