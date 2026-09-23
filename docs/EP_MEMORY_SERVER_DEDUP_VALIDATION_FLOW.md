@@ -83,8 +83,10 @@ M3 设备验收已按用户回传登记 16/16 通过，详细结果见调试进�
 ## Combine 第二阶段：按模块递进验收（2026-09-21）
 
 本节为第二阶段开发/验收计划。P2.1 的 M1/M2 已完成开发，设备验收已按用户回传登记通过；P2.2 的 M3 已通过，P2.3 的 M4 已按用户回传通过；P2.4 的 M5 已按用户回传通过 24/24，第二阶段既定验收完成。用户已确认按 **M1+M2 → M3 → M4 → M5** 推进，
-每个模块交付点都须完成单轮功能、多轮功能、多轮 performance、多轮 breakdown 四类确认，
-全部通过后才开发下一模块。共四个模块交付点、十六项子验收；按模块分别提交，不将四类确认默认拆成十六次代码提交。
+各点按其已实现范围确认功能正确及 performance/breakdown 采集解析正常，再推进下一模块。
+最新 CB06-04 收口覆盖此前“每点固定四类多轮验收”要求：M1/M2 和完整 M5 覆盖 1 轮、2 轮、普通多轮；
+M3/M4 只做无预热单轮的数据/Flag 到达检查，performance/breakdown 也使用单轮，不引入结果清理助手。
+按模块分别交付，不为开发验收新增压力矩阵、细粒度打点或性能达标门槛。
 沿用同一 `run_commit_validation.sh`、`build_all.sh/sync.sh/run.sh`、workflow 和 chain consumer，
 保留 dispatch/combine/both 三种模式、独立 D/C quantMode、共享输入 dtype/量化格式配置。
 P2.1–P2.3 保留在历史提交；当前入口为 `ep-sdedup-combine-p2-m5`。
@@ -103,13 +105,13 @@ checkpoint 前缀为 `ep-sdedup-combine-p2-`，每点累计包含前序已验收
 | P2.1 | `m12`：M0 + M1a/M1b + M2 + 必需 M6 排空 | 64 核均 Init、筛选/分担 type3 拷贝并发布完成；56..63 汇总/通知；全部 Read 核监听并清理，空任务也履责 | 保留；每核本阶段责任和在途操作完成后等待再退出 | stage 原始数据、两级控制发布/到齐/清理、全核参与及地址保护；结果区/yOut 保持 |
 | P2.2 | `m3`：增加 DIRECT 返回 | Send 核在自身 M1b 发布后进入 M3；Read 核仍完成 M2；各核排空后退出，M4/M5 未启用 | 移除，所有核均不再固定等待 | type1 原始行到 source/token/k 的结果槽，payload/Flag/尾块；type2 不生成 partial，yOut 保持 |
 | P2.3 | `m4`：增加成员读取、加权和 partial 返回 | Read 核在自身 M2 ready 后执行全部本核 M4；56..63 先完成通知再监听；排空后退出，M5 未启用 | 不保留 | self+stage 成员的 FP32 加权、低精度 partial、同卡/异卡成员寻址和 DIRECT/partial 共存；yOut 保持 |
-| P2.4 | `m5`：完整 M1–M5 + M6 | Read 核排空本核 M4 后进入 M5，按 BS 整 Token 分工；Send 核独立排空退出，不增加全核结束屏障 | 不保留 | sourceMask/权重驱动的最终 yOut、结果 Flag 提前清理、payload 保护及完整多轮复用 |
+| P2.4 | `m5`：完整 M1–M5 + M6 | Read 核以 M4 Event 收尾及 PIPE_ALL 建立边界，再初始化 M5 并按 BS 整 Token 分工；Send 核独立排空退出，不增加全核结束屏障 | 不保留 | sourceMask/权重驱动的最终 yOut、结果 Flag 提前清理、payload 保护及完整多轮复用 |
 
 50μs 只作为 P2.1 的既定临时等待，不能替代 M1 payload→Flag、M2 通知/清理完成或跨 rank 调度保证。
 P2.2 起遇到进度问题应定位真实依赖，不把 sleep 加回其他函数，也不擅自新增生产握手或全核 barrier。
 分阶段自然结束于该提交已实现的模块，不新增公共 stop-stage 参数；报告须标注 `implemented_through` 和 `scope=partial/full`。
 
-### 每点共同的四类确认与默认矩阵
+### 按模块适用的开发验收范围
 
 默认前两台固定 8P，共 16P；主 shape 延用 BS96/H7168/K6/E96。
 分核按最新 CB06-03 已确认的 Send/Read=32/32，使用独立编译期宏
@@ -118,25 +120,26 @@ Host/kernel 同步重编译部署，不新增公开分核参数或用于选择�
 Combine 只接受非量化，核心矩阵 D quant=0 / C quant=0；BF16、FP16 各跑 combine-only 和 both。
 量化格式在 quantMode=0 时不生效；Dispatch 量化能力保留，C quant 非零仍须由 Host 拒绝。
 
-| 子验收 | 模式 / 编译打点 | warmup / 正式轮次 | 必须确认 |
+| 对象 | functional / OFF | performance / OFF | breakdown / ON |
 | --- | --- | --- | --- |
-| F1 单轮功能 | functional / OFF | 0 / 1 | 真实提交/同步、模块独立 oracle、输入/非目标区保护、单轮控制和数据状态 |
-| F2 多轮功能 | functional / OFF | 2 / 5 | 同一 comm/stream/tensor 的多轮计数、各自 magic/选窗、控制清理/复用、当前轮结果；逐轮观察范围按下文调度记录 |
-| P 多轮性能 | performance / OFF | 2 / 5 | 两算子分别匹配正式 kernel 调用，预热剔除、延迟/字节/带宽及正确性；单独记录测试后处理开销 |
-| B 多轮拆解 | breakdown / ON | 2 / 5 | 当前已实现模块事件、核心角色覆盖、独立记录区/计数器、无丢记录、独立 trace 及正确性 |
+| M1/M2、完整 M5 | 确认 1 轮、2 轮及普通多轮功能正确 | 能取得有效性能数据，沿用 Dispatch 统计逻辑 | 模块级耗时及 trace 解析正确 |
+| M3、M4 | 无预热、1 轮，检查本点应产生的数据和 Flag；检查后结束，不清理结果 Flag | 无预热、1 轮，检查性能数据可获取 | 无预热、1 轮，检查已实现模块耗时解析及 trace |
 
-每点基础矩阵为 4 类×2 dtype×2 算子模式=16 个设备用例，另保留 BF16/FP16 dispatch-only
-多轮 functional 回归 2 例，共 **18 个基础串行用例**。模块定向边界用例另列在该点 manifest；
-运行前打印最终总数、顺序和配置，执行中显示 `[i/N]`，首错停止，不后台重启同一矩阵。
-OFF/ON 各用独立构建和安装目录，源码摘要一致；functional/performance 复用本点 OFF 包。
-设备用例沿用每例 180s、构建每批 900s 的明确超时，扩大轮次时显式记录新的期限，不用无界重试。
+复用既有入口和普通功能用例；本次不为偶现残留额外追加逐轮变化输入、故障注入或重复执行矩阵。
+M3/M4 尚无 M5，不把它们的单轮结果外推为完整多轮复用正确；M5 接入后验完整 1/2/多轮。
+已实现 P2.1 的具体矩阵及开发证据在下文单独保留，不强制后续模块照搬其用例数量、诊断细节或固定四类门槛。
+后续 manifest 按本节范围列出实际用例，保留 BF16/FP16、combine-only/both 及既有 Dispatch 回归接线。
+OFF/ON 使用独立构建和安装目录并保持源码摘要一致，functional/performance 复用 OFF 包。
+沿用既有超时、进度、失败汇总及日志路径；不把缺 rank、解析失败或数值错误报告为通过。
 
-四项分别输出通过/失败及证据路径，再汇总唯一 `COMMIT_VALIDATION_PASS checkpoint=...`；
-缺 rank、缺某一 dtype/模式、缺 trace、计数不符、oracle 失败或跳过任一子验收均不得总通过。
-性能阶段首先验收采集和统计正确、无丢调用、无错误结果，并建立本模块基线；目前没有用户指定的延迟/带宽阈值，
-不得凭空设优化达标线，也不把 5 轮样本当作稳定性或长期性能结论。扩大性能采样可在该点显式配置。
+开发验收只确认性能数据可获取、模块级耗时拆解正确，不建立性能基线，不设置延迟/带宽达标线。
+后续性能专项负责达标和调优；所有功能、性能均达标后再设计并执行压力脚本，例如单轮重复 1 万次、
+双轮重复 1 万次。当前不开发或运行该脚本，也不把普通多轮通过当作长时稳定性已经验收。
 
 ### P2.1：M1/M2 首个交付点的必需工作
+
+以下保留已完成的 P2.1 开发范围、矩阵及证据快照；最新后续验收边界以上文 CB06-04 为准。
+既有诊断用例和内部事件不作为后续模块必须追加的要求，本次文档收口不修改已经实现的测试脚本。
 
 1. **先落 M0 最新布局。** 当前源码仍为 52KiB Combine 控制区；同步已确认的 96KiB，
    prepareDone/serverReady/预留的 offset=0/16384/49152，跨度=16/32/48KiB。
@@ -210,53 +213,59 @@ OFF build_id=`a84a2c26f0434d529b2643710f8de5cb`，ON build_id=`82da3fcaa3e14e58a
 | --- | --- | --- |
 | M3 | type1 密排分工恰好一次；表 2 的 12B 行距/稀疏缓存；source/token/k 精确落槽；每块 480B payload+32B Flag，无 Dispatch 包尾；H 尾块、不越界读取、同卡/跨卡返回；有效 payload 与 expertOut 逐位一致，未提前乘权重 | 不要求 type2 结果或完整 sourceMask 到齐，不验 yOut 数值 |
 | M4 | type2 密排分工；表 2/3 的 row/baseRow/12B/K*8B；self 只计一次，其他成员含同卡均读 stage；0/1/多成员、不同权重、稀疏跨度、延迟准备；FP32 self 后按成员顺序累加，完成后 cast 回通信 dtype；DIRECT/partial 不重叠，partial 对应表 5 权重为 1 | 尚无 M5 最终归约和生产结果清理 |
-| M5 | 按 BS 整 Token 均分；按 mask 密排 Flag，未到齐转向下一 Token；每块只取首 float，阈值 flagBlockCount*popcount(mask)；FP32 按有效 k 加权后最终 cast；全零/稀疏/全 mask、BS 少于核数、倾斜到达；最后一次 probe 后清全部 K 槽 Flag，只清 32B，不改 480B payload；输出/清理完成再退出 | 跨 shape/布局的已用域复用、量化、TokenNum>10000 仍属专题遗留 |
+| M5 | 按 BS 整 Token 均分；按原始 TokenId 构建密排 pending 表，未到齐检测下一项，Scalar 完成指令提交后末项替换删除且继续检查换入项，删除不额外等待 Vector/MTE；按 mask 密排 Flag；每块只取首 float，阈值 flagBlockCount*popcount(mask)；FP32 按有效 k 加权后最终 cast；非零单 bit/稀疏/全 mask、BS 少于核数、倾斜到达；最后一次 probe 后清全部 K 槽 Flag，只清 32B，不改 480B payload；输出/清理完成再退出 | 跨 shape/布局的已用域复用、量化、TokenNum>10000 仍属专题遗留 |
 
 M4/M5 oracle 由测试侧依据原始路由、expertOut 和权重独立计算，不调用生产寻址/归约函数生成期望。
 必须复现 M4 partial 的中间 BF16/FP16 舍入及 M5 最终舍入；不能与“一次 FP32 全 K 归约”强行逐位比较。
 先用可精确表示数据检查地址/权重/重复计数，再覆盖非整权重、正负混合及舍入边界；具体 dtype 容差和支持的数值范围
-在 M4/M5 提交前固定到测试和报告，失败后不得临时放宽。mask=0 的输出契约按 CB05-01 收口后进入 M5 oracle。
+在 M4/M5 提交前固定到测试和报告，失败后不得临时放宽。合法 mask 至少有一个有效 bit；M5 oracle 不设置空 mask 补零用例，按原始 TokenId 校验压缩扫描后的输出。
 
-### 多轮调度、五表连接及测试后处理
+### 普通轮次与五表连接
 
 - combine-only 使用独立合法五表/count/expertOut fixture；both 每轮消费真实 Dispatch 输出的原 tensor，
   不复制/重排五表来掩盖接线问题。非量化主矩阵可沿用 expandXOut 作为 expertOut；
   另以 caller 构造的专家结果覆盖“不同 expert 输出”，不能仅以原 token 直通证明成员/权重正确。
   保留 D quant=4→独立 BF16/FP16 expertOut 的既有接线回归，不将 FP8 输出直接交给 Combine，不扩展 C 量化范围。
 - 每例仅首次创建时清零整个通信 buffer。例内固定 shape、布局和分核；M2 控制区由生产 kernel 用后清理，
-  不以每轮 Host memset 控制区替代清理。轮次输入采用可辨识数据，功能检查区分当前轮与残留内容。
+  不以每轮 Host memset 控制区替代清理。复用既有输入和结果检查；不为本次收口追加逐轮变化输入专项。
   combine-only 验证交替窗口；both 分别检查 D/C 自己的 magic/window，固定各用一窗符合约定。
-- **M3/M4 测试后处理方案待确认：** 尚无 M5 时，建议 consumer 在本轮所有 rank 提交完成并同步后，
-  只检查当前模块应写的结果槽，再仅清理已产生结果的 Flag、保留 payload 和控制区；清理完成且各 rank 就绪后进入下一轮。
-  不等待尚未由 M4 生成的槽，不提前实现生产 M5，也不把清理助手编入业务 kernel。
-  functional 多轮逐轮检查；performance/breakdown 使用同一复用规则，后处理和跨 rank rendezvous 独立记账、排除于算子耗时。
-  这些结果标为“有测试后处理的多轮模块验收”，不能声称是仅批末同步的连续生产连跑或端到端吞吐。
-  若不采用该方案，须先确定等价的结果消费/复用验收方法；不能重复发送同样数据、只读最后一轮就宣称多轮正确。
-- M1/M2 保留连续提交、批末同步的基线，验证 stage/控制清理及 final-round 结果；增加有明确轮次边界的功能诊断用例
-  检查中间轮次，分别报告，不能把批末读回说成逐轮校验。50μs 不视为跨 rank barrier。
-- M5 接入后取消替代 M5 的测试侧结果清理，先验单轮及可观察的多轮功能，再验符合既定模型调度的连续多轮。
-  移除 50μs 后的 Dispatch→Combine 连跑、stage 生命周期及跨 rank 进度偏差是明确验收项；
-  原生产调度约束必须落实到 consumer，不能从同 stream 的本卡完成推断远端已读完，也不静默新增 kernel 结束握手。
+- **M3/M4 已确认只验单轮：** 首次初始化后无预热运行一次，完成同步后检查本模块应写的数据和 Flag，
+  随后结束该测试；不清结果 Flag，不添加 consumer 清理助手，也不以未清理状态继续发送下一轮。
+  M3 不等待 M4 才会产生的槽，M4 不等待尚未实现的 M5 消费；已有 M2 仍负责自己的控制区清理。
+  functional/performance/breakdown 均遵守此单轮边界，避免预热实际造成多次写入。
+- M1/M2 和完整 M5 的开发功能验收覆盖 1/2/普通多轮，复用现有用例和检查方式。
+  不为当前开发额外设计逐轮观察、变化输入或长时间重复调用的专项；P2.1 已做检查按实际证据登记。
+  批末读回只说明所检查轮次的结果，不称为逐轮检查；50μs 不视为跨 rank barrier。
+- M5 接入后由生产 M5 清理结果 Flag，再验完整流程的 1/2/多轮。
+  consumer 遵守既定模型调度和 stage 生命周期，不新增生产 kernel 结束握手。
+- 低概率残留和长时稳定性留到全部功能、性能达标后的压力阶段；单轮重复 1 万次、双轮重复 1 万次
+  仅为后续压力方式示例，现阶段不展开脚本或矩阵，也不声称已有稳定性结论。
 
 ### 性能与 breakdown 的共同口径
 
-performance 用 OFF 包采集 msprof，breakdown 用 ON 包采集标准记录，两者都执行本模块正确性检查。
-D/C 记录区、有效/丢弃计数、latest 状态继续隔离，单算子只解析自身，both 分别输出两个 trace。
-latest 仍仅保留每核最后一次 launch，报告写明采集轮次；多轮调用数来自独立提交/完成与 profiler 记录，
-不能凭一个 latest trace 宣称导出了所有轮次。容量按模块新增事件重新核算，不沿用空 Combine 的 8 槽上限导致截断。
+performance 用 OFF 包沿用 Dispatch 的采集和统计逻辑，breakdown 用 ON 包沿用解析与 trace 导出。
+开发验收仅要求性能数据可取得、已实现模块的耗时拆解和 trace 正确，两种模式仍检查对应模块结果。
+M3/M4 使用无预热单轮；M1/M2、完整 M5 按正常轮次运行。后续性能专项再建立基线、判断达标、定位瓶颈。
 
-| 模块 | breakdown 至少区分 | 数据量口径 |
-| --- | --- | --- |
-| M1/M2 | Init、type3 筛选/拷贝、prepareDone 发布/等待/清理、serverReady 通知/等待/清理、末尾排空、单列 50μs wait | M1 有效拷贝 payload；本卡发布/Server 内通知的控制字节另列，控制同步不给业务带宽 |
-| M3 | type1 筛选/表缓存、读入/打包/发送、排空 | DIRECT 有效字节与含 Flag 的 wire 字节分别列出 |
-| M4 | type2 筛选/表缓存、成员读取及等待、FP32 加权/转换、partial 打包/发送、排空 | 成员 stage 读取、partial 返回、有效/wire 字节分别列出，self 不算跨卡读 |
-| M5 | 表段准备、probe/等待、payload 接收、FP32 加权/转换、Flag 清理、yOut 写出和排空 | 有效副本读取、输出、Flag 清理分别记账，端到端字节不把同一传输重复累计 |
+| 模块 | 当前 breakdown 粒度 |
+| --- | --- |
+| M1a | Init |
+| M1b | 本地 type3 拷贝模块整体，含筛选和索引处理 |
+| M2 | 本卡汇总及 Server ready 同步模块整体 |
+| M3 | DIRECT 返回模块整体 |
+| M4 | 成员读取、聚合及 partial 返回模块整体 |
+| M5 | 最终接收聚合及清理模块整体 |
+| M6 / 临时等待 | 必要收尾排空；P2.1 的既有 50μs 临时等待独立标注 |
 
-每份报告包含算子/模块、后端和真实设备/替身身份、源码/Host/Kernel 版本及哈希、CANN/driver、shape、dtype、
-D/C quantMode、分核、窗口、预热/正式轮次、调度/后处理模式、profiler/打点状态、可读的 μs 延迟、
-有效/物理通信字节和适用带宽，跨 rank 汇总 min/median/max。只有零工作量或不适用阶段记 N/A，
-真实 M1/M3/M4/M5 不能继续统一报告空算子 algorithm_bytes=0；不把控制轮询的未知流量伪造为确定业务字节。
-P2.1 整体 kernel 时长包含 50μs，模块时长单独报告，不直接把总耗时减 50μs 当作精确业务耗时。
+不要求模块内部 load/metadata/output、逐 Token/probe、逐引擎细打点；仅在后续性能专项发现瓶颈时
+针对该模块展开。已存在的 P2.1 细事件属于实现快照，不是后续模块细分模板。
+模块异步区间不能相加冒充完整 kernel 时长，也不以总时长减 50μs 推导精确业务时长。
+D/C 记录区及计数保持隔离，单算子只解析自身，both 分别导出两个 trace；latest 只代表实际保存的最后一次调用。
+
+沿用 Dispatch 已有统计、数据量、后端、版本、日志及结果输出字段，不为开发验收另建基线或达标报告。
+performance 继续使用最后最多 50 个正式轮次、先 server 内平均再跨 server 汇总的既定口径。
+run.sh 单行汇总，详细日志保存在 run 路径；执行失败、超时、结果校验失败沿用既有分类。
+若 kernel 正常结束而数值错误，仍完成可用性能统计和 trace 导出，最终标记校验失败。
 
 ### 文件职责、前置收口与交付证据
 
@@ -265,16 +274,17 @@ P2.1 整体 kernel 时长包含 50μs，模块时长单独报告，不直接把�
 | 公共布局、Host/tiling | `src/ep/common/ep_memory_server_dedup_buffer_layout.h`、Combine host/layout/launch/tiling；影响共享布局的 Dispatch 回归 | P2.1 同步 96KiB 及完整容量；公共 27 参数不变，内部 tiling 改动同时更新 Host/device/ABI 测试 |
 | Kernel 模块 | `tilexr_ep_combine_memory_server_dedup_kernel.h/.cpp` 及按需拆分模块头、CMake 依赖 | 依次实现 M1/M2、M3、M4、M5；各点都实现所需 M6 发布/排空，OFF/ON 真实 A5 编译 |
 | 独立参考与 consumer | `tests/ep/integration/test_tilexr_ep_server_dedup_chain.cpp`、`server_dedup_combine_consumer.h` 及模块 Host 测试 | 五表连接、模块 oracle、保护区/Flag、轮次证据；故障注入须使汇总失败 |
-| workflow 与报告 | `tools/validation/workflow.py`、`tools/validation/test_workflow.py`、原有四个脚本及 profiling mapping/解析器 | 单入口四类矩阵、精确进度/超时、当前 checkpoint/模块身份校验、独立安装包及可追溯 summary |
+| workflow 与报告 | `tools/validation/workflow.py`、`tools/validation/test_workflow.py`、原有四个脚本及 profiling mapping/解析器 | 单入口按模块轮次范围验收、沿用进度/超时、当前 checkpoint/模块身份校验、独立安装包及 summary |
 
-用户本次已确定模块顺序、四类门槛和 50μs 生命周期；不自动批准设计文档中所有推荐项。
+用户已确定模块顺序和 50μs 生命周期；轮次及性能验收范围按最新 CB06-04 执行，不沿用旧的每点四类多轮门槛。
 CB06-03 已确认默认 32/32 及编译期统一配置；CB1B-02 已确认单份有界连续表段缓存和按剩余 UB/Event 配置的共用环形 lane。
-P2.1 落实 M1/M2 实际 UB/Event 预算和目标 API 验证；CB1A-01 的跨模块总预算继续暂缓，不作为本点前置条件。
-M3 前落实 CB03-01 与上述测试后处理；M4 前落实 CB04-01/02 与数值容差；M5 前落实 CB05-01/02、
-空 mask 语义和完整调度/数值验收。跨模块复用优化仍待实际预算，已确认的 M2 独立 UB 不因计划变化而改写。
+P2.1 落实 M1/M2 实际 UB/Event 预算和目标 API 验证；CB1A-01 的跨模块总预算现已进入讨论，仍不追溯作为本点前置条件。
+M3 按已确认 CB03-01 实现非对齐起点的连续表段搬入及相对行号索引，单轮检查无需测试后处理；M4 按已确认 CB04-01 的共同表段缓存/成员寻址和 CB04-02 流水实施，并落实数值判据；M5 按已确认 CB05-01 的密排 pending 删除和非零 mask 契约、CB05-02 的 probe 执行完整调度/数值验收。
+CB1A-01 已确认首版保留 M4→M5 的 PIPE_ALL，位于 M5 初始化、表加载及覆盖复用 UB 之前；两模块 UB 生命周期、EventID 和流水状态独立，空间按常驻/公共/阶段专用资源规划，具体预算仍待核算。已确认的 M2 独立 UB 不因复用规划而改写。
+去掉屏障及更深度融合仅列入 [后续优化方案](specs/ep-memory-server-dedup-combine-design.md#deferred-m4-m5-fusion)，全部功能完成且此处被确认为性能问题后再评估；首版不要求实现，不增加融合开关、专项基线或新的验收矩阵，仍按既定轮次与模块级 performance/breakdown 验收。
 
 每个模块的交付闭环：本地 Host/脚本回归及 blue CANN 9.1 A5 OFF/ON 编译 → 独立提交并推送 →
-用户切换对应 SHA 执行 `bash run_commit_validation.sh` → 回传四类子结果及总 summary → 登记后进入下一模块。
+用户切换对应 SHA 执行 `bash run_commit_validation.sh` → 回传该模块适用结果及 summary → 登记后进入下一模块。
 报告保留环境身份、源码状态/摘要、build_id、Host/Kernel 哈希、命令和各 rank 证据；复用已存在的匹配环境 HCCL 资格记录。
 未回传仍为待验证，不重用第一阶段通过标志；P2.1 开发及设备验收证据已单独登记，设备部分按用户回传通过；P2.2 已按回传通过，P2.3 已按回传通过，P2.4 已按回传通过 24/24；第二阶段按既定范围收口，后续专题另行验收。
 
