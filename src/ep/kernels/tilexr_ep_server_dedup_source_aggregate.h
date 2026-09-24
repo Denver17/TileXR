@@ -24,44 +24,34 @@ public:
         uint32_t k, uint8_t dtype, uint32_t participant, uint32_t participants,
         const EpCombineM45WorkspaceLayout &layout, uint32_t partialTasks)
     {
-        scratch_ = scratch[layout.phaseOffset]; h_ = h; k_ = k; dtype_ = dtype;
-        const uint32_t base = bs / participants, extra = bs % participants;
-        count_ = base + (participant < extra ? 1U : 0U);
-        begin_ = participant * base + (participant < extra ? participant : extra);
-        blocks_ = (h * 2U + 479U) / 480U;
-        packetBytes_ = blocks_ * 512U;
         outputBytes_ = layout.outputBytes;
         finalLayout_ = EpCombineM5Layout(layout, partialTasks);
         inputLanes_ = finalLayout_.inputLanes;
         sharedOutputLanes_ = layout.outputLanes;
         outputLanes_ = layout.finalOutputLanes;
         if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
-        // The shared Host budget uses the largest contiguous Recv-core segment.
-        const uint32_t owned = EpCombineM5TokenCount(bs);
-        masks_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
-        pending_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
-        weights_ = Allocate<float>(EpCombineAlign(owned * k * 4U, 32U));
-        flags_ = Allocate<float>(EpCombineM5FlagBytes(h, k));
-        work_ = Allocate<float>(EpCombineM5WorkBytes(h, k));
-        probeSum_ = Allocate<float>(32U);
-        cast_ = scratch.ReinterpretCast<float>();
-        product_ = scratch[layout.computeBytes].ReinterpretCast<float>();
-        sum_ = scratch[2U * layout.computeBytes].ReinterpretCast<float>();
-        inputs_ = scratch.ReinterpretCast<uint16_t>();
-        outputs_ = scratch[layout.outputOffset].ReinterpretCast<uint16_t>();
-        result_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(result));
-        resultFlags_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(result));
-        output_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(yOut));
-        if (count_ == 0U) return;
-        GlobalTensor<uint32_t> maskGm;
-        GlobalTensor<float> weightGm;
-        maskGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(masks));
-        weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(weights));
-        DataCopyPad(masks_, maskGm[begin_], {1U, count_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0U});
-        DataCopyPad(weights_, weightGm[uint64_t(begin_) * k],
-            {1U, count_ * k * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0.0f});
-        Sync<HardEvent::MTE2_S>();
-        for (uint32_t p = 0; p < count_; ++p) pending_.SetValue(p, begin_ + p);
+        InitCommon(scratch, result, masks, weights, yOut, bs, h, k, dtype, participant, participants,
+            layout.phaseOffset, layout.computeBytes, layout.outputOffset);
+    }
+
+    __aicore__ inline void InitM6(LocalTensor<uint8_t> scratch, GM_ADDR result,
+        GM_ADDR weights, GM_ADDR yOut, uint32_t bs, uint32_t h, uint32_t k, uint8_t dtype,
+        uint32_t participant, uint32_t participants, const EpCombineM6WorkspaceLayout &layout)
+    {
+        inputLanes_ = layout.inputLanes; outputLanes_ = layout.outputLanes; outputBytes_ = layout.outputBytes;
+        if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
+        for (uint32_t lane = 0; lane < inputLanes_; ++lane)
+            finalLayout_.inputOffsets[lane] = layout.inputOffset + lane * layout.inputBytes;
+        for (uint32_t lane = 0; lane < outputLanes_; ++lane) {
+            finalLayout_.outputSlots[lane] = lane;
+            SetFlag<HardEvent::MTE3_V>(lane);
+        }
+        InitCommon(scratch, result, nullptr, weights, yOut, bs, h, k, dtype, participant, participants,
+            layout.phaseOffset, layout.computeBytes, layout.outputOffset);
+    }
+    __aicore__ inline void DrainM6()
+    {
+        for (uint32_t lane = 0; lane < outputLanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
     }
 
     __aicore__ inline uint32_t Process()
@@ -71,21 +61,21 @@ public:
         uint32_t remaining = count_, scan = 0U, completed = 0U;
         while (remaining != 0U) {
             const uint32_t token = pending_.GetValue(scan);
-            const uint32_t mask = masks_.GetValue(token - begin_);
-            if (mask == 0U || (k_ < 32U && (mask >> k_) != 0U)) { Trap(); return retiredOutputs_; }
+            const uint32_t mask = kEpServerDedupEnable ? masks_.GetValue(token - begin_) : 0U;
+            if (kEpServerDedupEnable && (mask == 0U || (k_ < 32U && (mask >> k_) != 0U))) { Trap(); return retiredOutputs_; }
             if (!Probe(token, mask)) {
                 if (++scan == remaining) scan = 0U;
                 continue;
             }
             // One interval per ready task; failed readiness probes emit no records.
-            Mark(kEpServerDedupCombineProfileFinalTokenBegin);
+            Mark(kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenBegin : kEpServerDedupCombineProfileM6TokenBegin);
             // No further probes after this point: clear every original token's
             // complete K*N flags, including mask-inactive slots. This source is
             // independent of the final token's in-flight payload and yOut.
             if (remaining == 1U) ClearFlags();
             if (dtype_ == TileXR::TILEXR_DATA_TYPE_FP16) Aggregate<half>(token, mask, completed);
             else Aggregate<bfloat16_t>(token, mask, completed);
-            Mark(kEpServerDedupCombineProfileFinalTokenEnd);
+            Mark(kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenEnd : kEpServerDedupCombineProfileM6TokenEnd);
             pending_.SetValue(scan, pending_.GetValue(remaining - 1U));
             --remaining; ++completed;
             if (scan == remaining) scan = 0U; // re-probe the swapped real TokenId
@@ -95,6 +85,45 @@ public:
     }
 
 private:
+    __aicore__ inline void InitCommon(LocalTensor<uint8_t> scratch, GM_ADDR result,
+        GM_ADDR masks, GM_ADDR weights, GM_ADDR yOut, uint32_t bs, uint32_t h,
+        uint32_t k, uint8_t dtype, uint32_t participant, uint32_t participants,
+        uint32_t phaseOffset, uint32_t computeBytes, uint32_t outputOffset)
+    {
+        scratch_ = scratch[phaseOffset]; h_ = h; k_ = k; dtype_ = dtype;
+        const uint32_t base = bs / participants, extra = bs % participants;
+        count_ = base + (participant < extra ? 1U : 0U);
+        begin_ = participant * base + (participant < extra ? participant : extra);
+        blocks_ = (h * 2U + 479U) / 480U;
+        packetBytes_ = blocks_ * 512U;
+        // The shared Host budget uses the largest contiguous Recv-core segment.
+        const uint32_t owned = EpCombineM5TokenCount(bs);
+        if (kEpServerDedupEnable) masks_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
+        pending_ = Allocate<uint32_t>(EpCombineAlign(owned * 4U, 32U));
+        weights_ = Allocate<float>(EpCombineAlign(owned * k * 4U, 32U));
+        flags_ = Allocate<float>(EpCombineM5FlagBytes(h, k));
+        work_ = Allocate<float>(EpCombineM5WorkBytes(h, k));
+        probeSum_ = Allocate<float>(32U);
+        cast_ = scratch.ReinterpretCast<float>();
+        product_ = scratch[computeBytes].ReinterpretCast<float>();
+        sum_ = scratch[2U * computeBytes].ReinterpretCast<float>();
+        inputs_ = scratch.ReinterpretCast<uint16_t>();
+        outputs_ = scratch[outputOffset].ReinterpretCast<uint16_t>();
+        result_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(result));
+        resultFlags_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(result));
+        output_.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(yOut));
+        if (count_ == 0U) return;
+        GlobalTensor<uint32_t> maskGm;
+        GlobalTensor<float> weightGm;
+        if (kEpServerDedupEnable) maskGm.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(masks));
+        weightGm.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(weights));
+        if (kEpServerDedupEnable) DataCopyPad(masks_, maskGm[begin_], {1U, count_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0U});
+        DataCopyPad(weights_, weightGm[uint64_t(begin_) * k],
+            {1U, count_ * k * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0.0f});
+        Sync<HardEvent::MTE2_S>();
+        for (uint32_t p = 0; p < count_; ++p) pending_.SetValue(p, begin_ + p);
+    }
+
     __aicore__ inline void Mark(uint32_t event)
     {
 #if defined(TILEXR_ENABLE_PROFILING)
@@ -122,7 +151,7 @@ private:
         // independent of payload compute/output, so do not wait for that Vector
         // work before issuing the next flag read. Inactive slot flags stay zero.
         const uint32_t flags = k_ * blocks_;
-        const uint32_t expected = uint32_t(GetBitCount<1>(uint64_t(mask))) * blocks_;
+        const uint32_t expected = (kEpServerDedupEnable ? uint32_t(GetBitCount<1>(uint64_t(mask))) : k_) * blocks_;
         auto src = resultFlags_[uint64_t(token) * k_ * packetBytes_ / 4U + 120U];
         DataCopy(flags_, src, {uint16_t(flags), 1U, 15U, 0U});
         Sync<HardEvent::MTE2_V>();
@@ -149,7 +178,7 @@ private:
     {
         const uint32_t lane = (inputSequence_ + member) % inputLanes_;
         WaitFlag<HardEvent::V_MTE2>(lane);
-        const uint32_t retire = finalLayout_.inputRetireMasks[lane] & ~retiredOutputs_;
+        const uint32_t retire = kEpServerDedupEnable ? finalLayout_.inputRetireMasks[lane] & ~retiredOutputs_ : 0U;
         if (retire != 0U) {
             for (uint32_t slot = 0; slot < sharedOutputLanes_; ++slot)
                 if ((retire >> slot) & 1U) WaitFlag<HardEvent::MTE3_V>(slot);
@@ -168,14 +197,14 @@ private:
     {
         uint32_t nextK = 0U, loaded = 0U;
         for (; nextK < k_ && loaded < inputLanes_; ++nextK)
-            if ((mask >> nextK) & 1U) Load(token, nextK, loaded++);
+            if (!kEpServerDedupEnable || ((mask >> nextK) & 1U)) Load(token, nextK, loaded++);
         uint32_t member = 0U;
-        for (uint32_t k = 0U; k < k_; ++k) if ((mask >> k) & 1U) {
+        for (uint32_t k = 0U; k < k_; ++k) if (!kEpServerDedupEnable || ((mask >> k) & 1U)) {
             const uint32_t lane = (inputSequence_ + member) % inputLanes_;
             WaitFlag<HardEvent::MTE2_V>(lane);
             Cast(cast_, inputs_[finalLayout_.inputOffsets[lane] / 2U].template ReinterpretCast<T>(), RoundMode::CAST_NONE, h_);
             SetFlag<HardEvent::V_MTE2>(lane);
-            while (nextK < k_ && ((mask >> nextK) & 1U) == 0U) ++nextK;
+            while (kEpServerDedupEnable && nextK < k_ && ((mask >> nextK) & 1U) == 0U) ++nextK;
             if (nextK < k_) Load(token, nextK++, loaded++);
             PipeBarrier<PIPE_V>();
             const float weight = weights_.GetValue((token - begin_) * k_ + k);

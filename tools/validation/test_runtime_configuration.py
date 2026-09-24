@@ -427,7 +427,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         for mode, override, arguments, expected, run_mode in (
                 ('production', None, [], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
                 ('production', None, ['breakdown=0'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=1'], workflow.COMBINE_M5_CHECKPOINT, 'breakdown'),
+                ('production', None, ['breakdown=1', 'dedup=0'], workflow.COMBINE_M5_CHECKPOINT, 'breakdown'),
                 ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
                 ('host', None, [], None, 'functional')):
             with self.subTest(mode=mode, override=override, arguments=arguments):
@@ -441,6 +441,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 values = json.loads(result.stdout.splitlines()[-1])
                 self.assertNotIn('TILEXR_INTERNAL_ACCEPTANCE_STAGE', values)
+                self.assertEqual(values['TILEXR_VALIDATION_DEDUP'], '0' if 'dedup=0' in arguments else '1')
                 self.assertEqual(values['TILEXR_VALIDATION_BREAKDOWN'], '1' if run_mode == 'breakdown' else '0')
                 self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], 'breakdown')
                 self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('3', '2'))
@@ -565,7 +566,7 @@ write_result(root, report, root/'summary.json')
         self.assertIn('unfinished workflow', (output / 'workflow.log').read_text())
 
     def test_bad_arguments_and_missing_configuration_name_the_problem(self):
-        for arguments in (['breakdown=2'], ['run_mode=breakdown'], ['breakdown=1']):
+        for arguments in (['breakdown=2'], ['dedup=2'], ['dedup='], ['run_mode=breakdown'], ['breakdown=1']):
             # The last case rejects profiling in the fixture's Host build mode.
             result = subprocess.run([str(self.bash), 'build_all.sh', *arguments], cwd=self.root,
                                     env=self.env, text=True, capture_output=True, timeout=10)

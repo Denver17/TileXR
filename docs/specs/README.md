@@ -21,6 +21,7 @@ for UDMA data-plane claims. Sources under `reference/` are comparison-only.
 | UDMA transport | [udma-transport.md](udma-transport.md) |
 | EP memory backend | [ep-memory.md](ep-memory.md) |
 | EP memory server deduplication (design in progress) | [ep-memory-server-dedup.md](ep-memory-server-dedup.md) |
+| EP memory server deduplication disabled mode | [ep-memory-server-dedup-disabled-mode.md](ep-memory-server-dedup-disabled-mode.md) |
 | MoonEP runtime and planner | [moonep-runtime.md](moonep-runtime.md) |
 | MoonEP Dispatch | [moonep-dispatch.md](moonep-dispatch.md) |
 | MoonEP Combine | [moonep-combine.md](moonep-combine.md) |

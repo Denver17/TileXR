@@ -39,7 +39,7 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     layout.scaleBytes = quantized ? TileXREpDedupAlign((uint64_t(h) + 31U) / 32U, 2U) : 0;
     layout.headerPayloadOffset = TileXREpDedupAlign(quantized ? layout.quantCount + layout.scaleBytes : uint64_t(h) * 2U, 32U);
     layout.readIndexPayloadOffset = layout.headerPayloadOffset + 32U;
-    const uint64_t readIndexBytes = uint64_t(topK) * 8U;
+    const uint64_t readIndexBytes = kEpServerDedupEnable ? uint64_t(topK) * 8U : 0U;
     if (layout.readIndexPayloadOffset % 480U + readIndexBytes > 480U)
         layout.readIndexPayloadOffset = TileXREpDedupAlign(layout.readIndexPayloadOffset, 480U);
     layout.headerWireOffset = layout.headerPayloadOffset / 480U * 512U + layout.headerPayloadOffset % 480U;
@@ -52,6 +52,26 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     layout.dispatchBytes = uint64_t(experts) * bs * layout.tokenStride;
     layout.requiredBytes = TileXREpDedupAlign(layout.dispatchOffset + layout.dispatchBytes, 512U);
     return layout;
+}
+
+// Fixed sender allocation shared by Host admission and device lane planning.
+// owned is the weight-copy partition, not the non-dedup route ownership.
+TILEXR_EP_DATA_INLINE uint64_t TileXREpServerDedupSendFixedUbBytes(uint32_t bs, uint32_t k,
+    uint32_t ranks, uint32_t owned, uint32_t reserved, bool quantized, const EpServerDedupDataLayout &data)
+{
+    const uint64_t input = quantized ? data.quantCount * 2U : data.packedPayloadBytes;
+    const uint64_t q = TileXREpDedupAlign(uint64_t(bs) * k * 4U, 32U);
+    const uint64_t scaleCount = data.quantCount / 32U;
+    const uint64_t quantWork = TileXREpDedupAlign(TileXREpDedupAlign(scaleCount, 32U) * 4U + scaleCount * 2U, 32U);
+    const uint64_t work = quantized && quantWork > q ? quantWork : q;
+    uint64_t bytes = reserved + 2U * input + TileXREpDedupAlign(uint64_t(bs) * k * 4U, 256U) +
+        2U * work + q + (quantized ? data.packedPayloadBytes : 0U) + TileXREpDedupAlign(uint64_t(owned) * k * 4U, 32U);
+    if (kEpServerDedupEnable) {
+        const uint32_t groups = ranks / 8U - 1U < k / 2U ? ranks / 8U - 1U : k / 2U;
+        bytes += TileXREpDedupAlign(uint64_t(owned) * k * 4U, 32U) + TileXREpDedupAlign(uint64_t(owned) * 4U, 32U) +
+            TileXREpDedupAlign(uint64_t(owned) * k * 16U, 32U) + 64U + TileXREpDedupAlign(groups * 4U, 32U);
+    } else bytes += 2112U;
+    return bytes;
 }
 
 TILEXR_EP_DATA_INLINE uint64_t TileXREpServerDedupDispatchOffset(const EpServerDedupDataLayout &layout,

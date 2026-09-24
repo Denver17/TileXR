@@ -25,12 +25,12 @@ int main()
         const uint64_t bs = test.experts >= 1008 ? 128U : 256U;
         Check(TileXREpBuildMemoryServerDedupLayout(test.ranks, bs, 7168, test.k, test.experts,
             &layout) == TILEXR_SUCCESS, "supported layout");
-        Check(layout.capacityRows == test.rows && layout.relayReadIndexRowStrideBytes == test.stride,
+        Check(layout.capacityRows == test.rows && layout.relayReadIndexRowStrideBytes == (kEpServerDedupEnable ? test.stride : 0U),
             "capacity and tightly packed RelayReadIndex stride");
-        Check(layout.tokenTypeBytes == test.rows * 4 && layout.destinationIndexBytes == test.rows * 12 &&
-            layout.relayReadIndexBytes == test.rows * test.stride,
+        Check(layout.tokenTypeBytes == (kEpServerDedupEnable ? test.rows * 4 : 0U) && layout.destinationIndexBytes == test.rows * 12 &&
+            layout.relayReadIndexBytes == (kEpServerDedupEnable ? test.rows * test.stride : 0U),
             "metadata byte sizes");
-        Check(layout.sourceMaskBytes == bs * 4U && layout.xBytes == bs * 7168U * 2U, "input and mask sizes");
+        Check(layout.sourceMaskBytes == (kEpServerDedupEnable ? bs * 4U : 0U) && layout.xBytes == bs * 7168U * 2U, "input and mask sizes");
         Check(layout.expertIdsBytes == bs * test.k * 4U && layout.weightBytes == layout.expertIdsBytes,
             "route input sizes");
         Check(layout.sendCountsBytes == static_cast<uint64_t>(test.experts) * 4U &&
@@ -38,7 +38,7 @@ int main()
             "count output sizes");
     }
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS &&
-        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.relayReadIndexBytes == 128, "tight H tail and K=1");
+        layout.xBytes == 6 && layout.expandXBytes == 96 && layout.relayReadIndexBytes == (kEpServerDedupEnable ? 128 : 0), "tight H tail and K=1");
     struct WireCase {
         uint32_t h, k;
         bool quantized;
@@ -61,12 +61,17 @@ int main()
     for (const auto &test : wireCases) {
         Check(TileXREpBuildMemoryServerDedupLayout(16, 1, test.h, test.k, 32,
             &layout, test.quantized) == TILEXR_SUCCESS, "wire boundary layout supported");
+        if (!kEpServerDedupEnable) {
+            Check(layout.data.headerWireOffset == test.header && layout.data.payloadBytes == layout.data.headerPayloadOffset + 32U &&
+                layout.data.tokenStride == 512U, "compact three-field tail drops the relay segment");
+        } else {
         Check(layout.data.headerWireOffset == test.header &&
-            layout.data.relayReadIndexWireOffset == test.index && layout.data.tokenStride == test.stride,
+            layout.data.relayReadIndexWireOffset == test.index && layout.data.tokenStride == (kEpServerDedupEnable ? test.stride : 0U),
             "Host caches exact aligned header/index offsets and complete token stride");
         Check(layout.data.headerWireOffset % 32U == 0 && layout.data.relayReadIndexWireOffset % 32U == 0 &&
             layout.data.relayReadIndexWireOffset % 512U + test.k * 8U <= 480U,
             "both segment starts align to 32B and all index bytes precede the flag");
+        }
     }
     const int64_t invalid[][5] = {
         {0, 1, 1, 1, 32}, {8, 1, 1, 1, 32}, {17, 1, 1, 1, 34}, {136, 1, 1, 1, 272},
@@ -118,7 +123,7 @@ int main()
             "fixed tables are aligned and disjoint including unused capacity");
         end = region.offset + region.bytes;
     }
-    Check(end == 835584U && TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1048576U &&
+    Check(end == 880640U && TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1048576U &&
         end <= TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
         "shared data follows both fixed control regions");
 
@@ -136,8 +141,8 @@ int main()
         countLayout.counterOffset % 1024U == 0 && countLayout.stateBytes == countLayout.counterOffset + 1024U,
         "both receiver matrices, every prefix and the isolated counter have disjoint storage");
     Check(TileXREpBuildMemoryServerDedupLayout(128, 256, 7168, 6, 384, &layout) == TILEXR_SUCCESS &&
-        layout.data.dispatchOffset == 1048576U && layout.data.dispatchBytes == 1560281088U &&
-        layout.data.requiredBytes == 1561329664U,
+        layout.data.dispatchOffset == 1048576U && layout.data.dispatchBytes == (kEpServerDedupEnable ? 1560281088U : 1509949440U) &&
+        layout.data.requiredBytes == (kEpServerDedupEnable ? 1561329664U : 1510998016U),
         "Dispatch requires only fixed controls and its own receive view");
     for (uint64_t peerBytes : {6ULL << 30, 8ULL << 30, 10ULL << 30}) {
         for (int64_t magic = 0; magic <= 5; ++magic) {
@@ -159,12 +164,14 @@ int main()
     alignas(32) uint8_t storage[512] = {};
     Check(TileXREpBuildMemoryServerDedupLayout(16, 1, 3, 1, 32, &layout) == TILEXR_SUCCESS,
         "one-token RelayReadIndex capacity");
+    if (kEpServerDedupEnable) {
     EpServerDedupAllocation relayReadIndex {storage + 4, 64, layout.relayReadIndexBytes, 4, 1};
     Check(TileXREpValidateServerDedupAllocations(&relayReadIndex, 1, 1) == TILEXR_ERROR_PARA_CHECK_FAIL,
         "insufficient RelayReadIndex allocation rejected");
     relayReadIndex.bytes = layout.relayReadIndexBytes;
     Check(TileXREpValidateServerDedupAllocations(&relayReadIndex, 1, 1) == TILEXR_SUCCESS,
         "4B-aligned capacityRows allocation fits exactly");
+    }
     const EpServerDedupAllocation valid[] = {
         {storage, 64, 64, 32, 1}, {storage + 64, 32, 4, 4, 1}, {storage + 96, 160, 128, 32, 1}
     };

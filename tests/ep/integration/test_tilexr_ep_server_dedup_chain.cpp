@@ -728,7 +728,7 @@ int Run(const Config &c)
             Check(aclrtMemcpy(buffers[1], layout.expertIdsBytes, idsHost.data(), idsHost.size() * sizeof(int32_t), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert ids");
             Check(aclrtMemcpy(buffers[9], layout.weightBytes, weightsHost.data(),
                 weightsHost.size() * sizeof(float), ACL_MEMCPY_HOST_TO_DEVICE), "copy expert scales");
-            Check(aclrtMemset(buffers[8], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
+            if (layout.sourceMaskBytes) Check(aclrtMemset(buffers[8], layout.sourceMaskBytes, 0xff, layout.sourceMaskBytes), "initialize source mask");
             Check(aclrtMemset(buffers[10], layout.weightBytes, 0xff, layout.weightBytes), "initialize source weights");
             for (const uint32_t index : {2U, 5U, 6U, 7U, 11U})
                 if (sizes[index]) Check(aclrtMemset(buffers[index], sizes[index], 0xa5, sizes[index]), "initialize dispatch output");

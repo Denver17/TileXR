@@ -32,6 +32,7 @@ struct SourceFixture : CombineM12Test::Fixture {
         for (uint32_t p = 0; p < bs; ++p) {
             masks[p] = p % 3U == 0U ? (1U << (k - 1U)) : p % 3U == 1U ?
                 (k == 32U ? 0xffffffffU : (1U << k) - 1U) : (1U | (1U << (k - 1U)));
+            if (!kEpServerDedupEnable) masks[p] = k == 32U ? UINT32_MAX : (1U << k) - 1U;
             for (uint32_t j = 0; j < k; ++j) {
                 const float choices[] = {0.0f, 0.1f, -1.25f, 0.375f, -0.3125f};
                 weights[p * k + j] = choices[(p + j) % 5U];
@@ -105,8 +106,9 @@ struct SourceFixture : CombineM12Test::Fixture {
         CombineMemoryServerDedupKernel kernel;
         kernel.Init(reinterpret_cast<GM_ADDR>(&args), reinterpret_cast<GM_ADDR>(expert.data()),
             reinterpret_cast<GM_ADDR>(table.data()), reinterpret_cast<GM_ADDR>(counts.data()),
-            reinterpret_cast<GM_ADDR>(weights.data()), reinterpret_cast<GM_ADDR>(types.data()),
-            reinterpret_cast<GM_ADDR>(relay.data()), reinterpret_cast<GM_ADDR>(masks.data()),
+            reinterpret_cast<GM_ADDR>(weights.data()), kEpServerDedupEnable ? reinterpret_cast<GM_ADDR>(types.data()) : nullptr,
+            kEpServerDedupEnable ? reinterpret_cast<GM_ADDR>(relay.data()) : nullptr,
+            kEpServerDedupEnable ? reinterpret_cast<GM_ADDR>(masks.data()) : nullptr,
             reinterpret_cast<GM_ADDR>(output.data()), bs, h, k, 32U, bf16 ? TileXR::TILEXR_DATA_TYPE_BFP16 : TileXR::TILEXR_DATA_TYPE_FP16, 0U, w, 0U);
         if (throughM4) CombineModuleTestAccess::ThroughM4(kernel);
         else kernel.Process();
@@ -119,7 +121,7 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
     const auto weights = f.weights;
     for (uint32_t round = 0; round < 3U; ++round) {
         const uint32_t w = round % 2U;
-        if (round == 2U && !partial) {
+        if (kEpServerDedupEnable && round == 2U && !partial) {
             // Reuse window zero with changed routing: previously active slots
             // become inactive, and a previous sparse token can gain a new slot.
             for (uint32_t p = 0; p < bs; ++p) f.masks[p] = 1U << (p % k);
@@ -192,7 +194,7 @@ void RunCase(uint32_t bs, uint32_t h, uint32_t k, bool bf16, bool partial)
                 }
             };
             f.Run(core, w);
-            Check(f.readyProbes != 0U, "Recv cores execute M2 before M4/M5");
+            Check(kEpServerDedupEnable ? f.readyProbes != 0U : f.readyProbes == 0U, "Recv cores execute M2 before M4/M5");
             Check(AscendC::PendingMte3().empty(), "full Process M6 drains flag clears and yOut");
             Check(writes.size() == count && std::set<uint32_t>(writes.begin(), writes.end()).size() == count,
                 "pending swap deletes each true TokenId once");
@@ -238,7 +240,9 @@ void TestDirectThenFinal(bool bf16)
     SourceFixture f(1U, 257U, 6U, bf16, true);
     // Send core returns DIRECT; a separate Recv core owns the final token.
     f.partial = false; f.types[0] = 1;
-    f.masks[0] = 3U; f.weights[0] = 0.375f; f.weights[1] = -0.125f;
+    f.masks[0] = kEpServerDedupEnable ? 3U : 63U;
+    if (!kEpServerDedupEnable) { f.tokens = 1U; f.counts.assign(32U, 1); }
+    f.weights[0] = 0.375f; f.weights[1] = -0.125f;
     for (uint32_t col = 0; col < f.h; ++col) f.expert[col] = f.Bits(0U, 0U, col);
     for (uint32_t round = 0; round < 3U; ++round) {
         const uint32_t w = round % 2U;
@@ -493,6 +497,7 @@ int main()
         TestBudget();
         for (bool bf16 : {true, false}) {
             TestDirectThenFinal(bf16);
+            if (kEpServerDedupEnable) {
             TestPartialTailOverlap(bf16);
             TestEightPartialSlots(bf16);
             TestInputReclaimsPartialSlots(bf16, 6U);
@@ -500,8 +505,9 @@ int main()
             TestInputReclaimsPartialSlots(bf16, 11U);
             TestInputReclaimsPartialSlots(bf16, 11U, 32U);
             TestPartialWithoutSource(bf16);
+            }
             RunCase(1U, 17U, 1U, bf16, false); // zero-owned Recv roles, single-bit mask
-            RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 6U, bf16, true);
+            RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 6U, bf16, kEpServerDedupEnable);
             RunCase(3U * kEpServerDedupCombineRecvCoreNum + 1U, 257U, 32U, bf16, false);
             RunCase(9U * kEpServerDedupCombineRecvCoreNum + 1U, 17U, 6U, bf16, false); // wrap inherited output slots
             RunCase(1U, 7168U, 32U, bf16, false); // >255 total flag repeats and wide tails

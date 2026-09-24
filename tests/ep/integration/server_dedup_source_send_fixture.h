@@ -82,6 +82,7 @@ inline std::vector<uint8_t> Payload(const Shape &s, uint32_t rank, const Packet 
         result.data(), result.data() + layout.quantCount);
     const auto tail = layout.headerPayloadOffset;
     Put(result, tail, rank); Put(result, tail + 4U, packet.token); Put(result, tail + 8U, packet.members[0].k);
+    if (!TileXREp::kEpServerDedupEnable) return result;
     Put(result, tail + 12U, uint32_t(packet.members.size() == 1U ? 1U : 2U));
     const auto index = layout.readIndexPayloadOffset;
     Put(result, index, uint32_t(packet.members.size() - 1U));
@@ -127,8 +128,8 @@ inline void CheckPacket(const Shape &s, uint32_t source, const Packet &packet,
     };
     compare(0, uint64_t(s.h) * (s.quantized ? 1U : 2U), "packet hidden");
     if (s.quantized) compare(layout.quantCount, layout.scaleBytes, "packet scale");
-    compare(layout.headerPayloadOffset, 16U, "packet header");
-    compare(layout.readIndexPayloadOffset, 8U * packet.members.size(), "packet read index");
+    compare(layout.headerPayloadOffset, TileXREp::kEpServerDedupEnable ? 16U : 12U, "packet header");
+    if (TileXREp::kEpServerDedupEnable) compare(layout.readIndexPayloadOffset, 8U * packet.members.size(), "packet read index");
 }
 } // namespace ServerDedupReference
 #endif

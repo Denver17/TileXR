@@ -63,7 +63,7 @@ int main()
         s.expertShardType == 0 && s.sharedExpertNum == 0 && s.sharedExpertRankNum == 0 && s.quantMode == 0 &&
         s.dtype == TILEXR_DATA_TYPE_BFP16 && s.activeMaskType == 0 && s.xActiveMask == nullptr &&
         s.sharedExpertX == nullptr && g_context.hostArgs == &g_args && g_context.devArgs == g_dev &&
-        g_layout.capacityRows == 768 && g_layout.requiredWindowBytes == 1454080,
+        g_layout.capacityRows == 768 && g_layout.requiredWindowBytes == (kEpServerDedupEnable ? 1454080U : 1060864U),
         "scalars and validated context forwarded");
     for (int i = 0; i < 39; ++i) {
         auto invalid = valid;
@@ -110,7 +110,9 @@ int main()
             case 37: v.tpRankId = 1; error = TILEXR_ERROR_NOT_SUPPORT; break;
             case 38: v.expertShardType = 1; error = TILEXR_ERROR_NOT_SUPPORT; break;
         }
-        Rejected(invalid, error);
+        if (!kEpServerDedupEnable && ((i >= 5 && i <= 7) || (i >= 15 && i <= 17)))
+            Check(CombineTest::Invoke(invalid) == TILEXR_SUCCESS, "disabled metadata may be null or misaligned");
+        else Rejected(invalid, error);
     }
     // Each tensor's byte extent must fit the address space without reading it.
     for (int i = 0; i < 8; ++i) {
@@ -126,7 +128,9 @@ int main()
             case 6: invalid.relayReadIndex = nearEnd; break;
             case 7: invalid.sourceMask = static_cast<uint32_t *>(nearEnd); break;
         }
-        Rejected(invalid, TILEXR_ERROR_PARA_CHECK_FAIL);
+        if (!kEpServerDedupEnable && i >= 5)
+            Check(CombineTest::Invoke(invalid) == TILEXR_SUCCESS, "disabled metadata has no byte extent");
+        else Rejected(invalid, TILEXR_ERROR_PARA_CHECK_FAIL);
     }
     // Same fixed prefix is insufficient once the kernel writes the real stage.
     const uint64_t fullBytes = g_args.peerMemBytes;
@@ -142,12 +146,14 @@ int main()
     laneBoundary.combine.h = 12960;
     Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "last shared input/output pair fits UB");
     laneBoundary.combine.h = 12961;
-    Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
+    if (kEpServerDedupEnable) Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
+    else Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "M6 independent budget admits this width");
     laneBoundary.combine.topK = 32;
     laneBoundary.combine.h = 11280;
     Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "K32 fits M5 probe and aggregate buffers");
     laneBoundary.combine.h = 11281;
-    Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
+    if (kEpServerDedupEnable) Rejected(laneBoundary, TILEXR_ERROR_NOT_SUPPORT);
+    else Check(CombineTest::Invoke(laneBoundary) == TILEXR_SUCCESS, "M6 independent budget admits this width");
     auto oversizedMetadata = valid;
     oversizedMetadata.combine.bs = UINT32_MAX;
     oversizedMetadata.combine.h = 1;
@@ -178,7 +184,7 @@ int main()
         switch (i) {
             case 0: g_args.rank = -1; break;
             case 1: g_args.rank = g_args.rankSize; break;
-            case 2: g_args.peerMemBytes -= 1024; break;
+            case 2: g_args.peerMemBytes = 2ULL * (1060864U + TILEXR_FLAG_BUFF_BYTES) - 1024U; break;
             case 3: g_args.peerMemBytes += 512; break;
             case 4: g_args.peerMemBytes = 0; break;
             case 5: g_args.peerMems[63] = nullptr; error = TILEXR_ERROR_NOT_INITIALIZED; break;

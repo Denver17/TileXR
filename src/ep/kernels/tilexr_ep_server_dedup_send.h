@@ -31,14 +31,17 @@ public:
         x_.SetGlobalBuffer(reinterpret_cast<__gm__ XType *>(x));
         ids_.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(ids));
         weights_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(weights));
-        maskOut_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(sourceMask));
+        if (kEpServerDedupEnable) maskOut_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(sourceMask));
         weightOut_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(sourceWeights));
     }
 
     __aicore__ inline void Process(ServerDedupProfile &profile,
         TBufPool<TPosition::VECCALC, 16> &scratch, uint32_t reservedBytes)
     {
-        if (count_ == 0U) return;
+        if (kEpServerDedupEnable && count_ == 0U) return;
+        const uint64_t fixed = TileXREpServerDedupSendFixedUbBytes(bs_, k_, args_->rankSize,
+            count_, reservedBytes, Quantized, data_);
+        if (fixed + data_.tokenStride > kEpServerDedupCountUbBytes) { Trap(); return; }
         scratch_ = &scratch;
         TQue<QuePosition::VECIN, 1> input;
         TBufPool<TPosition::VECIN, 1> cleanPool;
@@ -66,28 +69,37 @@ public:
         Allocate(qSubBuf_, scratchBytes);
         Allocate(qWorkBuf_, qBytes);
         if constexpr (Quantized) Allocate(quantBuf_, uint32_t(data_.packedPayloadBytes));
-        Allocate(weightInBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 4U, 32U)));
-        Allocate(weightOutBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 4U, 32U)));
-        Allocate(maskBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * 4U, 32U)));
-        Allocate(directBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 16U, 32U)));
-        Allocate(serverBuf_, 64U);
-        const uint32_t remoteServers = args_->rankSize / 8U - 1U;
-        const uint32_t maxGroups = remoteServers < k_ / 2U ? remoteServers : k_ / 2U;
-        if (maxGroups != 0U) Allocate(firstHopBuf_, uint32_t(TileXREpDedupAlign(maxGroups * 4U, 32U)));
+        if (count_ != 0U) Allocate(weightInBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 4U, 32U)));
+        if (kEpServerDedupEnable) {
+            Allocate(weightOutBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 4U, 32U)));
+            Allocate(maskBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * 4U, 32U)));
+            Allocate(directBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 16U, 32U)));
+            Allocate(serverBuf_, 64U);
+            const uint32_t remoteServers = args_->rankSize / 8U - 1U;
+            const uint32_t maxGroups = remoteServers < k_ / 2U ? remoteServers : k_ / 2U;
+            if (maxGroups != 0U) Allocate(firstHopBuf_, uint32_t(TileXREpDedupAlign(maxGroups * 4U, 32U)));
 
-        // The design's safe input contract guarantees room for at least one lane.
+        } else {
+            // Two 256-route lists plus two comparison masks, disjoint from q/quant scratch.
+            Allocate(routeSelectBuf_, 2112U);
+        }
+
+        // Assert the allocation and Host budget stay in lockstep before subtracting.
+        if (fixed != usedBytes_) { Trap(); return; }
         const uint32_t available = (kEpServerDedupCountUbBytes - usedBytes_) / uint32_t(data_.tokenStride);
         lanes_ = available < 8U ? available : 8U;
         Allocate(outBuf_, lanes_ * uint32_t(data_.tokenStride));
         routeIds_ = idsBuf_.Get<int32_t>();
-        routeWeights_ = weightInBuf_.Get<float>();
-        sourceWeights_ = weightOutBuf_.Get<float>();
-        sourceMasks_ = maskBuf_.Get<uint32_t>();
-        directTasks_ = directBuf_.Get<uint32_t>();
-        serverState_ = serverBuf_.Get<uint32_t>();
-        if (maxGroups != 0U) firstHopMasks_ = firstHopBuf_.Get<uint32_t>();
+        if (count_ != 0U) routeWeights_ = weightInBuf_.Get<float>();
+        if (kEpServerDedupEnable) {
+            sourceWeights_ = weightOutBuf_.Get<float>();
+            sourceMasks_ = maskBuf_.Get<uint32_t>();
+            directTasks_ = directBuf_.Get<uint32_t>();
+            serverState_ = serverBuf_.Get<uint32_t>();
+            if (args_->rankSize / 8U > 1U && k_ >= 2U) firstHopMasks_ = firstHopBuf_.Get<uint32_t>();
+        }
         DataCopyPad(routeIds_, ids_, {1U, bs_ * k_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
-        DataCopyPad(routeWeights_, weights_[uint64_t(start_) * k_],
+        if (count_ != 0U) DataCopyPad(routeWeights_, weights_[uint64_t(start_) * k_],
             {1U, count_ * k_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0.0f});
         Sync<HardEvent::MTE2_S>();
         uint64_t flagMask[2] = {0xffU, 0U};
@@ -99,6 +111,19 @@ public:
         }
         PipeBarrier<PIPE_V>();
 
+        if (kEpServerDedupEnable) SendWithDedup(input, profile);
+        else SendWithoutDedup(input, profile);
+        for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
+        Sync<HardEvent::S_MTE3>();
+        if (kEpServerDedupEnable) DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
+        if (count_ != 0U) DataCopyPad(weightOut_[uint64_t(start_) * k_],
+            kEpServerDedupEnable ? sourceWeights_ : routeWeights_, {1U, count_ * k_ * 4U, 0U, 0U, 0U});
+        Sync<HardEvent::MTE3_S>();
+    }
+
+private:
+    __aicore__ inline void SendWithDedup(TQue<QuePosition::VECIN, 1> &input, ServerDedupProfile &profile)
+    {
         profile.Begin(EpDedupDetailMetric::SendFirstHop);
         for (uint32_t token = 0; token < count_; ++token) {
             uint32_t directMask = 0, firstHopCount = 0;
@@ -110,7 +135,7 @@ public:
                 while ((mask & (uint32_t(1) << firstK)) == 0U) ++firstK;
                 const uint32_t index = (start_ + token) * k_ + firstK;
                 const uint32_t expert = uint32_t(routeIds_.GetValue(index));
-                SendPacket(input, token, firstK, expert, CalTokenSendExpertCnt(expert, index), mask, profile);
+                SendPacket(input, start_ + token, firstK, expert, CalTokenSendExpertCnt(expert, index), mask, profile);
                 sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << firstK));
                 sourceWeights_.SetValue(token * k_ + firstK, 1.0f);
             }
@@ -142,20 +167,46 @@ public:
                 const uint32_t token = directTasks_.GetValue(task * 4U);
                 const uint32_t k = directTasks_.GetValue(task * 4U + 1U);
                 const uint32_t q = directTasks_.GetValue(task * 4U + 3U);
-                SendPacket(input, token, k, expert, q, 0U, profile);
+                SendPacket(input, start_ + token, k, expert, q, 0U, profile);
                 sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << k));
                 sourceWeights_.SetValue(token * k_ + k, routeWeights_.GetValue(token * k_ + k));
             }
         }
         profile.End(EpDedupDetailMetric::SendDirect);
-        for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
-        Sync<HardEvent::S_MTE3>();
-        DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
-        DataCopyPad(weightOut_[uint64_t(start_) * k_], sourceWeights_, {1U, count_ * k_ * 4U, 0U, 0U, 0U});
-        Sync<HardEvent::MTE3_S>();
     }
-
-private:
+    __aicore__ inline void SendWithoutDedup(TQue<QuePosition::VECIN, 1> &input, ServerDedupProfile &profile)
+    {
+        profile.Begin(EpDedupDetailMetric::SendDirect);
+        auto indices = routeSelectBuf_.Get<int32_t>();
+        auto selected = indices[256U];
+        auto mask = routeSelectBuf_.Get<uint8_t>()[2048U];
+        auto upper = mask[32U];
+        const uint32_t servers = args_->rankSize / 8U, expertsPerServer = localExperts_ * 8U;
+        uint32_t owner = 0U;
+        for (uint32_t step = 0; step < servers; ++step) {
+            const uint32_t server = ServerDedupHalfOrder(servers, args_->rank / 8U, step);
+            // Tiling bounds selection UB without changing the stable compact stream.
+            for (uint32_t begin = 0; begin < bs_ * k_; begin += 256U) {
+                const uint32_t count = bs_ * k_ - begin < 256U ? bs_ * k_ - begin : 256U;
+                ServerDedupRankMask(mask, upper, routeIds_[begin], int32_t(server * expertsPerServer),
+                    int32_t((server + 1U) * expertsPerServer), count);
+                CreateVecIndex(indices, int32_t(begin), count);
+                PipeBarrier<PIPE_V>();
+                uint64_t matched = 0U;
+                GatherMask(selected, indices, mask.template ReinterpretCast<uint32_t>(), true,
+                    count, {1U, 1U, 0U, 0U}, matched);
+                Sync<HardEvent::V_S>();
+                const uint32_t first = ServerDedupFirstOwned(GetBlockIdx(), owner, kEpServerDedupSendCoreNum);
+                owner = (owner + uint32_t(matched)) % kEpServerDedupSendCoreNum;
+                for (uint32_t task = first; task < matched; task += kEpServerDedupSendCoreNum) {
+                    const uint32_t i = uint32_t(selected.GetValue(task));
+                    const uint32_t expert = uint32_t(routeIds_.GetValue(i));
+                    SendPacket(input, i / k_, i % k_, expert, CalTokenSendExpertCnt(expert, i), 0U, profile);
+                }
+            }
+        }
+        profile.End(EpDedupDetailMetric::SendDirect);
+    }
     template<HardEvent event> __aicore__ inline void Sync()
     {
         const TEventID id = pipe_->FetchEventID(event);
@@ -168,20 +219,6 @@ private:
     }
     __aicore__ inline void Classify(uint32_t token, uint32_t &directMask, uint32_t &groups)
     {
-        if (!kEpServerDedupEnable) {
-            // Reuse the 64B server state as this token's route masks. Keep the
-            // server scan even when every route is DIRECT; q and actual send
-            // order still come from the original routes and cyclic task loop.
-            const uint32_t serverNum = args_->rankSize / 8U;
-            for (uint32_t server = 0; server < serverNum; ++server) serverState_.SetValue(server, 0U);
-            for (uint32_t k = 0; k < k_; ++k) {
-                const uint32_t expert = uint32_t(routeIds_.GetValue((start_ + token) * k_ + k));
-                const uint32_t server = expert / localExperts_ / 8U;
-                serverState_.SetValue(server, serverState_.GetValue(server) | (uint32_t(1) << k));
-            }
-            for (uint32_t server = 0; server < serverNum; ++server) directMask |= serverState_.GetValue(server);
-            return;
-        }
         uint32_t seen = 0, grouped = 0;
         for (uint32_t k = 0; k < k_; ++k) {
             const uint32_t expert = uint32_t(routeIds_.GetValue((start_ + token) * k_ + k));
@@ -243,11 +280,13 @@ private:
     __aicore__ inline void FillTail(LocalTensor<uint8_t> payload, uint32_t token, uint32_t firstK, uint32_t mask)
     {
         auto header = payload[data_.headerPayloadOffset].template ReinterpretCast<uint32_t>();
+        header.SetValue(0U, uint32_t(args_->rank));
+        header.SetValue(1U, token);
+        header.SetValue(2U, firstK);
+        if (!kEpServerDedupEnable) return;
         auto index = payload[data_.readIndexPayloadOffset].template ReinterpretCast<uint32_t>();
         auto weights = index.template ReinterpretCast<float>();
-        header.SetValue(0U, uint32_t(args_->rank));
-        header.SetValue(1U, start_ + token);
-        header.SetValue(2U, firstK);
+        token -= start_; // Only dedup weights use this core's contiguous copy partition.
         header.SetValue(3U, uint32_t(mask == 0U ? EpServerDedupTokenType::Direct : EpServerDedupTokenType::FirstHop));
         weights.SetValue(1U, routeWeights_.GetValue(token * k_ + firstK));
         uint32_t entries = 0U;
@@ -265,7 +304,7 @@ private:
         uint32_t token, uint32_t firstK, uint32_t expert, uint32_t q, uint32_t mask,
         ServerDedupProfile &profile)
     {
-        const uint32_t tokenId = start_ + token, destination = expert / localExperts_;
+        const uint32_t tokenId = token, destination = expert / localExperts_;
         auto x = input.template AllocTensor<XType>();
         DataCopyPad(x, x_[uint64_t(tokenId) * h_], {1U, h_ * uint32_t(sizeof(XType)), 0U, 0U, 0U},
             {Quantized, 0U, 0U, XType(0)});
@@ -311,6 +350,7 @@ private:
     GlobalTensor<int32_t> ids_;
     GlobalTensor<float> weights_, weightOut_;
     GlobalTensor<uint32_t> maskOut_;
+    TBuf<> routeSelectBuf_;
     TBuf<> idsBuf_, qDstBuf_, qSubBuf_, qWorkBuf_, quantBuf_;
     TBuf<> weightInBuf_, weightOutBuf_, maskBuf_, directBuf_, serverBuf_, firstHopBuf_, outBuf_;
     LocalTensor<int32_t> routeIds_;

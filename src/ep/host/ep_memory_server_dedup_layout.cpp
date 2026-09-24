@@ -74,6 +74,10 @@ int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h
         !MultiplyBytes(next.capacityRows, next.relayReadIndexRowStrideBytes, &next.relayReadIndexBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    if (!kEpServerDedupEnable) {
+        next.tokenTypeBytes = next.sourceMaskBytes = next.relayReadIndexBytes = 0U;
+        next.relayReadIndexRowStrideBytes = 0U;
+    }
     *out = next;
     return TileXR::TILEXR_SUCCESS;
 }

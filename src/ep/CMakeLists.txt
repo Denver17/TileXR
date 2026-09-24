@@ -1,4 +1,9 @@
 include(GNUInstallDirs)
+set(TILEXR_EP_SERVER_DEDUP_ENABLE "1" CACHE STRING "Server dedup mode (0 or 1)")
+if(NOT TILEXR_EP_SERVER_DEDUP_ENABLE MATCHES "^[01]$")
+    message(FATAL_ERROR "TILEXR_EP_SERVER_DEDUP_ENABLE must be 0 or 1")
+endif()
+
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/src/collectives/kernels/cmake")
@@ -149,7 +154,8 @@ set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP
 tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"
     "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
-    DEFINITIONS $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
+    DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_ENABLE}
+        $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_counts.h"
@@ -161,6 +167,7 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_profile.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_profiling.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_mode.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_data_layout.h"
@@ -173,11 +180,13 @@ set(TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP
 tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp"
     "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
-    DEFINITIONS $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
+    DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_ENABLE}
+        $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_select.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_partial.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_source_aggregate.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_mode.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_config.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
@@ -224,7 +233,9 @@ add_library(tilexr-ep SHARED
 )
 
 add_dependencies(tilexr-ep ${TILEXR_EP_KERNEL_TARGETS})
-target_compile_definitions(tilexr-ep PRIVATE
+target_compile_definitions(tilexr-ep PUBLIC
+    TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_ENABLE}
+    PRIVATE
     TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>)
 tilexr_attach_kernel_artifacts(tilexr-ep
     FILES ${TILEXR_EP_KERNEL_OBJECTS}

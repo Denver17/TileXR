@@ -10,7 +10,7 @@ int main()
     using ServerDedupTest::Check;
     using namespace TileXREp;
     try {
-        CombineM12Test::Fixture f(5000U, 17U);
+        CombineM12Test::Fixture f(kEpServerDedupEnable ? 5000U : 1U, 17U);
         constexpr uint32_t capacity = kEpServerDedupCombineProfilingRecordsPerLaunch;
         // One real DIRECT task exercises the completion boundary, other rows
         // retain the M1 fixture. No M4 rows in this first full-kernel capture.
@@ -33,8 +33,8 @@ int main()
         auto invoke = [&]() {
             tilexr_ep_combine_memory_server_dedup_kernel(reinterpret_cast<GM_ADDR>(&f.args),
                 reinterpret_cast<GM_ADDR>(f.expert.data()), reinterpret_cast<GM_ADDR>(f.table.data()),
-                reinterpret_cast<GM_ADDR>(f.counts.data()), reinterpret_cast<GM_ADDR>(weights.data()), reinterpret_cast<GM_ADDR>(f.types.data()),
-                f.untouched.data(), reinterpret_cast<GM_ADDR>(sourceMask.data()), reinterpret_cast<GM_ADDR>(output.data()), reinterpret_cast<GM_ADDR>(&f.tiling), 0);
+                reinterpret_cast<GM_ADDR>(f.counts.data()), reinterpret_cast<GM_ADDR>(weights.data()), kEpServerDedupEnable ? reinterpret_cast<GM_ADDR>(f.types.data()) : nullptr,
+                kEpServerDedupEnable ? f.untouched.data() : nullptr, kEpServerDedupEnable ? reinterpret_cast<GM_ADDR>(sourceMask.data()) : nullptr, reinterpret_cast<GM_ADDR>(output.data()), reinterpret_cast<GM_ADDR>(&f.tiling), 0);
         };
         std::vector<uint32_t> synchronizationByCore[2][64];
         auto seedResults = [&]() {
@@ -43,9 +43,10 @@ int main()
             const uint32_t blocks = (f.h * 2U + 479U) / 480U;
             std::memset(f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
                 0, uint64_t(f.tiling.bs) * f.tiling.topK * blocks * 512U);
-            for (uint32_t p = 0; p < f.tiling.bs; ++p) for (uint32_t b = 0; b < blocks; ++b) {
+            for (uint32_t p = 0; p < f.tiling.bs; ++p)
+                for (uint32_t k = 0; k < (kEpServerDedupEnable ? 1U : f.tiling.topK); ++k) for (uint32_t b = 0; b < blocks; ++b) {
                 auto slot = f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
-                    (uint64_t(p) * f.tiling.topK * blocks + b) * 512U;
+                    ((uint64_t(p) * f.tiling.topK + k) * blocks + b) * 512U;
                 std::memset(slot, 0, 480U); const float one = 1.0f;
                 std::memcpy(slot + 480U, &one, 4U);
             }
@@ -59,9 +60,11 @@ int main()
             invoke();
             AscendC::EventObserver() = {};
             std::vector<uint32_t> expected {kEpServerDedupCombineProfileStart,
-                kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd,
-                kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd};
+                kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd};
+            if (kEpServerDedupEnable) expected.insert(expected.end(), {
+                kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd});
             if (core >= kEpServerDedupCombineSendCoreNum) {
+                if (kEpServerDedupEnable) {
                 expected.push_back(kEpServerDedupCombineProfileControlBegin);
                 if (core >= 56U) expected.insert(expected.end(), {
                     kEpServerDedupCombineProfilePrepareNotifyBegin, kEpServerDedupCombineProfilePrepareNotifyEnd});
@@ -69,12 +72,14 @@ int main()
                     kEpServerDedupCombineProfileServerWaitEnd, kEpServerDedupCombineProfileControlEnd,
                     kEpServerDedupCombineProfilePartialBegin,
                     kEpServerDedupCombineProfilePartialEnd, kEpServerDedupCombineProfileFinalBegin});
+                } else expected.push_back(kEpServerDedupCombineProfileM6Begin);
                 const uint32_t local = core - kEpServerDedupCombineSendCoreNum;
                 const uint32_t tasks = f.tiling.bs / kEpServerDedupCombineRecvCoreNum +
                     (local < f.tiling.bs % kEpServerDedupCombineRecvCoreNum ? 1U : 0U);
                 for (uint32_t task = 0; task < tasks; ++task) expected.insert(expected.end(), {
-                    kEpServerDedupCombineProfileFinalTokenBegin, kEpServerDedupCombineProfileFinalTokenEnd});
-                expected.push_back(kEpServerDedupCombineProfileFinalEnd);
+                    kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenBegin : kEpServerDedupCombineProfileM6TokenBegin,
+                    kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenEnd : kEpServerDedupCombineProfileM6TokenEnd});
+                expected.push_back(kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalEnd : kEpServerDedupCombineProfileM6End);
             } else expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
                 kEpServerDedupCombineProfileDirectMte3End, kEpServerDedupCombineProfileDirectEnd});
             expected.insert(expected.end(), {kEpServerDedupCombineProfileDrainBegin, kEpServerDedupCombineProfileDrainEnd,
@@ -101,6 +106,7 @@ int main()
         Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3/M4/M5 without profile writes");
         Check(std::memcmp(&originalArgs, &f.args, sizeof(f.args)) == 0, "kernel never mutates shared CommArgs");
 
+        if (kEpServerDedupEnable) {
         // More than the old 32-record limit on one M4 core. Reuse the real
         // kernel and defer MTE3, comparing ON/OFF hard-event sequences.
         std::vector<uint32_t> relay(f.tokens * f.tiling.topK * 2U, 0U);
@@ -142,6 +148,7 @@ int main()
         Check(std::count(first, last, kEpServerDedupCombineProfilePartialTokenBegin) == tasks &&
               std::count(first, last, kEpServerDedupCombineProfilePartialTokenEnd) == tasks,
               "one combined issue interval for every M4 task");
+        }
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     if (ServerDedupTest::Failures() != 0) return 1;
     std::cout << "EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_PASS\n";

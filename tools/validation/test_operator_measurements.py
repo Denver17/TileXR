@@ -37,6 +37,41 @@ class OperatorMeasurementTests(unittest.TestCase):
             directory, operator=operator,
             run_id="run-test", kernel_sha=self.hashes[operator])
 
+    def test_m6_capture_and_traffic_require_only_direct_returns(self):
+        self.config.update(implemented_through="M5", scope="full", server_dedup_enabled=False)
+        events = {}
+        for core in range(64):
+            values = [(0, 0x3001), (1, 0x3003), (2, 0x3004)]
+            if core < 32:
+                values += [(3, 0x301b), (10, 0x3021), (11, 0x301c)]
+            else:
+                values += [(3, 0x302a)]
+                for token in range(3):
+                    values += [(4 + 2 * token, 0x302c), (5 + 2 * token, 0x302d)]
+                values += [(11, 0x302b)]
+            events[core] = values + [(12, 0x3013), (13, 0x3014), (14, 0x3002)]
+        record = dict(rank=0, combine_type3_rows=0, combine_type1_rows=10, combine_type2_rows=0,
+            combine_token_num=10, combine_direct_received_rows=576, combine_partial_received_rows=0,
+            combine_partial_member_rows=0, combine_partial_local_members=0, combine_partial_stage_read_bytes=0,
+            combine_partial_self_read_bytes=0, combine_partial_payload_bytes=0, combine_partial_wire_bytes=0,
+            combine_algorithm_bytes=106*14336, combine_stage_copy_bytes=0, combine_direct_payload_bytes=10*14336,
+            combine_direct_wire_bytes=10*15360, combine_control_publish_bytes=0,
+            combine_final_read_bytes=576*14336, combine_y_out_bytes=96*14336, combine_flag_clear_bytes=576*30*32)
+        path = write_capture(self.root / "m6.records.v1", events_by_core=events)
+        evidence = operators.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "m6",
+            operator="combine", run_id="run-test", kernel_sha=self.hashes["combine"], record=record)
+        self.assertEqual(evidence["receive_module"], "M6")
+        self.assertIn("m6_final", evidence["stages_us"])
+        self.assertNotIn("m4_partial", evidence["stages_us"])
+        self.assertNotIn("m5_final", evidence["stages_us"])
+        self.assertEqual(operators.return_stage_counts(self.config)["m6_final"], 32)
+        bad = dict(record, combine_direct_received_rows=575)
+        with self.assertRaisesRegex(ValueError, "M6 requires"):
+            operators.return_traffic(bad, self.config)
+        bad = dict(record, combine_control_publish_bytes=32)
+        with self.assertRaisesRegex(ValueError, "control_publish_bytes"):
+            operators.return_traffic(bad, self.config)
+
     def records(self, mode="both"):
         return [dict(rank=rank, run_id="run-test", status="PASS", operator_measurements={
             operator: dict(breakdown=self.capture(rank, operator))

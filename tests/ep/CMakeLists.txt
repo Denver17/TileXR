@@ -10,6 +10,11 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 enable_testing()
+set(TILEXR_EP_SERVER_DEDUP_ENABLE "1" CACHE STRING "Server dedup mode (0 or 1)")
+if(NOT TILEXR_EP_SERVER_DEDUP_ENABLE MATCHES "^[01]$")
+    message(FATAL_ERROR "TILEXR_EP_SERVER_DEDUP_ENABLE must be 0 or 1")
+endif()
+add_compile_definitions(TILEXR_EP_SERVER_DEDUP_ENABLE=$<IF:$<BOOL:$<TARGET_PROPERTY:TILEXR_TEST_DEDUP_ONLY>>,1,${TILEXR_EP_SERVER_DEDUP_ENABLE}>)
 
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
@@ -945,3 +950,10 @@ if(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST)
         test_tilexr_ep_plan_multirank
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
+
+# Historical M1/M2/M4 handoff fixtures require forwarding. Keep their baseline
+# explicit; the shared source-aggregate fixture exercises full M3/M6 in mode 0.
+set_target_properties(test_tilexr_ep_server_dedup_combine_m12
+    test_tilexr_ep_server_dedup_combine_m3 test_tilexr_ep_server_dedup_combine_m4
+    test_tilexr_ep_server_dedup_chain_dry_run test_tilexr_ep_server_dedup_combine_delay
+    PROPERTIES TILEXR_TEST_DEDUP_ONLY TRUE)

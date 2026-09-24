@@ -143,8 +143,8 @@ int main()
     Check(captured.dtype == TILEXR_DATA_TYPE_BFP16 && captured.expandXOutDtype == TILEXR_DATA_TYPE_BFP16,
         "input and output dtype forwarded");
     Check(g_context.hostArgs == &g_commArgs && g_context.devArgs == g_devArgs &&
-        g_layout.capacityRows == 768 && g_layout.tokenTypeBytes == 3072 && g_layout.destinationIndexBytes == 9216 &&
-        g_layout.relayReadIndexRowStrideBytes == 48 && g_layout.relayReadIndexBytes == 36864,
+        g_layout.capacityRows == 768 && g_layout.tokenTypeBytes == (kEpServerDedupEnable ? 3072U : 0U) && g_layout.destinationIndexBytes == 9216 &&
+        g_layout.relayReadIndexRowStrideBytes == (kEpServerDedupEnable ? 48U : 0U) && g_layout.relayReadIndexBytes == (kEpServerDedupEnable ? 36864U : 0U),
         "validated context and bounded output layout forwarded");
 
 
@@ -201,7 +201,9 @@ int main()
             case 43: params.destinationIndexOut = nullptr; break;
             case 44: params.destinationIndexOut = reinterpret_cast<uint32_t *>(0x9001); break;
         }
-        CheckRejected(params, error);
+        if (!kEpServerDedupEnable && test >= 7 && test <= 12)
+            Check(Invoke(params) == TILEXR_SUCCESS, "disabled metadata is ignored, including null and misaligned pointers");
+        else CheckRejected(params, error);
     }
 
     for (auto dtype : {TILEXR_DATA_TYPE_FP16, TILEXR_DATA_TYPE_BFP16}) {
@@ -285,7 +287,7 @@ int main()
     g_commArgs.peerMemBytes = 8ULL << 30;
     CheckRejected(large, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMemBytes = 32ULL << 30;
-    Check(Invoke(large) == TILEXR_SUCCESS, "large view fits an actual domain larger than 8 GiB");
+    Check(Invoke(large) == (kEpServerDedupEnable ? TILEXR_SUCCESS : TILEXR_ERROR_NOT_SUPPORT), "large view fits an actual domain larger than 8 GiB");
     g_commArgs.peerMemBytes = ServerDedupTest::kPeerBytes;
     const auto savedPeer = g_commArgs.peerMems[63];
     g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(UINTPTR_MAX & ~uintptr_t(511U));

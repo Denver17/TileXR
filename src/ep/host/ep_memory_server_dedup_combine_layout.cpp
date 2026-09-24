@@ -25,7 +25,7 @@ bool BuildDataLayout(uint64_t bs, uint64_t h, uint64_t topK, uint64_t experts,
     if (resultSlotBytes == 0 || resultSlotBytes % 512U != 0) { return false; }
     next.resultOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
     next.stageRowBytes = (h * 2U + 511U) / 512U * 512U;
-    next.stageRows = experts * bs;
+    next.stageRows = kEpServerDedupEnable ? experts * bs : 0U;
     return Multiply(bs * topK, resultSlotBytes, next.resultBytes) &&
         Add(next.resultOffset, next.resultBytes, next.stageOffset) &&
         Multiply(next.stageRows, next.stageRowBytes, next.stageBytes) &&
@@ -61,6 +61,10 @@ int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64
     const uint64_t resultSlotBytes = (rowBytes + 479U) / 480U * 512U;
     if (!BuildDataLayout(bs, h, topK, experts, resultSlotBytes, next.data)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (!kEpServerDedupEnable) {
+        next.tokenTypeBytes = next.relayReadIndexBytes = next.sourceMaskBytes = 0U;
+        next.relayReadIndexRowStrideBytes = 0U;
     }
     next.requiredWindowBytes = next.data.requiredWindowBytes;
     *out = next;

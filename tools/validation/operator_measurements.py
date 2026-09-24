@@ -53,6 +53,8 @@ def return_stage_counts(config):
         stages["m4_partial"] = 64 - send
     if config.get("implemented_through") == "M5":
         stages["m5_final"] = 64 - send
+    if config.get("server_dedup_enabled") is False:
+        stages = dict(kernel_total=64, m1_init=64, m3_direct=send, m6_final=64 - send, m6_drain=64)
     return stages
 
 
@@ -92,6 +94,10 @@ def return_traffic(record, config):
                         y_out_bytes=config["bs"] * config["h"] * 2,
                         flag_clear_bytes=config["bs"] * config["topk"] * ((config["h"] * 2 + 479) // 480) * 32)
         expected["algorithm_bytes"] += expected["y_out_bytes"]
+    if config.get("server_dedup_enabled") is False:
+        if stage != 0 or partial != 0 or direct != tokens or record.get("combine_direct_received_rows") != config["bs"] * config["topk"]:
+            raise ValueError("M6 requires all original routes and no forwarded rows")
+        expected["control_publish_bytes"] = 0
     for key, value in expected.items():
         if type(record.get("combine_" + key)) is not int or record["combine_" + key] != value:
             raise ValueError("Combine traffic mismatch: " + key)
@@ -123,6 +129,7 @@ def _operator_scope(evidence, operator, config=None, record=None, *, duration=No
     measured = duration if duration is not None else evidence
     us = measured["mean_us"] if config["run_mode"] == "performance" else measured["sample_us"][0]
     if returns:
+        evidence["receive_module"] = "M6" if config.get("server_dedup_enabled") is False else "M5"
         evidence.update(scope="full" if config["implemented_through"] == "M5" else "partial", implemented_through=config["implemented_through"], native_status="combine-" + config["implemented_through"].lower(),
                         algorithm_bytes=traffic["algorithm_bytes"], stage_payload_bytes=traffic["stage_payload_bytes"],
                         stage_copy_bytes=traffic["stage_copy_bytes"], direct_payload_bytes=traffic["direct_payload_bytes"],
@@ -139,6 +146,8 @@ def _operator_scope(evidence, operator, config=None, record=None, *, duration=No
             evidence.update(performance_scope="acquisition and module parsing; no performance threshold",
                             traffic_scope="per launch; rank-specific logical payload, wire and local byte counts",
                             algorithm_bandwidth="effective stage + DIRECT + partial + yOut logical GB/s / full kernel")
+        if config.get("server_dedup_enabled") is False:
+            evidence["algorithm_bandwidth"] = "effective DIRECT + yOut logical GB/s / full kernel"
         return evidence
     evidence.update(scope="partial", implemented_through="M2", native_status="combine-m12",
                     algorithm_bytes=traffic["algorithm_bytes"], stage_copy_bytes=traffic["stage_copy_bytes"],
@@ -198,6 +207,8 @@ def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha, rec
                 expected["m4_token_issue"] = record["combine_type2_rows"]
             if config.get("implemented_through") == "M5" and "m5_token_issue" in stages:
                 expected["m5_token_issue"] = config["bs"]
+            if config.get("server_dedup_enabled") is False and "m6_token_issue" in stages:
+                expected["m6_token_issue"] = config["bs"]
             if set(stages) != set(expected) or any(stages[name].get("sample_count") != count
                                                   for name, count in expected.items()):
                 raise ValueError("Combine breakdown is missing required module/core-role intervals")
@@ -299,6 +310,9 @@ def summarize_operator_measurements(rank_records, config, run_id, kernel_shas):
                 summary["measured_traffic_bytes"] = {key: summary[key] * config["loops"] for key in byte_keys}
                 summary["submitted_traffic_bytes"] = {key: summary[key] * (config["loops"] + config["warmup"]) for key in byte_keys}
             summary["algorithm_communication_bytes"] = summary["direct_wire_bytes"] + summary.get("partial_wire_bytes", 0)
+            if config.get("server_dedup_enabled") is False:
+                summary.update(receive_module="M6", algorithm_bandwidth="effective DIRECT + yOut logical payload rate",
+                    communication_scope="M3 direct return wire; M6 local reads, yOut and Flag clear")
         elif operator == "combine" and config.get("implemented_through") == "M2":
             traffic = [m12_traffic(row, config) for row in sorted(rows, key=lambda row: row["rank"])]
             bandwidth = [row["algorithm_bytes"] / (us * 1000) if row["algorithm_bytes"] else None

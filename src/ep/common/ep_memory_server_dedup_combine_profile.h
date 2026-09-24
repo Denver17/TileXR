@@ -4,7 +4,8 @@
 namespace TileXREp {
 // Latest capture only. Covers two records per token plus module boundaries:
 // Each Recv core owns M4 <=1250 rows and M5 <20480 tokens (metadata alone
-// costs >=12 bytes/token in 240 KiB). Their combined capture fits 65536.
+// costs >=12 bytes/token in 240 KiB). M6 costs >=8 bytes/token and
+// owns fewer than 30720 tokens. Both modes fit 65536 records.
 constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 65536U;
 constexpr uint32_t kEpServerDedupCombineProfileStart = 0x3001U;
 constexpr uint32_t kEpServerDedupCombineProfileEnd = 0x3002U;
@@ -48,5 +49,9 @@ constexpr uint32_t kEpServerDedupCombineProfilePrepareNotifyBegin = 0x3026U;
 constexpr uint32_t kEpServerDedupCombineProfilePrepareNotifyEnd = 0x3027U;
 constexpr uint32_t kEpServerDedupCombineProfileServerWaitBegin = 0x3028U;
 constexpr uint32_t kEpServerDedupCombineProfileServerWaitEnd = 0x3029U;
+constexpr uint32_t kEpServerDedupCombineProfileM6Begin = 0x302aU;
+constexpr uint32_t kEpServerDedupCombineProfileM6End = 0x302bU;
+constexpr uint32_t kEpServerDedupCombineProfileM6TokenBegin = 0x302cU;
+constexpr uint32_t kEpServerDedupCombineProfileM6TokenEnd = 0x302dU;
 } // namespace TileXREp
 #endif

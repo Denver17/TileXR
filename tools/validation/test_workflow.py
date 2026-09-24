@@ -596,7 +596,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.config_instance = self.config()
         self.config_instance.install.mkdir(parents=True)
         (self.config_instance.install / "artifact").write_bytes(b"test installed artifact\n")
-        self.manifest = {"build_id": "test-build", "mode": "host", "checkpoint": workflow.CHECKPOINT,
+        self.manifest = {"server_dedup_enabled": True, "server_dedup_protocol": 2, "build_id": "test-build", "mode": "host", "checkpoint": workflow.CHECKPOINT,
                          "architecture": workflow.platform.machine(), "source": source,
                          "artifacts": workflow.artifact_files(self.config_instance.install),
                          "tests": [{"name": "test_tilexr_ep_server_dedup_" + name}
@@ -939,8 +939,9 @@ record.update(route_mode=os.environ['TILEXR_VALIDATION_ROUTE_MODE'], seed=int(os
 if not record['server_dedup_enabled']:
     record.update(first_hop_packets=0, first_hop_received=0, first_hop_bytes=0,
                   relay_packets=0, relay_received=0, relay_bytes=0,
-                  direct_packets=576, direct_received=576, direct_bytes=576*15872,
-                  same_server_data_bytes=264*15872, cross_server_data_bytes=288*15872)
+                  direct_packets=576, direct_received=576, direct_bytes=576*15360, token_stride=15360,
+                  data_bytes=576*15360, local_data_bytes=24*15360,
+                  same_server_data_bytes=264*15360, cross_server_data_bytes=288*15360)
 behavior = os.environ.get('CHAIN_TEST_BEHAVIOR', '') if rank == 8 else ''
 if behavior == 'wrong-dedup-mode':
     record['server_dedup_enabled'] = not record['server_dedup_enabled']
@@ -1086,6 +1087,7 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         program = self.config_instance.install / "bin" / workflow.CHAIN_PROGRAM
         program.write_text(program.read_text().replace("record['server_dedup_enabled'] = True",
                                                      "record['server_dedup_enabled'] = False"))
+        self.manifest["server_dedup_enabled"] = False
         self.manifest["artifacts"]["bin/" + workflow.CHAIN_PROGRAM] = workflow.digest(program)
         workflow.write_json(self.config_instance.install / "manifest.json", self.manifest)
         self.prepare_sync()

@@ -62,7 +62,7 @@ rtError_t rtKernelLaunchWithFlagV2(const void *stub, uint32_t blocks, rtArgsEx_t
 }
 int main()
 {
-    const std::array<uint64_t, 4> expected {{782336, 835552, 1048576, 4290772960ULL}};
+    const std::array<uint64_t, 4> expected {{782336, 880608, 1048576, 4290772960ULL}};
     std::set<uint32_t> patterns;
     for (uint32_t window = 0; window < 2; ++window) for (uint32_t index = 0; index < 4; ++index) {
         const uint64_t offset = expected[index] + uint64_t(window) * 4294967296ULL;

@@ -97,7 +97,7 @@ void CheckDeferredCountSender()
         Check(record[0] == 0x3f800000U && record[1] == (expert == 1U ? 1U : 0U),
             "sender preparation and lane reuse preserve the delayed count source");
     }
-    Check(mask == 1U && output == weight, "count-to-sender handoff preserves token outputs");
+    Check(mask == (dedup ? 1U : 0U) && output == weight, "count-to-sender handoff preserves token outputs");
     counts.Finish();
 }
 
@@ -142,9 +142,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     AscendC::GmWriteObserver() = [&](const void *destination, const void *payload, uint32_t bytes) {
         Check(bytes == data.tokenStride, "each source packet uses the complete shared stride");
         uint32_t header[4] {}, members = 0U;
-        std::memcpy(header, static_cast<const uint8_t *>(payload) + data.headerWireOffset, sizeof(header));
-        std::memcpy(&members, static_cast<const uint8_t *>(payload) + data.relayReadIndexWireOffset, 4U);
-        Check(header[3] == (members == 0U ? 1U : 2U), "source packet uses the shared token type enum");
+        std::memcpy(header, static_cast<const uint8_t *>(payload) + data.headerWireOffset, dedup ? sizeof(header) : 12U);
+        if (dedup) std::memcpy(&members, static_cast<const uint8_t *>(payload) + data.relayReadIndexWireOffset, 4U);
+        if (dedup) Check(header[3] == (members == 0U ? 1U : 2U), "source packet uses the shared token type enum");
         writes.push_back({AscendC::testCore, header[1], header[2], members, destination, reinterpret_cast<uintptr_t>(payload)});
     };
     std::map<uint32_t, std::array<std::vector<uint8_t>, 2>> windows;
@@ -182,7 +182,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             AscendC::TPipe pipe;
             TileXREp::ServerDedupSender<uint16_t, false, false> sender;
             sender.Init(&args, reinterpret_cast<uint8_t *>(hidden.data()), reinterpret_cast<uint8_t *>(ids.data()),
-                reinterpret_cast<uint8_t *>(weights.data()), reinterpret_cast<uint8_t *>(masks.data() + 1),
+                reinterpret_cast<uint8_t *>(weights.data()), dedup ? reinterpret_cast<uint8_t *>(masks.data() + 1) : nullptr,
                 reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
@@ -211,9 +211,10 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             const auto events = capture.Events(core);
 #if defined(TILEXR_ENABLE_PROFILING)
             std::vector<uint32_t> expected {TileXREp::kEpServerDedupMainEventBase + 2U};
-            if (count != 0U) {
+            if (count != 0U || !dedup) {
                 for (const auto operation : {TileXREp::EpDedupDetailMetric::SendFirstHop,
                         TileXREp::EpDedupDetailMetric::SendDirect}) {
+                    if (!dedup && operation == TileXREp::EpDedupDetailMetric::SendFirstHop) continue;
                     const uint32_t begin = TileXREp::kEpServerDedupOperationEventBase + 2U * uint32_t(operation);
                     expected.push_back(begin);
                     expected.push_back(begin + 1U);
@@ -236,11 +237,21 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             Check(writes.size() == bs * k && std::all_of(writes.begin(), writes.end(),
                 [](const Write &write) { return write.entries == 0U; }),
                 "disabled mode sends every original route directly without forward entries");
-            const uint32_t fullMask = k == 32U ? UINT32_MAX : (uint32_t(1) << k) - 1U;
             Check(std::all_of(masks.begin() + 1, masks.end() - 1,
-                [fullMask](uint32_t mask) { return mask == fullMask; }), "disabled mode enables all original k slots");
+                [](uint32_t mask) { return mask == 0xdeadbeefU; }), "disabled mode never writes mask table");
             Check(std::equal(weights.begin(), weights.end(), output.begin() + 1),
                 "disabled mode outputs every real route weight");
+        }
+        if (!dedup) {
+            uint32_t ordinal = 0U;
+            for (const auto server : serverOrder) for (uint32_t i = 0; i < bs * k; ++i) {
+                if (uint32_t(ids[i]) / (8U * localExperts) != server) continue;
+                auto it = std::find_if(writes.begin(), writes.end(), [&](const Write &w) {
+                    return w.token == i / k && w.k == i % k;
+                });
+                Check(it != writes.end() && it->core == ordinal % sendCoreNum, "route ownership continues across both server halves");
+                ++ordinal;
+            }
         }
         for (uint32_t core = 0; core < sendCoreNum; ++core) {
             bool directStarted = false;
@@ -250,7 +261,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             for (const auto &write : writes) if (write.core == core) {
                 const uint32_t start = core * (bs / sendCoreNum) + std::min(core, bs % sendCoreNum);
                 const uint32_t count = bs / sendCoreNum + (core < bs % sendCoreNum);
-                Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
+                if (dedup) Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
                     const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
@@ -287,9 +298,10 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             }
             Check(std::memcmp(payload.data(), hidden.data() + packet.token * h, h * 2U) == 0, "full hidden bytes preserve token identity");
             uint32_t header[4] {};
-            std::memcpy(header, payload.data() + data.headerPayloadOffset, sizeof(header));
+            std::memcpy(header, payload.data() + data.headerPayloadOffset, dedup ? sizeof(header) : 12U);
             Check(header[0] == source && header[1] == packet.token && header[2] == first.k &&
-                header[3] == (packet.members.size() == 1U ? 1U : 2U), "DIRECT/first-hop header identity and role");
+                (!dedup || header[3] == (packet.members.size() == 1U ? 1U : 2U)), "DIRECT/first-hop header identity and role");
+            if (dedup) {
             std::vector<uint32_t> index(k * 2U);
             std::memcpy(index.data(), payload.data() + data.readIndexPayloadOffset, k * 8U);
             Check(index[0] == packet.members.size() - 1U, "index header contains non-first-hop member count");
@@ -300,11 +312,12 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                     std::memcmp(&index[i * 2U + 1U], &member.weight, 4U) == 0,
                     "8B members preserve expert/q/weight in original k order");
             }
+            }
             expectedMasks[packet.token] |= uint32_t(1) << first.k;
             Check(output[1U + packet.token * k + first.k] == (packet.members.size() > 1U ? 1.0f : first.weight),
                 "group contribution has weight one and DIRECT retains the real weight");
         }
-        Check(std::equal(expectedMasks.begin(), expectedMasks.end(), masks.begin() + 1), "mask contains group heads and all DIRECT routes");
+        if (dedup) Check(std::equal(expectedMasks.begin(), expectedMasks.end(), masks.begin() + 1), "mask contains group heads and all DIRECT routes");
         Check(weights == originalWeights, "input weights remain read-only");
         Check(masks.front() == 0xdeadbeefU && masks.back() == 0xdeadbeefU && output.front() == -777.0f && output.back() == -777.0f,
             "non-aligned per-core writes preserve adjacent outputs");

@@ -27,9 +27,9 @@ public:
         data_.dispatchOffset += windowOffset_;
         expandX_.SetGlobalBuffer(expandX);
         dynamicScales_.SetGlobalBuffer(dynamicScales);
-        tokenType_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(tokenType));
+        if (kEpServerDedupEnable) tokenType_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(tokenType));
         destinationIndex_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(destinationIndex));
-        relayReadIndex_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(relayReadIndex));
+        if (kEpServerDedupEnable) relayReadIndex_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(relayReadIndex));
     }
 
     __aicore__ inline void Process(ServerDedupProfile &profile)
@@ -70,7 +70,7 @@ public:
         pipe_->InitBuffer(probeIdxBuf_, kProbeBatch * 4U);
         const uint32_t tablesBytes = 2U * uint32_t(TileXREpDedupAlign(uint64_t(tasks_.Count()) * 4U, 32U));
         const uint32_t fixed = prefixBytes + tablesBytes + flagsBytes + workBytes + kProbeBatch * 36U;
-        laneStride_ = uint32_t(data_.tokenStride) + 64U;
+        laneStride_ = uint32_t(data_.tokenStride) + (kEpServerDedupEnable ? 64U : 32U);
         const uint32_t available = (kEpServerDedupCountUbBytes - fixed) / laneStride_;
         lanes_ = available < 8U ? available : 8U; // Safe inputs guarantee at least one lane.
         pipe_->InitBuffer(lanesBuf_, lanes_ * laneStride_);
@@ -169,22 +169,28 @@ private:
         WaitFlag<HardEvent::MTE2_S>(lane);
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
         auto type = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
-        auto destination = wire[uint32_t(data_.tokenStride) + 32U].template ReinterpretCast<uint32_t>();
-        ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
-        const uint32_t role = tail.Header().GetValue(3U);
+        auto destination = wire[uint32_t(data_.tokenStride) + (kEpServerDedupEnable ? 32U : 0U)].template ReinterpretCast<uint32_t>();
         const uint32_t row = tasks_.Begin() + j;
-        const bool firstHop = role == uint32_t(EpServerDedupTokenType::FirstHop);
-        BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
-        if (firstHop) PrepareServerDedupForward(tail);
+        bool firstHop = false;
+        if (kEpServerDedupEnable) {
+            ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
+            firstHop = tail.Header().GetValue(3U) == uint32_t(EpServerDedupTokenType::FirstHop);
+            BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
+            if (firstHop) PrepareServerDedupForward(tail);
+        } else {
+            auto header = wire[data_.headerWireOffset].template ReinterpretCast<uint32_t>();
+            for (uint32_t i = 0; i < 3U; ++i) destination.SetValue(i, header.GetValue(i));
+        }
         ServerDedupReceiveSync<HardEvent::S_MTE3>();
         WaitFlag<HardEvent::MTE2_MTE3>(lane);
         WriteServerDedupPayloadRange(expandX_[uint64_t(row) * hiddenBytes_], wire, 0U, hiddenBytes_);
         if constexpr (Quantized)
             WriteServerDedupPayloadRange(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire,
                 uint32_t(data_.quantCount), uint32_t(data_.scaleBytes));
-        DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
+        if (kEpServerDedupEnable) DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
         DataCopyPad(destinationIndex_[uint64_t(row) * 3U], destination, {1U, 12U, 0U, 0U, 0U});
-        if (firstHop) {
+        if (kEpServerDedupEnable && firstHop) {
+            ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
             DataCopyPad(relayReadIndex_[uint64_t(row) * k_ * 2U], tail.ReadIndex(),
                 {1U, k_ * 8U, 0U, 0U, 0U});
             const uint32_t sourceRank = tail.Header().GetValue(0U);

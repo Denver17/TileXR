@@ -381,8 +381,13 @@ class Config:
             self.server_count = int(os.environ["TILEXR_VALIDATION_SERVERS"])
             if not 2 <= self.server_count <= 16:
                 raise ValueError("-n 必须为 2..16 台服务器")
+        self.dedup = 1
         self.profiling = False
         if action == "build":
+            dedup = os.environ.get("TILEXR_VALIDATION_DEDUP", "1")
+            if dedup not in ("0", "1"):
+                raise ValueError("编译 dedup 必须为 0/1")
+            self.dedup = int(dedup)
             breakdown = os.environ.get("TILEXR_VALIDATION_BREAKDOWN", "0")
             if breakdown not in ("0", "1"):
                 raise ValueError("编译 breakdown 必须为 0/1")
@@ -462,6 +467,8 @@ def source_send_stride(config):
     h, k = config["h"], config["topk"]
     data = ((h + 255) // 256 * 256 + (h + 63) // 64 * 2) if config["quant_mode"] == 4 else h * 2
     index = (data + 31) // 32 * 32 + 32
+    if config.get("server_dedup_enabled") is False:
+        return (index + 479) // 480 * 512
     if index % 480 + 8 * k > 480:
         index = (index + 479) // 480 * 480
     payload = index + 8 * k
@@ -705,6 +712,11 @@ def artifact_files(install):
 
 def verify_build(config, *, check_run_mode=True, dry_run=False):
     manifest = read_json(config.install / "manifest.json")
+    if type(manifest.get("server_dedup_enabled")) is not bool or manifest.get("server_dedup_protocol") != 2:
+        raise ValueError("缺少编译 dedup 模式/协议版本，请重新执行 build_all.sh 和 sync.sh")
+    config.dedup = int(manifest["server_dedup_enabled"])
+    if config.chain is not None:
+        config.chain["server_dedup_enabled"] = manifest["server_dedup_enabled"]
     if (manifest["mode"] not in (("host", "production") if dry_run else (config.mode,))
             or manifest["checkpoint"] != config.checkpoint):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
@@ -740,10 +752,9 @@ def verify_build(config, *, check_run_mode=True, dry_run=False):
 
 def validation_build_directory(config):
     name = validation_directory(config.checkpoint)
-    if config.checkpoint in (COMBINE_PROFILE_CHECKPOINT, COMBINE_M12_CHECKPOINT,
-                              COMBINE_M3_CHECKPOINT, COMBINE_M4_CHECKPOINT):
+    if config.checkpoint in COMBINE_MODULE_CHECKPOINTS or config.checkpoint in (DISPATCH_CHECKPOINT, COMBINE_PROFILE_CHECKPOINT):
         name += "-profile-on" if config.profiling else "-profile-off"
-    return config.root / "build" / name
+    return config.root / "build" / (name + f"-dedup-{config.dedup}")
 
 
 def source_content_sha256(root, source):
@@ -804,7 +815,8 @@ def build(config):
                          log / "source-status.log", cwd=config.root)
         source["working_tree_dirty"] = bool(status.strip())
         source["working_tree_status"] = status.splitlines()
-    common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}"]
+    common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}",
+              f"-DTILEXR_EP_SERVER_DEDUP_ENABLE={config.dedup}"]
     if config.mode == "production":
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
@@ -913,7 +925,8 @@ def build(config):
         if (final_source["commit"] != source["commit"] or
                 source_content_sha256(config.root, final_source) != source["content_sha256"]):
             raise Failure("BUILD_FAILED", "构建期间源码发生变化，拒绝关联不确定产物")
-    manifest = {"build_id": build_id, "source": source, "mode": config.mode,
+    manifest = {"server_dedup_enabled": bool(config.dedup), "server_dedup_protocol": 2,
+                "build_id": build_id, "source": source, "mode": config.mode,
                 "checkpoint": config.checkpoint, "architecture": platform.machine(),
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
                 "driver": os.environ.get("ASCEND_DRIVER_PATH", ""), "tests": tests,
@@ -1434,6 +1447,12 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                 raise Failure("RESULT_FAILED", "rank 的实际 shape/dtype/route_mode/seed 与本次配置不一致", rank=mapping["rank"])
         if chain:
             linked = record["chain"]
+            if "server_dedup_enabled" in manifest:
+                for marker in (record, linked):
+                    if marker.get("server_dedup_enabled") is not manifest["server_dedup_enabled"]:
+                        raise Failure("RESULT_FAILED", "编译 dedup 模式与安装包不一致", rank=mapping["rank"])
+            if manifest["checkpoint"] in COMBINE_DEVICE_CHECKPOINTS:
+                chain_config = dict(chain_config, server_dedup_enabled=linked["server_dedup_enabled"])
             if manifest["checkpoint"] in COMBINE_DEVICE_CHECKPOINTS:
                 validate_combine_chain_record(record, mapping, run_id, manifest, chain_config, invalid_output=invalid_output)
                 if manifest["checkpoint"] in COMBINE_MEASUREMENT_CHECKPOINTS and check_measurements:
@@ -1449,14 +1468,14 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     raise Failure("RESULT_FAILED", "缺少本次 Dispatch 配置", rank=mapping["rank"])
                 for marker in (record, linked):
                     enabled = marker.get("server_dedup_enabled")
-                    if (type(enabled) is not bool or enabled is not records[0].get("server_dedup_enabled") or
+                    if (("server_dedup_enabled" in manifest and enabled is not manifest["server_dedup_enabled"]) or type(enabled) is not bool or enabled is not records[0].get("server_dedup_enabled") or
                             ("server_dedup_enabled" in chain_config and
                              enabled is not chain_config["server_dedup_enabled"])):
                         raise Failure("RESULT_FAILED", "Dispatch 编译期去重状态缺失或 Rank 记录不一致", rank=mapping["rank"])
                 for key in ("quant_mode", "fp8_format", "kernel_scope"):
                     if record.get(key) != chain_config[key]:
                         raise Failure("RESULT_FAILED", "Dispatch 实际类型或范围不一致", rank=mapping["rank"], field=key)
-                stride = source_send_stride(chain_config)
+                stride = source_send_stride(dict(chain_config, server_dedup_enabled=record["server_dedup_enabled"]))
                 if record.get("native_status") != "dispatch" or record.get("token_stride") != stride:
                     raise Failure("RESULT_FAILED", "Dispatch 执行范围或 token stride 不一致", rank=mapping["rank"])
                 if invalid_output:

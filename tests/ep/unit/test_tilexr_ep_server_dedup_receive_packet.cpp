@@ -59,14 +59,14 @@ struct Packet {
     std::vector<uint8_t> payload, wire;
     Packet(uint32_t h, uint32_t topK, bool quantized, uint32_t role) :
         layout(TileXREpServerDedupDataLayout(2, h, topK, 96, quantized)), k(topK),
-        entries(role == 1U ? 0U : (topK == 6U ? 3U : topK - 1U)),
+        entries(!kEpServerDedupEnable || role == 1U ? 0U : (topK == 6U ? 3U : topK - 1U)),
         payload(layout.packedPayloadBytes), wire(layout.tokenStride)
     {
         for (uint32_t i = 0; i < payload.size(); ++i) payload[i] = uint8_t((i * 37U + i / 480U) % 251U);
         const uint32_t header[] = {2U, 1U, 0U, role, 0U, 0U, 0U, 0U};
-        std::memcpy(payload.data() + layout.headerPayloadOffset, header, sizeof(header));
+        std::memcpy(payload.data() + layout.headerPayloadOffset, header, kEpServerDedupEnable ? sizeof(header) : 12U);
         const uint32_t indexHeader[] = {entries, 0x3eaaaaabU};
-        std::memcpy(payload.data() + layout.readIndexPayloadOffset, indexHeader, sizeof(indexHeader));
+        if (kEpServerDedupEnable) std::memcpy(payload.data() + layout.readIndexPayloadOffset, indexHeader, sizeof(indexHeader));
         for (uint32_t i = 0; i < entries; ++i)
             SetEntry(i, 60U + i, i % 2U, 0x3f000001U + i * 0x101U);
         Pack();
@@ -206,8 +206,8 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     AscendC::TPipe pipe;
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
     receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,
-        reinterpret_cast<uint8_t *>(types.data() + 8U), reinterpret_cast<uint8_t *>(destinations.data() + 8U),
-        reinterpret_cast<uint8_t *>(indices.data() + 8U),
+        kEpServerDedupEnable ? reinterpret_cast<uint8_t *>(types.data() + 8U) : nullptr, reinterpret_cast<uint8_t *>(destinations.data() + 8U),
+        kEpServerDedupEnable ? reinterpret_cast<uint8_t *>(indices.data() + 8U) : nullptr,
         bs, h, k, experts, &pipe, magic);
     uint32_t sends = 0;
     uint64_t sendSync = 0;
@@ -259,7 +259,7 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "receiver writes the exact hidden row");
     if (Quantized) Check(std::memcmp(scales.data() + 32U, fixture.payload.data() + data.quantCount, data.scaleBytes) == 0,
         "receiver writes MXFP8 scale bytes from their logical payload offset");
-    Check(types[8U] == role, "receiver preserves the original local type before forwarding");
+    Check(types[8U] == (kEpServerDedupEnable ? role : 0xcdcdcdcdU), "receiver preserves the original local type before forwarding");
     const uint32_t logicalSlot = uint32_t((slot - data.dispatchOffset) / data.tokenStride);
     for (uint32_t word = 0; word < 3U; ++word) {
         const uint32_t expected = role == 3U ? (word == 0U ? logicalSlot : UINT32_MAX) : fixture.Word(word);
@@ -320,7 +320,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     std::memcpy(local.data() + counts.counterOffset, &zero, 4U);
     std::vector<Packet> fixtures;
     for (uint32_t q = 0; q < bs; ++q) {
-        fixtures.emplace_back(h, k, Quantized, q % 3U == 0U ? 2U : 1U);
+        fixtures.emplace_back(h, k, Quantized, kEpServerDedupEnable && q % 3U == 0U ? 2U : 1U);
         auto &packet = fixtures.back();
         packet.SetWord(0U, 0U); packet.SetWord(1U, q);
         packet.payload[0] = uint8_t(q);
@@ -343,7 +343,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     const uint32_t workBytes = 16U * ((uint32_t(data.blockCount) + 255U) / 256U) * 128U + 256U;
     const uint32_t fixed = experts * 4U + 2U * ((owned + 7U) / 8U * 32U) +
         uint32_t(data.blockCount) * 512U + 256U + workBytes + 576U;
-    const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + 64U));
+    const uint32_t lanes = std::min(8U, (190U * 1024U - fixed) / (uint32_t(data.tokenStride) + (kEpServerDedupEnable ? 64U : 32U)));
     Check(lanes == expectedLanes, "fixture exercises the intended physical lane count");
     const uint32_t depth = expectedLanes;
     std::vector<uint8_t> hidden(owned * hiddenBytes + 64U, 0xcd), scales(owned * data.scaleBytes + 64U, 0xcd);
@@ -353,8 +353,8 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     AscendC::TPipe pipe;
     ServerDedupReceiver<uint16_t, Quantized, false> receiver;
     receiver.Init(&args, hidden.data() + 32U, scales.data() + 32U,
-        reinterpret_cast<uint8_t *>(types.data() + 8U), reinterpret_cast<uint8_t *>(destinations.data() + 8U),
-        reinterpret_cast<uint8_t *>(indices.data() + 8U),
+        kEpServerDedupEnable ? reinterpret_cast<uint8_t *>(types.data() + 8U) : nullptr, reinterpret_cast<uint8_t *>(destinations.data() + 8U),
+        kEpServerDedupEnable ? reinterpret_cast<uint8_t *>(indices.data() + 8U) : nullptr,
         bs, h, k, experts, &pipe, 0);
     bool released = false, inLane = false;
     uint32_t flagReads = 0U, peak = 0U, currentLane = 0U, loadLane = 0U, peakLoads = 0U;
@@ -443,7 +443,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
             AscendC::Events<AscendC::HardEvent::MTE2_MTE3>(), AscendC::Events<AscendC::HardEvent::MTE3_MTE2>()})
         Check(std::none_of(events.begin(), events.end(), [](bool v) { return v; }), "all per-lane events are consumed after drain");
     Check(peak == lanes, "ready batches larger than the lane pool retain concurrent ownership");
-    Check(pipe.bytes == fixed + lanes * (data.tokenStride + 64U), "UB contains one packet/type/destination/index per lane and an independent 16-slot probe pool");
+    Check(pipe.bytes == fixed + lanes * (data.tokenStride + (kEpServerDedupEnable ? 64U : 32U)), "UB contains one packet/type/destination/index per lane and an independent 16-slot probe pool");
     for (uint32_t q = 0; q < owned; ++q) {
         const auto &packet = fixtures[q];
         Check(std::memcmp(hidden.data() + 32U + q * hiddenBytes, packet.payload.data(), hiddenBytes) == 0,
@@ -452,7 +452,7 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
             packet.payload.data() + data.quantCount, data.scaleBytes) == 0, "scale rows follow hidden rows");
         const auto *destination = destinations.data() + 8U + q * 3U;
         Check(destination[0] == 0U && destination[1] == q && destination[2] == packet.Word(2U) &&
-            types[8U + q] == packet.Word(3U), "tight 4B/12B metadata lanes follow stable rows");
+            types[8U + q] == (kEpServerDedupEnable ? packet.Word(3U) : 0xcdcdcdcdU), "tight 4B/12B metadata lanes follow stable rows");
         const auto *index = indices.data() + 8U + q * k * 2U;
         if (packet.entries) {
             Check(types[8U + q] == 2U && std::memcmp(index,
@@ -543,7 +543,7 @@ void CheckSparsePrefixReceivers()
             AscendC::TPipe pipe;
             ServerDedupReceiver<uint16_t, false, false> receiver;
             receiver.Init(&args, hidden.data(), nullptr, reinterpret_cast<uint8_t *>(types.data()),
-                reinterpret_cast<uint8_t *>(destinations.data()), reinterpret_cast<uint8_t *>(indices.data() + 8U),
+                reinterpret_cast<uint8_t *>(destinations.data()), kEpServerDedupEnable ? reinterpret_cast<uint8_t *>(indices.data() + 8U) : nullptr,
                 bs, h, k, experts, &pipe, magic);
             ServerDedupTest::ProfileCapture capture(args);
             ServerDedupProfile profile;
@@ -591,8 +591,8 @@ void CheckSparsePrefixReceivers()
 int main()
 {
     try {
-            CheckPacket(1U, 1U, false);
-            CheckSparsePrefixReceivers();
+            if (kEpServerDedupEnable) CheckPacket(1U, 1U, false);
+            if (kEpServerDedupEnable) CheckSparsePrefixReceivers();
             for (uint32_t owned = 17U; owned <= 32U; ++owned)
                 for (uint32_t h : {176U, 1856U, 2096U, 7168U})
                     CheckBatchReceiver<false>(h, 8U, owned);
@@ -600,17 +600,18 @@ int main()
             CheckBatchReceiver<false>(20000U, 3U);
             CheckBatchReceiver<false>(26000U, 2U);
             CheckBatchReceiver<false>(42000U, 1U);
-            for (bool quantized : {false, true}) {
+            if (kEpServerDedupEnable) for (bool quantized : {false, true}) {
                 for (uint32_t h : {209U, 225U, 7168U}) CheckPacket(h, 6U, quantized);
                 CheckPacket(209U, 32U, quantized);
                 CheckPacket(225U, 32U, quantized);
             }
             for (int64_t magic : {1, 2, 3}) for (uint32_t role : {1U, 2U, 3U}) {
+                if (!kEpServerDedupEnable && role != 1U) continue;
                 CheckReceiver<false>(role, magic);
                 CheckReceiver<true>(role, magic);
             }
-            CheckReceiver<false>(2U, 1, 128U);
-            CheckReceiver<true>(3U, 2, 128U);
+            CheckReceiver<false>(kEpServerDedupEnable ? 2U : 1U, 1, 128U);
+            CheckReceiver<true>(kEpServerDedupEnable ? 3U : 1U, 2, 128U);
     } catch (const std::exception &error) {
         AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};
         AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};

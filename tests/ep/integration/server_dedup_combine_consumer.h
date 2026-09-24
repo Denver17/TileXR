@@ -82,7 +82,7 @@ void InitializeStandaloneCombine(const Config &c,
         weights[packet.token * c.topK + first.k] = packet.members.size() == 1U ? first.weight : 1.0f;
     }
     const auto copy = [&](size_t index, const void *source, uint64_t bytes) {
-        Check(aclrtMemcpy(buffers[index], bytes, source, bytes, ACL_MEMCPY_HOST_TO_DEVICE),
+        if (bytes != 0U) Check(aclrtMemcpy(buffers[index], bytes, source, bytes, ACL_MEMCPY_HOST_TO_DEVICE),
             "initialize standalone Combine tables");
     };
     copy(4, prefix.data(), layout.sendCountsBytes);
@@ -112,7 +112,7 @@ std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
         "relayReadIndex", "sourceMask", "yOut"};
     std::vector<CombineTensorSnapshot> snapshots;
     for (size_t i = 0; i < 8U; ++i) {
-        if (c.FullCombine() && indices[i] == 13U) continue;
+        if (sizes[i] == 0U || (c.FullCombine() && indices[i] == 13U)) continue;
         // A continuous Dispatch batch legitimately rewrites its output tensors.
         // Independent expertOut is invariant; yOut is invariant only before M5.
         if (dispatchBatch && indices[i] != 12U && indices[i] != 13U) continue;

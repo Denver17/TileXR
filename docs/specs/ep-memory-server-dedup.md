@@ -2,7 +2,7 @@
 
 本文帮助读者理解当前 `TileXRMoeEpDispatchMemoryServerDedup` 实现，实现位于
 `codex/SilentEmotion` 分支。只描述已实现行为；Server Dedup Combine 的
-消费契约见[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)，其 kernel 尚未实现。
+消费契约见[联合设计](ep-memory-server-dedup-dispatch-combine-design.md)。本文的分类、转发及五表细节针对开启模式；关闭模式以[关闭去重特性](ep-memory-server-dedup-disabled-mode.md)为准。
 
 ## 从一个 Token 理解去重
 
@@ -53,7 +53,7 @@ K 为 top-k，S 为发送核数，Crecv=64−S。alignN(x) 表示向上对齐到
 | 通信 | Memory peer window 支持同节点及跨节点；本入口无 UDMA 自动切换或普通 Memory 回退 |
 | 容量 | Host 检查 Count UB、控制区、单窗容量及整数乘积；调用方保证输出分配、收发 UB 能容纳实际任务及至少一个完整 lane |
 
-三个宏在 `ep_memory_server_dedup_count_layout.h` 配置，修改后须配套重建 Host 和 kernel，
+分核和Count阈值在 `ep_memory_server_dedup_count_layout.h` 配置；去重值由 `build_all.sh dedup=0|1` 设置（公共定义在 `ep_memory_server_dedup_mode.h`）。修改后须配套重建 Host、kernel 和消费者，
 所有 Rank 使用一致产物；不是 run.sh 参数或运行时环境变量：
 
 | 宏 | 当前默认值 | 行为 |
@@ -236,14 +236,13 @@ seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远
 
 | 源端 UB | 大小/职责 |
 | --- | --- |
-| serverState | 64B，当前 Token 的首 k 或 group 下标；关闭去重时复用为 Server route 位图 |
+| serverState | 64B，开启模式当前 Token 的首 k 或 group 下标 |
 | firstHopMasks | align32(4*min(serverNum−1,floor(K/2)))，当前 Token 的 group 位图 |
 | directTasks | align32(count_i*K*16)，最大 DIRECT 任务数，保存原始 q |
 | sourceMask | align32(count_i*4)，group 保留 returnK，DIRECT 保留原始 k |
 | weightIn / weightOut | 各 align32(count_i*K*4)，只拷入本核权重区间 |
 
-关闭去重仍扫描 Server mask，但所有 route 进入 DIRECT 表，不发第一跳或 relay；sourceMask 的
-K 位均有效，输出权重全为真实值。
+关闭模式使用独立的按Server路由筛选调度，不运行本节的Token分类、不生成DIRECT缓存表或sourceMask；每条路由直发，表5原样复制。包尾、UB及M6接收细节见[关闭去重特性](ep-memory-server-dedup-disabled-mode.md)。
 
 ## 本卡数据发送流水
 

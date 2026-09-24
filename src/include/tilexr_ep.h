@@ -78,23 +78,24 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 // Server Dedup Dispatch 使用 A5 固定 64 AIV；发送/接收核数由
 // TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 编译期配置（默认 32/32，支持 16/24/32/40/48）。
 // 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
-// TILEXR_EP_SERVER_DEDUP_ENABLE 在 src/ep/common/ep_memory_server_dedup_count_layout.h 中配置，默认开启；
-// 修改后须重新编译 Host 与 kernel。关闭时按 server 轮转逐 route DIRECT。
-// 接收协议和输出容量不随模式改变。
+// TILEXR_EP_SERVER_DEDUP_ENABLE 由 build_all.sh dedup=0|1 固定，默认开启；
+// 修改后须配套重建 Host、kernel 和布局消费者。关闭时按目标Server筛选原始route并均衡分核，
+// 仅发送三字段包尾，包长随模式改变；hidden、表2和表5的输出shape保持不变。
 // sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
 // expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
 // 成功表示异步提交成功。非 A5 返回 NOT_SUPPORT；同一 communicator 须在同一 stream 串行调用。
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
 // expertScalesOut 是独立 FP32[bs,topK] 输出；sourceMask 有效位中 DIRECT 为真实权重，第一跳首 k 为 1.0。
-// 关闭去重时 sourceMask 的全部 topK 位有效，expertScalesOut 全部保留原始权重。
+// 关闭去重时 tokenType/relayReadIndex/sourceMask（表1/3/4）无效且可传空；
+// destinationIndex（表2）保留原始三字段，expertScalesOut（表5）原样复制所有权重。
 // C=epWorldSize*bs*min(topK,moeExpertNum/epWorldSize)，有效 row 数为 sendCountsOut[moeExpertNum-1]。
 // tokenTypeOut 为 uint32[C]，1=DIRECT、2=第一跳、3=转发终端，与 expandXOut 行序一致。
 // destinationIndexOut 为 uint32[C][3]：类型 1/2 为 [srcRank,srcTokenId,originalK]，
 // 类型 3 为 [本卡 Combine stage 逻辑 slot,UINT32_MAX,UINT32_MAX]，slot 必须按无符号解释。
 // relayReadIndexOut 行距为 topK*8B，仅类型 2 有效；首块为 uint32 N 与 FP32 selfWeight，
 // 后续 N 块为 uint16 expertId、uint16 q、FP32 weight，其余块不消费。
-// sourceMaskOut 为 uint32[bs]；五表基地址至少 4B 对齐，行距不另行向 32B 取整。
-// 五表输出应持有到对应 Combine 完成；旧 Server Dedup metadata 接口不再兼容。
+// 开启模式的 sourceMaskOut 为 uint32[bs]；有效表基地址至少4B对齐，行距不另行向32B取整。
+// 有效表输出应持有到对应 Combine 完成；旧 Server Dedup metadata 接口不再兼容。
 int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *expertIds, void *scales, bool *xActiveMask,
     int64_t activeMaskType, void *expertScales, TileXRCommPtr comm, int64_t bs, int64_t h, int64_t topK,
     int64_t moeExpertNum, int64_t epWorldSize, int64_t epRankId, int64_t tpWorldSize, int64_t tpRankId,

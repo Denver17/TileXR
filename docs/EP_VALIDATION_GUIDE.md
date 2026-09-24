@@ -748,14 +748,17 @@ overflow 检测代码生成，不改变用户 kernel 参数 ABI；CANN 9.1/A5 �
 Server Dedup kernel 的 true/false 编译均为 120B 用户参数，关闭后主 kernel
 代码段缩短 120B。此项未进行 NPU 性能结论，实际收益仍需在目标卡上对比验证。
 
-2026-09-18 去重开关改为编译期配置：`src/ep/common/ep_memory_server_dedup_count_layout.h`
-中的 `TILEXR_EP_SERVER_DEDUP_ENABLE` 默认值为 1。修改为 0 后必须同时重新编译 Host
-和 kernel，关闭时仍扫描 server mask，并按 server 轮转逐 route DIRECT 发送；不会通过
-run.sh、环境变量或公开 API 传递该值。
+去重开关使用固定构建参数：`bash build_all.sh dedup=0` 编译关闭版本，默认 `dedup=1`。
+它与 `breakdown=0|1` 独立，可以组合为 `bash build_all.sh dedup=0 breakdown=1`。
+普通 `if/else` 根据数值宏选择差异部分，不通过run.sh或公开API在运行时切换。
+关闭模式按Server筛选原始路由并均衡分核，使用三字段包尾和独立M6；表1/3/4无效，表2/5有效。
+完整约束见[关闭去重特性](specs/ep-memory-server-dedup-disabled-mode.md)。
 
-编译状态由 consumer 的头文件宏生成 `server_dedup_enabled`，workflow 在 NPU 执行结束后
-核对各 Rank 的记录并汇总到报告；它是产物状态，不是运行参数。修改宏后须一并重建
-kernel、Host 和 consumer 并同步到全部节点，不能把 workflow 的期望值固定为开启。
+构建目录分别记录dedup与profiling，安装仍是一套配套产物。manifest记录
+`server_dedup_enabled`、`server_dedup_protocol=2`及原有产物摘要；同步/运行读取安装包模式，
+核对各Rank记录。切换模式必须整体重建并同步Host、kernel和consumer；旧manifest需重建。
+
+下面是旧临时关闭实现的历史验证记录，不作为当前三字段包尾/M6实现的编译或设备验证证据：
 
 本次 review 修正了关闭宏后被 workflow 错判的问题，以及 launch 单测仍期待旧发送核数字节的
 断言。launch 单测使用二进制加载/注册替身，负向用例会故意输出 registration failed；
@@ -844,6 +847,8 @@ cmake --build build/server-dedup-a5-on --target tilexr_ep_dispatch_memory_server
 ```
 
 涉及 Host/launch 修改时还需构建 `tilexr-ep`。保留待验源码版本、编译器版本、配置、返回码和编译日志；核对编译命令确实包含 A5 目标。blue 连接信息缺失、不可达或工具链不完整时，说明具体阻塞；本地替身或 Host Clang 通过不记为 CANN 编译通过。blue 编译不作为设备功能/性能通过证据，用户侧仍按下文手动编译、同步、运行三个脚本验证。
+
+`command -v ccec` 失败或默认 `/usr/local/Ascend/ascend-toolkit` 无访问权限，只能说明当前搜索路径不可用，不能据此判定本机未安装 CANN。继续检查可访问的共享工具链和用户安装目录，读取安装版本，并实际执行 `bisheng --version` / `ccec --version`；通过 `TILEXR_CANN_ENV_SCRIPT` 指定对应 `set_env.sh` 后再配置独立构建目录。使用本机交叉编译时仍须核对 A5 编译参数，并单独记录设备运行尚未覆盖。
 
 ## 手动编译、同步、运行
 

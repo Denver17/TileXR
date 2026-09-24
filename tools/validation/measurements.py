@@ -274,7 +274,10 @@ def combine_breakdown_timeline(run, config=None):
                     expected.add("m4_partial")
                 if config["implemented_through"] == "M5" and lane.core >= config.get("combine_send_core_num", 32):
                     expected.add("m5_final")
-                token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final"}
+                if config.get("server_dedup_enabled") is False:
+                    expected = {"kernel_total", "m1_init", "m6_drain"}
+                    expected.add("m6_final" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
+                token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final", "m6_token_issue": "m6_final"}
                 actual = [sample.name for sample in lane.samples
                           if sample.kind == "interval" and sample.name not in token_stages]
                 if set(actual) != expected or len(actual) != len(expected):
@@ -312,7 +315,7 @@ def combine_breakdown_timeline(run, config=None):
         return replace(run, launches=tuple(launches), attributes={**run.attributes,
             "scope": "full" if config["implemented_through"] == "M5" else "partial", "implemented_through": config["implemented_through"],
             **({"m4_m5_handoff": "read/vector retired; output slots inherited without MTE3 drain"}
-               if config["implemented_through"] == "M5" else {}),
+               if config["implemented_through"] == "M5" and config.get("server_dedup_enabled") is not False else {}),
             "timing": "latest launch; module intervals and optional per-token instruction issue, no added fences"})
     if config and config.get("implemented_through") == "M2":
         common = {"kernel_total", "m1_init", "m1_select", "m1_stage_copy", "m1_prepare_publish", "m6_drain", "p21_delay_50us"}

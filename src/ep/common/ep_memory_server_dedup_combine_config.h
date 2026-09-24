@@ -2,6 +2,7 @@
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_CONFIG_H
 
 #include <cstdint>
+#include "ep_memory_server_dedup_mode.h"
 
 // Independent of Dispatch. Rebuild Host and kernel together on all ranks.
 #ifndef TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM
@@ -29,9 +30,9 @@ constexpr uint32_t kEpServerDedupCombineTableRows = 512U;
 // than 256 blocks, so packing never narrows an oversized vector repeat count.
 static_assert(kEpServerDedupCombineUbBytes / (480U + 512U) <= 255U, "M3 vector repeat budget");
 constexpr uint32_t kEpServerDedupCombineFixedUbBytes =
-    kEpServerDedupCombineTableRows * 12U + 256U +
+    kEpServerDedupCombineTableRows * 12U + (kEpServerDedupEnable ? 256U +
     2304U + 512U + 32U + 2048U +
-    512U + 256U + 32U + 512U + kEpServerDedupCombineRecvCoreNum * 32U;
+    512U + 256U + 32U + 512U + kEpServerDedupCombineRecvCoreNum * 32U : 32U);
 #if defined(__CCE__) && defined(__CCE_IS_AICORE__)
 #define TILEXR_EP_COMBINE_CONSTEXPR __aicore__ inline constexpr
 #else
@@ -184,6 +185,34 @@ TILEXR_EP_COMBINE_CONSTEXPR EpCombineM5WorkspaceLayout EpCombineM5Layout(
         }
         cursor += shared.inputBytes;
     }
+    return result;
+}
+// M6 owns every byte and event; there is no M4 phase or output-slot reclamation.
+struct EpCombineM6WorkspaceLayout {
+    uint32_t computeBytes = 0U, phaseOffset = 0U, inputOffset = 0U, outputOffset = 0U;
+    uint32_t inputBytes = 0U, outputBytes = 0U, inputLanes = 0U, outputLanes = 0U, totalBytes = 0U;
+};
+TILEXR_EP_COMBINE_CONSTEXPR EpCombineM6WorkspaceLayout EpCombineM6Layout(uint32_t bs, uint32_t h, uint32_t k)
+{
+    EpCombineM6WorkspaceLayout result {};
+    if (bs == 0U || h == 0U || h > kEpServerDedupCombineRecvUbBytes / 12U || k == 0U || k > 32U)
+        return result;
+    const uint64_t owned = EpCombineM5TokenCount(bs);
+    const uint64_t metadata = (owned * 4U + 31U) / 32U * 32U +
+        (owned * k * 4U + 31U) / 32U * 32U + EpCombineM5FlagBytes(h, k) + EpCombineM5WorkBytes(h, k) + 32U;
+    const uint32_t compute = EpCombineAlign(h * 4U, 256U);
+    const uint32_t input = ((h * 2U + 479U) / 480U) * 480U;
+    const uint32_t output = EpCombineAlign(h * 2U, 32U);
+    const uint64_t fixed = 3U * compute + metadata;
+    if (fixed + input + output > kEpServerDedupCombineRecvUbBytes) return result;
+    const uint32_t writes = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - input) / output);
+    result.outputLanes = writes > kEpServerDedupCombineM5MaxOutputLanes ? kEpServerDedupCombineM5MaxOutputLanes : writes;
+    const uint32_t reads = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - result.outputLanes * output) / input);
+    result.inputLanes = reads > kEpServerDedupCombineM5MaxInputLanes ? kEpServerDedupCombineM5MaxInputLanes : reads;
+    result.computeBytes = compute; result.phaseOffset = 3U * compute;
+    result.inputOffset = uint32_t(fixed); result.outputOffset = result.inputOffset + result.inputLanes * input;
+    result.inputBytes = input; result.outputBytes = output;
+    result.totalBytes = result.outputOffset + result.outputLanes * output;
     return result;
 }
 // Three FP32 H buffers alone bound H, and therefore K*N. The admitted

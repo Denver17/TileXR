@@ -11,15 +11,15 @@ int main()
         "supported metadata layout");
     Check(layout.globalBs == 256 && layout.capacityRows == 768 && layout.expertOutBytes == 19968 &&
         layout.assistInfoBytes == 9216 && layout.sendCountsBytes == 768 && layout.expertScalesBytes == 96 &&
-        layout.tokenTypeBytes == 3072 && layout.relayReadIndexRowStrideBytes == 48 &&
-        layout.relayReadIndexBytes == 36864 && layout.sourceMaskBytes == 16 && layout.yOutBytes == 104,
+        layout.tokenTypeBytes == (kEpServerDedupEnable ? 3072U : 0U) && layout.relayReadIndexRowStrideBytes == (kEpServerDedupEnable ? 48U : 0U) &&
+        layout.relayReadIndexBytes == (kEpServerDedupEnable ? 36864U : 0U) && layout.sourceMaskBytes == (kEpServerDedupEnable ? 16U : 0U) && layout.yOutBytes == 104,
         "independent expected five-table and tensor sizes");
     for (int64_t ranks : {32, 64, 128}) {
         for (int64_t k : {1, 6, 32}) {
             Check(TileXREpBuildMemoryServerDedupCombineLayout(ranks, 96, 7168, k, ranks, &layout) == TILEXR_SUCCESS,
                 "L=1 remains supported with full K relay stride");
             Check(layout.capacityRows == uint64_t(ranks * 96) &&
-                layout.relayReadIndexBytes == uint64_t(ranks * 96 * k * 8), "capacity uses min(K,L)");
+                layout.relayReadIndexBytes == (kEpServerDedupEnable ? uint64_t(ranks * 96 * k * 8) : 0U), "capacity uses min(K,L)");
         }
     }
     Check(TileXREpBuildMemoryServerDedupCombineLayout(16, 4096, 1, 32, 1024, &layout) == TILEXR_SUCCESS,
@@ -57,8 +57,8 @@ int main()
     Check(TileXREpBuildServerDedupCombineDataLayout(16, 96, 7168, 6, 96, 15360, &data) == TILEXR_SUCCESS,
         "explicit result-slot geometry without choosing a wire dtype");
     Check(data.resultOffset == 1048576 && data.resultBytes == 8847360 && data.stageOffset == 9895936 &&
-        data.stageRowBytes == 14336 && data.stageRows == 9216 && data.stageBytes == 132120576 &&
-        data.requiredWindowBytes == 142016512, "result and E*BS stage expected offsets");
+        data.stageRowBytes == 14336 && data.stageRows == (kEpServerDedupEnable ? 9216U : 0U) && data.stageBytes == (kEpServerDedupEnable ? 132120576U : 0U) &&
+        data.requiredWindowBytes == (kEpServerDedupEnable ? 142016512U : 9895936U), "result and E*BS stage expected offsets");
     Check(TileXREpBuildServerDedupCombineDataLayout(64, 4, 13, 6, 192, 1024, &data) == TILEXR_SUCCESS &&
         data.stageRowBytes == 512 && data.stageOffset == 1048576 + 24576, "other wire stride and padded stage");
     for (uint64_t slot : {uint64_t(0), uint64_t(513), UINT64_MAX - 511U}) {
@@ -67,14 +67,14 @@ int main()
         Check(data.requiredWindowBytes == 0, "no partial data layout on failure");
     }
     Check(TileXREpBuildMemoryServerDedupCombineLayout(16, 96, 7168, 6, 96, &layout) == TILEXR_SUCCESS &&
-        layout.requiredWindowBytes == 142016512 && layout.data.resultBytes == 8847360 &&
+        layout.requiredWindowBytes == (kEpServerDedupEnable ? 142016512U : 9895936U) && layout.data.resultBytes == 8847360 &&
         layout.data.stageOffset == 9895936, "production layout reserves result plus stage");
     for (uint32_t h : {1U, 13U, 240U, 241U, 256U, 257U, 7168U}) {
         Check(TileXREpBuildMemoryServerDedupCombineLayout(16, 3, h, 6, 96, &layout) == TILEXR_SUCCESS,
             "wire and stage tails supported");
         const uint64_t expectedResult = 18ULL * ((uint64_t(h) * 2U + 479U) / 480U) * 512U;
         const uint64_t expectedStage = 288ULL * ((uint64_t(h) * 2U + 511U) / 512U) * 512U;
-        Check(layout.requiredWindowBytes == 1048576ULL + expectedResult + expectedStage,
+        Check(layout.requiredWindowBytes == 1048576ULL + expectedResult + (kEpServerDedupEnable ? expectedStage : 0U),
             "independent nonquantized wire/padded stage capacity");
     }
     return CombineTest::Finish("layout");

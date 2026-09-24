@@ -94,6 +94,21 @@
       "track": "token_issue",
       "begin": 12324,
       "end": 12325
+    },
+    {
+      "name": "m6_final",
+      "category": "compute",
+      "critical": false,
+      "begin": 12330,
+      "end": 12331
+    },
+    {
+      "name": "m6_token_issue",
+      "category": "issue",
+      "parent": "m6_final",
+      "track": "token_issue",
+      "begin": 12332,
+      "end": 12333
     }
   ]
 }

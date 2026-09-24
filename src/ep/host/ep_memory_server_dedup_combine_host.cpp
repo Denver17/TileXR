@@ -19,8 +19,8 @@ int TileXREpValidateBasicMemoryServerDedupCombineParams(const EpMemoryServerDedu
     if (p.comm == nullptr || p.stream == nullptr || p.bs <= 0 || p.h <= 0 || p.topK <= 0 ||
         p.topK > kEpServerDedupMaxTopK || p.moeExpertNum <= 0 || !Aligned(p.expertOut, 2) || !Aligned(p.yOut, 2) ||
         !Aligned(p.assistInfoForCombine, 4) || !Aligned(p.epRecvCounts, 4) ||
-        !Aligned(p.expertScales, 4) || !Aligned(params.tokenType, 4) ||
-        !Aligned(params.relayReadIndex, 4) || !Aligned(params.sourceMask, 4)) {
+        !Aligned(p.expertScales, 4) || (kEpServerDedupEnable && (!Aligned(params.tokenType, 4) ||
+        !Aligned(params.relayReadIndex, 4) || !Aligned(params.sourceMask, 4)))) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if ((p.dtype != TileXR::TILEXR_DATA_TYPE_FP16 && p.dtype != TileXR::TILEXR_DATA_TYPE_BFP16) ||
@@ -51,16 +51,17 @@ int TileXREpValidateMemoryServerDedupCombineConfig(const EpMemoryServerDedupComb
     const uint32_t maxTokens = static_cast<uint32_t>(next.capacityRows < kEpServerDedupCombineMaxTokenNum ?
         next.capacityRows : kEpServerDedupCombineMaxTokenNum);
     if (EpCombinePayloadLaneCount(maxTokens, static_cast<uint32_t>(p.h)) == 0U ||
-        EpCombineM45Layout(maxTokens, static_cast<uint32_t>(p.bs), static_cast<uint32_t>(p.h),
-            static_cast<uint32_t>(p.topK)).inputLanes == 0U) {
+        (kEpServerDedupEnable ? EpCombineM45Layout(maxTokens, static_cast<uint32_t>(p.bs), static_cast<uint32_t>(p.h),
+            static_cast<uint32_t>(p.topK)).inputLanes :
+            EpCombineM6Layout(uint32_t(p.bs), uint32_t(p.h), uint32_t(p.topK)).inputLanes) == 0U) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
     if ((p.globalBs != 0 && (p.globalBs < 0 || uint64_t(p.globalBs) != next.globalBs)) ||
         !AddressRange(p.expertOut, next.expertOutBytes) || !AddressRange(p.yOut, next.yOutBytes) ||
         !AddressRange(p.assistInfoForCombine, next.assistInfoBytes) ||
         !AddressRange(p.epRecvCounts, next.sendCountsBytes) || !AddressRange(p.expertScales, next.expertScalesBytes) ||
-        !AddressRange(params.tokenType, next.tokenTypeBytes) ||
-        !AddressRange(params.relayReadIndex, next.relayReadIndexBytes) || !AddressRange(params.sourceMask, next.sourceMaskBytes)) {
+        (kEpServerDedupEnable && (!AddressRange(params.tokenType, next.tokenTypeBytes) ||
+        !AddressRange(params.relayReadIndex, next.relayReadIndexBytes) || !AddressRange(params.sourceMask, next.sourceMaskBytes)))) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     const uint64_t stride = args.peerMemBytes / 2U;
