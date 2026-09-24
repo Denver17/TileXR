@@ -265,9 +265,11 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 if (write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
                     const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
-                    const uint32_t serverStep = CombineServerOrderReference::Position(serverOrder, server);
+                    const uint32_t serverStep = dedup
+                        ? (server + ranks / 8U - source / 8U) % (ranks / 8U)
+                        : CombineServerOrderReference::Position(serverOrder, server);
                     Check(!directStarted || serverStep >= previousServerStep,
-                        "DIRECT visits its own half first and wraps independently within each half");
+                        "DIRECT uses cyclic server order with dedup and half order without dedup");
                     Check(!directStarted || serverStep != previousServerStep || index > previousDirect,
                         "DIRECT preserves token/k order within each destination server");
                     directStarted = true; previousDirect = index; previousServerStep = serverStep;

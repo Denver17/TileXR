@@ -152,14 +152,13 @@ private:
         }
         profile.End(EpDedupDetailMetric::SendFirstHop);
         profile.Begin(EpDedupDetailMetric::SendDirect);
-        // Half-first server scans retain the original q and token/k order.
+        // Stable per-server scans retain the original q and token/k order.
         // Each core advances independently; the packet/lane sequence continues
         // across first hops and server boundaries without an added drain.
         const uint32_t serverNum = args_->rankSize / 8U;
         const uint32_t expertsPerServer = localExperts_ * 8U;
-        const uint32_t ownServer = args_->rank / 8U;
+        uint32_t server = args_->rank / 8U;
         for (uint32_t step = 0; step < serverNum; ++step) {
-            const uint32_t server = ServerDedupHalfOrder(serverNum, ownServer, step);
             const uint32_t firstExpert = server * expertsPerServer;
             for (uint32_t task = 0; task < directCount_; ++task) {
                 const uint32_t expert = directTasks_.GetValue(task * 4U + 2U);
@@ -171,6 +170,7 @@ private:
                 sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << k));
                 sourceWeights_.SetValue(token * k_ + k, routeWeights_.GetValue(token * k_ + k));
             }
+            if (++server == serverNum) server = 0U;
         }
         profile.End(EpDedupDetailMetric::SendDirect);
     }
