@@ -647,15 +647,25 @@ int Run(const Config &c)
     CombineM5Validation m5Validation;
     uint64_t streamSynchronizations = 0;
     const auto profilePaths = ConfigureProfiling(c);
+    const auto progressStarted = Clock::now();
+    std::string reportedStage, reportedBatch;
     auto enterStage = [&](const char *name) {
         stage = name;
-        wall.Next(stage == "launch" || stage == "combine-launch" ? "submission" : stage);
+        if (stage == "launch" || stage == "combine-launch") wall.Next("submission");
+        else if (stage == "comm-args-check" || stage == "comm-args-copy") wall.Next("communicator");
+        else wall.Next(stage);
         // Flush before a potentially blocking call: an external timeout cannot
         // report the in-memory stage through the exception handler.
-        if (c.runMode == "breakdown") {
+        // Every mode needs evidence before a killed process can run its wall
+        // timer destructor. Ordinary batches log transitions, not every launch.
+        if (c.runMode == "breakdown" || stage != reportedStage || batch != reportedBatch) {
             std::cerr << "EP_SERVER_DEDUP_PROGRESS rank=" << c.rank << " stage=" << stage << " batch=" << batch
                 << " submission=" << submission << " submitted=" << submitted << " completed=" << completed
-                << " warmup_submitted=" << warmupSubmitted << " warmup_completed=" << warmupCompleted << std::endl;
+                << " warmup_submitted=" << warmupSubmitted << " warmup_completed=" << warmupCompleted
+                << " pid=" << getpid()
+                << " elapsed_s=" << std::chrono::duration<double>(Clock::now() - progressStarted).count() << std::endl;
+            reportedStage = stage;
+            reportedBatch = batch;
         }
     };
     Barrier barrier(c, Clock::now() + std::chrono::seconds(90));
@@ -671,6 +681,7 @@ int Run(const Config &c)
         enterStage("communicator");
         Check(TileXRCommInitRankMemoryDomainWithSize(0, kServerDedupDataMiB, c.rankSize, c.rank, &comm),
             "TileXRCommInitRankMemoryDomainWithSize");
+        enterStage("comm-args-check");
         TileXR::CommArgs *host = nullptr;
         GM_ADDR dev = nullptr;
         Check(TileXRGetCommArgsHost(comm, host), "TileXRGetCommArgsHost");
@@ -678,6 +689,7 @@ int Run(const Config &c)
         Require(host != nullptr && dev != nullptr, "missing Host/device CommArgs");
         ValidateComm(c, *host);
         TileXR::CommArgs deviceArgs {};
+        enterStage("comm-args-copy");
         Check(aclrtMemcpy(&deviceArgs, sizeof(deviceArgs), dev, sizeof(deviceArgs), ACL_MEMCPY_DEVICE_TO_HOST),
             "read device CommArgs");
         ValidateComm(c, deviceArgs);
@@ -716,7 +728,7 @@ int Run(const Config &c)
             Check(aclrtGetDevice(&device), "aclrtGetDevice");
             allocations.push_back({data, sizes[i], sizes[i], alignments[i], device});
         }
-        wall.Next("input-fixture");
+        enterStage("input-fixture");
         const auto shape = SourceSendShape(c);
         std::vector<float> weightsHost;
         if (runDispatch) {
@@ -740,11 +752,11 @@ int Run(const Config &c)
             InitializeStandaloneCombine(c, combineLayout, buffers);
         }
         if (runCombine) {
-            wall.Next("expert-fixture");
+            enterStage("expert-fixture");
             if (sizes[12]) InitializeCombineExpert(c, buffers[12], sizes[12]);
             Check(aclrtMemset(buffers[13], sizes[13], 0xa5, sizes[13]), "initialize combine yOut");
         }
-        wall.Next("reference-build");
+        enterStage("reference-build");
         if (m12 && runCombine) m12Validation.Initialize(c, *host);
         if (m3 && runCombine) m3Validation.Initialize(c, *host);
         if (m4 && runCombine) m4Validation.Initialize(c, *host);

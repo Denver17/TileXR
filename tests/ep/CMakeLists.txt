@@ -302,6 +302,10 @@ set(TILEXR_EP_SERVER_DEDUP_HOST_SOURCES
     ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_host.cpp
     ${TILEXR_ROOT}/src/ep/host/tilexr_ep_memory_server_dedup_dispatch.cpp)
 add_executable(test_tilexr_ep_server_dedup_protocol unit/test_tilexr_ep_server_dedup_protocol.cpp)
+add_executable(test_tilexr_ep_server_dedup_reference unit/test_tilexr_ep_server_dedup_reference.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_reference PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
+add_test(NAME test_tilexr_ep_server_dedup_reference COMMAND test_tilexr_ep_server_dedup_reference)
+set_tests_properties(test_tilexr_ep_server_dedup_reference PROPERTIES LABELS ep-sdedup-reference TIMEOUT 120)
 add_executable(test_tilexr_ep_server_dedup_layout
     unit/test_tilexr_ep_server_dedup_layout.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_layout.cpp)

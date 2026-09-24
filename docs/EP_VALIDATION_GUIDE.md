@@ -118,6 +118,29 @@ consumer 在退出时追加 `EP_SERVER_DEDUP_WALL`，使用 Host 单调时钟，
 维护教训：性能测试的 Host fixture/oracle 也需要合理优化；先分离初始化、参考构造和 profiler
 开销，不能通过省略数值/Flag 校验、关闭 profiler 或延长 timeout 来掩盖测试准备成本。
 
+128P Combine 的提交前排查（2026-09-24）：`dedup=1` 使用原 M4→M5，M6 不参与。
+当所有 rank 均没有 `EP_SERVER_DEDUP_CHAIN_PASS` 时，先定位 consumer 初始化和
+提交前 barrier；`exit=-15` 只证明进程收到 SIGTERM，不能据此认定 kernel 卡死或确定信号发送方。
+所有运行模式现在都在阶段切换前刷新 `EP_SERVER_DEDUP_PROGRESS`，附带 PID 和
+Host 单调时间 `elapsed_s`，区分 communicator、CommArgs 校验/拷贝、allocation、
+input-fixture、expert-fixture、reference-build、chain-barrier 及算子提交。
+日志表示即将进入该阶段；相邻记录的时间差才反映上一阶段耗时。
+
+已复现的 Host 扩展性问题：每个 producer 的 `DispatchRows` 都重新生成所有 source
+的输入，而 `balance_shift` 的单 source 生成又遍历全局路由，导致重复计算随 rank 数近似立方增长。
+现在线程内仅保留一组不可变 source IDs/weights，按 ranks、experts、BS、K、route mode、seed
+完整区分配置；切换配置替换缓存，行/packet 构造和独立数值参考校验仍照常执行。
+128P/BS256/K6 时这部分缓存约 1.5 MiB，不缓存设备输出。
+本机 `dedup=1`、E384/BS256/H7168/K6/seed42，三轮全 producer 路由参考扫描：
+64P 由 10.167s 降至 0.566s，128P 由 78.271s 降至 2.105s；修改前后各自的
+行数、路由/packet 字段及 FP32 权重摘要相同。仅为 CPU 子任务测量，尚未证明用户的
+128P 故障由这项开销触发，也不代表 NPU 运行已通过。需重新构建、同步 consumer 后复测，
+若仍失败，用最新阶段日志定位，保留原始首错；不要只检索 `_PASS` 或把后续取消当作首因。
+本次 Host 验证通过：Server Dedup CTest 40/40、非去重缓存配置切换 1/1、Dispatch
+consumer 25/25、Combine M5 consumer 5/5；`dedup=0/1、profiling=OFF` 的真实 CANN 9.1
+A5 kernel/生产库构建及 consumer 编译链接通过。证据在开发工作区
+`run/validation/combine-128p-host/`，未执行 NPU。
+
 此次涉及 consumer 二进制，需要重新构建并同步；性能模式示例：
 
 ```bash

@@ -5,6 +5,7 @@
 #include <array>
 #include <set>
 #include <tuple>
+#include <utility>
 #include "ep_memory_server_dedup_count_layout.h"
 #include "server_dedup_source_send_fixture.h"
 
@@ -16,15 +17,42 @@ struct DispatchRow {
     bool FirstHop() const { return !Direct() && k == packet.members.front().k; }
 };
 
+struct ReferenceSourceInput {
+    std::vector<int32_t> ids;
+    std::vector<float> weights;
+};
+
+// Each producer scan uses the same immutable source inputs. In balance_shift,
+// Ids itself regenerates the global epoch stream; doing that for every
+// producer/source pair makes Combine reference setup cubic in rank count.
+// Retain only one shape per thread, with every input-generation key included.
+inline const std::vector<ReferenceSourceInput> &ReferenceSourceInputs(const Shape &s)
+{
+    using Key = std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, TileXREpDemo::RouteMode, uint32_t>;
+    const Key key(s.ranks, s.experts, s.bs, s.k, s.routeMode, s.seed);
+    static thread_local Key cachedKey {};
+    static thread_local std::vector<ReferenceSourceInput> cached;
+    if (cached.empty() || cachedKey != key) {
+        std::vector<ReferenceSourceInput> next;
+        next.reserve(s.ranks);
+        for (uint32_t source = 0; source < s.ranks; ++source)
+            next.push_back({Ids(s, source), Weights(s, source)});
+        cached = std::move(next);
+        cachedKey = key;
+    }
+    return cached;
+}
+
 // Construct public rows from every original route, in expert/source/q order.
 // The source packet classifier and device prefix/address helpers are not used.
 inline std::vector<DispatchRow> DispatchRows(const Shape &s, uint32_t destination)
 {
     const uint32_t local = s.experts / s.ranks;
     std::vector<std::vector<DispatchRow>> byExpert(local);
+    const auto &inputs = ReferenceSourceInputs(s);
     for (uint32_t source = 0; source < s.ranks; ++source) {
-        const auto ids = Ids(s, source);
-        const auto weights = Weights(s, source);
+        const auto &ids = inputs[source].ids;
+        const auto &weights = inputs[source].weights;
         std::vector<uint32_t> q(s.experts, 0U);
         for (uint32_t token = 0; token < s.bs; ++token) {
             std::vector<Route> routes;

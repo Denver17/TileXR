@@ -284,7 +284,7 @@ class ChainConsumerTests(unittest.TestCase):
                     for rank, process in enumerate(processes):
                         output, errors = process.communicate(timeout=15)
                         self.assertEqual(process.returncode, 0, output + errors)
-                        self.assertNotIn("EP_SERVER_DEDUP_PROGRESS", errors)
+                        self.assertIn("EP_SERVER_DEDUP_PROGRESS", errors)
                         record, = self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")
                         records.append(record)
                         linked, = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")
@@ -474,7 +474,8 @@ class ChainConsumerTests(unittest.TestCase):
                         self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_INVALID")), 1)
                         self.assertNotIn("EP_SERVER_DEDUP_DISPATCH_PASS", output)
                         self.assertIn("stage=count-read", errors)
-                        line = next(line for line in errors.splitlines() if "stage=count-read" in line)
+                        line = next(line for line in errors.splitlines()
+                                    if line.startswith("EP_SERVER_DEDUP_VALIDATION_FAIL ") and "stage=count-read" in line)
                         fields = dict(word.split('=', 1) for word in line.split() if '=' in word)
                         self.assertEqual(int(fields['global_expert']), 2)
                         self.assertEqual(int(fields['actual_window_start']), 0)
@@ -610,13 +611,15 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertIn("comm-init", self.trace_lines(0))
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 
-    def test_breakdown_progress_is_flushed_before_blocking_api(self):
-        for api, stage in (("launch", "launch"), ("sync", "stream-sync"),
-                           ("comm-destroy", "cleanup-communicator")):
-            with self.subTest(api=api):
+    def test_progress_is_flushed_before_blocking_api_in_all_modes(self):
+        cases = [(mode, api, stage) for mode in ("functional", "performance", "breakdown")
+                 for api, stage in (("launch", "launch"), ("sync", "stream-sync"),
+                                    ("comm-destroy", "cleanup-communicator"))]
+        for mode, api, stage in cases:
+            with self.subTest(mode=mode, api=api):
                 resume = Path(self.trace.name) / "resume"
                 progress = Path(self.trace.name) / "progress.log"
-                env = dict(TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_LOOPS="3",
+                env = dict(TILEXR_VALIDATION_RUN_MODE=mode, TILEXR_VALIDATION_LOOPS="3",
                            TILEXR_VALIDATION_WARMUP="2")
                 with progress.open("w") as log:
                     process = self.start(0, environment=dict(env, TEST_PAUSE_STAGE=api,
@@ -644,9 +647,14 @@ class ChainConsumerTests(unittest.TestCase):
                            for line in progress.read_text().splitlines()
                            if line.startswith("EP_SERVER_DEDUP_PROGRESS ")]
                 self.assertEqual([entry["stage"] for entry in entries], [
-                    "acl-init", "device", "communicator", "allocation", "chain-barrier", "launch", "launch",
+                    "acl-init", "device", "communicator", "comm-args-check", "comm-args-copy", "allocation",
+                    "input-fixture", "reference-build", "chain-barrier", "launch", "launch",
                     "stream-sync", "batch-barrier", "count-read", "dispatch-read",
                     "cleanup-buffers", "cleanup-communicator", "cleanup-stream", "cleanup-device", "cleanup-acl"])
+                self.assertTrue(all(int(entry["pid"]) == process.pid for entry in entries))
+                elapsed = [float(entry["elapsed_s"]) for entry in entries]
+                self.assertGreaterEqual(elapsed[0], 0)
+                self.assertEqual(elapsed, sorted(elapsed))
                 launches = [entry for entry in entries if entry["stage"] == "launch"]
                 self.assertEqual([entry["batch"] for entry in launches], ["warmup", "measurement"])
                 self.assertEqual([entry["submission"] for entry in launches], ["1", "1"])
