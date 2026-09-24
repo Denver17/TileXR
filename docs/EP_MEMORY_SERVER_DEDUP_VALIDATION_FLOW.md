@@ -18,7 +18,7 @@ Combine 第一阶段 C1–C7 已收口；第二阶段以本页 M1/M2→M3→M4�
 
 专家数约束按最新主设计同步：总专家数不超过 1024 且能被 R 整除，不设独立单卡上限，允许 L=1。
 当前 cnt/cumsum 增量已适配 Host/layout/调度器限制；可执行步骤与数值判据见[当前提交验收](EP_VALIDATION_GUIDE.md#当前提交cntcumsum-验收)。
-Dispatch 当前每 rank 使用 8 GiB 通信域（8188 MiB 数据区 + 4 MiB runtime Flag）；以 `magic % 2` 选择两个固定 4 GiB 窗口，Combine 空算子已接入该域，真实通信数据面尚未实现。历史 Dispatch 布局曾在每窗前留 2 MiB；当前联合布局为 764KiB Dispatch 控制区、52KiB Combine 控制区及 208KiB 间隙，共享数据从 1MiB 开始。Token 区不得越过 4092 MiB 相对偏移；第一窗尾部留空以保持两窗容量一致。
+当前联合布局（2026-09-24）为每半区 1244KiB Dispatch 控制区、96KiB Combine 控制区及 196KiB 间隙，共享数据从 1.5MiB 开始。原始 cnt 在 GM 中以 512B 为槽距，仅槽首 32B 有效，UB 保持紧凑。以 `magic % 2` 选择实际 `peerMemBytes/2` 窗口；验证默认每 rank 使用 8GiB，此时 Token 区不得越过每窗 4092MiB，相应尾部留空以保持两窗容量一致。下文阶段记录中的旧 1MiB/2MiB 数据起点和紧凑 cnt GM 地址仅适用于当时版本，当前偏移以公共布局头及联合设计 §6 为准。
 开发阶段 1～4 统一先用 16P、每卡 6 专家（总计 96）、BS=96、TopK=6、balance_shift 主场景验证流程及性能；边界条件检查留到完整流程的最终验收，不在各增量默认扫描。
 下文保留阶段规划，空 kernel 辅助打点及完整数据路径的布局/ABI 不代表当前计数实现；既有通过记录不作为新范围已经验证的证据。
 

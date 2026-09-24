@@ -49,7 +49,7 @@ public:
     __aicore__ inline void CalcCumsum() { CalRecvAndSetFlag(); }
     __aicore__ inline void CompleteCumsum();
     __aicore__ inline TBufPool<TPosition::VECCALC, 16> &ScratchPool() { return stagePool_; }
-    __aicore__ inline uint32_t ReservedBytes() const { return statusCntAlign_ * STATE_OFFSET; }
+    __aicore__ inline uint32_t ReservedBytes() const { return statusCntAlign_ * kEpServerDedupCountRecordBytes; }
     // Valid after CompleteCumsum and until this core's TPipe is reset.
     __aicore__ inline LocalTensor<int32_t> Prefix() { return prefixBuf_.Get<int32_t>(); }
     __aicore__ inline void Finish()
@@ -62,8 +62,8 @@ private:
     static constexpr uint32_t UB_ALIGN = 32U;
     static constexpr uint32_t UB_ALIGN_DATA_COUNT = 8U;
     static constexpr uint32_t SIZE_ALIGN_256 = 256U;
-    static constexpr uint32_t STATE_OFFSET = 32U;
-    static constexpr uint32_t CNT_RECORDS_PER_BLOCK = 16U; // One 512B polling owner.
+    static constexpr uint32_t CNT_GM_STRIDE_BLOCKS = kEpServerDedupCountGmStride / UB_ALIGN;
+    static constexpr uint32_t CNT_RECORDS_PER_CORE_GRANULARITY = 16U;
     static constexpr uint32_t aivUsedAllToAll_ = kEpServerDedupSendCoreNum;
     static constexpr uint32_t aivUsedCumSum_ = kEpServerDedupRecvCoreNum;
 
@@ -220,9 +220,9 @@ __aicore__ inline void ServerDedupCounts::SendExpertCntRange(uint32_t start, uin
         const uint32_t localExpert = expert % moeExpertNumPerRank_;
         const uint32_t count = end - expert < moeExpertNumPerRank_ - localExpert ?
             end - expert : moeExpertNumPerRank_ - localExpert;
-        const uint64_t offset = (uint64_t(localExpert) * epWorldSize_ + epRankId_) * STATE_OFFSET;
+        const uint64_t offset = (uint64_t(localExpert) * epWorldSize_ + epRankId_) * kEpServerDedupCountGmStride;
         peer.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(args_->peerMems[dst] + stateOffset_ + offset));
-        const DataCopyParams copy{uint16_t(count), 1U, 0U, uint16_t(epWorldSize_ - 1U)};
+        const DataCopyParams copy{uint16_t(count), 1U, 0U, uint16_t(epWorldSize_ * CNT_GM_STRIDE_BLOCKS - 1U)};
         DataCopy<int32_t>(peer, statusTensor_[(expert - start) * UB_ALIGN_DATA_COUNT], copy);
         expert += count;
     }
@@ -230,9 +230,9 @@ __aicore__ inline void ServerDedupCounts::SendExpertCntRange(uint32_t start, uin
 
 __aicore__ inline void ServerDedupCounts::RecvCnt()
 {
-    // Never let two cores poll the same 512B block while peers are writing cnt.
+    // Retain 16-record ownership groups; each GM record now owns a 512B slot.
     const uint32_t recordsPerCore = Ceil(Ceil(rscvStatusNum_, aivUsedCumSum_),
-        CNT_RECORDS_PER_BLOCK) * CNT_RECORDS_PER_BLOCK;
+        CNT_RECORDS_PER_CORE_GRANULARITY) * CNT_RECORDS_PER_CORE_GRANULARITY;
     activeCumSumCores_ = Ceil(rscvStatusNum_, recordsPerCore);
     stagePool_.InitBuffer(scalarBuf_, 3U * UB_ALIGN);
     const uint32_t receiver = aivId_ - aivUsedAllToAll_;
@@ -313,13 +313,14 @@ __aicore__ inline void ServerDedupCounts::CalTokenSendExpertCnt(uint32_t dstExpe
 
 __aicore__ inline void ServerDedupCounts::WaitDispatchClearStatus()
 {
-    DataCopyParams intriOutParams{static_cast<uint16_t>(recStatusNumPerCore_), 1, 0, 0};
+    DataCopyParams intriOutParams{static_cast<uint16_t>(recStatusNumPerCore_), 1, 0,
+        static_cast<uint16_t>(CNT_GM_STRIDE_BLOCKS - 1U)};
     uint64_t duplicateMask[2] = {0x0101010101010101ULL, 0ULL};
     LocalTensor<int32_t> cleanStateTensor = waitStatusBuf_.Get<int32_t>();
     SyncFunc<AscendC::HardEvent::S_V>();
     Duplicate<int32_t>(cleanStateTensor, 0, duplicateMask, Ceil(recStatusNumPerCore_, 8), 1, 8);
     SyncFunc<AscendC::HardEvent::V_MTE3>();
-    DataCopy(windowInstatusFp32Tensor_[startStatusIndex_ * STATE_OFFSET / sizeof(float)],
+    DataCopy(windowInstatusFp32Tensor_[startStatusIndex_ * kEpServerDedupCountGmStride / sizeof(float)],
              cleanStateTensor.ReinterpretCast<float>(), intriOutParams);
     // The snapshot is no longer modified after this issue. Its DMA can overlap
     // cumsum; the caller retires all count-stage writes before receiver Reset.
@@ -441,10 +442,12 @@ __aicore__ inline void ServerDedupCounts::WaitDispatch()
     float compareTarget = static_cast<float>(1.0) * recStatusNumPerCore_;
     float sumOfFlag = static_cast<float>(-1.0);
 
-    DataCopyParams intriParams{static_cast<uint16_t>(recStatusNumPerCore_), 1, 0, 0};
+    // Gather only the 32B records into compact UB; never read the 480B gaps.
+    DataCopyParams intriParams{static_cast<uint16_t>(recStatusNumPerCore_), 1,
+        static_cast<uint16_t>(CNT_GM_STRIDE_BLOCKS - 1U), 0};
     SyncFunc<AscendC::HardEvent::S_V>();
     while (sumOfFlag != compareTarget) {
-        DataCopy(statusFp32Tensor_, windowInstatusFp32Tensor_[startStatusIndex_ * STATE_OFFSET / sizeof(float)], intriParams);
+        DataCopy(statusFp32Tensor_, windowInstatusFp32Tensor_[startStatusIndex_ * kEpServerDedupCountGmStride / sizeof(float)], intriParams);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         ReduceSum(statusSumOutTensor, statusFp32Tensor_, gatherMaskOutTensor,
             mask, recStatusNumPerCore_, 1U);

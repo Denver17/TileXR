@@ -94,9 +94,9 @@ int main()
     Check(TileXREpBuildMemoryServerDedupLayout(128, 128, 7168, 8, 1024, &layout, false) == TILEXR_SUCCESS,
         "compile-time core split builds a valid layout");
     const auto split = TileXREpServerDedupCountLayout(1024);
-    Check(split.cntOffset + split.prefixOffset == 119296U &&
+    Check(split.cntOffset + split.prefixOffset == 610816U &&
         split.cumsumFlagOffset == split.prefixOffset + 393216U &&
-        layout.countStateBytes == 587776U && split.stateBytes <= TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES,
+        layout.countStateBytes == 1079296U && split.stateBytes <= TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_BYTES,
         "fixed prefix region reserves twice the maximum 1024-expert/48-core footprint");
     for (uint32_t experts : {16U, 96U, 384U, 1008U, 1024U}) {
         const auto actual = TileXREpServerDedupCountLayout(experts);
@@ -123,7 +123,7 @@ int main()
             "fixed tables are aligned and disjoint including unused capacity");
         end = region.offset + region.bytes;
     }
-    Check(end == 880640U && TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1048576U &&
+    Check(end == 1372160U && TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1572864U &&
         end <= TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
         "shared data follows both fixed control regions");
 
@@ -132,17 +132,20 @@ int main()
         TILEXR_ERROR_PARA_CHECK_FAIL, "route scratch exceeding UB rejected");
     const auto countLayout = TileXREpServerDedupCountLayout(1024);
     const uint64_t matrixBytes = uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * 32U;
-    Check(countLayout.cntOffset == 12800 && countLayout.cumsumOffset == 32768 &&
+    Check(countLayout.cntOffset == 12800 && countLayout.cumsumOffset == 524288 &&
+        kEpServerDedupCountRecordBytes == 32U && kEpServerDedupCountGmStride == 512U &&
         countLayout.prefixStride == 4096,
-        "Count records retain 32B stride and each receiver has a full expert prefix");
+        "Count has 512B GM slots, compact 32B UB records and a full prefix per receiver");
+    Check(TileXREpServerDedupCountSendUbBytes(6U, 384U, 64U) == 1312U,
+        "sparse GM slots do not expand the compact count UB reservation");
     Check(countLayout.prefixOffset >= countLayout.cumsumOffset + matrixBytes &&
         countLayout.cumsumFlagOffset >= countLayout.prefixOffset + kEpServerDedupRecvCoreNum * 4096U &&
         countLayout.counterOffset >= countLayout.cntOffset + countLayout.cumsumFlagOffset + matrixBytes &&
         countLayout.counterOffset % 1024U == 0 && countLayout.stateBytes == countLayout.counterOffset + 1024U,
         "both receiver matrices, every prefix and the isolated counter have disjoint storage");
     Check(TileXREpBuildMemoryServerDedupLayout(128, 256, 7168, 6, 384, &layout) == TILEXR_SUCCESS &&
-        layout.data.dispatchOffset == 1048576U && layout.data.dispatchBytes == (kEpServerDedupEnable ? 1560281088U : 1509949440U) &&
-        layout.data.requiredBytes == (kEpServerDedupEnable ? 1561329664U : 1510998016U),
+        layout.data.dispatchOffset == 1572864U && layout.data.dispatchBytes == (kEpServerDedupEnable ? 1560281088U : 1509949440U) &&
+        layout.data.requiredBytes == (kEpServerDedupEnable ? 1561853952U : 1511522304U),
         "Dispatch requires only fixed controls and its own receive view");
     for (uint64_t peerBytes : {6ULL << 30, 8ULL << 30, 10ULL << 30}) {
         for (int64_t magic = 0; magic <= 5; ++magic) {

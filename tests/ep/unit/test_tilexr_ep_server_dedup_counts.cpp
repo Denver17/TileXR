@@ -19,6 +19,27 @@ constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
 constexpr uint32_t recvCoreNum = TileXREp::kEpServerDedupRecvCoreNum;
 using TileXREp::kEpServerDedupAllCoreCountBsThreshold;
 using ServerDedupTest::Check;
+// Independent wire contract: 32B records occupy the start of 512B GM slots.
+constexpr uint32_t countSlotWords = 128U;
+constexpr uint32_t countGapPattern = 0xa5a5a5a5U;
+
+void SeedCountSlots(std::vector<uint32_t> &state, uint64_t offset, uint32_t experts)
+{
+    auto begin = state.begin() + offset / 4U;
+    std::fill(begin, begin + 1024U * countSlotWords, countGapPattern);
+    for (uint32_t i = 0; i < experts; ++i)
+        std::fill(begin + i * countSlotWords, begin + i * countSlotWords + 8U, 0U);
+}
+
+void CheckCountGaps(const std::vector<uint32_t> &state, uint64_t offset, uint32_t experts)
+{
+    const auto begin = state.begin() + offset / 4U;
+    for (uint32_t i = 0; i < experts; ++i)
+        Check(std::all_of(begin + i * countSlotWords + 8U, begin + (i + 1U) * countSlotWords,
+            [](uint32_t value) { return value == countGapPattern; }), "cnt DMA preserves every 480B GM gap");
+    Check(std::all_of(begin + experts * countSlotWords, begin + 1024U * countSlotWords,
+        [](uint32_t value) { return value == countGapPattern; }), "cnt DMA preserves unused GM slots");
+}
 
 struct Rank {
     TileXR::CommArgs args {};
@@ -160,6 +181,7 @@ void CheckDeferredCountReceive()
     const uint32_t activeReceivers = (experts + recvCount - 1U) / recvCount;
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
+    for (auto &window : state) SeedCountSlots(window, layout.cntOffset, experts);
     TileXR::CommArgs args {};
     args.rankSize = world;
     args.peerMemBytes = ServerDedupTest::kPeerBytes;
@@ -170,8 +192,8 @@ void CheckDeferredCountReceive()
     }
     uint32_t localSum = 0U;
     for (uint32_t i = 0; i < recvCount; ++i) {
-        state[0][layout.cntOffset / 4U + (recvStart + i) * 8U] = 0x3f800000U;
-        state[0][layout.cntOffset / 4U + (recvStart + i) * 8U + 1U] = i % 5U;
+        state[0][layout.cntOffset / 4U + (recvStart + i) * countSlotWords] = 0x3f800000U;
+        state[0][layout.cntOffset / 4U + (recvStart + i) * countSlotWords + 1U] = i % 5U;
         localSum += i % 5U;
     }
     int32_t route = int32_t(start);
@@ -206,7 +228,7 @@ void CheckDeferredCountReceive()
     AscendC::DeferMte3() = false;
     for (uint32_t i = 0; i < count; ++i) {
         const uint32_t expert = start + i;
-        const uint32_t index = layout.cntOffset / 4U + expert % (experts / world) * world * 8U;
+        const uint32_t index = layout.cntOffset / 4U + expert % (experts / world) * world * countSlotWords;
         Check(state[expert / (experts / world)][index] == 0x3f800000U &&
             state[expert / (experts / world)][index + 1U] == (i == 0U ? 1U : 0U),
             "deferred cnt reads retain every record after receiver scratch overwrites count scratch");
@@ -219,8 +241,9 @@ void CheckDeferredCountReceive()
             "deferred local sum publication reaches only active cumsum consumers");
     }
     for (uint32_t i = 0; i < recvCount; ++i)
-        Check(state[0][layout.cntOffset / 4U + (recvStart + i) * 8U] == 0U,
+        Check(state[0][layout.cntOffset / 4U + (recvStart + i) * countSlotWords] == 0U,
             "deferred clear retires each consumed incoming ready flag");
+    for (const auto &window : state) CheckCountGaps(window, layout.cntOffset, experts);
     counts.Finish();
 }
 
@@ -239,6 +262,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
         for (uint32_t bank = 0; bank < 2U; ++bank) {
             auto &state = rank.states[bank];
             state.assign(TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET / 4 + 32, 0);
+            SeedCountSlots(state, layout.cntOffset, experts);
             std::fill(state.begin() + (layout.cntOffset + layout.prefixOffset) / 4 + recvCoreNum * experts,
                 state.begin() + (layout.cntOffset + layout.cumsumFlagOffset) / 4, 0xa5a5a5a5);
             std::fill(state.begin() + layout.counterOffset / 4, state.end(), 0xa5a5a5a5);
@@ -299,7 +323,12 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             AscendC::testCore = id % 64;
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&profileArgs), 0U);
+            AscendC::StridedCopyObserver() = [&](bool write, const void *, AscendC::DataCopyParams copy) {
+                Check(write && copy.blockLen == 1U && copy.srcStride == 0U && copy.dstStride == world * 16U - 1U,
+                    "cnt send transfers compact 32B UB records to expert/source GM slots");
+            };
             ranks[id / 64].cores[id % 64].SendCnt(profile);
+            AscendC::StridedCopyObserver() = {};
             profile.Publish();
             const auto events = capture.Events(id % 64);
 #if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING
@@ -320,33 +349,42 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                 Check(AscendC::testCopies > before, "BS below the independent threshold lets all 64 cores publish Count");
         }
         for (uint32_t r = 0; r < world; ++r) for (uint32_t i = 0; i < experts; ++i) {
-            Check(ranks[r].states[bank][offset / 4 + i * 8] == 0x3f800000, "every cnt record, including zero, is notified");
-            Check(int32_t(ranks[r].states[bank][offset / 4 + i * 8 + 1]) == expected[r][i], "raw per-expert/source count matches independent route histogram");
+            Check(ranks[r].states[bank][offset / 4 + i * countSlotWords] == 0x3f800000, "every cnt record, including zero, is notified");
+            Check(int32_t(ranks[r].states[bank][offset / 4 + i * countSlotWords + 1]) == expected[r][i], "raw per-expert/source count matches independent route histogram");
         }
-        std::vector<std::vector<int32_t>> blockOwners(world, std::vector<int32_t>((experts + 15U) / 16U, -1));
+        for (const auto &rank : ranks) CheckCountGaps(rank.states[bank], offset, experts);
+        std::vector<std::vector<int32_t>> blockOwners(world, std::vector<int32_t>(experts, -1));
         for (uint32_t id : order) if (id % 64 >= sendCoreNum) {
             const uint32_t receiver = id % 64 - sendCoreNum;
             const uint32_t rank = id / 64;
             const auto before = AscendC::testCopies;
-            AscendC::GmReadObserver() = [&](const void *source, uint32_t bytes) {
+            AscendC::StridedCopyObserver() = [&](bool write, const void *source, AscendC::DataCopyParams copy) {
                 const uintptr_t begin = reinterpret_cast<uintptr_t>(ranks[rank].states[bank].data()) + offset;
                 const uintptr_t address = reinterpret_cast<uintptr_t>(source);
-                Check(receiver < activeReceivers && address >= begin && address + bytes <= begin + experts * 32U,
+                if (address < begin || address >= begin + experts * 512U) {
+                    Check(write, "cnt receive reads only its GM cnt slots");
+                    return; // Local segment-sum publication.
+                }
+                Check(copy.blockCount > 0U && copy.blockLen == 1U &&
+                    copy.srcStride == (write ? 0U : 15U) && copy.dstStride == (write ? 15U : 0U),
+                    "poll and cleanup transfer only 32B records between sparse GM and compact UB");
+                Check(receiver < activeReceivers && address + (copy.blockCount - 1U) * 512U + 32U <= begin + experts * 512U,
                     "only active receivers read cnt and stay within the valid records");
                 Check((address - begin + offset) % 512U == 0U,
                     "each cnt polling range starts on a window-relative 512B boundary");
-                const uint32_t first = uint32_t((address - begin) / 32U);
+                const uint32_t first = uint32_t((address - begin) / 512U);
                 Check(first == receiver * recordsPerCore &&
-                    bytes == std::min(recordsPerCore, experts - first) * 32U,
+                    copy.blockCount == std::min(recordsPerCore, experts - first),
                     "cnt polling rounds up the per-core budget to 16 records and clips the tail");
-                for (uint32_t block = first / 16U; block <= (first + bytes / 32U - 1U) / 16U; ++block) {
+                if (write) return;
+                for (uint32_t block = first; block < first + copy.blockCount; ++block) {
                     auto &owner = blockOwners[rank][block];
                     Check(owner == -1 || owner == int32_t(receiver), "a 512B cnt block has only one polling core");
                     owner = int32_t(receiver);
                 }
             };
             ranks[rank].cores[id % 64].RecvCnt();
-            AscendC::GmReadObserver() = {};
+            AscendC::StridedCopyObserver() = {};
             if (receiver >= activeReceivers)
                 Check(AscendC::testCopies == before, "inactive cnt receivers issue no reads or zero-sum publications");
         }
@@ -393,12 +431,13 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 
         for (uint32_t r = 0; r < world; ++r) {
             const auto &rank = ranks[r];
+            CheckCountGaps(rank.states[bank], offset, experts);
             Check(rank.states[1U - bank] == inactive[r], "count phases preserve the other round bank");
             int64_t cumulative = 0, previousExpert = 0;
             for (uint32_t i = 0; i < experts; ++i) {
                 cumulative += expected[r][i];
                 Check(rank.output[i + 1] == cumulative, "inclusive sendCountsOut follows localExpert/source order");
-                Check(rank.states[bank][offset / 4 + i * 8] == 0, "cnt ready flag cleared by its receiver");
+                Check(rank.states[bank][offset / 4 + i * countSlotWords] == 0, "cnt ready flag cleared by its receiver");
                 for (uint32_t receiver = 0; receiver < recvCoreNum; ++receiver)
                     Check(int32_t(rank.states[bank][(offset + layout.prefixOffset) / 4 + receiver * experts + i]) == cumulative,
                         "all receive consumers receive the complete prefix");

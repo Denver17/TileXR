@@ -723,6 +723,12 @@ Python 新入口行为 5 项、batch 3 项、build 16 项、workflow 100 项通�
 
 ## 当前提交：完整 Dispatch（设计验证流程 §2.5）
 
+2026-09-24 cnt GM 槽位升级：每条 cnt 起点间隔 512B，仅槽首 32B 有效，发送/接收 UB 保持紧凑。
+每半区的 Dispatch/Combine 控制区为 1244KiB/96KiB，196KiB 留空后，共用数据从 1.5MiB 开始。
+工作流 layout 标识更新为 `r13-count-gm512`；须配套重建并同步 Host、Dispatch/Combine kernel、consumer 和边界验证工具。
+16 条的接收分配粒度继续保留；cumsum/ready 矩阵的 32B 单元及 prefix 副本大小不变。
+下面旧布局的构建和设备记录保留为历史证据，不作为该升级已经上机验证的结论。
+
 2026-09-20 共用通信布局：Dispatch 已使用实际 `peerMemBytes/2` 选窗，控制区固定
 764KiB/52KiB，数据从 1MiB 开始；prefix 总区域固定预留 384KiB，副本继续按实际 E*4 紧凑排列。
 Host 按每半区减 4MiB runtime 保留区检查，允许恰好容纳；不再强制 8GiB。

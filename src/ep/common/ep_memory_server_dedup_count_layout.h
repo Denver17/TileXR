@@ -27,8 +27,12 @@ constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold =
     TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD;
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
+constexpr uint32_t kEpServerDedupCountGmStride = 512U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
-static_assert(uint64_t(kEpServerDedupMaxExperts) * kEpServerDedupCountRecordBytes <=
+static_assert(kEpServerDedupCountGmStride % kEpServerDedupCountRecordBytes == 0U &&
+    TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET % kEpServerDedupCountGmStride == 0U,
+    "GM count slots must be aligned whole records");
+static_assert(uint64_t(kEpServerDedupMaxExperts) * kEpServerDedupCountGmStride <=
     TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_BYTES, "Count records exceed their fixed region");
 static_assert(uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * kEpServerDedupCountRecordBytes <=
     TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES &&
@@ -85,7 +89,7 @@ TILEXR_EP_DEDUP_INLINE uint64_t TileXREpServerDedupCountSendUbBytes(
     const uint64_t routeBytes = (routes * sizeof(int32_t) + 255U) / 256U * 256U;
     const uint32_t records = (experts + countCores - 1U) / countCores;
     const uint32_t alignedRecords = (records + 7U) / 8U * 8U;
-    return 4U * routeBytes + uint64_t(alignedRecords) * (32U + sizeof(int32_t));
+    return 4U * routeBytes + uint64_t(alignedRecords) * (kEpServerDedupCountRecordBytes + sizeof(int32_t));
 }
 
 #undef TILEXR_EP_DEDUP_INLINE

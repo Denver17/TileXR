@@ -63,7 +63,7 @@ int main()
         s.expertShardType == 0 && s.sharedExpertNum == 0 && s.sharedExpertRankNum == 0 && s.quantMode == 0 &&
         s.dtype == TILEXR_DATA_TYPE_BFP16 && s.activeMaskType == 0 && s.xActiveMask == nullptr &&
         s.sharedExpertX == nullptr && g_context.hostArgs == &g_args && g_context.devArgs == g_dev &&
-        g_layout.capacityRows == 768 && g_layout.requiredWindowBytes == (kEpServerDedupEnable ? 1454080U : 1060864U),
+        g_layout.capacityRows == 768 && g_layout.requiredWindowBytes == (kEpServerDedupEnable ? 1978368U : 1585152U),
         "scalars and validated context forwarded");
     for (int i = 0; i < 39; ++i) {
         auto invalid = valid;
@@ -160,7 +160,7 @@ int main()
     oversizedMetadata.combine.topK = 1;
     oversizedMetadata.combine.globalBs = 0;
     Rejected(oversizedMetadata, TILEXR_ERROR_NOT_SUPPORT);
-    g_args.peerMemBytes = 2ULL * (1048576ULL + TILEXR_FLAG_BUFF_BYTES);
+    g_args.peerMemBytes = 2ULL * (1572864ULL + TILEXR_FLAG_BUFF_BYTES);
     Rejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_args.peerMemBytes = fullBytes;
     Check(CombineTest::Invoke(valid) == TILEXR_SUCCESS, "exact full data capacity accepted");
@@ -184,7 +184,7 @@ int main()
         switch (i) {
             case 0: g_args.rank = -1; break;
             case 1: g_args.rank = g_args.rankSize; break;
-            case 2: g_args.peerMemBytes = 2ULL * (1060864U + TILEXR_FLAG_BUFF_BYTES) - 1024U; break;
+            case 2: g_args.peerMemBytes = 2ULL * (1585152U + TILEXR_FLAG_BUFF_BYTES) - 1024U; break;
             case 3: g_args.peerMemBytes += 512; break;
             case 4: g_args.peerMemBytes = 0; break;
             case 5: g_args.peerMems[63] = nullptr; error = TILEXR_ERROR_NOT_INITIALIZED; break;

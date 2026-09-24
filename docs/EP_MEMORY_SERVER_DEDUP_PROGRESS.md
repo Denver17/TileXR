@@ -153,10 +153,10 @@ CB1A-03 已关闭设计待定，按 Dispatch 参考落实阶段内 Event/Reset �
 CB1A-02 当前初始化方案已关闭设计待定：Host 首次清零、kernel 按模块职责用后清理，接线保留实现验证；
 结果 Flag 跨布局/已用域复用仍为附录 B 重点遗留，M2 按 CB02-03 已定依赖实现，整体排空按 CB06-02 已确认方案执行。M1a 仅剩 CB1A-01，现已进入讨论，未标记全部资源设计完成。
 [CB00-02](specs/ep-memory-server-dedup-combine-design.md#cb00-02) 布局已确认：Dispatch 控制区、Combine 控制区、共用数据区依次 512B 对齐，前后半区各保留一份，第二份起点为 peerMemBytes/2；共用数据区按 max(Ddata,Cdata) 核算。
-控制区以公共宏解耦：Dispatch 764KiB（当前固定表区占用 574KiB），Combine 96KiB（固定预留需求 48KiB 的两倍），
-合计 860KiB；其后留空 164KiB，每份 buffer 的共用数据起点固定为 +1MiB（1048576B）。
-Dispatch 布局及原 Combine 公共宏已落实到源码，C1 已接入原固定区与参数化地址助手；
-本次 32B Flag 升级后的 Combine 96KiB/16KiB/16384B 宏及地址助手尚未实现，当前源码仍为 52KiB/2KiB/2048B，既有 C1–C7 验收不覆盖新布局。双方仅校验各自使用量，核算见[联合设计 §6.4](specs/ep-memory-server-dedup-dispatch-combine-design.md#64-固定控制区宏及上限核算)。
+控制区以公共宏解耦：2026-09-24 cnt GM 槽距升级为 512B 后，Dispatch 为 1244KiB（固定表区占用 1054KiB），Combine 为 96KiB（固定预留需求 48KiB 的两倍），
+合计 1340KiB；其后留空 196KiB，每份 buffer 的共用数据起点为 +1.5MiB（1572864B）。
+Dispatch cnt 的有效记录及 UB 步长仍为 32B；Combine 的 96KiB/16KiB/16384B 宏已在源码中。
+本次迁移须同步构建双方 Host/kernel/consumer；历史 C1–C7 设备结果不覆盖新的外部偏移。双方仅校验各自使用量，核算见[联合设计 §6.4](specs/ep-memory-server-dedup-dispatch-combine-design.md#64-固定控制区宏及上限核算)。
 Combine 控制小表独立 offset 宏已确认：prepareDone=0、serverReady=16384、扩展预留=49152，均相对 Combine 控制区并按 512B 对齐。
 两表固定预留 16KiB/32KiB，BS 或分核变化只改变有效范围，不移动表边界；Dispatch 内部固定 offset 的源码改造由独立专题维护。
 Combine 接收区为 BS*K 个 DataAsFlag 槽，中转区紧接其后，为 E*BS 行原始 BF16/FP16，行 stride=alignUp(H*2,512)。

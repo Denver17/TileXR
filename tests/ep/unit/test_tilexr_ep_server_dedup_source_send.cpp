@@ -93,7 +93,7 @@ void CheckDeferredCountSender()
         "sender accounts for the retained 256-byte count records inside its UB budget");
     for (uint32_t expert = 0; expert < experts / world; ++expert) {
         uint32_t record[2] {};
-        std::memcpy(record, window.data() + countLayout.cntOffset + expert * world * 32U, sizeof(record));
+        std::memcpy(record, window.data() + countLayout.cntOffset + expert * world * 512U, sizeof(record));
         Check(record[0] == 0x3f800000U && record[1] == (expert == 1U ? 1U : 0U),
             "sender preparation and lane reuse preserve the delayed count source");
     }

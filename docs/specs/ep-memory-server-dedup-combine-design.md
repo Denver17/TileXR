@@ -65,7 +65,7 @@ UB 预算或验收范围，相关问题集中到[附录 A 遗留项](#deferred-q
 | 空职责核 | 全 64 核均发布 M1b 完成，最后 8 核均履行 M2 通知；TokenNum=0 不代表该卡无 BS 接收任务，不能跳过控制协议 |
 | M5 最新方案 | 按 mask 置位 k 搬运，UB 按 32B Flag 块密排，统一等待后一次首 float 求和；完整性采用用户确认的总线保证，阈值 N*popcount(mask) |
 | 控制小表 | Combine 控制区固定 96KiB；prepareDone/serverReady/扩展预留的 offset 固定为 0/16384/49152，预留跨度为 16/32/48KiB，均 512B 对齐；分核变化只改变有效范围 |
-| 通信布局 | Dispatch 控制区 → Combine 控制区 → 164KiB 留空 → 共用数据区；数据起点固定为每份 buffer 的 +1MiB（1048576B），均 512B 对齐，前后半区各一份，步长为 peerMemBytes/2；数据区大小取 Dispatch/Combine 需求最大值，Combine 中转区接在结果接收区之后（CB00-02） |
+| 通信布局 | Dispatch 控制区 → Combine 控制区 → 196KiB 留空 → 共用数据区；数据起点固定为每份 buffer 的 +1.5MiB（1572864B），均 512B 对齐，前后半区各一份，步长为 peerMemBytes/2；数据区大小取 Dispatch/Combine 需求最大值，Combine 中转区接在结果接收区之后（CB00-02） |
 | 复用边界 | 模型顺序不变，不重开跨轮重叠、新公共轮次参数或额外读完握手；M2 每个整体 buffer 内仅一份完成 Flag，随本次 Combine 选窗使用（CB02-02 已确认） |
 
 实现中将 M4 的 N 命名为 memberCount，M5 的 N 命名为 flagBlockCount；M2 分核的
@@ -161,7 +161,7 @@ C2 已接入空 kernel/注册（16B GM tiling、88B launch、64 核），真实�
 | 中转数据保持原始 BF16/FP16 | 不量化、不加权、不附加 DataAsFlag；每 Token 行 stride=alignUp(H*2,512)，只读写 H*2B 有效数据，行尾对齐空隙既不写入也不读取 |
 | 中转行数与 Dispatch 接收槽一致 | stageRows=localMoeExpertNum*rankSize*batchSize=E*BS；表 2 offset 与表 3 解出的 slot 使用相同物理行号，不使用密排 expertOut row |
 | 结果槽 | BS*K 个槽，每槽大小为返回 Token 完成 DataAsFlag 拼接后的总字节数；非量化 payload/Flag/补齐均计入，不含量化 scale 或 Dispatch 包尾；CB03-02/CB04-03 已确认 BF16/FP16 返回及 480B+32B 包块，Sresult=ceilDiv(2H,480)*512 |
-| 控制区及共用数据区 | 两个控制区由公共固定宏划分为 764KiB/96KiB（含扩展预留），随后留空 164KiB，数据起点为 1MiB，均 512B 对齐；数据区容量取 max(Dispatch 接收区大小, Combine 接收区+中转区大小)，内部控制细节互不依赖 |
+| 控制区及共用数据区 | 两个控制区由公共固定宏划分为 1244KiB/96KiB（含扩展预留），随后留空 196KiB，数据起点为 1.5MiB，均 512B 对齐；数据区容量取 max(Dispatch 接收区大小, Combine 接收区+中转区大小)，内部控制细节互不依赖 |
 | 整体双 buffer | 前后半区各保留上述三个区域，第二份基址为 peer[rank]+peerMemBytes/2；每份 Combine 控制区只放一份 M2 完成 Flag（CB02-02 已确认） |
 | 容量检查 | 两份布局分别放入对应半区；统一检查 singleBufferBytes<=peerMemBytes/2-runtimeReservedBytes，不能仅比较两份需求总和；不足时报错，等于时允许，uint64 运算检查溢出 |
 
@@ -170,9 +170,10 @@ C2 已接入空 kernel/注册（16B GM tiling、88B launch、64 核），真实�
 初始化/清理依赖由 M1a/M1b/M2 继续设计；Combine 独立校验内部使用量
 不超过 96KiB 公共宏，无需感知 Dispatch 控制布局。按当前设计，单份预留需求 48KiB、预留一倍
 余量后的宏为 96KiB；完整核算见[联合设计 §6.4](ep-memory-server-dedup-dispatch-combine-design.md#64-固定控制区宏及上限核算)。
-本次 32B Flag 布局升级为设计确认：当前公共头文件仍为旧 52KiB 控制区、2KiB prepareDone
-及 serverReady=2048B，尚未同步本次 96KiB/16KiB/16384B 设计。后续实现需同步公共宏、
-Host/设备地址助手及布局验证；现有 C1–C7 验收不覆盖本次升级。数据起点 1MiB 与整体选窗不变。
+当前公共头文件已采用 96KiB 控制区、16KiB prepareDone 及 serverReady=16384B。
+2026-09-24 Dispatch cnt 的 GM 槽位扩为 512B 后，Combine 控制区起点顺延至 1244KiB，
+共用数据起点改为 1.5MiB，整体选窗仍取 peerMemBytes/2。Host、kernel、consumer 和布局验证须同步使用新偏移；
+历史 C1–C7 设备验收不作为本次升级的设备验证证据。
 固定布局与有效记录分开记账，以下均为单份整体 buffer 内、相对 Combine 控制区起点的区间：
 
 | 区域 | 固定 offset | 固定预留 | 本次调用有效范围 |
@@ -198,16 +199,16 @@ bufferBase(rank) = peer[rank] + bufferIndex*bufferStride
 combineControlBase(rank) = bufferBase(rank) + COMBINE_CONTROL_OFFSET
 prepareDoneBase(rank) = combineControlBase(rank) + COMBINE_PREPARE_DONE_OFFSET
 serverReadyBase(rank) = combineControlBase(rank) + COMBINE_SERVER_READY_OFFSET
-SHARED_DATA_OFFSET = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET  // 固定 1048576B
+SHARED_DATA_OFFSET = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET  // 固定 1572864B
 resultBase(rank) = bufferBase(rank) + SHARED_DATA_OFFSET
 stageBase(rank) = resultBase(rank) + alignUp(uint64(BS)*K*Sresult,512)
 Sstage = alignUp(uint64(H)*2,512)
 ```
 
-因此结果区在 buffer 0 的地址为 `peer[rank]+1MiB`，在 buffer 1 为
-`peer[rank]+peerMemBytes/2+1MiB`；中转区只在该结果区后加上对齐后的接收区大小，
-不再额外加一次控制区或 1MiB。1MiB 为 1048576B（0x100000），不是 1000000B。
-控制区合计 860KiB，后面 164KiB 保持留空；不纳入 Combine 的 96KiB 控制预算或 stage。
+因此结果区在 buffer 0 的地址为 `peer[rank]+1.5MiB`，在 buffer 1 为
+`peer[rank]+peerMemBytes/2+1.5MiB`；中转区只在该结果区后加上对齐后的接收区大小，
+不再额外加一次控制区或 1.5MiB。1.5MiB 为 1572864B（0x180000），不是 1000000B。
+控制区合计 1340KiB，后面 196KiB 保持留空；不纳入 Combine 的 96KiB 控制预算或 stage。
 
 上述大写名称简写自联合设计中 TILEXR_EP_SERVER_DEDUP_ 前缀的对应宏；不把 offset 或
 单份控制区大小重新按 BS/分核计算。Sresult 由 CB03-02 已确认的非量化返回格式计算。
@@ -238,10 +239,10 @@ P=14336B，N=30，Sresult=15360B（15KiB）。
 | Combine 数据需求 | 接收区 + 中转区 | 1404MiB |
 
 上述为已确认格式在该 shape 下的首版容量示例。
-完整需求仍须取 max(Ddata,1404MiB)，再加共用数据区之前的固定 1MiB（含控制区及留空），
+完整需求仍须取 max(Ddata,1404MiB)，再加共用数据区之前的固定 1.5MiB（含控制区及留空），
 得到 singleBufferBytes，再分别核对两个半区容量及 runtime 保留边界。不能将 1404MiB 直接视为单份共用数据区的最终值。
-在本例中，相对所选 buffer 的结果区为 [1MiB,61MiB)，中转区为 [61MiB,1405MiB)。
-1405MiB 仅为 Combine 视图含前缀的需求；若 Ddata 更大，完整共用布局仍取较大值。
+在本例中，相对所选 buffer 的结果区为 [1.5MiB,61.5MiB)，中转区为 [61.5MiB,1405.5MiB)。
+1405.5MiB 仅为 Combine 视图含前缀的需求；若 Ddata 更大，完整共用布局仍取较大值。
 旧 relayBytes=8*BS*K*returnStride 是历史预留，不能代替新的中转区。
 
 验收需验证 Host/Dispatch/Combine 的区域布局一致且步长均为 peerMemBytes/2、表 2 写槽与表 3 读槽一致、

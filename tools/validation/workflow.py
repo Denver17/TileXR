@@ -125,7 +125,7 @@ DISPATCH_CHECKPOINT = "ep-sdedup-p2-dispatch"
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
 DISPATCH_INVALID_MARKER = "EP_SERVER_DEDUP_DISPATCH_INVALID "
 DISPATCH_ABI = {"launch_bytes": 120, "tiling_bytes": 32, "runtime_args_bytes": 120,
-                "layout": "r12-shared-peer-buffer", "kernel_scope": "dispatch"}
+                "layout": "r13-count-gm512", "kernel_scope": "dispatch"}
 MEMORY_BOUNDARY_CHECKPOINT = "ep-sdedup-p1-memory-boundary"
 MEMORY_BOUNDARY_MARKER = "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS "
 SERVER_DEDUP_PEER_BYTES = 8 * 1024 ** 3
@@ -1358,7 +1358,7 @@ def validate_combine_boundary_record(record, mapping):
     points = record.get("points")
     if not isinstance(points, list) or len(points) != 8 or any(not isinstance(point, dict) for point in points):
         raise Failure("LOG_PARSE_FAILED", "C7必须包含双窗全部8个独立点位", rank=mapping["rank"])
-    offsets = (764 * 1024, 860 * 1024 - 32, 1024 ** 2, stride - reserved - 32)
+    offsets = (1244 * 1024, 1340 * 1024 - 32, 1536 * 1024, stride - reserved - 32)
     for number, point in enumerate(points):
         window, index = divmod(number, 4)
         expected = dict(window=window, index=index, offset=window * stride + offsets[index],

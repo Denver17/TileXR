@@ -258,6 +258,10 @@ struct TPipe {
     }
 };
 struct DataCopyParams { uint16_t blockCount, blockLen, srcStride, dstStride; };
+inline std::function<void(bool, const void *, DataCopyParams)> &StridedCopyObserver() {
+    static std::function<void(bool, const void *, DataCopyParams)> observer;
+    return observer;
+}
 struct DataCopyExtParams { uint16_t blockCount; uint32_t blockLen, srcStride, dstStride, rsv; };
 struct CopyRepeatParams { uint8_t dstBlkStride, srcBlkStride, dstRepStride, srcRepStride; };
 template<class T> void Copy(LocalTensor<T> dst, LocalTensor<T> src, uint64_t mask, uint8_t repeats, CopyRepeatParams p) {
@@ -272,6 +276,7 @@ template<class T> void Copy(LocalTensor<T> dst, LocalTensor<T> src, uint64_t mas
 }
 template<class T> struct DataCopyPadExtParams { bool isPad; uint8_t leftPadding, rightPadding; T paddingValue; };
 template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, DataCopyParams p) {
+    if (StridedCopyObserver()) StridedCopyObserver()(false, src.pointer, p);
     if (GmReadObserver()) GmReadObserver()(src.pointer, p.blockCount * p.blockLen * 32U);
     ++testCopies;
     for (uint32_t b = 0; b < p.blockCount; ++b) {
@@ -283,6 +288,7 @@ template<class T> void DataCopy(LocalTensor<T> dst, GlobalTensor<T> src, DataCop
 template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, DataCopyParams p) {
     ++testCopies;
     IssueMte3([=]() {
+        if (StridedCopyObserver()) StridedCopyObserver()(true, dst.pointer, p);
         for (uint32_t b = 0; b < p.blockCount; ++b) {
             const auto from = src[uint64_t(b) * (p.blockLen + p.srcStride) * 32 / sizeof(T)];
             std::memcpy(reinterpret_cast<uint8_t *>(dst.pointer) + uint64_t(b) * (p.blockLen + p.dstStride) * 32,

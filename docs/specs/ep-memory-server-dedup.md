@@ -433,9 +433,9 @@ M*36 包含每候选 32B sum 存储和 4B 快照下标；Sum 使用紧凑结果�
 
 Dispatch/Combine 复用同一个 peer-memory allocation。两份完整 buffer 分别位于实际逻辑
 通信空间的前后半区：`windowOffset=(uint64(magic)%2)*(CommArgs.peerMemBytes/2)`。
-每份依次为 Dispatch 控制区 764KiB、Combine 控制区 52KiB、共用数据区；数据起点固定为
-1MiB（1048576B），均按 512B 对齐；两个控制区末尾的 816KiB 到 1MiB 之间
-208KiB 留空，不属于任何算子的控制表。标准 profiling、五表及输出仍使用独立 GM。
+每份依次为 Dispatch 控制区 1244KiB、Combine 控制区 96KiB、共用数据区；数据起点固定为
+1.5MiB（1572864B），均按 512B 对齐；两个控制区末尾的 1340KiB 到 1.5MiB 之间
+196KiB 留空，不属于任何算子的控制表。标准 profiling、五表及输出仍使用独立 GM。
 
 公共容量及 offset 宏定义于
 [buffer 布局头](../../src/ep/common/ep_memory_server_dedup_buffer_layout.h)。
@@ -445,21 +445,24 @@ CountLayout 内部 cumsumOffset/prefixOffset/cumsumFlagOffset 相对 cntOffset�
 | 表 | 固定 offset（B） | 固定预留（B） | 实际有效范围 |
 | --- | --- | --- | --- |
 | 前置保留 | 0 | 12800 | 不访问 |
-| count | 12800 | 32768 | E*32 |
-| cumsum | 45568 | 73728 | Crecv*Crecv*32 |
-| prefix 总区域 | 119296 | 393216 | Crecv*E*4 |
-| ready | 512512 | 73728 | Crecv*Crecv*32 |
-| 对齐间隙 | 586240 | 512 | 不访问 |
-| counter 保留 | 586752 | 1024 | 不访问 |
-| 区尾扩展预留 | 587776 | 194560 | 不访问 |
+| count | 12800 | 524288 | E*512 槽位，槽首共 E*32 有效字节 |
+| cumsum | 537088 | 73728 | Crecv*Crecv*32 |
+| prefix 总区域 | 610816 | 393216 | Crecv*E*4 |
+| ready | 1004032 | 73728 | Crecv*Crecv*32 |
+| 对齐间隙 | 1077760 | 512 | 不访问 |
+| counter 保留 | 1078272 | 1024 | 不访问 |
+| 区尾扩展预留 | 1079296 | 194560 | 不访问 |
 
 prefix 区域按 `1024*4*48*2=384KiB` 预留，内部各核副本继续紧凑存放，
 `prefixStride=align32(E*4)=E*4`。额外一倍仅为空间预留，不增加复制量。
 写入副本、CompleteCumsum 和接收阶段均沿用实际 E 寻址；后续 ready 表不能占用 prefix 预留。
 两个矩阵也保持实际 Crecv 行距，固定整表起点不代表改变表内布局。
+原始 cnt 在 GM 中按 `[localExpert][sourceRank]` 排列，起点间隔 512B，槽首 32B 有效；
+发送/接收 UB 仍按 32B 紧凑排列，轮询和清理只跨步搬运槽首，480B 空隙不访问。
+接收任务仍以 16 条为分配粒度，空闲核仅等待最终 prefix。UB 预算及 cumsum/ready 单元大小不变。
 
 ```text
-dispatchOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET  // 1MiB
+dispatchOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET  // 1.5MiB
 dispatchBytes = uint64(E)*BS*T
 requiredBytes = align512(dispatchOffset+dispatchBytes)
 bufferStride = CommArgs.peerMemBytes/2
@@ -474,7 +477,7 @@ Host 先检查 shape/UB/整数范围，再要求：
 - `peerMemBytes%1024==0`，peer 基址 512B 对齐，地址加法无溢出；
 - `bufferStride>=TILEXR_FLAG_BUFF_BYTES`；
 - `requiredBytes<=bufferStride-TILEXR_FLAG_BUFF_BYTES`，等于时允许；
-- `stateBytes=587776<=764KiB`，各控制表实际范围不超固定预留。
+- `stateBytes=1079296<=1244KiB`，各控制表实际范围不超固定预留。
 
 runtime 4MiB Flag 实际只占全域尾部，第一半区对应尾部留空，保证两份布局具有相同容量约束。
 物理 allocation 为 rank 地址偏移额外申请的字节不计入逻辑 peerMemBytes。

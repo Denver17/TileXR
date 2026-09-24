@@ -46,35 +46,35 @@ int main()
     }
     Check(TileXREpBuildMemoryServerDedupCombineLayout(64, 4, 13, 6, 192, nullptr) == TILEXR_ERROR_PARA_CHECK_FAIL,
         "null layout rejected");
-    Check(TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET == 782336 &&
+    Check(TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET == 1273856 &&
         TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES == 98304 &&
         TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_BYTES == 16384 &&
         TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET == 16384 &&
         TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_BYTES == 32768 &&
         TILEXR_EP_SERVER_DEDUP_COMBINE_RESERVED_OFFSET + TILEXR_EP_SERVER_DEDUP_COMBINE_RESERVED_BYTES == 98304 &&
-        TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1048576, "fixed shared control partition");
+        TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET == 1572864, "fixed shared control partition");
     EpServerDedupCombineDataLayout data {};
     Check(TileXREpBuildServerDedupCombineDataLayout(16, 96, 7168, 6, 96, 15360, &data) == TILEXR_SUCCESS,
         "explicit result-slot geometry without choosing a wire dtype");
-    Check(data.resultOffset == 1048576 && data.resultBytes == 8847360 && data.stageOffset == 9895936 &&
+    Check(data.resultOffset == 1572864 && data.resultBytes == 8847360 && data.stageOffset == 10420224 &&
         data.stageRowBytes == 14336 && data.stageRows == (kEpServerDedupEnable ? 9216U : 0U) && data.stageBytes == (kEpServerDedupEnable ? 132120576U : 0U) &&
-        data.requiredWindowBytes == (kEpServerDedupEnable ? 142016512U : 9895936U), "result and E*BS stage expected offsets");
+        data.requiredWindowBytes == (kEpServerDedupEnable ? 142540800U : 10420224U), "result and E*BS stage expected offsets");
     Check(TileXREpBuildServerDedupCombineDataLayout(64, 4, 13, 6, 192, 1024, &data) == TILEXR_SUCCESS &&
-        data.stageRowBytes == 512 && data.stageOffset == 1048576 + 24576, "other wire stride and padded stage");
+        data.stageRowBytes == 512 && data.stageOffset == 1572864 + 24576, "other wire stride and padded stage");
     for (uint64_t slot : {uint64_t(0), uint64_t(513), UINT64_MAX - 511U}) {
         Check(TileXREpBuildServerDedupCombineDataLayout(64, 4, 13, 6, 192, slot, &data) == TILEXR_ERROR_PARA_CHECK_FAIL,
             "invalid or overflowing result stride rejected");
         Check(data.requiredWindowBytes == 0, "no partial data layout on failure");
     }
     Check(TileXREpBuildMemoryServerDedupCombineLayout(16, 96, 7168, 6, 96, &layout) == TILEXR_SUCCESS &&
-        layout.requiredWindowBytes == (kEpServerDedupEnable ? 142016512U : 9895936U) && layout.data.resultBytes == 8847360 &&
-        layout.data.stageOffset == 9895936, "production layout reserves result plus stage");
+        layout.requiredWindowBytes == (kEpServerDedupEnable ? 142540800U : 10420224U) && layout.data.resultBytes == 8847360 &&
+        layout.data.stageOffset == 10420224, "production layout reserves result plus stage");
     for (uint32_t h : {1U, 13U, 240U, 241U, 256U, 257U, 7168U}) {
         Check(TileXREpBuildMemoryServerDedupCombineLayout(16, 3, h, 6, 96, &layout) == TILEXR_SUCCESS,
             "wire and stage tails supported");
         const uint64_t expectedResult = 18ULL * ((uint64_t(h) * 2U + 479U) / 480U) * 512U;
         const uint64_t expectedStage = 288ULL * ((uint64_t(h) * 2U + 511U) / 512U) * 512U;
-        Check(layout.requiredWindowBytes == 1048576ULL + expectedResult + (kEpServerDedupEnable ? expectedStage : 0U),
+        Check(layout.requiredWindowBytes == 1572864ULL + expectedResult + (kEpServerDedupEnable ? expectedStage : 0U),
             "independent nonquantized wire/padded stage capacity");
     }
     return CombineTest::Finish("layout");

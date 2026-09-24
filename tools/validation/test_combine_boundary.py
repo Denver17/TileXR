@@ -27,7 +27,7 @@ class CombineBoundaryTests(CombineMultiTests):
                 "TILEXR_VALIDATION_OPERATOR_MODE": "combine", "TILEXR_VALIDATION_LOOPS": "1",
                 "TILEXR_VALIDATION_WARMUP": "0"}):
             config, mappings, records = self.records(False)
-        offsets = (782336, 880608, 1048576, 4290772960)
+        offsets = (1273856, 1372128, 1572864, 4290772960)
         for record in records:
             record.update(native_status="boundary-probe", peer_mem_bytes=8 * 1024 ** 3,
                           buffer_stride=4 * 1024 ** 3, runtime_reserved_bytes=4 * 1024 ** 2,

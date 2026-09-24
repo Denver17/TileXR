@@ -37,7 +37,9 @@ inline void InitComm(TileXR::CommArgs &args)
     args = {};
     args.rankSize = 64;
     args.rank = 9;
-    args.peerMemBytes = 2ULL * (1454080ULL + TileXR::TILEXR_FLAG_BUFF_BYTES);
+    // ValidParams: shared prefix + 24 result slots + 768 padded stage rows.
+    args.peerMemBytes = 2ULL * (TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
+        24ULL * 512U + 768ULL * 512U + TileXR::TILEXR_FLAG_BUFF_BYTES);
     for (auto &peer : args.peerMems) { peer = reinterpret_cast<GM_ADDR>(0x1000000); }
 }
 inline int Invoke(const TileXREp::EpMemoryServerDedupCombineParams &params)
