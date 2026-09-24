@@ -771,6 +771,10 @@ Dispatch 固定宏均以前缀 `TILEXR_EP_SERVER_DEDUP_DISPATCH_` 命名：
 
 各表另有同名 `*_BYTES` 宏。offset 相对 Dispatch 控制区起点，全部 512B 对齐。
 count 记录仍为 32B；两个矩阵仍按实际 C×C 紧凑排列；prefix 副本仍按实际 E*4 间隔排列。
+cnt 检测按 `alignUp(ceilDiv(E,C),16)` 条连续分段，仅前
+`A=ceilDiv(E,alignUp(ceilDiv(E,C),16))` 个接收核参与 cnt/cumsum，避免不同核轮询同一 512B 块。
+cumsum 矩阵只使用前 A 个发布者和前 A 个消费者，保留 C*32B 行距；ready 矩阵仍有 C 个
+消费者，每个消费者仅等待前 A 个发布者。全部 C 个接收核仍取得完整 prefix 副本。
 只固定整表起点和最大预留区间，不要求每核副本独立固定 offset。ready 必须排在整个 384KiB
 prefix 预留之后，不能占用 prefix 的扩展余量。
 实现的 CountLayout 为兼容内部寻址，cumsumOffset/prefixOffset/cumsumFlagOffset 仍相对 cntOffset；

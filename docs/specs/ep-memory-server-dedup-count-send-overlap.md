@@ -25,11 +25,27 @@
 3. receiver 读齐自己负责的 incoming cnt 后，先 Gather/Sum，再在 UB 中形成相对前缀，然后发布局部和。局部前缀计算移到等待跨核结果之前。
 4. cnt 状态清理移到局部和发布之后；删除清理前后的 MTE3_S。清理源 waitStatusBuf 的 ready 字段置零后保持只读，直到现有 count/receiver 边界完成等待。
 5. 删除发布局部和后立即执行的 MTE3_V。sumCoreBuf 在真正复用为 prefix-ready 标志源之前等待 MTE3，避免覆盖尚未读取的局部和。GetCumSum 返回本核全局起始偏移，再加到相对前缀上。
-6. 保留进入 recvdata 之前的完成屏障及 receiver Reset；cnt、状态清理、局部和和最终前缀输出均在此退休。发送核保留末尾完成保证。零计数接收分段仍发布零局部和并参与协议。
+6. 保留进入 recvdata 之前的完成屏障及 receiver Reset；cnt、状态清理、局部和和最终前缀输出均在此退休。发送核保留末尾完成保证。有效分段即使所有 cnt 都为零也参与求和；未分配 cnt 记录的接收核跳过局部和与 cumsum，仅等待最终 prefix。
 
 MTE3 队列顺序仍为 cnt、局部和、清理和前缀输出。可覆盖窗口来自 recv_cnt、局部求和与局部前缀计算；残留 cnt 等待近似为 `max(0, cnt 发送耗时 - 可独立推进时间)`，实际覆盖比例由 A5 测量决定。
 
-前置局部前缀后需要再遍历一次本核分段以加上全局偏移；当前默认 E384/32 接收核时为每核 12 项。此计算代价与 pool 管理开销也必须计入完整阶段比较。
+前置局部前缀后需要再遍历一次本核分段以加上全局偏移；当前默认 E384/32 接收核时为前 24 核各 16 项。此计算代价与 pool 管理开销也必须计入完整阶段比较。
+
+## cnt 检测按 512B 分配（2026-09-24）
+
+同一 512B 块被多个核轮询会增加对端写入开销。cnt 记录为 32B，因此接收分段以 16 条为最小分配粒度。令 E 为本 rank 的 cnt 条数、C 为接收核数：
+
+```
+recordsPerCore = alignUp(ceilDiv(E, C), 16)
+activeCores = ceilDiv(E, recordsPerCore)
+receiver r < activeCores: [r * recordsPerCore, min((r + 1) * recordsPerCore, E))
+```
+
+cnt 表起点及窗口基址已有 512B 对齐约束，分段边界也必须按 512B 对齐；末段只读取实际记录，不能等候补齐位置的 ready。E384/C32 使用前 24 核，每核 16 条；E16/C32 仅第 0 核处理 16 条；E24/C32 使用前两核，分别处理 16、8 条。SendCnt 的专家分工和发送地址保持原协议。
+
+只跳过空闲核的 cnt 轮询还不够：若它们继续发布零总和，或活跃核仍等待 C 个发布者，就没有真正退出 cumsum，甚至会在删除零发布后挂起。因此分段总和只在前 activeCores 个核之间交换，发布数、监听数、求和数和清理数同步缩减；矩阵行距仍为 C*32B。最终 prefix 分段及其 ready 仍发布给全部 C 个接收核，但每个消费者只等待前 activeCores 个发布者，然后读取自己的完整 prefix 副本。空闲核不分配 cnt/cumsum 工作缓冲，也不访问分段总和矩阵。
+
+Host 回归通过实际 GM 读取检查每个 512B cnt 块只有一个监听核，覆盖尾段、单核及非 8 整数倍活跃核、全零流量、双窗多轮、空闲核无 cnt/cumsum IO、全部接收核的完整 prefix 和就绪清理。延迟 MTE3 用例继续验证 cnt 在途时接收 scratch 的复用。该模型不模拟缓存争用，性能收益须由 A5 实测确认。
 
 ## 打点语义
 
@@ -50,3 +66,5 @@ MTE3 队列顺序仍为 cnt、局部和、清理和前缀输出。可覆盖窗�
 新增延迟 DMA 模型在实际生产 SendCnt→sender、SendCnt→RecvCnt 路径复用 scratch 后才读取 cnt 源，核对记录与输出，并检查准备/接收阶段在 cnt 未完成时能继续执行。独立审查未发现阻断问题，确认 sender 最多占 stagePool 的 14/16 个条目、receiver 最多 10 个条目，以及真正覆盖 sumCoreBuf 前的完成等待。
 
 源码清单、补丁、编译配置、日志和二进制摘要保留于忽略目录 `build/cnt-overlap-verification/`。未运行 NPU；Host 模型不证明真实 MTE 时序、FP8 数值行为、通信带宽或覆盖比例。
+
+2026-09-24：512B cnt 分段变更基于 `2feae84` 加工作区修改。默认 32/32 的 counts OFF/ON、source_send、receive_packet 共 4 项 Host 回归通过；16/48、24/40、40/24、48/16 的 counts 各 1 项通过，共 8 项。blue 本机共享 CANN 9.1.0 / Bisheng Clang 15.0.5 的 A5 `dav-c310-vec` kernel（profiling OFF）编译链接通过，配置和构建退出码均为 0。源码摘要、补丁、配置、测试与编译日志保存在 `build/cnt-block-verification/`。未运行 NPU，512B 争用改善及实际耗时尚待 A5 验证。

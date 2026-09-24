@@ -63,6 +63,7 @@ private:
     static constexpr uint32_t UB_ALIGN_DATA_COUNT = 8U;
     static constexpr uint32_t SIZE_ALIGN_256 = 256U;
     static constexpr uint32_t STATE_OFFSET = 32U;
+    static constexpr uint32_t CNT_RECORDS_PER_BLOCK = 16U; // One 512B polling owner.
     static constexpr uint32_t aivUsedAllToAll_ = kEpServerDedupSendCoreNum;
     static constexpr uint32_t aivUsedCumSum_ = kEpServerDedupRecvCoreNum;
 
@@ -105,6 +106,7 @@ private:
     uint32_t rscvStatusNum_ = 0, moeExpertNumPerRank_ = 0, expertTokenNumsType_ = 0;
     uint32_t statusCntAlign_ = 0;
     uint32_t startStatusIndex_ = 0, endStatusIndex_ = 0, recStatusNumPerCore_ = 0;
+    uint32_t activeCumSumCores_ = 0;
     bool useAllCoreCount_ = false;
     GM_ADDR recvCntWorkspaceGM_ = nullptr;
     GM_ADDR sendCountsOutGM_ = nullptr;
@@ -228,16 +230,23 @@ __aicore__ inline void ServerDedupCounts::SendExpertCntRange(uint32_t start, uin
 
 __aicore__ inline void ServerDedupCounts::RecvCnt()
 {
-    SplitToCore(rscvStatusNum_, aivUsedCumSum_, aivId_ - aivUsedAllToAll_,
-        startStatusIndex_, endStatusIndex_, recStatusNumPerCore_);
-    if (recStatusNumPerCore_ != 0U) {
-        stagePool_.InitBuffer(waitStatusBuf_, Ceil(recStatusNumPerCore_ * UB_ALIGN, SIZE_ALIGN_256) * SIZE_ALIGN_256);
-    }
+    // Never let two cores poll the same 512B block while peers are writing cnt.
+    const uint32_t recordsPerCore = Ceil(Ceil(rscvStatusNum_, aivUsedCumSum_),
+        CNT_RECORDS_PER_BLOCK) * CNT_RECORDS_PER_BLOCK;
+    activeCumSumCores_ = Ceil(rscvStatusNum_, recordsPerCore);
+    stagePool_.InitBuffer(scalarBuf_, 3U * UB_ALIGN);
+    const uint32_t receiver = aivId_ - aivUsedAllToAll_;
+    // Inactive receivers only consume the final prefix in CompleteCumsum.
+    if (receiver >= activeCumSumCores_) return;
+    startStatusIndex_ = receiver * recordsPerCore;
+    endStatusIndex_ = startStatusIndex_ + recordsPerCore < rscvStatusNum_ ?
+        startStatusIndex_ + recordsPerCore : rscvStatusNum_;
+    recStatusNumPerCore_ = endStatusIndex_ - startStatusIndex_;
+    stagePool_.InitBuffer(waitStatusBuf_, Ceil(recStatusNumPerCore_ * UB_ALIGN, SIZE_ALIGN_256) * SIZE_ALIGN_256);
     stagePool_.InitBuffer(gatherMaskOutBuf_, Ceil(rscvStatusNum_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN);
     stagePool_.InitBuffer(sumCoreBuf_, aivUsedCumSum_ * UB_ALIGN);
     stagePool_.InitBuffer(sumLocalBuf_, aivUsedCumSum_ * UB_ALIGN);
     stagePool_.InitBuffer(sumContinueBuf_, Ceil(aivUsedCumSum_ * sizeof(float), UB_ALIGN) * UB_ALIGN);
-    stagePool_.InitBuffer(scalarBuf_, 3U * UB_ALIGN);
     WaitDispatch();
 }
 
@@ -245,8 +254,8 @@ __aicore__ inline void ServerDedupCounts::CompleteCumsum()
 {
     // Convert the physical AIV index to its receive-group index.
     const uint32_t receiver = aivId_ - aivUsedAllToAll_;
-    stagePool_.InitBuffer(readyBuf_, aivUsedCumSum_ * UB_ALIGN);
-    stagePool_.InitBuffer(cleanBuf_, aivUsedCumSum_ * UB_ALIGN);
+    stagePool_.InitBuffer(readyBuf_, activeCumSumCores_ * UB_ALIGN);
+    stagePool_.InitBuffer(cleanBuf_, activeCumSumCores_ * UB_ALIGN);
     stagePool_.InitBuffer(prefixBuf_, Ceil(rscvStatusNum_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN);
     statusFp32Tensor_ = readyBuf_.Get<float>();
     statusCleanFp32Tensor_ = cleanBuf_.Get<float>();
@@ -353,12 +362,13 @@ __aicore__ inline void ServerDedupCounts::PublishRecvCntSum(float sumOfRecvCnt)
 
     LocalTensor<float> sumCoreFP32Tensor = sumCoreBuf_.Get<float>();
     uint64_t maskArrayCount[2] = {0x0101010101010101, 0};
-    uint8_t repeatTimes = Ceil(aivUsedCumSum_, 8);
+    uint8_t repeatTimes = Ceil(activeCumSumCores_, 8);
 
     Duplicate<float>(sumCoreFP32Tensor, sumOfRecvCnt, maskArrayCount, repeatTimes, 1, 8);
     uint64_t maskArrayFlag[2] = {0x0202020202020202, 0};
     Duplicate<float>(sumCoreFP32Tensor, static_cast<float>(1.0), maskArrayFlag, repeatTimes, 1, 8);
-    DataCopyParams sumIntriParams{static_cast<uint16_t>(aivUsedCumSum_), 1, 0, 0};
+    // Keep the matrix row stride, but publish only to active cumsum consumers.
+    DataCopyParams sumIntriParams{static_cast<uint16_t>(activeCumSumCores_), 1, 0, 0};
     SyncFunc<AscendC::HardEvent::V_MTE3>();
     DataCopy(selfRankWinInGMTensor_[(layout_.cumsumOffset + newAivId * aivUsedCumSum_ * UB_ALIGN) / sizeof(float)], sumCoreFP32Tensor, sumIntriParams);
     // sumCoreBuf_ stays immutable until CalRecvAndSetFlag reuses it. Polling
@@ -368,7 +378,7 @@ __aicore__ inline void ServerDedupCounts::PublishRecvCntSum(float sumOfRecvCnt)
 __aicore__ inline uint32_t ServerDedupCounts::GetCumSum(uint32_t newAivId)
 {
     uint32_t offset = 0;
-    DataCopyParams sumIntriParams{static_cast<uint16_t>(aivUsedCumSum_), 1, static_cast<uint16_t>(aivUsedCumSum_ - 1), 0};
+    DataCopyParams sumIntriParams{static_cast<uint16_t>(activeCumSumCores_), 1, static_cast<uint16_t>(aivUsedCumSum_ - 1), 0};
     LocalTensor<float> sumLocalTensor = sumLocalBuf_.Get<float>();
     LocalTensor<uint32_t> gatherSumPattern = scalarBuf_.GetWithOffset<uint32_t>(UB_ALIGN / sizeof(uint32_t), 0);
     LocalTensor<float> sumContinueTensor = sumContinueBuf_.Get<float>();
@@ -376,8 +386,8 @@ __aicore__ inline uint32_t ServerDedupCounts::GetCumSum(uint32_t newAivId)
 
     uint32_t mask = 2;
     uint64_t recvCnt = 0;
-    uint32_t innerSumParams = Ceil(aivUsedCumSum_ * sizeof(float), UB_ALIGN) * UB_ALIGN / sizeof(float);
-    SumParams sumParams{1, innerSumParams, aivUsedCumSum_};
+    uint32_t innerSumParams = Ceil(activeCumSumCores_ * sizeof(float), UB_ALIGN) * UB_ALIGN / sizeof(float);
+    SumParams sumParams{1, innerSumParams, activeCumSumCores_};
     int32_t cumSumFlag = 0;
     gatherSumPattern.SetValue(0, 2);
     SyncFunc<AscendC::HardEvent::S_V>();
@@ -385,13 +395,13 @@ __aicore__ inline uint32_t ServerDedupCounts::GetCumSum(uint32_t newAivId)
     while (true) {
         DataCopy(sumLocalTensor, selfRankWinInGMTensor_[(layout_.cumsumOffset + newAivId * UB_ALIGN) / sizeof(float)], sumIntriParams);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
-        GatherMask(sumContinueTensor, sumLocalTensor, gatherSumPattern, true, mask, {1, static_cast<uint16_t>(aivUsedCumSum_), 1, 0}, recvCnt);
+        GatherMask(sumContinueTensor, sumLocalTensor, gatherSumPattern, true, mask, {1, static_cast<uint16_t>(activeCumSumCores_), 1, 0}, recvCnt);
         PipeBarrier<PIPE_V>();
         Sum(recvCntSumOutTensor, sumContinueTensor, sumParams);
         SyncFunc<AscendC::HardEvent::V_S>();
         cumSumFlag = static_cast<int32_t>(recvCntSumOutTensor.GetValue(0));
 
-        if (cumSumFlag == aivUsedCumSum_) {
+        if (cumSumFlag == activeCumSumCores_) {
             break;
         }
     }
@@ -411,10 +421,10 @@ __aicore__ inline uint32_t ServerDedupCounts::GetCumSum(uint32_t newAivId)
 
     LocalTensor<float> sumCoreFp32Tensor = sumLocalBuf_.Get<float>();
 
-    uint8_t repeatTimes = Ceil(aivUsedCumSum_, 8);
+    uint8_t repeatTimes = Ceil(activeCumSumCores_, 8);
 
     Duplicate<float>(sumCoreFp32Tensor, static_cast<float>(0), 64, repeatTimes, 1, 8);
-    DataCopyParams cleanParams{static_cast<uint16_t>(aivUsedCumSum_), 1, 0, static_cast<uint16_t>(aivUsedCumSum_ - 1)};
+    DataCopyParams cleanParams{static_cast<uint16_t>(activeCumSumCores_), 1, 0, static_cast<uint16_t>(aivUsedCumSum_ - 1)};
     SyncFunc<AscendC::HardEvent::V_MTE3>();
     DataCopy(selfRankWinInGMTensor_[(layout_.cumsumOffset + newAivId * UB_ALIGN) / sizeof(float)], sumCoreFp32Tensor, cleanParams);
     return offset;
@@ -422,11 +432,6 @@ __aicore__ inline uint32_t ServerDedupCounts::GetCumSum(uint32_t newAivId)
 
 __aicore__ inline void ServerDedupCounts::WaitDispatch()
 {
-    if (recStatusNumPerCore_ == 0U) {
-        // Empty segments still contribute to the all-receiver cumsum protocol.
-        PublishRecvCntSum(0.0F);
-        return;
-    }
     LocalTensor<float> gatherMaskOutTensor = gatherMaskOutBuf_.Get<float>();
     LocalTensor<uint32_t> gatherTmpTensor = scalarBuf_.GetWithOffset<uint32_t>(UB_ALIGN / sizeof(uint32_t), 0);
     LocalTensor<float> statusSumOutTensor = scalarBuf_.GetWithOffset<float>(UB_ALIGN / sizeof(float), UB_ALIGN);
@@ -454,7 +459,7 @@ __aicore__ inline void ServerDedupCounts::WaitDispatch()
 
 __aicore__ inline void ServerDedupCounts::CalRecvAndSetFlag()
 {
-
+    if (recStatusNumPerCore_ == 0U) return;
     LocalTensor<int32_t> outCountLocal = gatherMaskOutBuf_.Get<int32_t>();
     uint32_t newAivId = aivId_ - aivUsedAllToAll_;
     const uint32_t offset = GetCumSum(newAivId);
@@ -492,14 +497,14 @@ __aicore__ inline void ServerDedupCounts::WaitCumSumFlag()
 {
 
     int32_t cumSumFlag = 0;
-    int32_t targetFlag = aivUsedCumSum_ * UB_ALIGN_DATA_COUNT;
+    int32_t targetFlag = activeCumSumCores_ * UB_ALIGN_DATA_COUNT;
     uint32_t cumSumFlagOffset = (layout_.cumsumFlagOffset + (aivId_ - aivUsedAllToAll_) * aivUsedCumSum_ * UB_ALIGN) / sizeof(float);
-    uint32_t innerSumParams = aivUsedCumSum_ * UB_ALIGN / sizeof(float);
-    SumParams sumFlagParams{1, innerSumParams, aivUsedCumSum_ * UB_ALIGN_DATA_COUNT};
+    uint32_t innerSumParams = activeCumSumCores_ * UB_ALIGN / sizeof(float);
+    SumParams sumFlagParams{1, innerSumParams, activeCumSumCores_ * UB_ALIGN_DATA_COUNT};
     LocalTensor<float> statusSumOutTensor = scalarBuf_.Get<float>();
 
     while (true) {
-        DataCopy(statusFp32Tensor_, selfRankWinInGMTensor_[cumSumFlagOffset], aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
+        DataCopy(statusFp32Tensor_, selfRankWinInGMTensor_[cumSumFlagOffset], activeCumSumCores_ * UB_ALIGN_DATA_COUNT);
         SyncFunc<AscendC::HardEvent::MTE2_V>();
         Sum(statusSumOutTensor, statusFp32Tensor_, sumFlagParams);
         SyncFunc<AscendC::HardEvent::V_S>();
@@ -509,11 +514,11 @@ __aicore__ inline void ServerDedupCounts::WaitCumSumFlag()
             break;
         }
     }
-    Duplicate<float>(statusCleanFp32Tensor_, static_cast<float>(0), aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
+    Duplicate<float>(statusCleanFp32Tensor_, static_cast<float>(0), activeCumSumCores_ * UB_ALIGN_DATA_COUNT);
     SyncFunc<AscendC::HardEvent::S_MTE3>();
 
     SyncFunc<AscendC::HardEvent::V_MTE3>();
-    DataCopy(selfRankWinInGMTensor_[cumSumFlagOffset], statusCleanFp32Tensor_, aivUsedCumSum_ * UB_ALIGN_DATA_COUNT);
+    DataCopy(selfRankWinInGMTensor_[cumSumFlagOffset], statusCleanFp32Tensor_, activeCumSumCores_ * UB_ALIGN_DATA_COUNT);
 }
 
 } // namespace TileXREp

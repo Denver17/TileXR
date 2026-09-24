@@ -155,9 +155,9 @@ void CheckDeferredCountReceive()
     const uint32_t countCore = countCores == 64U ? core : receiver;
     const uint32_t start = countCore * (experts / countCores) + std::min(countCore, experts % countCores);
     const uint32_t count = experts / countCores + (countCore < experts % countCores);
-    const uint32_t recvStart = receiver * (experts / recvCoreNum) +
-        std::min(receiver, experts % recvCoreNum);
-    const uint32_t recvCount = experts / recvCoreNum + (receiver < experts % recvCoreNum);
+    const uint32_t recvCount = ((experts + 16U * recvCoreNum - 1U) / (16U * recvCoreNum)) * 16U;
+    const uint32_t recvStart = receiver * recvCount;
+    const uint32_t activeReceivers = (experts + recvCount - 1U) / recvCount;
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
     TileXR::CommArgs args {};
@@ -214,8 +214,9 @@ void CheckDeferredCountReceive()
     for (uint32_t consumer = 0; consumer < recvCoreNum; ++consumer) {
         const uint32_t index = (layout.cntOffset + layout.cumsumOffset) / 4U +
             (receiver * recvCoreNum + consumer) * 8U;
-        Check(state[0][index] == localSum && state[0][index + 1U] == 0x3f800000U,
-            "deferred local sum publication preserves value and readiness");
+        Check(state[0][index] == (consumer < activeReceivers ? localSum : 0U) &&
+            state[0][index + 1U] == (consumer < activeReceivers ? 0x3f800000U : 0U),
+            "deferred local sum publication reaches only active cumsum consumers");
     }
     for (uint32_t i = 0; i < recvCount; ++i)
         Check(state[0][layout.cntOffset / 4U + (recvStart + i) * 8U] == 0U,
@@ -228,6 +229,8 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
     TileXR::CommArgs profileArgs {};
     ServerDedupTest::ProfileCapture capture(profileArgs);
     const uint32_t localExperts = experts / world;
+    const uint32_t recordsPerCore = ((experts + 16U * recvCoreNum - 1U) / (16U * recvCoreNum)) * 16U;
+    const uint32_t activeReceivers = (experts + recordsPerCore - 1U) / recordsPerCore;
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<Rank> ranks(world);
     ServerDedupTest::SparsePeerMemory memory;
@@ -320,11 +323,70 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
             Check(ranks[r].states[bank][offset / 4 + i * 8] == 0x3f800000, "every cnt record, including zero, is notified");
             Check(int32_t(ranks[r].states[bank][offset / 4 + i * 8 + 1]) == expected[r][i], "raw per-expert/source count matches independent route histogram");
         }
-        for (uint32_t id : order) if (id % 64 >= sendCoreNum) ranks[id / 64].cores[id % 64].RecvCnt();
+        std::vector<std::vector<int32_t>> blockOwners(world, std::vector<int32_t>((experts + 15U) / 16U, -1));
+        for (uint32_t id : order) if (id % 64 >= sendCoreNum) {
+            const uint32_t receiver = id % 64 - sendCoreNum;
+            const uint32_t rank = id / 64;
+            const auto before = AscendC::testCopies;
+            AscendC::GmReadObserver() = [&](const void *source, uint32_t bytes) {
+                const uintptr_t begin = reinterpret_cast<uintptr_t>(ranks[rank].states[bank].data()) + offset;
+                const uintptr_t address = reinterpret_cast<uintptr_t>(source);
+                Check(receiver < activeReceivers && address >= begin && address + bytes <= begin + experts * 32U,
+                    "only active receivers read cnt and stay within the valid records");
+                Check((address - begin + offset) % 512U == 0U,
+                    "each cnt polling range starts on a window-relative 512B boundary");
+                const uint32_t first = uint32_t((address - begin) / 32U);
+                Check(first == receiver * recordsPerCore &&
+                    bytes == std::min(recordsPerCore, experts - first) * 32U,
+                    "cnt polling rounds up the per-core budget to 16 records and clips the tail");
+                for (uint32_t block = first / 16U; block <= (first + bytes / 32U - 1U) / 16U; ++block) {
+                    auto &owner = blockOwners[rank][block];
+                    Check(owner == -1 || owner == int32_t(receiver), "a 512B cnt block has only one polling core");
+                    owner = int32_t(receiver);
+                }
+            };
+            ranks[rank].cores[id % 64].RecvCnt();
+            AscendC::GmReadObserver() = {};
+            if (receiver >= activeReceivers)
+                Check(AscendC::testCopies == before, "inactive cnt receivers issue no reads or zero-sum publications");
+        }
+        for (uint32_t rank = 0; rank < world; ++rank) {
+            Check(std::all_of(blockOwners[rank].begin(), blockOwners[rank].end(),
+                [](int32_t owner) { return owner >= 0; }), "all cnt blocks are polled");
+            for (uint32_t publisher = 0; publisher < recvCoreNum; ++publisher) {
+                int32_t sum = 0;
+                if (publisher < activeReceivers)
+                    for (uint32_t i = publisher * recordsPerCore;
+                        i < std::min((publisher + 1U) * recordsPerCore, experts); ++i) sum += expected[rank][i];
+                for (uint32_t consumer = 0; consumer < recvCoreNum; ++consumer) {
+                    const uint64_t index = (offset + layout.cumsumOffset) / 4U +
+                        (publisher * recvCoreNum + consumer) * 8U;
+                    const bool active = publisher < activeReceivers && consumer < activeReceivers;
+                    Check(ranks[rank].states[bank][index] == (active ? uint32_t(sum) : 0U) &&
+                        ranks[rank].states[bank][index + 1U] == (active ? 0x3f800000U : 0U),
+                        "only active publishers and consumers participate in segment-sum exchange");
+                }
+            }
+        }
         std::shuffle(order.begin(), order.end(), rng);
-        for (uint32_t id : order) if (id % 64 >= sendCoreNum) ranks[id / 64].cores[id % 64].CalcCumsum();
+        for (uint32_t id : order) if (id % 64 >= sendCoreNum) {
+            const auto before = AscendC::testCopies;
+            const auto syncBefore = AscendC::TestSyncOperations();
+            ranks[id / 64].cores[id % 64].CalcCumsum();
+            if (id % 64 - sendCoreNum >= activeReceivers)
+                Check(AscendC::testCopies == before && AscendC::TestSyncOperations() == syncBefore,
+                    "inactive receivers skip cumsum IO and synchronization");
+        }
         std::shuffle(order.begin(), order.end(), rng);
-        for (uint32_t id : order) if (id % 64 >= sendCoreNum) ranks[id / 64].cores[id % 64].CompleteCumsum();
+        for (uint32_t id : order) if (id % 64 >= sendCoreNum) {
+            ranks[id / 64].cores[id % 64].CompleteCumsum();
+            auto prefix = ranks[id / 64].cores[id % 64].Prefix();
+            int32_t cumulative = 0;
+            for (uint32_t i = 0; i < experts; ++i) {
+                cumulative += expected[id / 64][i];
+                Check(prefix.GetValue(i) == cumulative, "every receiver, including inactive cumsum cores, loads the final prefix");
+            }
+        }
         for (uint32_t r = 0; r < world; ++r)
             CheckReceiveTasks(ranks[r], expected[r], world, experts, bs, k);
         for (auto &rank : ranks) for (auto &core : rank.cores) core.Finish();
@@ -371,6 +433,8 @@ int main()
             CheckDeferredCountReceive();
             Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
             Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
+            Run(16, 48, 1, 1, 4);       // Three active cumsum cores: partial vector repeats.
+            Run(64, 384, 1, 6, 4);      // 32 receivers use 24 aligned 16-record polling ranges.
             Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
             Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
             Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
