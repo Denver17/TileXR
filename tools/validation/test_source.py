@@ -4,7 +4,6 @@ import os
 import json
 from pathlib import Path
 import shutil
-import shlex
 import subprocess
 import sys
 import tarfile
@@ -257,110 +256,6 @@ class SourceTests(unittest.TestCase):
             self.skipTest("runtime copied the directory instead of creating a symlink")
         with self.assertRaisesRegex(ValueError, "symlink"):
             inventory(self.root)
-
-    @unittest.skipUnless(shutil.which("powershell.exe") and Path("/usr/bin/bash").exists(),
-                         "Windows PowerShell + MSYS transport harness unavailable")
-    def test_push_transport_capture_exercises_remote_refresh_and_rejection(self):
-        scripts = self.root / "tools/validation"
-        scripts.mkdir(parents=True)
-        for name in ("source.py", "push.ps1"):
-            shutil.copyfile(Path(__file__).with_name(name), scripts / name)
-        self.commit(self.root)
-        capture = self.base / "capture"
-        capture.mkdir()
-        deployed = self.base / "server's source path"
-        native = lambda path: subprocess.check_output(["cygpath", "-w", str(path)]).decode().strip()
-        quote = lambda value: "'" + value.replace("'", "''") + "'"
-        harness = self.base / "capture.ps1"
-        harness.write_text("""
-$ErrorActionPreference = 'Stop'
-$capture = CAPTURE
-function scp {
-    Copy-Item -LiteralPath $args[-2] -Destination (Join-Path $capture 'source.tar.gz')
-    $global:LASTEXITCODE = 0
-}
-function ssh {
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
-    [IO.File]::WriteAllText((Join-Path $capture 'script.sh'), (($input -join "`n") + "`n"), $utf8)
-    [IO.File]::WriteAllText((Join-Path $capture 'command.txt'), $args[-1], $utf8)
-    $global:LASTEXITCODE = 0
-}
-& PUSH -Server 'fixture.invalid' -RemotePath DESTINATION
-""".replace("CAPTURE", quote(native(capture)))
-           .replace("PUSH", quote(native(scripts / "push.ps1")))
-           .replace("DESTINATION", quote(str(deployed))), encoding="utf-8")
-        result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive",
-                                 "-ExecutionPolicy", "Bypass", "-File", native(harness)],
-                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout)
-        command = (capture / "command.txt").read_text()
-        arguments = shlex.split(command)
-        self.assertEqual(arguments[-1], str(deployed))
-        remote_archive = Path(arguments[-2])
-        self.addCleanup(lambda: remote_archive.unlink(missing_ok=True))
-        script = (capture / "script.sh").read_bytes()
-
-        def deploy():
-            shutil.copyfile(capture / "source.tar.gz", remote_archive)
-            return subprocess.run(["/usr/bin/bash", "-c", command], input=script,
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                  env=dict(os.environ, PATH="/usr/bin:" + os.environ["PATH"]))
-
-        result = deploy()
-        self.assertEqual(result.returncode, 0, result.stdout.decode())
-        self.assertTrue((deployed / ".tilexr-validation-root").is_file())
-        (deployed / "validation.local.sh").write_text("retained config\n")
-        (deployed / "hostfile").write_text("retained hostfile\n")
-        # A previous deployment can carry the old digest dictionary. Only its
-        # paths matter when removing stale files; its contents are not verified.
-        old_manifest = json.loads((deployed / ".tilexr-source.json").read_text())
-        old_manifest["files"] = {name: "ignored old digest" for name in old_manifest["files"]}
-        (deployed / ".tilexr-source.json").write_text(json.dumps(old_manifest))
-        (deployed / "file.txt").write_text("modified deployed source\n")
-        (self.root / "file.txt").unlink()
-        (self.root / "new.txt").write_text("new source\n")
-        self.commit(self.root)
-        pack(self.root, capture / "source.tar.gz")
-        result = deploy()
-        self.assertEqual(result.returncode, 0, result.stdout.decode())
-        self.assertFalse((deployed / "file.txt").exists())
-        self.assertTrue((deployed / "new.txt").is_file())
-        self.assertEqual((deployed / "validation.local.sh").read_text(), "retained config\n")
-        self.assertEqual((deployed / "hostfile").read_text(), "retained hostfile\n")
-        self.assertIsInstance(json.loads((deployed / ".tilexr-source.json").read_text())["files"], list)
-
-        original_archive = (capture / "source.tar.gz").read_bytes()
-        for name, reason in (("../outside", b"unsafe archive path"),
-                             ("unexpected.txt", b"archive and source manifest disagree"),
-                             ("new.txt", b"archive and source manifest disagree")):
-            with self.subTest(archive_entry=name):
-                malformed = self.base / "malformed.tar.gz"
-                with tarfile.open(capture / "source.tar.gz") as source, tarfile.open(malformed, "w:gz") as output:
-                    for member in source:
-                        output.addfile(member, source.extractfile(member))
-                    output.addfile(tarfile.TarInfo(name))
-                shutil.copyfile(malformed, capture / "source.tar.gz")
-                result = deploy()
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn(reason, result.stdout)
-                self.assertFalse((self.base / "outside").exists())
-                (capture / "source.tar.gz").write_bytes(original_archive)
-        lock = deployed / "run/validation/node.lock"
-        lock.mkdir(parents=True)
-        result = deploy()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b"validation is active", result.stdout)
-        lock.rmdir()
-        (deployed / ".git").mkdir()
-        result = deploy()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b"do not overwrite a Git checkout", result.stdout)
-        (deployed / ".git").rmdir()
-        (deployed / ".tilexr-validation-root").unlink()
-        result = deploy()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b"destination must be empty or managed", result.stdout)
-        self.assertEqual((deployed / "validation.local.sh").read_text(), "retained config\n")
 
 
 if __name__ == "__main__":

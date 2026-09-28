@@ -1589,6 +1589,10 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 
 ### 第 1、2 步：固定版本及 PC 同步
 
+2026-09-28 起已移除 `tools/validation/push.ps1` 及其专用 Windows PowerShell/MSYS 传输测试。
+下表对该脚本的说明仅保留为历史审计记录，不再是可用入口。Linux 构建、同步和运行入口不依赖该脚本；
+共享的 `source.py` 清单与导出功能及其测试继续保留。退役入口时应同时清理专用测试和入口文档，避免环境跳过项掩盖失效引用。
+
 | ID | 原审计位置 | 原操作或检查，失败/影响 | 本次决定与当前行为 |
 | --- | --- | --- | --- |
 | P01 | PC `git fetch`、`git switch --detach` | 获取并选择验证版本；不自动检查 PC 是否有未提交改动 | 保留版本选择。Mutagen 同步实际文件；提交号只作来源标签，不证明当前文件与该提交相同 |
