@@ -25,6 +25,8 @@ option(BUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST "Enable the installed 4 GiB boundary
 option(BUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST "Enable the installed 8 GiB Combine boundary probe" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
+include(${TILEXR_ROOT}/src/cmake/TileXREpCoreConfig.cmake)
+add_compile_definitions(${TILEXR_EP_CORE_DEFINITIONS})
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix")
 set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE STRING "TileXR install library directory")
 set(TILEXR_INSTALL_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}" CACHE STRING "TileXR install include directory")
@@ -532,7 +534,8 @@ foreach(_m5_send_cores IN ITEMS 16 48)
     target_include_directories(${_m5_split_target} BEFORE PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake" ${TILEXR_EP_TEST_INCLUDE_DIRS})
     target_compile_definitions(${_m5_split_target} PRIVATE
-        TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=${_m5_send_cores})
+        $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=${_m5_send_cores}>)
+    set_property(TARGET ${_m5_split_target} PROPERTY TILEXR_TEST_COMBINE_SEND_CORES ${_m5_send_cores})
     add_test(NAME ${_m5_split_target} COMMAND ${_m5_split_target})
     set_tests_properties(${_m5_split_target} PROPERTIES LABELS ep-sdedup-combine-p2-m5 TIMEOUT 180)
 endforeach()

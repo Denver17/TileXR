@@ -881,6 +881,36 @@ cmake --build build/server-dedup-a5-on --target tilexr_ep_dispatch_memory_server
 
 ## 手动编译、同步、运行
 
+### 比较 Send/Recv 核数配比
+
+核数是编译期配置，总 AIV 数保持 64。可以独立配置两个算子，无需修改头文件：
+
+```bash
+bash build_all.sh dispatch_send_cores=24 combine_send_cores=24
+bash sync.sh
+bash run.sh -m 1 -n 4 -e 384 -l 100 50 bs=128 topk=6 h=7168 route_mode=balance_shift operator_mode=combine quant_mode=4 fp8_format=e4m3
+```
+
+Dispatch send 支持 `16/24/32/40/48`，Combine send 另支持 `56`；Recv 自动取 `64-send`。
+下一组比较时重新构建并同步，例如 `dispatch_send_cores=32 combine_send_cores=40`。
+breakdown 构建可同时传 `breakdown=1`，对应运行模式 `-m 2`。不要把核数作为 `run.sh`
+参数：改变运行时声明不能改变已经编译的 kernel。
+
+未传核数时继续使用两个共享头文件的默认值（上库默认均为 32），也兼容直接修改头文件。
+构建先编译、执行 `tools/validation/core_config.cpp`，取得实际宏值，再把同一组定义传给
+Host、A5 kernel 和测试 consumer 的 CMake 构建。直接使用 CMake 时，对两个构建目录传入相同的
+`TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM` / `TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM`。
+
+安装清单的 `server_dedup_core_config` 保存生效核数，Combine contract 同步记录 send 核数；
+运行时以已安装包为准加载配置，结果首行及 `summary.json` 记录两组配比。
+缺少该字段的旧包必须重新构建和同步；不要手动修改 manifest 绕过产物检查。
+
+维护注意：只改 C++ 宏而仍用 Python 的 32 核常量，会把合法 `24/40` 配置报告的
+`combine_control_publish_bytes=26624` 与旧预期 `24576` 比较，产生
+`Combine traffic mismatch: control_publish_bytes`，且可能显示“执行阶段失败 / ranks=0”。
+字节数校验和 breakdown 核角色解析必须使用清单中的实际核数，不能关闭检查或伪造报告值。
+Host/CPU 回归只能证明配置与验证契约；不同配比的数值正确性和性能仍需 A5 多 rank 实测。
+
 首次部署时准备环境文件与主机清单；已有文件只检查，不覆盖：
 
 ```bash

@@ -446,6 +446,25 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], 'breakdown')
                 self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('3', '2'))
 
+    def test_build_core_options_are_explicit_independent_and_validated(self):
+        (self.root / "tools/validation/workflow.py").write_text(
+            "import os,json; print(json.dumps(dict(os.environ)))\n")
+        environment = dict(self.env, TILEXR_VALIDATION_BUILD_MODE="host",
+                           TILEXR_VALIDATION_DISPATCH_SEND_CORES="48", TILEXR_VALIDATION_COMBINE_SEND_CORES="56")
+        for arguments, expected in (([], ("", "")),
+                (["dispatch_send_cores=24", "combine_send_cores=40"], ("24", "40")),
+                (["combine_send_cores=56"], ("", "56"))):
+            result = subprocess.run([str(self.bash), "build_all.sh", *arguments], cwd=self.root,
+                                    env=environment, text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            values = json.loads(result.stdout.splitlines()[-1])
+            self.assertEqual((values["TILEXR_VALIDATION_DISPATCH_SEND_CORES"],
+                              values["TILEXR_VALIDATION_COMBINE_SEND_CORES"]), expected)
+        for argument in ("dispatch_send_cores=56", "combine_send_cores=20", "combine_send_cores=", "dispatch_send_cores=024"):
+            result = subprocess.run([str(self.bash), "build_all.sh", argument], cwd=self.root,
+                                    env=environment, capture_output=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+
     def test_run_prints_selected_operator_performance_on_separate_lines(self):
         cann = self.root / "cann-env.sh"
         cann.write_text("# CANN environment fixture\n")

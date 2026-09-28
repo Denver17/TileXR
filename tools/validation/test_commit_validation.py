@@ -39,6 +39,8 @@ class CombineCommitValidationTests(unittest.TestCase):
     def execute(self, argv, log, **kwargs):
         args = [str(arg) for arg in argv]
         self.commands.append(args)
+        if Path(args[0]).name == "core-config":
+            return json.dumps(dict(dispatch_send_core_num=32, combine_send_core_num=32))
         build = workflow.validation_build_directory(workflow.Config("build"))
         work = build / "host"
         if args[0] not in ("cmake", "ctest", "g++"):

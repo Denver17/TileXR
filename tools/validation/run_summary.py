@@ -96,6 +96,10 @@ def render_result(report, summary_path):
     config = report.get("chain_configuration", {})
     if config:
         parts.append(f"mode={config['run_mode']} BS={config['bs']} loops={config['loops']} warmup={config['warmup']}")
+        for operator in ("dispatch", "combine"):
+            cores = config.get(operator + "_send_core_num")
+            if cores is not None:
+                parts.append(f"{operator}_cores(send/recv)={cores}/{64 - cores}")
     if "rank_size" in report:
         parts.append(f"ranks={report.get('completed_ranks', 0)}/{report['rank_size']}")
     analysis = report.get("case_analysis")

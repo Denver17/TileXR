@@ -1,4 +1,5 @@
 include(GNUInstallDirs)
+include(${CMAKE_SOURCE_DIR}/src/cmake/TileXREpCoreConfig.cmake)
 set(TILEXR_EP_SERVER_DEDUP_ENABLE "1" CACHE STRING "Server dedup mode (0 or 1)")
 if(NOT TILEXR_EP_SERVER_DEDUP_ENABLE MATCHES "^[01]$")
     message(FATAL_ERROR "TILEXR_EP_SERVER_DEDUP_ENABLE must be 0 or 1")
@@ -64,6 +65,7 @@ function(tilexr_add_ep_aicore_kernel target source output)
         ${TILEXR_EP_KERNEL_INCLUDES})
     target_compile_definitions(${target}_tmp PRIVATE
         CATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH}
+        ${TILEXR_EP_CORE_DEFINITIONS}
         ${ARG_DEFINITIONS})
 
     add_custom_command(
@@ -234,6 +236,7 @@ add_library(tilexr-ep SHARED
 
 add_dependencies(tilexr-ep ${TILEXR_EP_KERNEL_TARGETS})
 target_compile_definitions(tilexr-ep PUBLIC
+    ${TILEXR_EP_CORE_DEFINITIONS}
     TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_ENABLE}
     PRIVATE
     TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>)

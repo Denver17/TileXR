@@ -105,6 +105,8 @@ class BuildTests(unittest.TestCase):
         """代替昂贵的 CMake；实际创建本次安装文件，并保留所有调用参数。"""
         args = [str(value) for value in argv]
         self.commands.append((args, Path(log), kwargs))
+        if Path(args[0]).name == "core-config":
+            return json.dumps(dict(dispatch_send_core_num=32, combine_send_core_num=32))
         work = self.root / "build/validation"
         stage = work / "install"
         if "--install" in args:

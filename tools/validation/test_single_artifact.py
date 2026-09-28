@@ -34,6 +34,7 @@ class SingleArtifactTests(unittest.TestCase):
         kernel.parent.mkdir(parents=True, exist_ok=True)
         kernel.write_text("profile=" + str(profiling))
         manifest = dict(build_id="build-" + str(profiling), mode=config.mode,
+                        server_dedup_core_config=dict(dispatch_send_core_num=32, combine_send_core_num=32),
                         checkpoint=config.checkpoint, architecture=workflow.platform.machine(),
                         server_dedup_profiling=profiling,
                         server_dedup_contract=workflow.DISPATCH_ABI,

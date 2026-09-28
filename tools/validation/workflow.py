@@ -112,8 +112,11 @@ COMBINE_M4_ABI = dict(COMBINE_M3_ABI, kernel_scope="combine-m4", implemented_thr
 
 COMBINE_M5_ABI = dict(COMBINE_M4_ABI, kernel_scope="combine-m5", implemented_through="M5", scope="full")
 
-def combine_contract(checkpoint):
-    return {None: COMBINE_M5_ABI, COMBINE_M12_CHECKPOINT: COMBINE_M12_ABI, COMBINE_M3_CHECKPOINT: COMBINE_M3_ABI, COMBINE_M4_CHECKPOINT: COMBINE_M4_ABI, COMBINE_M5_CHECKPOINT: COMBINE_M5_ABI}.get(checkpoint, COMBINE_ABI)
+def combine_contract(checkpoint, send_core_num=32):
+    contract = dict({None: COMBINE_M5_ABI, COMBINE_M12_CHECKPOINT: COMBINE_M12_ABI, COMBINE_M3_CHECKPOINT: COMBINE_M3_ABI, COMBINE_M4_CHECKPOINT: COMBINE_M4_ABI, COMBINE_M5_CHECKPOINT: COMBINE_M5_ABI}.get(checkpoint, COMBINE_ABI))
+    if "send_core_num" in contract:
+        contract["send_core_num"] = send_core_num
+    return contract
 
 
 EMPTY_KERNEL_CHECKPOINT = "ep-sdedup-p1-empty-kernel"
@@ -383,7 +386,15 @@ class Config:
                 raise ValueError("-n 必须为 2..16 台服务器")
         self.dedup = 1
         self.profiling = False
+        self.core_overrides = {}
         if action == "build":
+            for operator in ("dispatch", "combine"):
+                value = os.environ.get(f"TILEXR_VALIDATION_{operator.upper()}_SEND_CORES", "")
+                allowed = ("16", "24", "32", "40", "48") + (("56",) if operator == "combine" else ())
+                if value:
+                    if value not in allowed:
+                        raise ValueError(f"Invalid {operator}_send_cores={value}; expected {'/'.join(allowed)}")
+                    self.core_overrides[operator + "_send_core_num"] = int(value)
             dedup = os.environ.get("TILEXR_VALIDATION_DEDUP", "1")
             if dedup not in ("0", "1"):
                 raise ValueError("编译 dedup 必须为 0/1")
@@ -710,18 +721,47 @@ def artifact_files(install):
             for path in sorted(install.rglob("*")) if path.is_file() and path.name != "manifest.json"}
 
 
+CORE_MACROS = {
+    "dispatch_send_core_num": "TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM",
+    "combine_send_core_num": "TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM",
+}
+
+
+def validate_core_config(value):
+    if not isinstance(value, dict) or set(value) != set(CORE_MACROS):
+        raise ValueError("缺少编译核数配置，请重新执行 build_all.sh 和 sync.sh")
+    for key, cores in value.items():
+        maximum = 48 if key == "dispatch_send_core_num" else 56
+        if type(cores) is not int or cores not in range(16, maximum + 1, 8):
+            raise ValueError(f"非法编译核数 {key}={cores}，请重新构建/同步")
+    return dict(value)
+
+
+def compile_core_config(config, work, log, command):
+    probe = work / "core-config"
+    command(["g++", "-std=c++14", "-I" + str(config.root / "src/include"),
+             "-I" + str(config.root / "src/ep/common"),
+             *(f"-D{CORE_MACROS[key]}={value}" for key, value in config.core_overrides.items()),
+             config.root / "tools/validation/core_config.cpp", "-o", probe], log / "core-config-build.log")
+    return validate_core_config(json.loads(command([probe], log / "core-config.json")))
+
+
 def verify_build(config, *, check_run_mode=True, dry_run=False):
     manifest = read_json(config.install / "manifest.json")
+    cores = validate_core_config(manifest.get("server_dedup_core_config"))
     if type(manifest.get("server_dedup_enabled")) is not bool or manifest.get("server_dedup_protocol") != 2:
         raise ValueError("缺少编译 dedup 模式/协议版本，请重新执行 build_all.sh 和 sync.sh")
     config.dedup = int(manifest["server_dedup_enabled"])
     if config.chain is not None:
         config.chain["server_dedup_enabled"] = manifest["server_dedup_enabled"]
+        # Runtime configuration follows installed binaries, never source defaults
+        # or build-only environment variables left in the caller's shell.
+        config.chain.update(cores)
     if (manifest["mode"] not in (("host", "production") if dry_run else (config.mode,))
             or manifest["checkpoint"] != config.checkpoint):
         raise ValueError("测试配置与构建不一致，请重新执行 build_all.sh 和 sync.sh")
     if config.checkpoint in (COMBINE_EMPTY_KERNEL_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
-        if manifest.get("server_dedup_combine_contract") != combine_contract(config.checkpoint):
+        if manifest.get("server_dedup_combine_contract") != combine_contract(config.checkpoint, cores["combine_send_core_num"]):
             raise ValueError("Combine 88B launch / 16B GM tiling构建契约或模块身份不符，请重新执行 run_commit_validation.sh")
     if config.checkpoint in (DISPATCH_CHECKPOINT, *COMBINE_DEVICE_CHECKPOINTS):
         if manifest.get("server_dedup_contract") != DISPATCH_ABI:
@@ -808,6 +848,9 @@ def build(config):
     print(f"开始构建 {config.checkpoint or 'server-dedup'}，mode={config.mode}，日志：{log}", flush=True)
     for tool in ("cmake", "g++"):
         command([tool, "--version"], log / (tool + "-version.log"))
+    cores = compile_core_config(config, work, log, command)
+    print("编译核数：" + " ".join(f"{operator}={cores[operator + '_send_core_num']}/{64 - cores[operator + '_send_core_num']}"
+                                for operator in ("dispatch", "combine")), flush=True)
     combine_tests = COMBINE_TESTS.get(config.checkpoint)
     combine_c2 = config.checkpoint == COMBINE_EMPTY_KERNEL_CHECKPOINT
     if combine_tests and (config.root / ".git").exists():
@@ -816,7 +859,8 @@ def build(config):
         source["working_tree_dirty"] = bool(status.strip())
         source["working_tree_status"] = status.splitlines()
     common = ["-DCMAKE_BUILD_TYPE=Debug", "-DCMAKE_INSTALL_LIBDIR=lib", f"-DCMAKE_INSTALL_PREFIX={stage}",
-              f"-DTILEXR_EP_SERVER_DEDUP_ENABLE={config.dedup}"]
+              f"-DTILEXR_EP_SERVER_DEDUP_ENABLE={config.dedup}",
+              *(f"-D{CORE_MACROS[key]}={value}" for key, value in cores.items())]
     if config.mode == "production":
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
@@ -926,6 +970,7 @@ def build(config):
                 source_content_sha256(config.root, final_source) != source["content_sha256"]):
             raise Failure("BUILD_FAILED", "构建期间源码发生变化，拒绝关联不确定产物")
     manifest = {"server_dedup_enabled": bool(config.dedup), "server_dedup_protocol": 2,
+                "server_dedup_core_config": cores,
                 "build_id": build_id, "source": source, "mode": config.mode,
                 "checkpoint": config.checkpoint, "architecture": platform.machine(),
                 "python": sys.version, "cann": os.environ.get("ASCEND_HOME_PATH", ""),
@@ -934,7 +979,7 @@ def build(config):
     if combine_tests:
         manifest["build_timeout_seconds"] = 900
     if combine_c2 or config.checkpoint in COMBINE_DEVICE_CHECKPOINTS:
-        manifest["server_dedup_combine_contract"] = dict(combine_contract(config.checkpoint))
+        manifest["server_dedup_combine_contract"] = combine_contract(config.checkpoint, cores["combine_send_core_num"])
     if config.checkpoint in COMBINE_MEASUREMENT_CHECKPOINTS:
         for operator, filename in (("dispatch", "server_dedup.mapping.json"), ("combine", "server_dedup_combine.mapping.json")):
             if not (stage / "share/tilexr/profiling" / filename).is_file():

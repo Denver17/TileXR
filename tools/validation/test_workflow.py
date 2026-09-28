@@ -196,6 +196,8 @@ class ConfigTests(TemporaryRoot):
         (self.root / "3rdparty/spdlog").mkdir(parents=True)
 
         def configure_boundary(argv, *args, **kwargs):
+            if Path(argv[0]).name == "core-config":
+                return '{"dispatch_send_core_num":32,"combine_send_core_num":32}'
             if "-S" in argv:
                 self.assertEqual(argv[:3], ["cmake", "-S", self.root])
                 self.assertIn("-DTILEXR_BUILD_EP=ON", argv)
@@ -597,6 +599,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.config_instance.install.mkdir(parents=True)
         (self.config_instance.install / "artifact").write_bytes(b"test installed artifact\n")
         self.manifest = {"server_dedup_enabled": True, "server_dedup_protocol": 2, "build_id": "test-build", "mode": "host", "checkpoint": workflow.CHECKPOINT,
+                         "server_dedup_core_config": dict(dispatch_send_core_num=32, combine_send_core_num=32),
                          "architecture": workflow.platform.machine(), "source": source,
                          "artifacts": workflow.artifact_files(self.config_instance.install),
                          "tests": [{"name": "test_tilexr_ep_server_dedup_" + name}
