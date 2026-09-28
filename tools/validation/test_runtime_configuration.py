@@ -451,16 +451,21 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             "import os,json; print(json.dumps(dict(os.environ)))\n")
         environment = dict(self.env, TILEXR_VALIDATION_BUILD_MODE="host",
                            TILEXR_VALIDATION_DISPATCH_SEND_CORES="48", TILEXR_VALIDATION_COMBINE_SEND_CORES="56")
-        for arguments, expected in (([], ("", "")),
+        cases = [([], ("", "")),
                 (["dispatch_send_cores=24", "combine_send_cores=40"], ("24", "40")),
-                (["combine_send_cores=56"], ("", "56"))):
+                (["combine_send_cores=52"], ("", "52")),
+                (["combine_send_cores=56"], ("", "56"))]
+        cases.extend(([f"dispatch_send_cores={cores}", f"combine_send_cores={cores}"],
+                      (str(cores), str(cores))) for cores in range(16, 49, 4))
+        for arguments, expected in cases:
             result = subprocess.run([str(self.bash), "build_all.sh", *arguments], cwd=self.root,
                                     env=environment, text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             values = json.loads(result.stdout.splitlines()[-1])
             self.assertEqual((values["TILEXR_VALIDATION_DISPATCH_SEND_CORES"],
                               values["TILEXR_VALIDATION_COMBINE_SEND_CORES"]), expected)
-        for argument in ("dispatch_send_cores=56", "combine_send_cores=20", "combine_send_cores=", "dispatch_send_cores=024"):
+        for argument in ("dispatch_send_cores=52", "dispatch_send_cores=12", "combine_send_cores=60",
+                         "combine_send_cores=30", "combine_send_cores=", "dispatch_send_cores=028"):
             result = subprocess.run([str(self.bash), "build_all.sh", argument], cwd=self.root,
                                     env=environment, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)

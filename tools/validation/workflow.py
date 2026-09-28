@@ -390,7 +390,7 @@ class Config:
         if action == "build":
             for operator in ("dispatch", "combine"):
                 value = os.environ.get(f"TILEXR_VALIDATION_{operator.upper()}_SEND_CORES", "")
-                allowed = ("16", "24", "32", "40", "48") + (("56",) if operator == "combine" else ())
+                allowed = tuple(str(cores) for cores in range(16, 57 if operator == "combine" else 49, 4))
                 if value:
                     if value not in allowed:
                         raise ValueError(f"Invalid {operator}_send_cores={value}; expected {'/'.join(allowed)}")
@@ -732,7 +732,7 @@ def validate_core_config(value):
         raise ValueError("缺少编译核数配置，请重新执行 build_all.sh 和 sync.sh")
     for key, cores in value.items():
         maximum = 48 if key == "dispatch_send_core_num" else 56
-        if type(cores) is not int or cores not in range(16, maximum + 1, 8):
+        if type(cores) is not int or cores not in range(16, maximum + 1, 4):
             raise ValueError(f"非法编译核数 {key}={cores}，请重新构建/同步")
     return dict(value)
 

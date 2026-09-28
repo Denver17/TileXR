@@ -8,12 +8,12 @@ for argument in "$@"; do
     case "$argument" in
         dedup=0|dedup=1) dedup=${argument#*=} ;;
         breakdown=0|breakdown=1) breakdown=${argument#*=} ;;
-        dispatch_send_cores=16|dispatch_send_cores=24|dispatch_send_cores=32|dispatch_send_cores=40|dispatch_send_cores=48)
+        dispatch_send_cores=16|dispatch_send_cores=20|dispatch_send_cores=24|dispatch_send_cores=28|dispatch_send_cores=32|dispatch_send_cores=36|dispatch_send_cores=40|dispatch_send_cores=44|dispatch_send_cores=48)
             dispatch_send_cores=${argument#*=} ;;
-        combine_send_cores=16|combine_send_cores=24|combine_send_cores=32|combine_send_cores=40|combine_send_cores=48|combine_send_cores=56)
+        combine_send_cores=16|combine_send_cores=20|combine_send_cores=24|combine_send_cores=28|combine_send_cores=32|combine_send_cores=36|combine_send_cores=40|combine_send_cores=44|combine_send_cores=48|combine_send_cores=52|combine_send_cores=56)
             combine_send_cores=${argument#*=} ;;
         -h|--help)
-            printf 'Usage: bash build_all.sh [breakdown=0|1] [dedup=0|1] [dispatch_send_cores=16|24|32|40|48] [combine_send_cores=16|24|32|40|48|56]\nDefault: breakdown=0 (profiling disabled), dedup=1; core counts use header defaults. Total cores remain 64.\n'
+            printf 'Usage: bash build_all.sh [breakdown=0|1] [dedup=0|1] [dispatch_send_cores=N] [combine_send_cores=N]\nSend cores: Dispatch 16..48, Combine 16..56, both in steps of 4.\nDefault: breakdown=0 (profiling disabled), dedup=1; core counts use header defaults. Total cores remain 64.\n'
             exit 0 ;;
         *) printf '[build] Failed: invalid argument: %s (see bash build_all.sh --help)\n' "$argument" >&2; exit 2 ;;
     esac

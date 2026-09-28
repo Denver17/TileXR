@@ -40,7 +40,7 @@ class CoreConfigTests(unittest.TestCase):
             chain=dict(run_mode="functional", dispatch_send_core_num=32, combine_send_core_num=32)), manifest
 
     def test_compiler_resolves_all_supported_splits_and_header_defaults(self):
-        for dispatch, combine in ((16, 56), (24, 24), (32, 32), (40, 16), (48, 40), (24, 48)):
+        for dispatch, combine in (*((n, n) for n in range(16, 49, 4)), (28, 52), (44, 56)):
             cores = dict(dispatch_send_core_num=dispatch, combine_send_core_num=combine)
             with self.subTest(cores=cores):
                 self.assertEqual(self.probe(cores), cores)
@@ -60,15 +60,15 @@ class CoreConfigTests(unittest.TestCase):
         self.assertEqual(self.probe({}, root), dict(dispatch_send_core_num=24, combine_send_core_num=24))
 
     def test_manifest_controls_runtime_and_report_not_environment(self):
-        config, manifest = self.package(dict(dispatch_send_core_num=40, combine_send_core_num=24))
+        config, manifest = self.package(dict(dispatch_send_core_num=44, combine_send_core_num=28))
         with mock.patch.dict(os.environ, TILEXR_VALIDATION_COMBINE_SEND_CORES="56"):
             workflow.verify_build(config)
-        self.assertEqual(config.chain["combine_send_core_num"], 24)
-        self.assertEqual(config.chain["dispatch_send_core_num"], 40)
+        self.assertEqual(config.chain["combine_send_core_num"], 28)
+        self.assertEqual(config.chain["dispatch_send_core_num"], 44)
         report = dict(status="PASS", chain_configuration=dict(config.chain, bs=128, loops=100, warmup=50))
         line = run_summary.render_result(report, "summary.json")
-        self.assertIn("dispatch_cores(send/recv)=40/24", line)
-        self.assertIn("combine_cores(send/recv)=24/40", line)
+        self.assertIn("dispatch_cores(send/recv)=44/20", line)
+        self.assertIn("combine_cores(send/recv)=28/36", line)
         manifest["server_dedup_combine_contract"]["send_core_num"] = 32
         workflow.write_json(config.install / "manifest.json", manifest)
         with self.assertRaisesRegex(ValueError, "构建契约"):
@@ -79,7 +79,10 @@ class CoreConfigTests(unittest.TestCase):
         for cores in (None, {}, dict(dispatch_send_core_num=56, combine_send_core_num=24),
                       dict(dispatch_send_core_num=24, combine_send_core_num=True),
                       dict(dispatch_send_core_num=24, combine_send_core_num="24"),
-                      dict(dispatch_send_core_num=24, combine_send_core_num=20)):
+                      dict(dispatch_send_core_num=52, combine_send_core_num=28),
+                      dict(dispatch_send_core_num=12, combine_send_core_num=28),
+                      dict(dispatch_send_core_num=28, combine_send_core_num=60),
+                      dict(dispatch_send_core_num=28, combine_send_core_num=30)):
             with self.subTest(cores=cores):
                 manifest["server_dedup_core_config"] = cores
                 workflow.write_json(config.install / "manifest.json", manifest)
@@ -116,10 +119,10 @@ target_compile_definitions(probe PRIVATE ${{TILEXR_EP_CORE_DEFINITIONS}})
 ''')
         build = self.work / "cmake-build"
         args = ["cmake", "-S", str(source), "-B", str(build),
-                "-DTILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM=24", "-DTILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=40"]
+                "-DTILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM=28", "-DTILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=52"]
         subprocess.run(args, check=True, capture_output=True)
         subprocess.run(["cmake", "--build", str(build)], check=True, capture_output=True)
-        self.assertIn('"combine_send_core_num":40', subprocess.check_output([str(build / "probe")], text=True))
+        self.assertIn('"combine_send_core_num":52', subprocess.check_output([str(build / "probe")], text=True))
         result = subprocess.run(args + ["-DTILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM=56"], capture_output=True)
         self.assertNotEqual(result.returncode, 0)
 

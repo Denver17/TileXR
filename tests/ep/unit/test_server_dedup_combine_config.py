@@ -103,13 +103,13 @@ int main() {
     return 0;
 }
 ''')
-        for send in (16, 24, 32, 40, 48, 56, 0, 8, 20, 57, 64):
+        for send in (*range(16, 57, 4), 0, 8, 12, 18, 30, 57, 60, 64):
             binary = Path(directory) / ('config-' + str(send))
             result = subprocess.run([
                 args.compiler, "-std=c++14", "-I", args.include, "-o", str(binary),
                 "-DTILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=" + str(send), str(source),
             ], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, timeout=30)
-            valid = send in (16, 24, 32, 40, 48, 56)
+            valid = send in range(16, 57, 4)
             if (result.returncode == 0) != valid:
                 raise RuntimeError("unexpected compile result for Send=%d:\n%s" % (send, result.stdout))
             if valid:

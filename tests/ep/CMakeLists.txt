@@ -528,7 +528,7 @@ set_tests_properties(test_tilexr_ep_server_dedup_combine_m5 PROPERTIES LABELS ep
 install(TARGETS test_tilexr_ep_server_dedup_combine_m5 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Unequal groups catch an M5 owner/UB budget still tied to the Read core count.
-foreach(_m5_send_cores IN ITEMS 16 48)
+foreach(_m5_send_cores IN ITEMS 16 28 48 52)
     set(_m5_split_target test_tilexr_ep_server_dedup_combine_m5_send${_m5_send_cores})
     add_executable(${_m5_split_target} unit/test_tilexr_ep_server_dedup_combine_m5.cpp)
     target_include_directories(${_m5_split_target} BEFORE PRIVATE
@@ -542,14 +542,22 @@ endforeach()
 
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
-foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile)
+foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile
+        test_tilexr_ep_server_dedup_counts_send20 test_tilexr_ep_server_dedup_counts_send28
+        test_tilexr_ep_server_dedup_counts_send36 test_tilexr_ep_server_dedup_counts_send44)
     add_executable(${test_target} unit/test_tilexr_ep_server_dedup_counts.cpp)
     target_include_directories(${test_target} PRIVATE
         unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS}
         ${TILEXR_ROOT}/src/ep/kernels)
     target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
+    if(test_target MATCHES "_send([0-9]+)$")
+        set(_count_send_cores ${CMAKE_MATCH_1})
+        target_compile_definitions(${test_target} PRIVATE
+            $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM=${_count_send_cores}>)
+        set_property(TARGET ${test_target} PROPERTY TILEXR_TEST_DISPATCH_SEND_CORES ${_count_send_cores})
+    endif()
     add_test(NAME ${test_target} COMMAND ${test_target})
-    # Five splits now run all-core Count up to BS511 plus the 512/513 boundary.
+    # Includes empty/uneven count segments and both sides of the BS512 threshold.
     set_tests_properties(${test_target} PROPERTIES TIMEOUT 240)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()

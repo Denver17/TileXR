@@ -176,9 +176,9 @@ void CheckDeferredCountReceive()
     const uint32_t countCore = countCores == 64U ? core : receiver;
     const uint32_t start = countCore * (experts / countCores) + std::min(countCore, experts % countCores);
     const uint32_t count = experts / countCores + (countCore < experts % countCores);
-    const uint32_t recvCount = ((experts + 16U * recvCoreNum - 1U) / (16U * recvCoreNum)) * 16U;
-    const uint32_t recvStart = receiver * recvCount;
-    const uint32_t activeReceivers = (experts + recvCount - 1U) / recvCount;
+    const uint32_t recvCount = experts / recvCoreNum + (receiver < experts % recvCoreNum);
+    const uint32_t recvStart = receiver * (experts / recvCoreNum) + std::min(receiver, experts % recvCoreNum);
+    const uint32_t activeReceivers = std::min(experts, recvCoreNum);
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<std::vector<uint32_t>> state(world, std::vector<uint32_t>(layout.stateBytes / 4U, 0U));
     for (auto &window : state) SeedCountSlots(window, layout.cntOffset, experts);
@@ -252,8 +252,7 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
     TileXR::CommArgs profileArgs {};
     ServerDedupTest::ProfileCapture capture(profileArgs);
     const uint32_t localExperts = experts / world;
-    const uint32_t recordsPerCore = ((experts + 16U * recvCoreNum - 1U) / (16U * recvCoreNum)) * 16U;
-    const uint32_t activeReceivers = (experts + recordsPerCore - 1U) / recordsPerCore;
+    const uint32_t activeReceivers = std::min(experts, recvCoreNum);
     const auto layout = TileXREp::TileXREpServerDedupCountLayout(experts);
     std::vector<Rank> ranks(world);
     ServerDedupTest::SparsePeerMemory memory;
@@ -373,9 +372,11 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                 Check((address - begin + offset) % 512U == 0U,
                     "each cnt polling range starts on a window-relative 512B boundary");
                 const uint32_t first = uint32_t((address - begin) / 512U);
-                Check(first == receiver * recordsPerCore &&
-                    copy.blockCount == std::min(recordsPerCore, experts - first),
-                    "cnt polling rounds up the per-core budget to 16 records and clips the tail");
+                const uint32_t expectedStart = receiver * (experts / recvCoreNum) +
+                    std::min(receiver, experts % recvCoreNum);
+                const uint32_t expectedCount = experts / recvCoreNum + (receiver < experts % recvCoreNum);
+                Check(first == expectedStart && copy.blockCount == expectedCount,
+                    "cnt polling balances individual 512B records without rounding ownership to 16");
                 if (write) return;
                 for (uint32_t block = first; block < first + copy.blockCount; ++block) {
                     auto &owner = blockOwners[rank][block];
@@ -393,9 +394,8 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
                 [](int32_t owner) { return owner >= 0; }), "all cnt blocks are polled");
             for (uint32_t publisher = 0; publisher < recvCoreNum; ++publisher) {
                 int32_t sum = 0;
-                if (publisher < activeReceivers)
-                    for (uint32_t i = publisher * recordsPerCore;
-                        i < std::min((publisher + 1U) * recordsPerCore, experts); ++i) sum += expected[rank][i];
+                for (uint32_t i = 0; i < experts; ++i)
+                    if (blockOwners[rank][i] == int32_t(publisher)) sum += expected[rank][i];
                 for (uint32_t consumer = 0; consumer < recvCoreNum; ++consumer) {
                     const uint64_t index = (offset + layout.cumsumOffset) / 4U +
                         (publisher * recvCoreNum + consumer) * 8U;
@@ -472,14 +472,15 @@ int main()
             CheckDeferredCountReceive();
             Run(16, 16, 1, 1, 4);       // L=1, idle count/source cores, zero receive ranks.
             Run(24, 24, 5, 6, 4);       // Non-divisible receiver segments and output tails.
-            Run(16, 48, 1, 1, 4);       // Three active cumsum cores: partial vector repeats.
-            Run(64, 384, 1, 6, 4);      // 32 receivers use 24 aligned 16-record polling ranges.
+            Run(16, 48, 1, 1, 4);       // One or two records per core; no 16-record ownership padding.
+            Run(64, 384, 1, 6, 4);      // All receivers active, including fractional vector groups.
+            Run(32, 384, 128, 6, 2);    // User's 32P case; 28/36 splits counts into 10/11-record ranges.
             Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
             Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
             Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
             Run(64, 384, 48, 6, 4);     // Historical small-BS boundary; now still uses all-core Count.
             Run(64, 384, 96, 6, 2);     // Senders also participate in Count for the common BS96 case.
-            Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology and 63 records/core.
+            Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology with unaligned partition tails.
             Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
             Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.
             if (kEpServerDedupAllCoreCountBsThreshold > 0U && kEpServerDedupAllCoreCountBsThreshold <= 1024U) {

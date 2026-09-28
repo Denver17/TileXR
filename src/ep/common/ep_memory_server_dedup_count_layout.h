@@ -19,8 +19,8 @@ constexpr uint32_t kEpServerDedupCoreNum = 64U;
 #endif
 constexpr uint32_t kEpServerDedupSendCoreNum = TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM;
 static_assert(kEpServerDedupSendCoreNum >= 16U && kEpServerDedupSendCoreNum <= 48U &&
-    kEpServerDedupSendCoreNum % 8U == 0U,
-    "TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM must be 16, 24, 32, 40 or 48");
+    kEpServerDedupSendCoreNum % 4U == 0U,
+    "TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM must be 16..48 in steps of 4");
 constexpr uint32_t kEpServerDedupRecvCoreNum = kEpServerDedupCoreNum - kEpServerDedupSendCoreNum;
 // BS below this threshold uses all 64 cores for Count; otherwise only receivers.
 constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold =

@@ -63,7 +63,6 @@ private:
     static constexpr uint32_t UB_ALIGN_DATA_COUNT = 8U;
     static constexpr uint32_t SIZE_ALIGN_256 = 256U;
     static constexpr uint32_t CNT_GM_STRIDE_BLOCKS = kEpServerDedupCountGmStride / UB_ALIGN;
-    static constexpr uint32_t CNT_RECORDS_PER_CORE_GRANULARITY = 16U;
     static constexpr uint32_t aivUsedAllToAll_ = kEpServerDedupSendCoreNum;
     static constexpr uint32_t aivUsedCumSum_ = kEpServerDedupRecvCoreNum;
 
@@ -230,22 +229,22 @@ __aicore__ inline void ServerDedupCounts::SendExpertCntRange(uint32_t start, uin
 
 __aicore__ inline void ServerDedupCounts::RecvCnt()
 {
-    // Retain 16-record ownership groups; each GM record now owns a 512B slot.
-    const uint32_t recordsPerCore = Ceil(Ceil(rscvStatusNum_, aivUsedCumSum_),
-        CNT_RECORDS_PER_CORE_GRANULARITY) * CNT_RECORDS_PER_CORE_GRANULARITY;
-    activeCumSumCores_ = Ceil(rscvStatusNum_, recordsPerCore);
+    // Each count owns a 512B GM slot, so contiguous ownership can split at any
+    // record. Keep all nonempty receivers active and their loads within one record.
+    activeCumSumCores_ = rscvStatusNum_ < aivUsedCumSum_ ? rscvStatusNum_ : aivUsedCumSum_;
     stagePool_.InitBuffer(scalarBuf_, 3U * UB_ALIGN);
     const uint32_t receiver = aivId_ - aivUsedAllToAll_;
     // Inactive receivers only consume the final prefix in CompleteCumsum.
     if (receiver >= activeCumSumCores_) return;
-    startStatusIndex_ = receiver * recordsPerCore;
-    endStatusIndex_ = startStatusIndex_ + recordsPerCore < rscvStatusNum_ ?
-        startStatusIndex_ + recordsPerCore : rscvStatusNum_;
-    recStatusNumPerCore_ = endStatusIndex_ - startStatusIndex_;
+    SplitToCore(rscvStatusNum_, aivUsedCumSum_, receiver,
+        startStatusIndex_, endStatusIndex_, recStatusNumPerCore_);
     stagePool_.InitBuffer(waitStatusBuf_, Ceil(recStatusNumPerCore_ * UB_ALIGN, SIZE_ALIGN_256) * SIZE_ALIGN_256);
     stagePool_.InitBuffer(gatherMaskOutBuf_, Ceil(rscvStatusNum_ * sizeof(int32_t), UB_ALIGN) * UB_ALIGN);
-    stagePool_.InitBuffer(sumCoreBuf_, aivUsedCumSum_ * UB_ALIGN);
-    stagePool_.InitBuffer(sumLocalBuf_, aivUsedCumSum_ * UB_ALIGN);
+    // Vector publication/cleanup touches complete groups of eight 32B records.
+    // Padding is UB-only; matrix strides and participation use actual core counts.
+    const uint32_t sumBytes = Ceil(aivUsedCumSum_, 8U) * SIZE_ALIGN_256;
+    stagePool_.InitBuffer(sumCoreBuf_, sumBytes);
+    stagePool_.InitBuffer(sumLocalBuf_, sumBytes);
     stagePool_.InitBuffer(sumContinueBuf_, Ceil(aivUsedCumSum_ * sizeof(float), UB_ALIGN) * UB_ALIGN);
     WaitDispatch();
 }

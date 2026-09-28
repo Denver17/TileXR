@@ -886,12 +886,13 @@ cmake --build build/server-dedup-a5-on --target tilexr_ep_dispatch_memory_server
 核数是编译期配置，总 AIV 数保持 64。可以独立配置两个算子，无需修改头文件：
 
 ```bash
-bash build_all.sh dispatch_send_cores=24 combine_send_cores=24
+bash build_all.sh dispatch_send_cores=28 combine_send_cores=28
 bash sync.sh
 bash run.sh -m 1 -n 4 -e 384 -l 100 50 bs=128 topk=6 h=7168 route_mode=balance_shift operator_mode=combine quant_mode=4 fp8_format=e4m3
 ```
 
-Dispatch send 支持 `16/24/32/40/48`，Combine send 另支持 `56`；Recv 自动取 `64-send`。
+Dispatch send 支持 `16..48`、Combine send 支持 `16..56`，均以 4 核为步长；
+Recv 自动取 `64-send`。例如 `28/36` 表示 28 个 send 核和 36 个 recv 核。
 下一组比较时重新构建并同步，例如 `dispatch_send_cores=32 combine_send_cores=40`。
 breakdown 构建可同时传 `breakdown=1`，对应运行模式 `-m 2`。不要把核数作为 `run.sh`
 参数：改变运行时声明不能改变已经编译的 kernel。
@@ -910,6 +911,14 @@ Host、A5 kernel 和测试 consumer 的 CMake 构建。直接使用 CMake 时，
 `Combine traffic mismatch: control_publish_bytes`，且可能显示“执行阶段失败 / ranks=0”。
 字节数校验和 breakdown 核角色解析必须使用清单中的实际核数，不能关闭检查或伪造报告值。
 Host/CPU 回归只能证明配置与验证契约；不同配比的数值正确性和性能仍需 A5 多 rank 实测。
+
+Dispatch Count 的 recv 分工按 cnt 记录总数做连续商余数划分，不再把每核记录数向上补齐到 16。
+每条 cnt 仍占独立 512B GM 槽，因此任意记录边界都保留独占的 512B 轮询/清理范围。
+例如 E=384、recv=36 时，24 核各处理 11 条，12 核各处理 10 条；有工作量的核全部参与 cumsum。
+注意区分任务划分与 UB 对齐：cumsum 的两个向量发布/清理缓冲仍按 8 条 32B 记录补齐，
+以覆盖完整向量 repeat；GM 矩阵步长、通知数量和等待条件必须继续使用真实核数。
+仅放宽核数宏会使 36 核的 1152B 缓冲被 1280B 向量写越界。回归需覆盖新增的
+20/28/36/44 核 Dispatch 配置、Combine 52 核、空任务、非整除 cnt 分段及 BS512 两侧路径。
 
 首次部署时准备环境文件与主机清单；已有文件只检查，不覆盖：
 
