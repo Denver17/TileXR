@@ -29,6 +29,8 @@ class CombineM12ResumeTests(TemporaryRoot):
             artifact.parent.mkdir(parents=True)
             artifact.write_text(package)
             manifest = dict(build_id=package, checkpoint=cfg.checkpoint, mode="production",
+                server_dedup_enabled=True, server_dedup_protocol=2,
+                server_dedup_core_config=dict(dispatch_send_core_num=32, combine_send_core_num=32),
                 architecture=workflow.platform.machine(), server_dedup_profiling=profiling,
                 server_dedup_profile_schema=workflow.measurements.RECORDS_SCHEMA,
                 server_dedup_combine_contract=workflow.COMBINE_M12_ABI,

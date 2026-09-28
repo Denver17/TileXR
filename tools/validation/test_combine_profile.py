@@ -250,7 +250,8 @@ class CombineProfileTests(c5.CombineMultiTests):
                     self.assertEqual(saved["build_id"], phase["build_id"])
                     self.assertEqual(saved["server_dedup_profiling"], phase["profiling"])
                     self.assertEqual(phase["status"], "PASS")
-                    self.assertTrue(phase["build_directory"].endswith("-profile-on" if phase["profiling"] else "-profile-off"))
+                    suffix = "-profile-on-dedup-1" if phase["profiling"] else "-profile-off-dedup-1"
+                    self.assertTrue(phase["build_directory"].endswith(suffix))
             if fault in ("host-performance", "wrong-build", "performance-combine"):
                 self.assertEqual(builds, ["performance"])
             for index, name in enumerate(cases, 1):

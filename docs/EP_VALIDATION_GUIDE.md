@@ -1553,6 +1553,14 @@ breakdown 编译曾在 profile record 转换处报 `casts away qualifiers`：CAN
 
 脚本维护测试：`python3 -m unittest discover -s tools/validation -p 'test_*.py' -v`。真实 C++ consumer 的 Host 生命周期测试为 `python3 tests/ep/integration/test_server_dedup_chain.py -v`，编译实际 consumer 并使用 ACL/comm/launch 替身，覆盖 FP16/BF16 各 16 个进程、真实 TCP barrier、失败边界和清理；它不计入每节点 17 项 Host 测试。这些是开发者测试，不是用户七步流程之外的必执行命令。真实 CANN 构建和真实 SSH 集群通过情况必须以服务器运行日志为准。
 
+维护构建/续跑测试夹具时，模拟安装应使用实际 CMake 命令中的构建目录和安装前缀，
+目录保护测试应在本次配置的真实构建路径上放置文件或符号链接。构建目录按 profiling/dedup
+隔离，生产安装目录仍共用；切换模式不能删除其他配置的构建缓存，但必须使旧 manifest 和同步凭据失效。
+有效 manifest 夹具必须包含 `server_dedup_enabled`、`server_dedup_protocol=2` 和
+`server_dedup_core_config`；负例应从有效夹具中单独破坏目标字段。旧路径和缺失协议字段曾使
+44 个失败项在到达目标校验前就失败或误判目录行为，修正夹具时应保留 ABI、摘要、模式、续跑完整性和目录保护断言。
+这些脚本测试不执行 NPU，不能代替设备正确性与性能验证。
+
 以下三段保留历史版本的开发证据，不代替本次精简后的回归。2026-09-09 初始实现验证：Windows/MSYS2 上 41 项脚本行为测试中 40 项通过，1 项因文件系统未创建真实 symlink 而跳过；PowerShell 5.1 同步入口通过模拟传输执行了实际导出、Bash 解包、刷新和拒绝覆盖检查。全新且路径含空格的部署目录中，四个服务器入口以 `mode=host` 完成实际 C++14 Debug 构建、安装和 17/17 Host/Python 测试。CANN 生产构建、真实 SSH 集群同步及 NPU 执行未在本地验证。
 
 同日普通文件同步修复：临时子模块移除 `.git` 后复现 `fatal: not a tree object`。修复后 52 项脚本回归中 51 项通过，1 项因 MSYS 未创建真实 symlink 而跳过；包含普通同步清单跨模拟节点分发及结果摘要检查。无 `.git`、无导出清单且路径含空格的普通复制目录中，首次构建和修改源码后的重建均通过四个服务器入口，每轮 17/17 Host/Python 测试成功；用 Git 拦截程序确认两轮服务器流程均未调用 Git，hostfile 字节不变。hostfile 保持手动配置，不再自动生成。本地没有 CANN/NPU，生产编译及真实 SSH 集群验证仍需以服务器日志为准。

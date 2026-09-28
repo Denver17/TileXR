@@ -95,6 +95,7 @@ class BuildTests(unittest.TestCase):
         self.addCleanup(patch.stop)
         self.names = sorted(workflow.REQUIRED_TESTS)
         self.commands = []
+        self.install_prefixes = {}
         self.generation = 0
 
     def config(self, mode="host", action="build"):
@@ -107,10 +108,14 @@ class BuildTests(unittest.TestCase):
         self.commands.append((args, Path(log), kwargs))
         if Path(args[0]).name == "core-config":
             return json.dumps(dict(dispatch_send_core_num=32, combine_send_core_num=32))
-        work = self.root / "build/validation"
-        stage = work / "install"
+        if "-B" in args:
+            directory = Path(args[args.index("-B") + 1])
+            self.install_prefixes[directory] = Path(next(
+                arg.split("=", 1)[1] for arg in args if arg.startswith("-DCMAKE_INSTALL_PREFIX=")))
         if "--install" in args:
-            if args[-1] == str(work / "production"):
+            directory = Path(args[args.index("--install") + 1])
+            stage = self.install_prefixes[directory]
+            if directory.name == "production":
                 files = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
                 files += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o"
                           for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup")]
@@ -127,8 +132,9 @@ class BuildTests(unittest.TestCase):
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(f"fixture generation {self.generation}\n", encoding="utf-8")
         if args[0] == "ctest":
+            host_build = Path(args[args.index("--test-dir") + 1])
             output = json.dumps({"tests": [{"name": name,
-                                           "command": [str(work / "host/bin" / name)]}
+                                           "command": [str(host_build / "bin" / name)]}
                                           for name in self.names]})
         else:
             output = "fixture command completed\n"
@@ -148,7 +154,7 @@ class BuildTests(unittest.TestCase):
     def test_rebuild_reuses_fixed_path_and_discards_old_files(self):
         config = self.config()
         first, _ = self.build_fixture(config)
-        work = self.root / "build/validation"
+        work = workflow.validation_build_directory(config)
         (work / "old-object.o").write_text("old object")
         (work / "host/cache").mkdir(parents=True)
         (work / "host/cache/stale-config").write_text("old options")
@@ -156,7 +162,7 @@ class BuildTests(unittest.TestCase):
         old_binary.write_text("obsolete executable")
         second, _ = self.build_fixture(config)
         self.assertNotEqual(first["build_id"], second["build_id"])
-        self.assertEqual(set(path.name for path in (self.root / "build").iterdir()), {"validation"})
+        self.assertEqual(set((self.root / "build").iterdir()), {work})
         self.assertFalse((work / "old-object.o").exists())
         self.assertFalse((work / "host/cache").exists())
         self.assertFalse(old_binary.exists())
@@ -245,7 +251,7 @@ class BuildTests(unittest.TestCase):
         self.assertIn(workflow.REGISTRATION_TEST, [test["name"] for test in manifest["tests"]])
         configure = [args for args, _, _ in self.commands if "-S" in args][-1]
         self.assertIn("-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST=ON", configure)
-        self.assertIn(f"-DTILEXR_INSTALL_PREFIX={self.root / 'build/validation/install'}", configure)
+        self.assertIn(f"-DTILEXR_INSTALL_PREFIX={workflow.validation_build_directory(config) / 'install'}", configure)
 
     def test_chain_build_installs_native_consumer_without_adding_per_host_test(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
@@ -346,7 +352,7 @@ class BuildTests(unittest.TestCase):
 
         def inspect_runtime(actual, stage, log):
             self.assertIs(actual, config)
-            self.assertEqual(stage, self.root / "build/validation/install")
+            self.assertEqual(stage, workflow.validation_build_directory(config) / "install")
             self.assertEqual(self.commands[-1][0][0], "ctest")
             self.assertTrue((stage / "lib/libtilexr-ep.so").is_file())
             self.assertTrue((stage / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_kernel.o").is_file())
@@ -364,13 +370,13 @@ class BuildTests(unittest.TestCase):
             workflow.sync(config)
         runtime.assert_called_once()
         self.assertEqual(workflow.read_json(config.logs / "sync.json")["build_id"], manifest["build_id"])
-        production = self.root / "build/validation/production"
+        production = workflow.validation_build_directory(config) / "production"
         operations = [args[1] for args, _, _ in self.commands if str(production) in args]
         self.assertEqual(operations, ["-S", "--build", "--install"])
 
     def test_file_at_build_directory_is_preserved_and_rejected(self):
         config = self.config()
-        work = self.root / "build/validation"
+        work = workflow.validation_build_directory(config)
         work.parent.mkdir()
         work.write_text("user-owned file\n")
         with self.assertRaisesRegex(ValueError, "构建路径不是目录"):
@@ -390,13 +396,14 @@ class BuildTests(unittest.TestCase):
         if not probe.is_symlink():
             self.skipTest("MSYS 以复制模拟 symlink，无法验证真实链接保护")
         probe.unlink()
-        for relative in ("build", "build/validation", "install", "install/validation"):
-            with self.subTest(path=relative):
-                link = self.root / relative
+        config = self.config()
+        work = workflow.validation_build_directory(config)
+        for link in (work.parent, work, config.install.parent, config.install):
+            with self.subTest(path=link.relative_to(self.root)):
                 link.parent.mkdir(parents=True, exist_ok=True)
                 link.symlink_to(target, target_is_directory=True)
                 with self.assertRaisesRegex(ValueError, "符号链接"):
-                    workflow.clean_build_directory(self.config())
+                    workflow.clean_build_directory(config)
                 self.assertEqual(sentinel.read_text(), "outside content\n")
                 link.unlink()
 

@@ -223,7 +223,10 @@ class CombineM5Tests(c5.CombineMultiTests):
                 self.assertEqual(len(summary["cases"]), 24)
                 self.assertTrue(all(gate["status"] == "PASS" for gate in summary["gates"].values()))
                 self.assertEqual(summary["phases"][0]["install_directory"], summary["phases"][1]["install_directory"])
-                self.assertEqual(summary["phases"][0]["build_directory"], summary["phases"][1]["build_directory"])
+                self.assertNotEqual(summary["phases"][0]["build_directory"], summary["phases"][1]["build_directory"])
+                for phase in summary["phases"]:
+                    suffix = "-profile-on-dedup-1" if phase["profiling"] else "-profile-off-dedup-1"
+                    self.assertTrue(phase["build_directory"].endswith(suffix))
                 for index, name in enumerate(names, 1):
                     self.assertIn(f"[{index}/24] PASS {name}", output.getvalue())
             else:

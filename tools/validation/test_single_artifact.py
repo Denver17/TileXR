@@ -27,13 +27,15 @@ class SingleArtifactTests(unittest.TestCase):
         patch.start()
         self.addCleanup(patch.stop)
 
-    def install_fixture(self, profiling):
-        with mock.patch.dict(os.environ, TILEXR_VALIDATION_BREAKDOWN=str(int(profiling))):
+    def install_fixture(self, profiling, dedup=1):
+        with mock.patch.dict(os.environ, TILEXR_VALIDATION_BREAKDOWN=str(int(profiling)),
+                             TILEXR_VALIDATION_DEDUP=str(dedup)):
             config = workflow.Config("build")
         kernel = config.install / "lib/kernel.o"
         kernel.parent.mkdir(parents=True, exist_ok=True)
         kernel.write_text("profile=" + str(profiling))
         manifest = dict(build_id="build-" + str(profiling), mode=config.mode,
+                        server_dedup_enabled=bool(dedup), server_dedup_protocol=2,
                         server_dedup_core_config=dict(dispatch_send_core_num=32, combine_send_core_num=32),
                         checkpoint=config.checkpoint, architecture=workflow.platform.machine(),
                         server_dedup_profiling=profiling,
@@ -85,12 +87,15 @@ class SingleArtifactTests(unittest.TestCase):
                                 workflow.run(config)
                             launch.assert_not_called()
 
-    def test_rebuild_uses_one_directory_and_invalidates_old_evidence(self):
-        paths = set()
-        for profiling in (False, True, False):
-            config, _ = self.install_fixture(profiling)
+    def test_rebuild_isolates_compile_modes_and_invalidates_shared_install_evidence(self):
+        builds, installs = set(), set()
+        for profiling, dedup in ((False, 1), (True, 1), (False, 0), (True, 0), (False, 1)):
+            config, _ = self.install_fixture(profiling, dedup)
             work = workflow.validation_build_directory(config)
-            paths.add((work, config.install))
+            self.assertEqual(work.name, f"validation-combine-p24-profile-{'on' if profiling else 'off'}-dedup-{dedup}")
+            self.assertEqual(config.install, self.root / "install/validation-combine-p24")
+            builds.add(work)
+            installs.add(config.install)
             work.mkdir(parents=True, exist_ok=True)
             (work / "old-object.o").write_text("old flags")
             workflow.write_json(config.logs / "sync.json", dict(build_id="old"))
@@ -98,10 +103,14 @@ class SingleArtifactTests(unittest.TestCase):
             self.assertFalse((config.install / "manifest.json").exists())
             self.assertFalse((config.logs / "sync.json").exists())
             self.assertFalse((work / "old-object.o").exists())
+            for other in builds - {work}:
+                self.assertEqual((other / "other-mode.o").read_text(), "preserve other configuration")
+            (work / "other-mode.o").write_text("preserve other configuration")
             with self.assertRaises(FileNotFoundError):
                 workflow.verify_build(workflow.Config("sync"), check_run_mode=False)
-        self.assertEqual(len(paths), 1)
-        self.assertEqual(len(list((self.root / "build").iterdir())), 1)
+        self.assertEqual(len(builds), 4)
+        self.assertEqual(len(installs), 1)
+        self.assertEqual(set((self.root / "build").iterdir()), builds)
         self.assertEqual(len(list((self.root / "install").iterdir())), 1)
 
 
