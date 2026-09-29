@@ -11,7 +11,7 @@ from unittest import mock
 
 import measurements as measure
 import operator_measurements as operators
-from test_profiling_fixture import CAPTURE_ID, write_capture
+from test_profiling_fixture import CAPTURE_ID, combine_loop_events, write_capture
 
 
 class OperatorMeasurementTests(unittest.TestCase):
@@ -82,30 +82,7 @@ class OperatorMeasurementTests(unittest.TestCase):
             operators.return_traffic(bad, self.config)
 
     def loop_events(self, rows=10):
-        events = {}
-        for core in range(64):
-            ids = [0x3001, 0x3003, 0x3004]
-            if core < 32:
-                ids += [0x301b, 0x302e, 0x302f]
-                if rows:
-                    for server in range(2):
-                        ids += [0x3030, 0x3031]
-                        if server == 0 and core < rows:
-                            ids += [0x3032, 0x3033, 0x3034, 0x3035]
-                    ids += [0x3036, 0x3037]
-                ids += [0x3021, 0x301c]
-            else:
-                ids += [0x302a, 0x3038, 0x3039]
-                tokens = self.config["bs"] // 32 + (core - 32 < self.config["bs"] % 32)
-                for token in range(tokens):
-                    ids += [0x303a, 0x303b, 0x302c, 0x303c, 0x303d]
-                    for k in range(self.config["topk"]):
-                        ids += [0x303e, 0x303f, 0x3040, 0x3041]
-                    ids += [0x3042, 0x3043, 0x302d]
-                ids += [0x3044, 0x3045, 0x302b]
-            ids += [0x3013, 0x3014, 0x3002]
-            events[core] = [(index * 1000, event) for index, event in enumerate(ids)]
-        return events
+        return combine_loop_events(self.config["bs"], self.config["topk"], rows=rows)
 
     def test_nondedup_loop_detail_and_per_core_totals(self):
         self.config.update(implemented_through="M5", scope="full", server_dedup_enabled=False, rank_size=16)

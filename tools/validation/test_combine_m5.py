@@ -4,6 +4,8 @@ from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
 import os
+from pathlib import Path
+import shutil
 import threading
 import time
 import unittest
@@ -11,6 +13,7 @@ from unittest import mock
 
 import workflow
 import test_combine_multi as c5
+from test_profiling_fixture import combine_loop_events, write_capture
 
 
 class CombineM5Tests(c5.CombineMultiTests):
@@ -134,6 +137,64 @@ class CombineM5Tests(c5.CombineMultiTests):
             invalid[0]["completed"] = 0
             with self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records(invalid, mappings, "run", self.manifest, config.chain, allow_invalid_output=True)
+
+    def test_nondedup_loop_capture_uses_world_size_at_node_entry(self):
+        # Exercise both decoding and final evidence validation through run_ranks.
+        # Only the device subprocess is replaced; parsers and validators are real.
+        os.environ.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE")
+        self.manifest.update(checkpoint=None, server_dedup_enabled=False)
+        for world, rank in ((16, 0), (64, 23)):
+            with self.subTest(world=world, rank=rank):
+                config, _, records = self.m5_records("combine", "breakdown")
+                config.chain.update(server_dedup_enabled=False, moe_expert_num=128)
+                self.assertNotIn("rank_size", config.chain)
+                before = copy.deepcopy(config.chain)
+                mapping = workflow.rank_mapping([dict(host=f"192.0.2.{i + 1}", devices=list(range(8)))
+                                                 for i in range(world // 8)])[rank]
+                row = copy.deepcopy(records[0])
+                for marker in (row, row["chain"]):
+                    marker.update(workflow.rank_record(mapping, "run", self.manifest),
+                                  server_dedup_enabled=False, moe_expert_num=128, peer_count=world)
+                bs, h, topk = (config.chain[key] for key in ("bs", "h", "topk"))
+                rows, blocks = 10, (2 * h + 479) // 480
+                row.update(combine_type1_rows=rows, combine_type2_rows=0, combine_type3_rows=0,
+                    combine_token_num=rows, combine_direct_received_rows=bs * topk, combine_partial_received_rows=0,
+                    combine_partial_member_rows=0, combine_partial_local_members=0,
+                    combine_partial_stage_read_bytes=0, combine_partial_self_read_bytes=0,
+                    combine_partial_payload_bytes=0, combine_partial_wire_bytes=0,
+                    combine_algorithm_bytes=(rows + bs) * 2 * h, combine_stage_copy_bytes=0,
+                    combine_direct_payload_bytes=rows * 2 * h, combine_direct_wire_bytes=rows * blocks * 512,
+                    combine_control_publish_bytes=0, combine_final_read_bytes=bs * topk * 2 * h)
+                mapping_path = config.install / "share/tilexr/profiling/server_dedup_combine.mapping.json"
+                mapping_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(workflow.measurements.profiling_mapping(operator="combine"), mapping_path)
+
+                def execute(argv, log, **kwargs):
+                    env = kwargs["env"]
+                    path = Path(env["TILEXR_PROFILING_COMBINE_RECORDS_PATH"])
+                    write_capture(path, rank=rank, capture_id=env["TILEXR_PROFILING_CAPTURE_ID"],
+                        launches=7, warmup=2, events_by_core=combine_loop_events(bs, topk, world, rows))
+                    marker = dict(workflow.rank_record(mapping, "run", self.manifest), pid=row["pid"],
+                        operator="combine", schema=workflow.measurements.RECORDS_SCHEMA,
+                        records_path=str(path), capture_id=env["TILEXR_PROFILING_CAPTURE_ID"], launches=7,
+                        capture_mode="latest_launch", captured_launches=1, captured_launch=6)
+                    return (workflow.CHAIN_MARKER + json.dumps(row["chain"]) + "\n" +
+                            workflow.COMBINE_CHAIN_MARKER + json.dumps(row) + "\n" +
+                            workflow.OPERATOR_BREAKDOWN_MARKER + json.dumps(marker) + "\n")
+
+                result, cancelled = dict(errors=[]), threading.Event()
+                with mock.patch.object(workflow, "execute", side_effect=execute):
+                    workflow.run_ranks(config, "run", self.manifest, [mapping],
+                                       time.monotonic() + 60, cancelled, result)
+                self.assertEqual(result["errors"], [])
+                self.assertFalse(cancelled.is_set())
+                self.assertEqual(result["validation_status"], "PASS")
+                self.assertEqual(config.chain, before)
+                evidence = result["ranks"][0]["operator_measurements"]["combine"]["breakdown"]
+                self.assertEqual(evidence["status"], "complete")
+                self.assertEqual(evidence["stages_us"]["m3_server_select"]["sample_count"], 32 * world // 8)
+                self.assertEqual(evidence["stages_us"]["m6_loop_input_wait"]["sample_count"], bs * topk)
+                self.assertTrue(Path(evidence["summary_path"]).is_file())
 
     def test_numeric_invalid_keeps_both_captures_without_cancelling_peers(self):
         config, mappings, records = self.m5_records("both", "performance")

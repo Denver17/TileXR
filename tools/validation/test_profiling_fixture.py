@@ -36,3 +36,30 @@ def write_capture(path, rank=0, launches=5, warmup=2, duration=8000, fault="", c
     Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_bytes(header + body)
     return Path(path)
+
+
+def combine_loop_events(bs, topk, rank_size=16, rows=10):
+    events = {}
+    for core in range(64):
+        ids = [0x3001, 0x3003, 0x3004]
+        if core < 32:
+            ids += [0x301b, 0x302e, 0x302f]
+            if rows:
+                for server in range(rank_size // 8):
+                    ids += [0x3030, 0x3031]
+                    if server == 0 and core < rows:
+                        ids += [0x3032, 0x3033, 0x3034, 0x3035]
+                ids += [0x3036, 0x3037]
+            ids += [0x3021, 0x301c]
+        else:
+            ids += [0x302a, 0x3038, 0x3039]
+            tokens = bs // 32 + (core - 32 < bs % 32)
+            for token in range(tokens):
+                ids += [0x303a, 0x303b, 0x302c, 0x303c, 0x303d]
+                for k in range(topk):
+                    ids += [0x303e, 0x303f, 0x3040, 0x3041]
+                ids += [0x3042, 0x3043, 0x302d]
+            ids += [0x3044, 0x3045, 0x302b]
+        ids += [0x3013, 0x3014, 0x3002]
+        events[core] = [(index * 1000, event) for index, event in enumerate(ids)]
+    return events

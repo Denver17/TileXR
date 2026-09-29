@@ -1497,7 +1497,8 @@ def validate_rank_records(records, expected, run_id, manifest, chain_config=None
                     if marker.get("server_dedup_enabled") is not manifest["server_dedup_enabled"]:
                         raise Failure("RESULT_FAILED", "编译 dedup 模式与安装包不一致", rank=mapping["rank"])
             if manifest["checkpoint"] in COMBINE_DEVICE_CHECKPOINTS:
-                chain_config = dict(chain_config, server_dedup_enabled=linked["server_dedup_enabled"])
+                chain_config = dict(chain_config, server_dedup_enabled=linked["server_dedup_enabled"],
+                                    rank_size=mapping["rank_size"])
             if manifest["checkpoint"] in COMBINE_DEVICE_CHECKPOINTS:
                 validate_combine_chain_record(record, mapping, run_id, manifest, chain_config, invalid_output=invalid_output)
                 if manifest["checkpoint"] in COMBINE_MEASUREMENT_CHECKPOINTS and check_measurements:
@@ -1777,7 +1778,10 @@ def run_ranks(config, run_id, manifest, mappings, deadline, cancelled, result):
                                 timer.next("profile_wait")
                                 with profiling_lock:
                                     timer.next("profile_decode")
-                                    evidence = operator_measure.breakdown_record(records_paths[operator], config.chain, rank,
+                                    # The node's chain config has no topology; use the
+                                    # selected global rank mapping, not local worker count.
+                                    evidence = operator_measure.breakdown_record(records_paths[operator],
+                                        dict(config.chain, rank_size=mapping["rank_size"]), rank,
                                         env["TILEXR_PROFILING_CAPTURE_ID"], log.parent / f"profile-rank-{rank}" / operator,
                                         operator=operator, run_id=run_id, kernel_sha=kernel_shas[operator],
                                         mapping_path=config.install / ("share/tilexr/profiling/server_dedup.mapping.json" if operator == "dispatch"

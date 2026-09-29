@@ -1306,6 +1306,12 @@ Host 替身检查只证明事件和报告契约；真实耗时及流水扰动需
 记录、循环顺序、空任务、容量对齐及开关打点的同步序列对照。blue CANN 9.1/A5 的
 profiling OFF/ON 均完成 Dispatch/Combine kernel 和 owning Host 库编译；未运行 NPU 用例。
 
+节点解析注意：`config.chain` 不含拓扑 `rank_size`。新增按 server 数量校验循环次数时，
+解析入口和后续测量校验入口都必须从已选定的 `mapping["rank_size"]` 补入全局卡数，
+不能使用本节点 worker 数或固定 64。否则设备执行、校验和 records 导出均可完成，
+Python 仍会以 `KeyError: 'rank_size'` 判采集失败并取消其他 rank。
+回归需经过真实 `run_ranks` 入口且不手工给 chain 补字段；只测已补全配置的 reader 会漏报。
+
 ### 通用采集与导出
 
 在首节点逐条执行：
