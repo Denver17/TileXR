@@ -6,7 +6,6 @@
 #include "tilexr_ep_server_dedup_counts.h"
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
-#include "combine_server_order_reference.h"
 #include "server_dedup_test_memory.h"
 #include "server_dedup_profile_capture.h"
 #include "../integration/server_dedup_source_send_reference.h"
@@ -108,7 +107,6 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     args.rankSize = ranks;
     args.rank = source;
     const uint32_t localExperts = experts / ranks;
-    const auto serverOrder = CombineServerOrderReference::Order(ranks / 8U, source / 8U);
     auto data = TileXREp::TileXREpServerDedupDataLayout(bs, h, k, experts, false);
     std::vector<int32_t> ids(bs * k);
     std::vector<float> weights(bs * k);
@@ -243,15 +241,17 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 "disabled mode outputs every real route weight");
         }
         if (!dedup) {
-            uint32_t ordinal = 0U;
-            for (const auto server : serverOrder) for (uint32_t i = 0; i < bs * k; ++i) {
-                if (uint32_t(ids[i]) / (8U * localExperts) != server) continue;
-                auto it = std::find_if(writes.begin(), writes.end(), [&](const Write &w) {
-                    return w.token == i / k && w.k == i % k;
-                });
-                Check(it != writes.end() && it->core == ordinal % sendCoreNum, "route ownership continues across both server halves");
-                ++ordinal;
+            uint32_t nextRoute = 0U;
+            for (uint32_t core = 0; core < sendCoreNum; ++core) {
+                std::vector<uint32_t> actual;
+                for (const auto &write : writes) if (write.core == core)
+                    actual.push_back(write.token * k + write.k);
+                std::vector<uint32_t> expected(bs * k / sendCoreNum + (core < bs * k % sendCoreNum));
+                std::iota(expected.begin(), expected.end(), nextRoute);
+                Check(actual == expected, "non-dedup core sends its contiguous original route range in order");
+                nextRoute += uint32_t(expected.size());
             }
+            Check(nextRoute == bs * k, "contiguous route ranges cover the full input");
         }
         for (uint32_t core = 0; core < sendCoreNum; ++core) {
             bool directStarted = false;
@@ -262,14 +262,12 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 const uint32_t start = core * (bs / sendCoreNum) + std::min(core, bs % sendCoreNum);
                 const uint32_t count = bs / sendCoreNum + (core < bs % sendCoreNum);
                 if (dedup) Check(write.token >= start && write.token < start + count, "same core owns both stages of a token");
-                if (write.entries == 0) {
+                if (dedup && write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
                     const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
-                    const uint32_t serverStep = dedup
-                        ? (server + ranks / 8U - source / 8U) % (ranks / 8U)
-                        : CombineServerOrderReference::Position(serverOrder, server);
+                    const uint32_t serverStep = (server + ranks / 8U - source / 8U) % (ranks / 8U);
                     Check(!directStarted || serverStep >= previousServerStep,
-                        "DIRECT uses cyclic server order with dedup and half order without dedup");
+                        "dedup DIRECT uses cyclic server order");
                     Check(!directStarted || serverStep != previousServerStep || index > previousDirect,
                         "DIRECT preserves token/k order within each destination server");
                     directStarted = true; previousDirect = index; previousServerStep = serverStep;
@@ -337,6 +335,12 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
 int main()
 {
     try {
+            // Interleaved servers must not reorder or redistribute original routes.
+            // BS=1 also separates route send ownership from token weight-copy ownership.
+            if (!dedup) {
+                for (uint32_t bs : {1U, 13U, sendCoreNum + 1U})
+                    Run(32, 384, bs, 64, 6, false, 16, 3, {192, 0, 96, 288, 1, 193});
+            }
             CheckDeferredCountSender();
             CheckReceiveUnpack(32, false);
             CheckReceiveUnpack(240, false); // Exactly one 480B data block.

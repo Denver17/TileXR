@@ -6,7 +6,6 @@
 #include "ep_memory_server_dedup_data_layout.h"
 #include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_profile.h"
-#include "tilexr_ep_server_dedup_select.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -78,10 +77,6 @@ public:
             const uint32_t remoteServers = args_->rankSize / 8U - 1U;
             const uint32_t maxGroups = remoteServers < k_ / 2U ? remoteServers : k_ / 2U;
             if (maxGroups != 0U) Allocate(firstHopBuf_, uint32_t(TileXREpDedupAlign(maxGroups * 4U, 32U)));
-
-        } else {
-            // Two 256-route lists plus two comparison masks, disjoint from q/quant scratch.
-            Allocate(routeSelectBuf_, 2112U);
         }
 
         // Assert the allocation and Host budget stay in lockstep before subtracting.
@@ -177,33 +172,15 @@ private:
     __aicore__ inline void SendWithoutDedup(TQue<QuePosition::VECIN, 1> &input, ServerDedupProfile &profile)
     {
         profile.Begin(EpDedupDetailMetric::SendDirect);
-        auto indices = routeSelectBuf_.Get<int32_t>();
-        auto selected = indices[256U];
-        auto mask = routeSelectBuf_.Get<uint8_t>()[2048U];
-        auto upper = mask[32U];
-        const uint32_t servers = args_->rankSize / 8U, expertsPerServer = localExperts_ * 8U;
-        uint32_t owner = 0U;
-        for (uint32_t step = 0; step < servers; ++step) {
-            const uint32_t server = ServerDedupHalfOrder(servers, args_->rank / 8U, step);
-            // Tiling bounds selection UB without changing the stable compact stream.
-            for (uint32_t begin = 0; begin < bs_ * k_; begin += 256U) {
-                const uint32_t count = bs_ * k_ - begin < 256U ? bs_ * k_ - begin : 256U;
-                ServerDedupRankMask(mask, upper, routeIds_[begin], int32_t(server * expertsPerServer),
-                    int32_t((server + 1U) * expertsPerServer), count);
-                CreateVecIndex(indices, int32_t(begin), count);
-                PipeBarrier<PIPE_V>();
-                uint64_t matched = 0U;
-                GatherMask(selected, indices, mask.template ReinterpretCast<uint32_t>(), true,
-                    count, {1U, 1U, 0U, 0U}, matched);
-                Sync<HardEvent::V_S>();
-                const uint32_t first = ServerDedupFirstOwned(GetBlockIdx(), owner, kEpServerDedupSendCoreNum);
-                owner = (owner + uint32_t(matched)) % kEpServerDedupSendCoreNum;
-                for (uint32_t task = first; task < matched; task += kEpServerDedupSendCoreNum) {
-                    const uint32_t i = uint32_t(selected.GetValue(task));
-                    const uint32_t expert = uint32_t(routeIds_.GetValue(i));
-                    SendPacket(input, i / k_, i % k_, expert, CalTokenSendExpertCnt(expert, i), 0U, profile);
-                }
-            }
+        // Route ownership is independent of the token partition used to copy weights.
+        const uint32_t total = bs_ * k_, core = GetBlockIdx();
+        const uint32_t base = total / kEpServerDedupSendCoreNum;
+        const uint32_t remainder = total % kEpServerDedupSendCoreNum;
+        const uint32_t begin = core * base + (core < remainder ? core : remainder);
+        const uint32_t count = base + (core < remainder ? 1U : 0U);
+        for (uint32_t i = begin; i < begin + count; ++i) {
+            const uint32_t expert = uint32_t(routeIds_.GetValue(i));
+            SendPacket(input, i / k_, i % k_, expert, CalTokenSendExpertCnt(expert, i), 0U, profile);
         }
         profile.End(EpDedupDetailMetric::SendDirect);
     }
@@ -350,7 +327,6 @@ private:
     GlobalTensor<int32_t> ids_;
     GlobalTensor<float> weights_, weightOut_;
     GlobalTensor<uint32_t> maskOut_;
-    TBuf<> routeSelectBuf_;
     TBuf<> idsBuf_, qDstBuf_, qSubBuf_, qWorkBuf_, quantBuf_;
     TBuf<> weightInBuf_, weightOutBuf_, maskBuf_, directBuf_, serverBuf_, firstHopBuf_, outBuf_;
     LocalTensor<int32_t> routeIds_;

@@ -70,7 +70,7 @@ TILEXR_EP_DATA_INLINE uint64_t TileXREpServerDedupSendFixedUbBytes(uint32_t bs, 
         const uint32_t groups = ranks / 8U - 1U < k / 2U ? ranks / 8U - 1U : k / 2U;
         bytes += TileXREpDedupAlign(uint64_t(owned) * k * 4U, 32U) + TileXREpDedupAlign(uint64_t(owned) * 4U, 32U) +
             TileXREpDedupAlign(uint64_t(owned) * k * 16U, 32U) + 64U + TileXREpDedupAlign(groups * 4U, 32U);
-    } else bytes += 2112U;
+    }
     return bytes;
 }
 

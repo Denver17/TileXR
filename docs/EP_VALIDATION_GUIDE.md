@@ -843,7 +843,24 @@ Clang 15.0.5 的 A5 kernel 与 `tilexr-ep` Host 库 profiling OFF/ON 均编译�
 
 固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 申请 **8 GiB 通信域**（8188 MiB 数据 + 4 MiB runtime Flag），底层另有 1 MiB 地址偏移余量。两个固定 4 GiB 窗口由 `magic % 2` 选择；每窗前 2 MiB 是 cnt/cumsum/prefix/counter，后续 4090 MiB 可用于 Token 区，最后 4 MiB 保留。第一窗尾部空置，第二窗尾部归 runtime；任何 shape 均不得改变窗跨度或越过单窗上限。总专家数 `0<E<=1024` 且能被 rank 数整除。
 
-每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
+去重模式下，每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
+
+非去重 Dispatch（`dedup=0`）从 2026-09-29 起按原始 `expertIds[BS,TopK]` 的展平路由分核，
+不再按 server 重排或轮转分配。设 `N=BS*TopK`、send 核数为 `S`，核 `c` 从
+`c*(N/S)+min(c,N%S)` 开始，顺序发送 `N/S+(c<N%S)` 条路由（除法取整）。
+例如 `BS=1/TopK=6` 时核 0～5 分别发送原始 k0～k5；跨核到达顺序不作保证。
+发送分区与权重复制的连续 token 分区独立，不能因权重分区为空跳过该核发送；
+完整路由表仍用于按原始下标计算 expert 的 q，不能将 q 改成本核局部序号。
+移除路由筛选缓冲时，Host/kernel 共用的固定 UB 预算同步减少 2112B，避免触发预算与实际分配不一致；
+可用发送 lane 仍按剩余 UB 自动计算、最多 8 路。Combine 的 server 顺序不受此变更影响。
+Host 替身验证发送归属、顺序、原始 q 槽位、权重及流水复用；真实多卡正确性与性能需 A5 实测。
+
+本次验证：非去重 send=28 的 60 项 CTest、去重默认 send=32 的 46 项 Server Dedup CTest 均取得通过结果；
+其中并发运行被容器 OOM 终止的 3 项 counts 测试串行复跑通过。非去重 send=16～48 每 4 核一档，
+九档 source_send 的 profiling OFF/ON 共 18 项通过；新顺序断言已确认能检出旧 server 排序实现。
+blue CANN 9.1.0 / ccec Clang 15.0.5、A5 `dav-c310-vec`、send=28、profiling OFF 下，
+`dedup=0/1` 的 `tilexr-ep` 及其 kernel 构建通过，源码摘要与编译快照一致。
+构建证据保留在开发工作区 `build/route-contiguous-evidence/`；未执行 NPU 测试，不据此认定性能提升。
 
 接收以完整前缀确定连续输出行，在本次接收核组按 floor 分区；tokenPos/pendingIdx 均只存 UB。每批独立探测最多 16 个 Token 的全部块、全部 8 个 Flag word，记录稳定索引，按原 pending 位置逆序消费就绪项并末项覆盖删除。整批未就绪时继续扫描；有删除则重查批起点的换入项。
 
