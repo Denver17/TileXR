@@ -32,7 +32,7 @@ int TileXREpLaunchCombineMemoryServerDedupKernel(const EpMemoryServerDedupCombin
     uint32_t profilingSlot = UINT32_MAX;
     // Independent latest state: Dispatch's reservation width never constrains
     // Combine. Capture failure is retained by the runtime for export validation.
-    TileXRProfilingReserveLatestCombineLaunch(p.comm, kEpServerDedupCombineProfilingRecordsPerLaunch,
+    TileXRProfilingReserveLatestCombineLaunch(p.comm, EpCombineProfilingRecordsPerLaunch(tiling.bs, tiling.topK),
         &profilingSlot);
     tiling.profilingEnabled = profilingSlot == 0U ? 1U : 0U;
 #endif

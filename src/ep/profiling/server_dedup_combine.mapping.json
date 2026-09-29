@@ -109,6 +109,102 @@
       "track": "token_issue",
       "begin": 12332,
       "end": 12333
+    },
+    {
+      "name": "m3_prepare",
+      "category": "setup",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12334,
+      "end": 12335
+    },
+    {
+      "name": "m3_server_select",
+      "category": "setup",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12336,
+      "end": 12337
+    },
+    {
+      "name": "m3_loop_read",
+      "category": "copy",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12338,
+      "end": 12339
+    },
+    {
+      "name": "m3_loop_pack_send",
+      "category": "issue",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12340,
+      "end": 12341
+    },
+    {
+      "name": "m3_retire",
+      "category": "wait",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12342,
+      "end": 12343
+    },
+    {
+      "name": "m6_prepare",
+      "category": "setup",
+      "parent": "m6_final",
+      "track": "loop_detail",
+      "begin": 12344,
+      "end": 12345
+    },
+    {
+      "name": "m6_ready_wait",
+      "category": "wait",
+      "parent": "m6_final",
+      "track": "loop_detail",
+      "begin": 12346,
+      "end": 12347
+    },
+    {
+      "name": "m6_token_prepare",
+      "category": "setup",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12348,
+      "end": 12349
+    },
+    {
+      "name": "m6_loop_input_wait",
+      "category": "wait",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12350,
+      "end": 12351
+    },
+    {
+      "name": "m6_loop_compute_prefetch",
+      "category": "compute",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12352,
+      "end": 12353
+    },
+    {
+      "name": "m6_output",
+      "category": "issue",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12354,
+      "end": 12355
+    },
+    {
+      "name": "m6_retire",
+      "category": "wait",
+      "parent": "m6_final",
+      "track": "loop_detail",
+      "begin": 12356,
+      "end": 12357
     }
   ]
 }

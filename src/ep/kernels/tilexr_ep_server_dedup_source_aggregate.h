@@ -59,6 +59,7 @@ public:
         if (count_ == 0U) return 0U;
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) SetFlag<HardEvent::V_MTE2>(lane);
         uint32_t remaining = count_, scan = 0U, completed = 0U;
+        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6ReadyBegin);
         while (remaining != 0U) {
             const uint32_t token = pending_.GetValue(scan);
             const uint32_t mask = kEpServerDedupEnable ? masks_.GetValue(token - begin_) : 0U;
@@ -67,11 +68,13 @@ public:
                 if (++scan == remaining) scan = 0U;
                 continue;
             }
+            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6ReadyEnd);
             // One interval per ready task; failed readiness probes emit no records.
             Mark(kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenBegin : kEpServerDedupCombineProfileM6TokenBegin);
             // No further probes after this point: clear every original token's
             // complete K*N flags, including mask-inactive slots. This source is
             // independent of the final token's in-flight payload and yOut.
+            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6PrefetchBegin);
             if (remaining == 1U) ClearFlags();
             if (dtype_ == TileXR::TILEXR_DATA_TYPE_FP16) Aggregate<half>(token, mask, completed);
             else Aggregate<bfloat16_t>(token, mask, completed);
@@ -79,6 +82,7 @@ public:
             pending_.SetValue(scan, pending_.GetValue(remaining - 1U));
             --remaining; ++completed;
             if (scan == remaining) scan = 0U; // re-probe the swapped real TokenId
+            if (!kEpServerDedupEnable && remaining != 0U) Mark(kEpServerDedupCombineProfileM6ReadyBegin);
         }
         for (uint32_t lane = 0; lane < inputLanes_; ++lane) WaitFlag<HardEvent::V_MTE2>(lane);
         return retiredOutputs_;
@@ -198,10 +202,14 @@ private:
         uint32_t nextK = 0U, loaded = 0U;
         for (; nextK < k_ && loaded < inputLanes_; ++nextK)
             if (!kEpServerDedupEnable || ((mask >> nextK) & 1U)) Load(token, nextK, loaded++);
+        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6PrefetchEnd);
         uint32_t member = 0U;
         for (uint32_t k = 0U; k < k_; ++k) if (!kEpServerDedupEnable || ((mask >> k) & 1U)) {
+            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6InputWaitBegin);
             const uint32_t lane = (inputSequence_ + member) % inputLanes_;
             WaitFlag<HardEvent::MTE2_V>(lane);
+            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6InputWaitEnd);
+            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6ComputeBegin);
             Cast(cast_, inputs_[finalLayout_.inputOffsets[lane] / 2U].template ReinterpretCast<T>(), RoundMode::CAST_NONE, h_);
             SetFlag<HardEvent::V_MTE2>(lane);
             while (kEpServerDedupEnable && nextK < k_ && ((mask >> nextK) & 1U) == 0U) ++nextK;
@@ -216,7 +224,9 @@ private:
             }
             PipeBarrier<PIPE_V>();
             ++member;
+            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6ComputeEnd);
         }
+        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6OutputBegin);
         inputSequence_ += member;
         const uint32_t outputLane = finalLayout_.outputSlots[completed % outputLanes_];
         WaitFlag<HardEvent::MTE3_V>(outputLane);
@@ -225,6 +235,7 @@ private:
         SetFlag<HardEvent::V_MTE3>(outputLane); WaitFlag<HardEvent::V_MTE3>(outputLane);
         DataCopyPad(output_[uint64_t(token) * h_], output, {1U, h_ * 2U, 0U, 0U, 0U});
         SetFlag<HardEvent::MTE3_V>(outputLane);
+        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6OutputEnd);
     }
 
     LocalTensor<uint8_t> scratch_;

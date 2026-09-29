@@ -1261,6 +1261,53 @@ python3 tools/validation/export_expert_ids.py /path/to/run/summary.json
 
 ## Breakdown：标准 records.v1 打点
 
+### 非去重 Combine：准备与循环耗时
+
+`dedup=0` 的 breakdown 在 `m3_direct` / `m6_final` 内增加以下区间；
+`dedup=1` 保持原有模块和 token 打点。构建并同步后，沿用原 case，把运行模式改为 `-m 2`：
+
+```bash
+bash build_all.sh dedup=0 breakdown=1
+bash sync.sh
+bash run.sh -m 2 -n 8 -e 128 -l 100 50 bs=256 topk=6 h=5120 route_mode=balance_shift operator_mode=both quant_mode=4 fp8_format=e4m3 seed=42
+```
+
+| 模块 | 区间 | 范围 |
+| --- | --- | --- |
+| M3 | `m3_prepare`、`m3_server_select` | 循环前的行索引/缓冲区准备；每个 server 的筛选及任务分配 |
+| M3 每条发送任务 | `m3_loop_read` | 路由三元组读取、输入 lane 等待、expertOut 读入及已有 MTE2_V 等待 |
+| M3 每条发送任务 | `m3_loop_pack_send` | 输出 lane 等待、Vector 打包、已有 V_MTE3 等待、远端发送下发 |
+| M3 收尾 | `m3_retire` | 现有输入/输出 lane 归还等待 |
+| M6 | `m6_prepare`、`m6_ready_wait` | InitM6；从开始扫描到下一个 token 就绪的整段等待，包含失败重试 |
+| M6 每个 token | `m6_token_prepare` | 首批输入预取下发；最后一个 token 还包含全部本核 Flag 清理下发 |
+| M6 每轮 top-k | `m6_loop_input_wait` | 本轮输入的已有 MTE2_V 等待 |
+| M6 每轮 top-k | `m6_loop_compute_prefetch` | Cast、后续输入预取、加权累加及原有 Vector barrier |
+| M6 输出/收尾 | `m6_output`、`m6_retire` | 每个 token 的输出 lane 等待、转换及写回下发；模块末尾输出 lane 归还等待 |
+
+标准 trace 保留每个真实区间；`instance_id` / `task_sequence` 是本核本阶段执行序号，
+M6 top-k 另附 `token_sequence` 和 `topk_iteration`（均从 0 开始），并非原始 TokenId。
+每 rank 摘要的 `stages_us` 给出样本数、总和、中位数、最短/最长；
+新增 `core_totals_us.<stage>.cores` 给出各核该阶段的累计微秒数。
+跨 rank 报告中的 `core_totals_us` 先取各 rank 的每核累计最大值，再汇总 min/median/max。
+不同阶段的最大值可能来自不同核，不能相加当作 kernel 时长；父模块与子区间也不能重复累加。
+
+这些点只读取 Scalar 时钟和写入 profiling GM，不添加同步。发送和写回区间结束表示下发，
+不等于 DMA 完成；计算区间包含预取等待，不能当作纯 Vector 执行时间。
+打点会扰动流水，性能比较仍使用 `breakdown=0` 产物和 `-m 1`。
+
+维护要点：就绪轮询次数没有静态上界，按一次就绪前的整段等待记录一对事件，避免轮询把
+采集区写满。非去重 M6 每核预算为 `align16(ceil(bs/recv_cores)*(8+4*topk)+128)`，
+与原 65,536 条下限取大；Host reservation、kernel writer、consumer 初始化使用同一函数。
+16 条对齐来自 runtime 环境容量契约，而非 writer 的 8 条 Publish 对齐。
+自定义调用方需在 communicator 初始化前设置足够的 `TILEXR_PROFILING_RECORDS_PER_CORE`。
+Host 替身检查只证明事件和报告契约；真实耗时及流水扰动需在 A5 上验证。
+
+2026-09-29 验证：6 项 C++/consumer 检查和 70 项报告回归通过，包含重试等待的有界
+记录、循环顺序、空任务、容量对齐及开关打点的同步序列对照。blue CANN 9.1/A5 的
+profiling OFF/ON 均完成 Dispatch/Combine kernel 和 owning Host 库编译；未运行 NPU 用例。
+
+### 通用采集与导出
+
 在首节点逐条执行：
 
 ```bash
@@ -1286,7 +1333,7 @@ bash run.sh -n 2 -e 96 -m 2 -l 3 2
 
 原粗粒度 `Mark()` 自带的 profiling-only `PIPE_ALL` 已移除；通信代码原有 SetFlag/WaitFlag、PIPE_ALL、SyncAll 和完成协议保留。时间戳表示 Scalar 到达点位的时间，只有已有完成 fence 才赋予相应完成语义：`acquire_load` 的终点在已有 MTE2_S 之后，packet/output/relay 的 issue 不代表 DMA 完成，drain issue 也不表示流水已经排空。新旧 breakdown 数值不能直接作为无扰动性能 A/B；直接 GM 写和读时钟仍可能影响调度，普通性能基线关闭设备打点。
 
-整批执行固定为每核预留 65,536 条，共 64 核，即每 rank 48MiB GM 有效载荷预算，另有约 4KiB 的计数区。每次 launch 覆盖本 core 的上一轮记录，consumer 在 communicator 初始化前将容量固定为 65,536，不再乘 `warmup+loops`，也不再受原 1,023 轮槽位上限限制。例如 50 次预热加 100 次测量，打点 GM 和当前 Host 原始回读均由每 rank 7,200MiB 降为 48MiB；8 卡服务器共 384MiB，64 卡共 3GiB。这是缓冲区容量，导出文件只含最后一轮实际命中记录，报告内存仍随该轮事件数增长。
+Dispatch 整批执行默认每核预留 65,536 条，共 64 核，即每 rank 48MiB GM 有效载荷预算，另有约 4KiB 的计数区。每次 launch 覆盖本 core 的上一轮记录，consumer 在 communicator 初始化前设置容量（非去重 Combine 的较大 shape 按上节公式扩容），不再乘 `warmup+loops`，也不再受原 1,023 轮槽位上限限制。例如 50 次预热加 100 次测量，打点 GM 和当前 Host 原始回读均由每 rank 7,200MiB 降为 48MiB；8 卡服务器共 384MiB，64 卡共 3GiB。这是缓冲区容量，导出文件只含最后一轮实际命中记录，报告内存仍随该轮事件数增长。
 
 Host 使用标准库 `TileXRProfilingReserveLatestLaunch` 复用 slot 0，独立于通信 magic；kernel 使用 `DirectProfilingWriter::InitializeLatest` 在入口重置本 core 的有效条数和丢点计数，然后沿用标准 Record/Publish。只重置计数，不清空整块 GM；latest exporter 只扫描发布的有效范围，所以较短或空的最后一轮不会混入旧尾部，上一轮 overflow 也不会污染本轮丢点数。最后一轮槽满仍报告 incomplete，通信继续执行；先前轮次的详细记录和丢点信息已被覆盖，不对其完整性作结论。
 

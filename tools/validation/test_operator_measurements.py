@@ -65,12 +65,83 @@ class OperatorMeasurementTests(unittest.TestCase):
         self.assertNotIn("m4_partial", evidence["stages_us"])
         self.assertNotIn("m5_final", evidence["stages_us"])
         self.assertEqual(operators.return_stage_counts(self.config)["m6_final"], 32)
+        self.config["rank_size"] = 16
+        path = write_capture(self.root / "m6-loops.records.v1", events_by_core=self.loop_events())
+        detailed = operators.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "m6-loops",
+            operator="combine", run_id="run-test", kernel_sha=self.hashes["combine"], record=record)
+        operators._validate_evidence(detailed, self.config, "combine", 0, "run-test", self.hashes["combine"], record)
+        bad_count = copy.deepcopy(detailed)
+        bad_count["stages_us"]["m3_loop_read"]["sample_count"] -= 1
+        with self.assertRaisesRegex(ValueError, "required module/core-role"):
+            operators._validate_evidence(bad_count, self.config, "combine", 0, "run-test", self.hashes["combine"], record)
         bad = dict(record, combine_direct_received_rows=575)
         with self.assertRaisesRegex(ValueError, "M6 requires"):
             operators.return_traffic(bad, self.config)
         bad = dict(record, combine_control_publish_bytes=32)
         with self.assertRaisesRegex(ValueError, "control_publish_bytes"):
             operators.return_traffic(bad, self.config)
+
+    def loop_events(self, rows=10):
+        events = {}
+        for core in range(64):
+            ids = [0x3001, 0x3003, 0x3004]
+            if core < 32:
+                ids += [0x301b, 0x302e, 0x302f]
+                if rows:
+                    for server in range(2):
+                        ids += [0x3030, 0x3031]
+                        if server == 0 and core < rows:
+                            ids += [0x3032, 0x3033, 0x3034, 0x3035]
+                    ids += [0x3036, 0x3037]
+                ids += [0x3021, 0x301c]
+            else:
+                ids += [0x302a, 0x3038, 0x3039]
+                tokens = self.config["bs"] // 32 + (core - 32 < self.config["bs"] % 32)
+                for token in range(tokens):
+                    ids += [0x303a, 0x303b, 0x302c, 0x303c, 0x303d]
+                    for k in range(self.config["topk"]):
+                        ids += [0x303e, 0x303f, 0x3040, 0x3041]
+                    ids += [0x3042, 0x3043, 0x302d]
+                ids += [0x3044, 0x3045, 0x302b]
+            ids += [0x3013, 0x3014, 0x3002]
+            events[core] = [(index * 1000, event) for index, event in enumerate(ids)]
+        return events
+
+    def test_nondedup_loop_detail_and_per_core_totals(self):
+        self.config.update(implemented_through="M5", scope="full", server_dedup_enabled=False, rank_size=16)
+        path = write_capture(self.root / "loops.records.v1", events_by_core=self.loop_events())
+        evidence = measure.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "loops",
+                                           operator="combine")
+        self.assertEqual(evidence["status"], "complete")
+        self.assertEqual(evidence["stages_us"]["m6_loop_input_wait"]["sample_count"], 576)
+        self.assertEqual(evidence["stages_us"]["m6_loop_input_wait"]["median"], 1)
+        self.assertEqual(evidence["core_totals_us"]["m6_loop_input_wait"]["maximum"], 18)
+        self.assertEqual(len(evidence["core_totals_us"]["m6_loop_input_wait"]["cores"]), 32)
+        summary = measure.summarize_measurements([
+            dict(rank=rank, server_dedup_enabled=False, breakdown=evidence) for rank in range(16)],
+            self.config, self.hashes["combine"], operator="combine")
+        self.assertEqual(summary["breakdown"]["core_totals_us"]["m6_loop_input_wait"]["median"], 18)
+        self.assertIn("每核累计最大值（跨 rank） m6_loop_input_wait", measure.render_measurements(summary))
+        run = measure.combine_breakdown_timeline(measure.load_profile_run(
+            measure.profiling_mapping(operator="combine"), [path]), self.config)
+        lane = next(lane for lane in run.launches[0].lanes if lane.core == 32)
+        loops = [s for s in lane.samples if s.name == "m6_loop_compute_prefetch"]
+        self.assertEqual([s.instance_id for s in loops], list(range(18)))
+        self.assertEqual(loops[7].attributes["token_sequence"], 1)
+        self.assertEqual(loops[7].attributes["topk_iteration"], 1)
+        # Empty send tasks and receive cores must retain preparation/retirement
+        # but must not invent any loop samples or readiness waits.
+        self.config["bs"] = 3
+        path = write_capture(self.root / "empty.records.v1", events_by_core=self.loop_events(rows=0))
+        empty = measure.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "empty", operator="combine")
+        self.assertEqual(empty["stages_us"]["m6_loop_input_wait"]["sample_count"], 18)
+        self.assertNotIn("m3_loop_read", empty["stages_us"])
+        # Losing an entire pair is syntactically valid; role/count checks must catch it.
+        events = self.loop_events()
+        events[32] = [item for item in events[32] if item[1] not in (0x303e, 0x303f)]
+        path = write_capture(self.root / "missing.records.v1", events_by_core=events)
+        with self.assertRaisesRegex(ValueError, "loop/core role coverage"):
+            measure.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "missing", operator="combine")
 
     def records(self, mode="both"):
         return [dict(rank=rank, run_id="run-test", status="PASS", operator_measurements={

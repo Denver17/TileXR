@@ -1,12 +1,22 @@
 #ifndef TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_PROFILE_H
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_PROFILE_H
 #include <cstdint>
+#include "ep_memory_server_dedup_combine_config.h"
 namespace TileXREp {
-// Latest capture only. Covers two records per token plus module boundaries:
-// Each Recv core owns M4 <=1250 rows and M5 <20480 tokens (metadata alone
-// costs >=12 bytes/token in 240 KiB). M6 costs >=8 bytes/token and
-// owns fewer than 30720 tokens. Both modes fit 65536 records.
+// Latest capture only. Dedup token intervals and M3 (<=10000 total rows)
+// fit the floor. Non-dedup M6 needs 8 records/token plus 4/top-k member.
+// Keep Host reservation, device writer and runner allocation identical.
 constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 65536U;
+#if defined(__CCE__) && defined(__CCE_IS_AICORE__)
+__aicore__ inline
+#endif
+constexpr uint32_t EpCombineProfilingRecordsPerLaunch(uint32_t bs, uint32_t k)
+{
+    const uint32_t required = kEpServerDedupEnable ? 0U :
+        EpCombineAlign(EpCombineM5TokenCount(bs) * (8U + 4U * k) + 128U, 16U);
+    return required > kEpServerDedupCombineProfilingRecordsPerLaunch ? required :
+        kEpServerDedupCombineProfilingRecordsPerLaunch;
+}
 constexpr uint32_t kEpServerDedupCombineProfileStart = 0x3001U;
 constexpr uint32_t kEpServerDedupCombineProfileEnd = 0x3002U;
 constexpr uint32_t kEpServerDedupCombineProfileInitBegin = 0x3003U;
@@ -53,5 +63,30 @@ constexpr uint32_t kEpServerDedupCombineProfileM6Begin = 0x302aU;
 constexpr uint32_t kEpServerDedupCombineProfileM6End = 0x302bU;
 constexpr uint32_t kEpServerDedupCombineProfileM6TokenBegin = 0x302cU;
 constexpr uint32_t kEpServerDedupCombineProfileM6TokenEnd = 0x302dU;
+// Non-dedup preparation and loop intervals; no additional completion fences.
+constexpr uint32_t kEpServerDedupCombineProfileDirectPrepareBegin = 0x302eU;
+constexpr uint32_t kEpServerDedupCombineProfileDirectPrepareEnd = 0x302fU;
+constexpr uint32_t kEpServerDedupCombineProfileDirectSelectBegin = 0x3030U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectSelectEnd = 0x3031U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectReadBegin = 0x3032U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectReadEnd = 0x3033U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectSendBegin = 0x3034U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectSendEnd = 0x3035U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectDrainBegin = 0x3036U;
+constexpr uint32_t kEpServerDedupCombineProfileDirectDrainEnd = 0x3037U;
+constexpr uint32_t kEpServerDedupCombineProfileM6PrepareBegin = 0x3038U;
+constexpr uint32_t kEpServerDedupCombineProfileM6PrepareEnd = 0x3039U;
+constexpr uint32_t kEpServerDedupCombineProfileM6ReadyBegin = 0x303aU;
+constexpr uint32_t kEpServerDedupCombineProfileM6ReadyEnd = 0x303bU;
+constexpr uint32_t kEpServerDedupCombineProfileM6PrefetchBegin = 0x303cU;
+constexpr uint32_t kEpServerDedupCombineProfileM6PrefetchEnd = 0x303dU;
+constexpr uint32_t kEpServerDedupCombineProfileM6InputWaitBegin = 0x303eU;
+constexpr uint32_t kEpServerDedupCombineProfileM6InputWaitEnd = 0x303fU;
+constexpr uint32_t kEpServerDedupCombineProfileM6ComputeBegin = 0x3040U;
+constexpr uint32_t kEpServerDedupCombineProfileM6ComputeEnd = 0x3041U;
+constexpr uint32_t kEpServerDedupCombineProfileM6OutputBegin = 0x3042U;
+constexpr uint32_t kEpServerDedupCombineProfileM6OutputEnd = 0x3043U;
+constexpr uint32_t kEpServerDedupCombineProfileM6RetireBegin = 0x3044U;
+constexpr uint32_t kEpServerDedupCombineProfileM6RetireEnd = 0x3045U;
 } // namespace TileXREp
 #endif

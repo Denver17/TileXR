@@ -209,6 +209,18 @@ def _validate_evidence(evidence, config, operator, rank, run_id, kernel_sha, rec
                 expected["m5_token_issue"] = config["bs"]
             if config.get("server_dedup_enabled") is False and "m6_token_issue" in stages:
                 expected["m6_token_issue"] = config["bs"]
+            if set(stages) & measure.COMBINE_LOOP_MODULES.keys():
+                if config.get("server_dedup_enabled") is not False:
+                    raise ValueError("Combine loop detail requires dedup=0")
+                send = config.get("combine_send_core_num", 32)
+                rows = record["combine_token_num"]
+                expected.update(m3_prepare=send, m6_prepare=64 - send, m6_retire=64 - send,
+                    m6_ready_wait=config["bs"], m6_token_prepare=config["bs"], m6_output=config["bs"],
+                    m6_loop_input_wait=config["bs"] * config["topk"],
+                    m6_loop_compute_prefetch=config["bs"] * config["topk"])
+                if rows:
+                    expected.update(m3_server_select=send * (config["rank_size"] // 8), m3_retire=send,
+                                    m3_loop_read=rows, m3_loop_pack_send=rows)
             if set(stages) != set(expected) or any(stages[name].get("sample_count") != count
                                                   for name, count in expected.items()):
                 raise ValueError("Combine breakdown is missing required module/core-role intervals")

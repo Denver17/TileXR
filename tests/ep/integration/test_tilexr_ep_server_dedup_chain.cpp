@@ -32,6 +32,7 @@
 #include "ep_memory_server_dedup_layout.h"
 #include "ep_memory_server_dedup_combine_host.h"
 #include "ep_memory_server_dedup_combine_config.h"
+#include "ep_memory_server_dedup_combine_profile.h"
 #include "tilexr_profiling.h"
 #include "../demo/tilexr_ep_expert_ids.h"
 #include "server_dedup_dispatch_reference.h"
@@ -367,7 +368,10 @@ ProfilePaths ConfigureProfiling(const Config &c)
         const char *capture = std::getenv("TILEXR_PROFILING_CAPTURE_ID");
         Require(capture && *capture, "breakdown requires TILEXR_PROFILING_CAPTURE_ID");
         Require(!dispatch || !combine || paths.dispatch != paths.combine, "operator capture paths must differ");
-        Check(setenv("TILEXR_PROFILING_RECORDS_PER_CORE", "65536", 1), "configure profiling capacity");
+        const auto capacity = combine ? TileXREp::EpCombineProfilingRecordsPerLaunch(c.bs, c.topK) :
+            TileXREp::kEpServerDedupCombineProfilingRecordsPerLaunch;
+        Check(setenv("TILEXR_PROFILING_RECORDS_PER_CORE", std::to_string(capacity).c_str(), 1),
+            "configure profiling capacity");
     }
     return paths;
 }

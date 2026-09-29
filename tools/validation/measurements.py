@@ -245,9 +245,36 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
                 artifact_manifest={item.name: dict(size_bytes=item.stat().st_size, sha256=_file_digest(item))
                                    for item in generated.artifacts},
                 summary_path=str(generated.output_dir / "summary.json"))
+    if operator == "combine":
+        totals = combine_loop_core_totals(run)
+        if totals:
+            evidence["core_totals_us"] = totals
     atomic_write_json(Path(evidence["summary_path"]), evidence)
     evidence["summary_sha256"] = _file_digest(evidence["summary_path"])
     return evidence
+
+
+# Preparation and loop intervals exist only in new non-dedup captures.
+COMBINE_LOOP_MODULES = {
+    "m3_prepare": "m3_direct", "m3_server_select": "m3_direct",
+    "m3_loop_read": "m3_direct", "m3_loop_pack_send": "m3_direct", "m3_retire": "m3_direct",
+    "m6_prepare": "m6_final", "m6_ready_wait": "m6_final",
+    "m6_token_prepare": "m6_final", "m6_loop_input_wait": "m6_final",
+    "m6_loop_compute_prefetch": "m6_final", "m6_output": "m6_final", "m6_retire": "m6_final",
+}
+
+
+def combine_loop_core_totals(run):
+    """Sum repeated intervals per core; never sum different cores into latency."""
+    totals = {}
+    for launch in run.launches:
+        for lane in launch.lanes:
+            for sample in lane.samples:
+                if sample.name in COMBINE_LOOP_MODULES:
+                    cores = totals.setdefault(sample.name, {})
+                    key = str(lane.core)
+                    cores[key] = cores.get(key, 0.0) + sample.duration_us
+    return {name: dict(cores=cores, **_statistics(list(cores.values()))) for name, cores in totals.items()}
 
 
 def combine_breakdown_timeline(run, config=None):
@@ -259,6 +286,10 @@ def combine_breakdown_timeline(run, config=None):
         # require the full split on every participating core, not just totals.
         m2_split = any(sample.name in ("m2_prepare_notify", "m2_server_wait")
                        for launch in run.launches for lane in launch.lanes for sample in lane.samples)
+        loop_detail = any(sample.name in COMBINE_LOOP_MODULES
+                          for launch in run.launches for lane in launch.lanes for sample in lane.samples)
+        if loop_detail and config.get("server_dedup_enabled") is not False:
+            raise ValueError("Combine loop detail requires dedup=0")
         launches = []
         for launch in run.launches:
             lanes = []
@@ -279,14 +310,33 @@ def combine_breakdown_timeline(run, config=None):
                     expected.add("m6_final" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
                 token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final", "m6_token_issue": "m6_final"}
                 actual = [sample.name for sample in lane.samples
-                          if sample.kind == "interval" and sample.name not in token_stages]
+                          if sample.kind == "interval" and sample.name not in token_stages and sample.name not in COMBINE_LOOP_MODULES]
                 if set(actual) != expected or len(actual) != len(expected):
                     raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))
                 samples = []
-                sequences = {name: 0 for name in token_stages}
+                if loop_detail:
+                    counts = {name: sum(s.name == name for s in lane.samples) for name in COMBINE_LOOP_MODULES}
+                    recv = 64 - config.get("combine_send_core_num", 32)
+                    local = lane.core - config.get("combine_send_core_num", 32)
+                    required = {}
+                    if local >= 0:
+                        tokens = config["bs"] // recv + (local < config["bs"] % recv)
+                        required = dict(m6_prepare=1, m6_retire=1, m6_ready_wait=tokens,
+                            m6_token_prepare=tokens, m6_output=tokens,
+                            m6_loop_input_wait=tokens * config["topk"],
+                            m6_loop_compute_prefetch=tokens * config["topk"])
+                    else:
+                        selected = counts["m3_server_select"] != 0
+                        required = dict(m3_prepare=1, m3_server_select=config["rank_size"] // 8 if selected else 0,
+                            m3_retire=int(selected), m3_loop_read=counts["m3_loop_read"],
+                            m3_loop_pack_send=counts["m3_loop_read"])
+                    if any(counts[name] != required.get(name, 0) for name in counts):
+                        raise ValueError("Combine loop/core role coverage mismatch: " + str(lane.core))
+                modules = {**token_stages, **COMBINE_LOOP_MODULES}
+                sequences = dict.fromkeys(modules, 0)
                 for sample in lane.samples:
-                    if sample.name in token_stages:
-                        if token_stages[sample.name] not in expected:
+                    if sample.name in sequences:
+                        if modules[sample.name] not in expected:
                             raise ValueError("Combine token/core role coverage mismatch: " + str(lane.core))
                         # records.v1 contains timestamps and event IDs, not TokenId.
                         # M4 and M5 share a core, but have independent task sets.
@@ -294,8 +344,11 @@ def combine_breakdown_timeline(run, config=None):
                         sequence = sequences[sample.name]
                         sample = replace(sample, instance_id=sequence,
                             attributes={**sample.attributes, "task_sequence": sequence,
-                                        "task_sequence_scope": "module/core",
-                                        "timing": "instruction issue; no completion fence"})
+                                        "task_sequence_scope": "stage/core" if sample.name in COMBINE_LOOP_MODULES else "module/core",
+                                        "timing": "Scalar elapsed including existing waits; no added completion fence",
+                                        **({"token_sequence": sequence // config["topk"],
+                                            "topk_iteration": sequence % config["topk"]}
+                                           if sample.name in ("m6_loop_input_wait", "m6_loop_compute_prefetch") else {})})
                         sequences[sample.name] += 1
                     if sample.name == "m4_partial" and config["implemented_through"] == "M5":
                         sample = replace(sample, attributes={**sample.attributes,
@@ -601,6 +654,12 @@ def summarize_measurements(rank_records, chain_config, kernel_sha, *, output_val
                                          for row in ranks if name in row["breakdown"]["stages_us"]])
                        for name in stage_names},
             timing="Scalar arrival; existing completion fences remain; issue is not DMA completion; atomic is nested in metadata")
+        total_names = sorted(set().union(*(row["breakdown"].get("core_totals_us", {}) for row in ranks)))
+        if total_names:
+            summary["breakdown"]["core_totals_us"] = {
+                name: _statistics([row["breakdown"]["core_totals_us"][name]["maximum"]
+                                   for row in ranks if name in row["breakdown"].get("core_totals_us", {})])
+                for name in total_names}
     return summary
 
 
@@ -631,6 +690,8 @@ def render_measurements(summary):
         append("kernel（最后一轮每 rank 最慢核的跨 rank 汇总）", breakdown["kernel_us"], "us")
         for name, stats in breakdown["stages_us"].items():
             append("标准打点区间 " + name, stats, "us")
+        for name, stats in breakdown.get("core_totals_us", {}).items():
+            append("每核累计最大值（跨 rank） " + name, stats, "us")
         lines.append("Scalar 时间戳直接写 GM；issue 表示下发，atomic 包含于 metadata；performance 使用关闭打点的产物。")
     return "\n".join(lines)
 
@@ -663,7 +724,7 @@ def validate_report_artifacts(evidence, rank, chain_config):
         raise ValueError("profiling report summary rank mismatch")
     identity = ("schema", "capture_id", "run_mode", "loops", "warmup", "launches", "measured_launches",
                 "selection", "capture_mode", "captured_launch", "captured_launches", "status", "sample_us",
-                "stages_us", "dropped_records", "artifact_manifest", "operator", "kernel", "run_id", "kernel_sha256",
+                "stages_us", "core_totals_us", "dropped_records", "artifact_manifest", "operator", "kernel", "run_id", "kernel_sha256",
                 "last_launch", "scope", "native_status", "algorithm_bytes", "algorithm_bandwidth_gbps", "algorithm_bandwidth",
                 "implemented_through", "stage_copy_bytes", "control_publish_bytes", "wait_us",
                 "stage_payload_bytes", "direct_payload_bytes", "direct_wire_bytes", "partial_payload_bytes", "partial_wire_bytes", "partial_self_read_bytes", "partial_stage_read_bytes", "final_read_bytes", "y_out_bytes", "flag_clear_bytes", "traffic_scope", "performance_scope")

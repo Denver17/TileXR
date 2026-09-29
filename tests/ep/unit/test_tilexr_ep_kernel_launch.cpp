@@ -14,6 +14,7 @@
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_launch.h"
 #include "ep_memory_server_dedup_combine_launch.h"
+#include "ep_memory_server_dedup_combine_profile.h"
 #include "server_dedup_combine_test_fixture.h"
 #include "runtime/kernel.h"
 #include "tilexr_api.h"
@@ -37,6 +38,7 @@ int gFailures = 0;
 int gMagicCalls = 0;
 uint32_t gProfilingCalls = 0U;
 uint32_t gCombineProfilingCalls = 0U;
+uint32_t gCombineProfilingRecords = 0U;
 bool gProfilingExhausted = false;
 constexpr int64_t kNextMagic = 0x123456781234LL;
 std::string gSocName = "Ascend950PR_9589";
@@ -320,7 +322,8 @@ void TestCombineServerDedupLaunch()
     tiling[11] = static_cast<uint8_t>(TileXR::TILEXR_DATA_TYPE_BFP16);
 #if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
     tiling[13] = 1;
-    Check(gCombineProfilingCalls == 1, "Combine reserves its independent latest region");
+    Check(gCombineProfilingCalls == 1 && gCombineProfilingRecords == 65536U,
+        "Combine reserves its independent latest region with the small-shape floor");
 #endif
     Check(gLaunches[0].name == "tilexr_ep_combine_memory_server_dedup_kernel" &&
         gLaunches[0].blockDim == 64 && gLaunches[0].stream == params.combine.stream &&
@@ -335,6 +338,10 @@ void TestCombineServerDedupLaunch()
     params.combine.dtype = TileXR::TILEXR_DATA_TYPE_FP16;
     params.combine.bs = 65536; params.combine.h = 131072; params.combine.topK = 32; params.combine.moeExpertNum = 1024;
     Check(launch() == TileXR::TILEXR_SUCCESS, "wide shapes and FP16 are not narrowed prematurely");
+#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    Check(gCombineProfilingRecords == TileXREp::EpCombineProfilingRecordsPerLaunch(65536U, 32U),
+        "Combine Host reservation follows large-shape loop budget");
+#endif
     std::vector<uint8_t> wide(16, 0);
     wide[2] = 1; wide[6] = 2; wide[9] = 4; wide[10] = 32; wide[11] = static_cast<uint8_t>(TileXR::TILEXR_DATA_TYPE_FP16);
     wide[13] = tiling[13];
@@ -728,7 +735,7 @@ extern "C" {
 
 int TileXRProfilingReserveLatestCombineLaunch(TileXRCommPtr, uint32_t recordsPerLaunch, uint32_t *slot)
 {
-    Check(recordsPerLaunch == 65536U, "Combine independently reserves token capture capacity");
+    gCombineProfilingRecords = recordsPerLaunch;
     *slot = gProfilingExhausted ? UINT32_MAX : 0U;
     ++gCombineProfilingCalls;
     return TileXR::TILEXR_SUCCESS;

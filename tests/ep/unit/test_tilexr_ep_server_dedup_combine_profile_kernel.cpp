@@ -11,7 +11,15 @@ int main()
     using namespace TileXREp;
     try {
         CombineM12Test::Fixture f(kEpServerDedupEnable ? 5000U : 1U, 17U);
-        constexpr uint32_t capacity = kEpServerDedupCombineProfilingRecordsPerLaunch;
+        const uint32_t capacity = EpCombineProfilingRecordsPerLaunch(f.tiling.bs, f.tiling.topK);
+        Check(capacity == 65536U, "small shapes retain capture floor");
+        const uint32_t largeBs = 8192U * kEpServerDedupCombineRecvCoreNum;
+        Check(EpCombineProfilingRecordsPerLaunch(largeBs, 6U) ==
+            (kEpServerDedupEnable ? 65536U : 8192U * 32U + 128U),
+            "large M6 loop captures reserve shape-derived padded capacity");
+        Check(EpCombineProfilingRecordsPerLaunch(6001U * kEpServerDedupCombineRecvCoreNum, 1U) ==
+            (kEpServerDedupEnable ? 65536U : 72144U),
+            "odd token counts round capacity to runtime-required 16-record alignment");
         // One real DIRECT task exercises the completion boundary, other rows
         // retain the M1 fixture. No M4 rows in this first full-kernel capture.
         f.types[0] = 1; f.table[0] = 8; f.table[1] = 0; f.table[2] = 0;
@@ -54,10 +62,28 @@ int main()
         for (uint32_t round = 0; round < 3U; ++round) for (uint32_t core : {0U, kEpServerDedupCombineSendCoreNum, 63U}) {
             f.Hooks(core, 0U); dropped[core * 16U] = 9U;
             seedResults();
+            uint32_t m6Probes = 0U;
+            const uint32_t participant = core - kEpServerDedupCombineSendCoreNum;
+            const uint32_t perCore = f.tiling.bs / kEpServerDedupCombineRecvCoreNum;
+            const uint32_t extra = f.tiling.bs % kEpServerDedupCombineRecvCoreNum;
+            const bool delayM6 = !kEpServerDedupEnable && round == 0U &&
+                core >= kEpServerDedupCombineSendCoreNum && (perCore != 0U || participant < extra);
+            if (delayM6) {
+                const uint32_t token = participant * perCore + std::min(participant, extra);
+                auto firstFlag = f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
+                    uint64_t(token) * f.tiling.topK * 512U + 480U;
+                AscendC::GmReadObserver() = [&, firstFlag](const void *src, uint32_t) {
+                    if (src == firstFlag) {
+                        const float ready = ++m6Probes > 16U ? 1.0f : 0.0f;
+                        std::memcpy(firstFlag, &ready, sizeof(ready));
+                    }
+                };
+            }
             if (round == 2U) AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
                 synchronizationByCore[1][core].push_back(uint32_t(event) * 32U + id * 2U + uint32_t(set));
             };
             invoke();
+            if (delayM6) Check(m6Probes == 17U, "M6 retries readiness while retaining one wait interval");
             AscendC::EventObserver() = {};
             std::vector<uint32_t> expected {kEpServerDedupCombineProfileStart,
                 kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd};
@@ -72,16 +98,47 @@ int main()
                     kEpServerDedupCombineProfileServerWaitEnd, kEpServerDedupCombineProfileControlEnd,
                     kEpServerDedupCombineProfilePartialBegin,
                     kEpServerDedupCombineProfilePartialEnd, kEpServerDedupCombineProfileFinalBegin});
-                } else expected.push_back(kEpServerDedupCombineProfileM6Begin);
+                } else expected.insert(expected.end(), {kEpServerDedupCombineProfileM6Begin,
+                    kEpServerDedupCombineProfileM6PrepareBegin, kEpServerDedupCombineProfileM6PrepareEnd});
                 const uint32_t local = core - kEpServerDedupCombineSendCoreNum;
                 const uint32_t tasks = f.tiling.bs / kEpServerDedupCombineRecvCoreNum +
                     (local < f.tiling.bs % kEpServerDedupCombineRecvCoreNum ? 1U : 0U);
-                for (uint32_t task = 0; task < tasks; ++task) expected.insert(expected.end(), {
-                    kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenBegin : kEpServerDedupCombineProfileM6TokenBegin,
-                    kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalTokenEnd : kEpServerDedupCombineProfileM6TokenEnd});
+                for (uint32_t task = 0; task < tasks; ++task) {
+                    if (kEpServerDedupEnable) expected.insert(expected.end(), {
+                        kEpServerDedupCombineProfileFinalTokenBegin, kEpServerDedupCombineProfileFinalTokenEnd});
+                    else {
+                        expected.insert(expected.end(), {kEpServerDedupCombineProfileM6ReadyBegin,
+                            kEpServerDedupCombineProfileM6ReadyEnd, kEpServerDedupCombineProfileM6TokenBegin,
+                            kEpServerDedupCombineProfileM6PrefetchBegin, kEpServerDedupCombineProfileM6PrefetchEnd});
+                        for (uint32_t k = 0; k < f.tiling.topK; ++k) expected.insert(expected.end(), {
+                            kEpServerDedupCombineProfileM6InputWaitBegin, kEpServerDedupCombineProfileM6InputWaitEnd,
+                            kEpServerDedupCombineProfileM6ComputeBegin, kEpServerDedupCombineProfileM6ComputeEnd});
+                        expected.insert(expected.end(), {kEpServerDedupCombineProfileM6OutputBegin,
+                            kEpServerDedupCombineProfileM6OutputEnd, kEpServerDedupCombineProfileM6TokenEnd});
+                    }
+                }
+                if (!kEpServerDedupEnable) expected.insert(expected.end(), {
+                    kEpServerDedupCombineProfileM6RetireBegin, kEpServerDedupCombineProfileM6RetireEnd});
                 expected.push_back(kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalEnd : kEpServerDedupCombineProfileM6End);
-            } else expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectBegin,
-                kEpServerDedupCombineProfileDirectMte3End, kEpServerDedupCombineProfileDirectEnd});
+            } else {
+                expected.push_back(kEpServerDedupCombineProfileDirectBegin);
+                if (!kEpServerDedupEnable) {
+                    expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectPrepareBegin,
+                        kEpServerDedupCombineProfileDirectPrepareEnd});
+                    for (uint32_t server = 0; server < 2U; ++server) {
+                        expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectSelectBegin,
+                            kEpServerDedupCombineProfileDirectSelectEnd});
+                        // The only DIRECT row targets this rank's own server, visited first.
+                        if (server == 0U) expected.insert(expected.end(), {
+                            kEpServerDedupCombineProfileDirectReadBegin, kEpServerDedupCombineProfileDirectReadEnd,
+                            kEpServerDedupCombineProfileDirectSendBegin, kEpServerDedupCombineProfileDirectSendEnd});
+                    }
+                    expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectDrainBegin,
+                        kEpServerDedupCombineProfileDirectDrainEnd});
+                }
+                expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectMte3End,
+                    kEpServerDedupCombineProfileDirectEnd});
+            }
             expected.insert(expected.end(), {kEpServerDedupCombineProfileDrainBegin, kEpServerDedupCombineProfileDrainEnd,
                 kEpServerDedupCombineProfileEnd});
             Check(counts[core * 16U] == (expected.size() + 7U) / 8U * 8U && dropped[core * 16U] == 0U, "latest capture publishes actual padded count and resets dropped");
