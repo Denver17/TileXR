@@ -55,6 +55,8 @@ def free_port():
 
 
 class ChainConsumerTests(unittest.TestCase):
+    compile_definitions = ["-DTILEXR_EP_SERVER_DEDUP_ENABLE=1", "-DTILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=0"]
+
     @classmethod
     def setUpClass(cls):
         compiler = shutil.which("g++")
@@ -70,7 +72,7 @@ class ChainConsumerTests(unittest.TestCase):
         result = subprocess.run([
             compiler, "-std=c++14", "-O2", "-fno-fast-math", "-ffp-contract=off",
             "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
-            "-DTILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1",
+            "-DTILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1", *cls.compile_definitions,
             "-I", str(include.parent), "-I", str(ROOT / "src/include"),
             "-I", str(ROOT / "src/comm"), "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
             str(SOURCE / "test_tilexr_ep_server_dedup_chain.cpp"),

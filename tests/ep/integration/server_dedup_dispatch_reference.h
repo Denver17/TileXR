@@ -63,7 +63,7 @@ inline std::vector<DispatchRow> DispatchRows(const Shape &s, uint32_t destinatio
             for (const auto &route : routes) {
                 if (route.expert / local != destination) continue;
                 Packet packet {token, {}};
-                if (!TileXREp::kEpServerDedupEnable || destination / 8U == source / 8U) packet.members.push_back(route);
+                if (!TileXREp::EpServerDedupEnabled(s.bs) || destination / 8U == source / 8U) packet.members.push_back(route);
                 else for (const auto &candidate : routes)
                     if (candidate.expert / local / 8U == destination / 8U) packet.members.push_back(candidate);
                 byExpert[route.expert % local].push_back({source, token, route.expert, route.q, route.k, packet});

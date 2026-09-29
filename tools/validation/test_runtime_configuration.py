@@ -427,6 +427,8 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         for mode, override, arguments, expected, run_mode in (
                 ('production', None, [], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
                 ('production', None, ['breakdown=0'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
+                ('production', None, ['dedup=auto'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
+                ('production', None, ['dedup=1'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
                 ('production', None, ['breakdown=1', 'dedup=0'], workflow.COMBINE_M5_CHECKPOINT, 'breakdown'),
                 ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
                 ('host', None, [], None, 'functional')):
@@ -441,7 +443,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 values = json.loads(result.stdout.splitlines()[-1])
                 self.assertNotIn('TILEXR_INTERNAL_ACCEPTANCE_STAGE', values)
-                self.assertEqual(values['TILEXR_VALIDATION_DEDUP'], '0' if 'dedup=0' in arguments else '1')
+                self.assertEqual(values['TILEXR_VALIDATION_DEDUP'], next((arg.split('=', 1)[1] for arg in arguments if arg.startswith('dedup=')), 'auto'))
                 self.assertEqual(values['TILEXR_VALIDATION_BREAKDOWN'], '1' if run_mode == 'breakdown' else '0')
                 self.assertEqual(values['TILEXR_VALIDATION_RUN_MODE'], 'breakdown')
                 self.assertEqual((values['TILEXR_VALIDATION_LOOPS'], values['TILEXR_VALIDATION_WARMUP']), ('3', '2'))

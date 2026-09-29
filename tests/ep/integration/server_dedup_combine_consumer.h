@@ -86,10 +86,12 @@ void InitializeStandaloneCombine(const Config &c,
             "initialize standalone Combine tables");
     };
     copy(4, prefix.data(), layout.sendCountsBytes);
-    copy(5, types.data(), layout.tokenTypeBytes);
     copy(6, assist.data(), layout.assistInfoBytes);
-    copy(7, relay.data(), layout.relayReadIndexBytes);
-    copy(8, mask.data(), layout.sourceMaskBytes);
+    if (TileXREp::EpServerDedupEnabled(c.bs)) {
+        copy(5, types.data(), layout.tokenTypeBytes);
+        copy(7, relay.data(), layout.relayReadIndexBytes);
+        copy(8, mask.data(), layout.sourceMaskBytes);
+    }
     copy(10, weights.data(), layout.expertScalesBytes);
 }
 
@@ -113,6 +115,8 @@ std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
     std::vector<CombineTensorSnapshot> snapshots;
     for (size_t i = 0; i < 8U; ++i) {
         if (sizes[i] == 0U || (c.FullCombine() && indices[i] == 13U)) continue;
+        if (!TileXREp::EpServerDedupEnabled(c.bs) &&
+            (indices[i] == 5U || indices[i] == 7U || indices[i] == 8U)) continue;
         // A continuous Dispatch batch legitimately rewrites its output tensors.
         // Independent expertOut is invariant; yOut is invariant only before M5.
         if (dispatchBatch && indices[i] != 12U && indices[i] != 13U) continue;

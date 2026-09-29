@@ -5,20 +5,21 @@
 #include "ep_memory_server_dedup_combine_profile.h"
 #include "../../../src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp"
 
-int main()
+int RunProfile(bool largeFixture)
 {
     using ServerDedupTest::Check;
     using namespace TileXREp;
     try {
-        CombineM12Test::Fixture f(kEpServerDedupEnable ? 5000U : 1U, 17U);
+        CombineM12Test::Fixture f(largeFixture ? 5000U : 1U, 17U);
+        const bool dedup = EpServerDedupEnabled(f.tiling.bs);
         const uint32_t capacity = EpCombineProfilingRecordsPerLaunch(f.tiling.bs, f.tiling.topK);
         Check(capacity == 65536U, "small shapes retain capture floor");
         const uint32_t largeBs = 8192U * kEpServerDedupCombineRecvCoreNum;
         Check(EpCombineProfilingRecordsPerLaunch(largeBs, 6U) ==
-            (kEpServerDedupEnable ? 65536U : 8192U * 32U + 128U),
+            (EpServerDedupEnabled(largeBs) ? 65536U : 8192U * 32U + 128U),
             "large M6 loop captures reserve shape-derived padded capacity");
         Check(EpCombineProfilingRecordsPerLaunch(6001U * kEpServerDedupCombineRecvCoreNum, 1U) ==
-            (kEpServerDedupEnable ? 65536U : 72144U),
+            (EpServerDedupEnabled(6001U * kEpServerDedupCombineRecvCoreNum) ? 65536U : 72144U),
             "odd token counts round capacity to runtime-required 16-record alignment");
         // One real DIRECT task exercises the completion boundary, other rows
         // retain the M1 fixture. No M4 rows in this first full-kernel capture.
@@ -52,7 +53,7 @@ int main()
             std::memset(f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
                 0, uint64_t(f.tiling.bs) * f.tiling.topK * blocks * 512U);
             for (uint32_t p = 0; p < f.tiling.bs; ++p)
-                for (uint32_t k = 0; k < (kEpServerDedupEnable ? 1U : f.tiling.topK); ++k) for (uint32_t b = 0; b < blocks; ++b) {
+                for (uint32_t k = 0; k < (dedup ? 1U : f.tiling.topK); ++k) for (uint32_t b = 0; b < blocks; ++b) {
                 auto slot = f.peers[f.rank].data() + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
                     ((uint64_t(p) * f.tiling.topK + k) * blocks + b) * 512U;
                 std::memset(slot, 0, 480U); const float one = 1.0f;
@@ -66,7 +67,7 @@ int main()
             const uint32_t participant = core - kEpServerDedupCombineSendCoreNum;
             const uint32_t perCore = f.tiling.bs / kEpServerDedupCombineRecvCoreNum;
             const uint32_t extra = f.tiling.bs % kEpServerDedupCombineRecvCoreNum;
-            const bool delayM6 = !kEpServerDedupEnable && round == 0U &&
+            const bool delayM6 = !dedup && round == 0U &&
                 core >= kEpServerDedupCombineSendCoreNum && (perCore != 0U || participant < extra);
             if (delayM6) {
                 const uint32_t token = participant * perCore + std::min(participant, extra);
@@ -87,10 +88,10 @@ int main()
             AscendC::EventObserver() = {};
             std::vector<uint32_t> expected {kEpServerDedupCombineProfileStart,
                 kEpServerDedupCombineProfileInitBegin, kEpServerDedupCombineProfileInitEnd};
-            if (kEpServerDedupEnable) expected.insert(expected.end(), {
+            if (dedup) expected.insert(expected.end(), {
                 kEpServerDedupCombineProfileStageBegin, kEpServerDedupCombineProfileStageEnd});
             if (core >= kEpServerDedupCombineSendCoreNum) {
-                if (kEpServerDedupEnable) {
+                if (dedup) {
                 expected.push_back(kEpServerDedupCombineProfileControlBegin);
                 if (core >= 56U) expected.insert(expected.end(), {
                     kEpServerDedupCombineProfilePrepareNotifyBegin, kEpServerDedupCombineProfilePrepareNotifyEnd});
@@ -104,7 +105,7 @@ int main()
                 const uint32_t tasks = f.tiling.bs / kEpServerDedupCombineRecvCoreNum +
                     (local < f.tiling.bs % kEpServerDedupCombineRecvCoreNum ? 1U : 0U);
                 for (uint32_t task = 0; task < tasks; ++task) {
-                    if (kEpServerDedupEnable) expected.insert(expected.end(), {
+                    if (dedup) expected.insert(expected.end(), {
                         kEpServerDedupCombineProfileFinalTokenBegin, kEpServerDedupCombineProfileFinalTokenEnd});
                     else {
                         expected.insert(expected.end(), {kEpServerDedupCombineProfileM6ReadyBegin,
@@ -117,12 +118,12 @@ int main()
                             kEpServerDedupCombineProfileM6OutputEnd, kEpServerDedupCombineProfileM6TokenEnd});
                     }
                 }
-                if (!kEpServerDedupEnable) expected.insert(expected.end(), {
+                if (!dedup) expected.insert(expected.end(), {
                     kEpServerDedupCombineProfileM6RetireBegin, kEpServerDedupCombineProfileM6RetireEnd});
-                expected.push_back(kEpServerDedupEnable ? kEpServerDedupCombineProfileFinalEnd : kEpServerDedupCombineProfileM6End);
+                expected.push_back(dedup ? kEpServerDedupCombineProfileFinalEnd : kEpServerDedupCombineProfileM6End);
             } else {
                 expected.push_back(kEpServerDedupCombineProfileDirectBegin);
-                if (!kEpServerDedupEnable) {
+                if (!dedup) {
                     expected.insert(expected.end(), {kEpServerDedupCombineProfileDirectPrepareBegin,
                         kEpServerDedupCombineProfileDirectPrepareEnd});
                     for (uint32_t server = 0; server < 2U; ++server) {
@@ -163,7 +164,7 @@ int main()
         Check(times == savedTimes && events == savedEvents, "OFF tiling performs M1/M2/M3/M4/M5 without profile writes");
         Check(std::memcmp(&originalArgs, &f.args, sizeof(f.args)) == 0, "kernel never mutates shared CommArgs");
 
-        if (kEpServerDedupEnable) {
+        if (dedup) {
         // More than the old 32-record limit on one M4 core. Reuse the real
         // kernel and defer MTE3, comparing ON/OFF hard-event sequences.
         std::vector<uint32_t> relay(f.tokens * f.tiling.topK * 2U, 0U);
@@ -210,4 +211,15 @@ int main()
     if (ServerDedupTest::Failures() != 0) return 1;
     std::cout << "EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_PASS\n";
     return 0;
+}
+
+int main()
+{
+    if (TileXREp::kEpServerDedupAutoEnable) {
+        // Keep the same real writer/event-order checks on both sides of the
+        // runtime threshold, including M6's delayed readiness and loop markers.
+        if (RunProfile(false) != 0) return 1;
+        return RunProfile(true);
+    }
+    return RunProfile(TileXREp::kEpServerDedupEnable);
 }

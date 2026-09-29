@@ -34,6 +34,7 @@ public:
         Mark(kEpServerDedupCombineProfileStart);
         Mark(kEpServerDedupCombineProfileInitBegin);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
+        enableDedup_ = EpServerDedupEnabled(bs);
         h_ = h; topK_ = topK; bs_ = bs; experts_ = experts; dtype_ = dtype;
         expertAddr_ = expertOut; tableAddr_ = assistInfoForCombine; relayAddr_ = relayReadIndex; typesAddr_ = tokenType;
         weightsAddr_ = expertScales; masksAddr_ = sourceMask; outputAddr_ = yOut;
@@ -99,13 +100,13 @@ public:
 
     __aicore__ inline void Process()
     {
-        if (kEpServerDedupEnable) {
+        if (enableDedup_) {
             Mark(kEpServerDedupCombineProfileStageBegin);
             CopyLocalPendingTokens();
             Mark(kEpServerDedupCombineProfileStageEnd);
         }
         if (core_ >= kEpServerDedupCombineSendCoreNum) {
-            if (kEpServerDedupEnable) {
+            if (enableDedup_) {
                 Mark(kEpServerDedupCombineProfileControlBegin);
                 if (core_ >= 56U) {
                     Mark(kEpServerDedupCombineProfilePrepareNotifyBegin);
@@ -156,17 +157,25 @@ private:
 #if defined(TILEXR_ENABLE_PROFILING)
         aggregate.SetProfiling(&profile_);
 #endif
-        // The count scalar has retired; M6 owns the entire receive arena from here.
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6PrepareBegin);
-        aggregate.InitM6(arena_.Get<uint8_t>(),
-            args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
-            weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
-            core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum, m6Workspace_);
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6PrepareEnd);
+        // Count DMA has retired. Auto uses the same final-stage scratch view as
+        // M5, but owns its output events because M4 did not run on this launch.
+        Mark(kEpServerDedupCombineProfileM6PrepareBegin);
+        if (kEpServerDedupEnable) {
+            aggregate.InitDirectShared(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
+                args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
+                weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
+                core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum, workspace_);
+        } else {
+            aggregate.InitM6(arena_.Get<uint8_t>(),
+                args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
+                weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
+                core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum, m6Workspace_);
+        }
+        Mark(kEpServerDedupCombineProfileM6PrepareEnd);
         aggregate.Process();
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6RetireBegin);
+        Mark(kEpServerDedupCombineProfileM6RetireBegin);
         aggregate.DrainM6();
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileM6RetireEnd);
+        Mark(kEpServerDedupCombineProfileM6RetireEnd);
     }
     __aicore__ inline uint32_t AggregateSourceTokens()
     {
@@ -282,7 +291,7 @@ private:
     {
         selected_ = 0U;
         if (tokens_ == 0U) return;
-        if (kEpServerDedupEnable) {
+        if (enableDedup_) {
             DataCopyPad(typeUb_, types_, {1U, tokens_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
             Sync<HardEvent::MTE2_V>();
             Compares(maskUb_, typeUb_, int32_t(1), CMPMODE::EQ, (tokens_ + 63U) / 64U * 64U);
@@ -312,7 +321,7 @@ private:
         PipeBarrier<PIPE_V>();
         // Keep two persistent compact arrays: ranks in typeUb_, original rows
         // in packedUb_. indexUb_ becomes the per-server compact output list.
-        if (kEpServerDedupEnable) {
+        if (enableDedup_) {
             GatherMask(typeUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
                 tokens_, {1U, 1U, 0U, 0U}, selected_);
         } else {
@@ -339,10 +348,10 @@ private:
     }
     __aicore__ inline void ReturnDirectTokens()
     {
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectPrepareBegin);
+        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareBegin);
         PrepareDirectRows();
         if (selected_ == 0U) {
-            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
+            if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
             return;
         }
         const uint32_t servers = uint32_t(args_->rankSize) / 8U;
@@ -357,15 +366,15 @@ private:
             SetFlag<HardEvent::MTE3_V>(lane);
         }
         PipeBarrier<PIPE_V>();
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
+        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
         for (uint32_t step = 1U; step <= servers; ++step) {
-            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectSelectBegin);
+            if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSelectBegin);
             const uint32_t count = SelectDirectServer(ServerDedupHalfOrder(servers, ownServer, step - 1U));
             const uint32_t first = ServerDedupFirstOwned(core_, owner, kEpServerDedupCombineSendCoreNum);
             owner = (owner + count) % kEpServerDedupCombineSendCoreNum;
-            if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectSelectEnd);
+            if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSelectEnd);
             for (uint32_t task = first; task < count; task += kEpServerDedupCombineSendCoreNum) {
-                if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectReadBegin);
+                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectReadBegin);
                 const uint32_t row = uint32_t(indexUb_.GetValue(task));
                 // Only owned rows reload a routing triple. The persistent rank
                 // and original-row arrays are untouched between server rounds.
@@ -382,8 +391,8 @@ private:
                 DataCopyPad(input, expert_[uint64_t(row) * h_], {1U, h_ * 2U, 0U, 0U, 0U},
                     {false, 0U, 0U, uint16_t(0)});
                 SetFlag<HardEvent::MTE2_V>(lane); WaitFlag<HardEvent::MTE2_V>(lane);
-                if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectReadEnd);
-                if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectSendBegin);
+                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectReadEnd);
+                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSendBegin);
                 // Output lifetime ends only after the previous send has read it.
                 WaitFlag<HardEvent::MTE3_V>(lane);
                 auto output = resultUb_[lane * resultStride_];
@@ -400,17 +409,17 @@ private:
                     TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + (uint64_t(token) * topK_ + topk) * resultStride_);
                 DataCopy(destination, output, resultStride_);
                 SetFlag<HardEvent::MTE3_V>(lane);
-                if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectSendEnd);
+                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSendEnd);
             }
             // No server fence: the next scan can overlap pending output DMA.
         }
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectDrainBegin);
+        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectDrainBegin);
         // Final retirement includes unused seeded lanes, never a per-token drain.
         for (uint32_t lane = 0; lane < lanes_; ++lane) {
             WaitFlag<HardEvent::V_MTE2>(lane);
             WaitFlag<HardEvent::MTE3_V>(lane);
         }
-        if (!kEpServerDedupEnable) Mark(kEpServerDedupCombineProfileDirectDrainEnd);
+        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectDrainEnd);
     }
     __aicore__ inline void ReturnPartialTokens()
     {
@@ -485,6 +494,7 @@ private:
     GM_ADDR weightsAddr_ = nullptr;
     GM_ADDR masksAddr_ = nullptr;
     GM_ADDR outputAddr_ = nullptr;
+    bool enableDedup_ = false;
     uint32_t bs_ = 0, experts_ = 0;
     uint8_t dtype_ = 0;
     uint32_t core_ = 0, h_ = 0, topK_ = 0, blocks_ = 0, resultStride_ = 0, tokens_ = 0, lanes_ = 0, laneBytes_ = 0, usedBytes_ = 0;

@@ -78,15 +78,18 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
 // Server Dedup Dispatch 使用 A5 固定 64 AIV；发送/接收核数由
 // TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 编译期配置（默认 32/32，支持 16/24/32/40/48）。
 // 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
-// TILEXR_EP_SERVER_DEDUP_ENABLE 由 build_all.sh dedup=0|1 固定，默认开启；
-// 修改后须配套重建 Host、kernel 和布局消费者。关闭时按目标Server筛选原始route并均衡分核，
-// 仅发送三字段包尾，包长随模式改变；hidden、表2和表5的输出shape保持不变。
+// build_all.sh dedup=auto|0|1 选择策略，默认 auto；须配套重建 Host、kernel 和布局消费者。
+// auto 固定采用去重资源/通信包布局，kernel 按原始每 rank BS <=32 关闭去重、>32 开启。
+// 同一轮所有 Rank 及对应 Dispatch/Combine 必须使用相同模式；不得用接收 token 数决定模式。
+// 显式 0/1 保留强制非去重/去重布局；0 使用三字段包尾，auto 的直接包保留去重包长。
+// hidden、表2和表5的输出shape保持不变。
 // sendCountsOut 为 int32[moeExpertNum] 含当前项前缀；expertTokenNumsOut 为 int64[moeExpertNum/epWorldSize]，
 // expertTokenNumsType=0 输出按 expert 累计前缀，=1 输出逐 expert count。
 // 成功表示异步提交成功。非 A5 返回 NOT_SUPPORT；同一 communicator 须在同一 stream 串行调用。
 // expertScales 必须为非空、4B 对齐的 FP32[bs,topK] 路由权重输入。
 // expertScalesOut 是独立 FP32[bs,topK] 输出；sourceMask 有效位中 DIRECT 为真实权重，第一跳首 k 为 1.0。
-// 关闭去重时 tokenType/relayReadIndex/sourceMask（表1/3/4）无效且可传空；
+// 关闭去重时 tokenType/relayReadIndex/sourceMask（表1/3/4）无效；显式 dedup=0 可传空，
+// auto 即使 BS<=32 也须按去重规格提供三张表（内容不消费、不保证写入）。
 // destinationIndex（表2）保留原始三字段，expertScalesOut（表5）原样复制所有权重。
 // C=epWorldSize*bs*min(topK,moeExpertNum/epWorldSize)，有效 row 数为 sendCountsOut[moeExpertNum-1]。
 // tokenTypeOut 为 uint32[C]，1=DIRECT、2=第一跳、3=转发终端，与 expandXOut 行序一致。

@@ -89,7 +89,7 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }
-    if (!kEpServerDedupEnable) {
+    if (!EpServerDedupEnabled(uint32_t(p.bs))) {
         const uint32_t owned = (uint32_t(p.bs) + kEpServerDedupSendCoreNum - 1U) / kEpServerDedupSendCoreNum;
         const uint32_t records = p.bs < kEpServerDedupAllCoreCountBsThreshold ?
             uint32_t(TileXREpDedupAlign((uint32_t(p.moeExpertNum) + 63U) / 64U, 8U)) * 32U : 0U;

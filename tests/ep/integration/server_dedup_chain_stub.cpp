@@ -181,8 +181,17 @@ aclError aclrtMemset(void *data, size_t size, int32_t value, size_t bytes)
     std::memset(data, value, bytes);
     return Call("memset");
 }
-aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind)
+aclError aclrtMemcpy(void *destination, size_t, const void *source, size_t bytes, aclrtMemcpyKind kind)
 {
+    if (kind == ACL_MEMCPY_DEVICE_TO_HOST && std::getenv("TEST_FORBID_UNUSED_METADATA_READ")) {
+        const char *bs = std::getenv("TILEXR_VALIDATION_BS");
+        if (bs && !TileXREp::EpServerDedupEnabled(static_cast<uint32_t>(std::strtoul(bs, nullptr, 10)))) {
+            for (size_t index : {5U, 7U, 8U})
+                if (firstBuffers.size() > index && source == firstBuffers[index]) return 92;
+            for (size_t index : {4U, 5U, 6U})
+                if (firstCombineBuffers.size() > index && source == firstCombineBuffers[index]) return 92;
+        }
+    }
     if (BatchPending()) return Call("mid-batch-transfer") == 0 ? 92 : 91;
     if (IsM12() && IsLocalPeer(reinterpret_cast<uintptr_t>(destination))) {
         if (auto data = M12Address(reinterpret_cast<uintptr_t>(destination), bytes)) {
@@ -415,11 +424,11 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
         const char *packetFault = std::getenv("TEST_PACKET_FAULT");
         const std::string failure = packetFault == nullptr ? "" : packetFault;
         const uint64_t hiddenStride = uint64_t(shape.h) * (shape.quantized ? 1U : 2U);
-        std::fill(sourceMask, sourceMask + bs, 0);
+        if (TileXREp::EpServerDedupEnabled(bs)) std::fill(sourceMask, sourceMask + bs, 0);
         const auto sourcePackets = SourcePackets(Ids(shape, rank), Weights(shape, rank), rank, world, experts, topK);
         for (const auto &packet : sourcePackets) {
             const auto &first = packet.members.front();
-            sourceMask[packet.token] |= uint32_t(1) << first.k;
+            if (TileXREp::EpServerDedupEnabled(bs)) sourceMask[packet.token] |= uint32_t(1) << first.k;
             weightsOut[packet.token * topK + first.k] = packet.members.size() > 1U ? 1.0f : first.weight;
         }
         const auto outputRows = DispatchRows(shape, rank);
@@ -440,7 +449,7 @@ int TileXRMoeEpDispatchMemoryServerDedup(void *x, int32_t *ids, void *scales, bo
             if (failure == "terminal-slot" && type == 3U) destination[0] ^= 1U;
             if (failure == "terminal-sentinel" && type == 3U) destination[1] = 0U;
             if (failure != "missing-output") {
-                tokenType[index] = type;
+                if (TileXREp::EpServerDedupEnabled(bs)) tokenType[index] = type;
                 std::copy(destination.begin(), destination.end(), destinationIndex + index * 3U);
             }
             if (row.FirstHop()) {
@@ -584,7 +593,7 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
         const uintptr_t stage = base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + resultBytes;
         uint32_t packed = 0;
         for (int32_t row = 0; row < sendCounts[experts - 1]; ++row) {
-            if (tokenType[row] != 3U) continue;
+            if (!TileXREp::EpServerDedupEnabled(bs) || tokenType[row] != 3U) continue;
             const uint32_t slot = assist[uint64_t(row) * 3U];
             auto target = M12Address(stage + uint64_t(slot) * stride, stride);
             if (!target) return 92;
@@ -694,12 +703,14 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
             auto result = M12Address(base + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, resultBytes);
             if (!result) return 92;
             for (uint32_t token = 0; token < uint32_t(bs); ++token) {
-                if (sourceMask[token] == 0U) return 92;
+                const uint32_t mask = TileXREp::EpServerDedupEnabled(bs) ? sourceMask[token] :
+                    (topK == 32 ? UINT32_MAX : (1U << topK) - 1U);
+                if (mask == 0U) return 92;
                 for (uint32_t col = 0; col < uint32_t(h); ++col) {
                     float sum = 0.0f;
                     bool first = true;
                     for (uint32_t k = 0; k < uint32_t(topK); ++k) {
-                        if (!(sourceMask[token] & (1U << k))) continue;
+                        if (!(mask & (1U << k))) continue;
                         const uint64_t elementByte = uint64_t(col) * 2U;
                         const uint64_t offset = (uint64_t(token) * topK + k) * packetBytes +
                             elementByte / 480U * 512U + elementByte % 480U;
@@ -740,9 +751,11 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
         auto control = M12Address(base + TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_OFFSET,
             TILEXR_EP_SERVER_DEDUP_COMBINE_CONTROL_BYTES);
         if (!control) return 92;
-        std::memset(control, 0, TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_BYTES);
-        std::memset(control + TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET, 0,
-            TileXREp::kEpServerDedupCombineRecvCoreNum * 512U);
+        if (TileXREp::EpServerDedupEnabled(bs)) {
+            std::memset(control, 0, TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_BYTES);
+            std::memset(control + TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET, 0,
+                TileXREp::kEpServerDedupCombineRecvCoreNum * 512U);
+        }
         if (isFault("prepare")) control[0] = 1;
         if (isFault("ready")) control[TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET] = 1;
         if (isFault("neighbor")) control[TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET +
@@ -787,6 +800,13 @@ int TileXRMoeEpCombineMemoryServerDedup(void *expertOut, int32_t *assist, int32_
                         if (IsM5()) events.insert(events.end(), {0x301f, 0x3020});
                     }
                     events.insert(events.end(), {0x3013, 0x3014, 0x3002});
+                    if (!TileXREp::EpServerDedupEnabled(bs)) {
+                        events = {0x3001, 0x3003, 0x3004};
+                        if (core < TileXREp::kEpServerDedupCombineSendCoreNum)
+                            events.insert(events.end(), {0x301b, 0x301c});
+                        else if (IsM5()) events.insert(events.end(), {0x302a, 0x302b});
+                        events.insert(events.end(), {0x3013, 0x3014, 0x3002});
+                    }
                     for (size_t index = 0; index < events.size(); ++index) {
                         combineProfileEvents[base + index] = events[index];
                         combineProfileTimes[base + index] = origin + core + index * 100U;

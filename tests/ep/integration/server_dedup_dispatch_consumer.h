@@ -18,9 +18,10 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
     };
     read(hidden.data(), hidden.size(), buffers[2], "read dispatch hidden");
     read(scales.data(), scales.size(), buffers[11], "read dispatch scales");
-    if (TileXREp::kEpServerDedupEnable) read(types.data(), types.size() * sizeof(uint32_t), buffers[5], "read dispatch TokenType");
+    if (TileXREp::EpServerDedupEnabled(shape.bs)) read(types.data(), types.size() * sizeof(uint32_t), buffers[5], "read dispatch TokenType");
     read(destinations.data(), destinations.size() * sizeof(uint32_t), buffers[6], "read dispatch DestinationIndex");
-    read(mask.data(), layout.sourceMaskBytes, buffers[8], "read dispatch sourceMask");
+    if (TileXREp::EpServerDedupEnabled(shape.bs))
+        read(mask.data(), layout.sourceMaskBytes, buffers[8], "read dispatch sourceMask");
     read(weights.data(), layout.weightBytes, buffers[9], "read input weights");
     read(weightsOut.data(), layout.weightBytes, buffers[10], "read dispatch source weights");
     ValidateOutput(std::memcmp(weights.data(), originalWeights.data(), layout.weightBytes) == 0, "input weights modified");
@@ -42,7 +43,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         ValidateOutput(FloatBits(weightsOut[packet.token * shape.k + first.k]) == FloatBits(direct ? first.weight : 1.0f),
             "source weight mismatch token=" + std::to_string(packet.token) + " k=" + std::to_string(first.k));
     }
-    if (TileXREp::kEpServerDedupEnable) ValidateOutput(mask == expectedMask, "sourceMask mismatch");
+    if (TileXREp::EpServerDedupEnabled(shape.bs)) ValidateOutput(mask == expectedMask, "sourceMask mismatch");
     ValidateOutput(RelayAddressesMatch(shape), "global reference member address mismatch");
     for (size_t index = 0; index < rows.size(); ++index) {
         const auto &row = rows[index];
@@ -93,7 +94,7 @@ std::string ValidateDispatch(const Config &c, const TileXR::CommArgs &args,
         }
         if (shape.quantized) ValidateOutput(std::memcmp(scales.data() + index * scaleStride,
             payload.data() + layout.data.quantCount, scaleStride) == 0, "dispatch scale mismatch" + context);
-        if (TileXREp::kEpServerDedupEnable) ValidateOutput(types[index] == TokenType(row), "TokenType mismatch" + context);
+        if (TileXREp::EpServerDedupEnabled(shape.bs)) ValidateOutput(types[index] == TokenType(row), "TokenType mismatch" + context);
         const auto expected = DestinationIndex(shape, row);
         for (uint32_t word = 0; word < 3U; ++word)
             ValidateOutput(destinations[index * 3U + word] == expected[word],

@@ -18,6 +18,7 @@ inline std::vector<Packet> SourcePackets(const std::vector<int32_t> &ids, const 
     std::vector<uint32_t> histogram(experts, 0U);
     std::vector<Packet> packets;
     const uint32_t localExperts = experts / ranks;
+    const bool dedup = TileXREp::EpServerDedupEnabled(static_cast<uint32_t>(ids.size() / k));
     for (uint32_t token = 0; token < ids.size() / k; ++token) {
         std::map<uint32_t, std::vector<Route>> groups;
         for (uint32_t route = 0; route < k; ++route) {
@@ -25,7 +26,7 @@ inline std::vector<Packet> SourcePackets(const std::vector<int32_t> &ids, const 
             groups[expert / localExperts / 8U].push_back({expert, histogram[expert]++, route, weights[token * k + route]});
         }
         for (auto &group : groups) {
-            if (TileXREp::kEpServerDedupEnable && group.first != source / 8U && group.second.size() > 1U) {
+            if (dedup && group.first != source / 8U && group.second.size() > 1U) {
                 packets.push_back({token, group.second});
             } else {
                 for (const auto &route : group.second) packets.push_back({token, {route}});

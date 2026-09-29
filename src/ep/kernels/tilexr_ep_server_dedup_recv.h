@@ -18,6 +18,7 @@ public:
         GM_ADDR expandX, GM_ADDR dynamicScales, GM_ADDR tokenType, GM_ADDR destinationIndex, GM_ADDR relayReadIndex,
         uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0)
     {
+        enableDedup_ = EpServerDedupEnabled(bs);
         args_ = args; pipe_ = pipe; bs_ = bs; k_ = k; experts_ = experts;
         localExperts_ = experts / uint32_t(args_->rankSize);
         receiver_ = GetBlockIdx() - kEpServerDedupSendCoreNum;
@@ -172,7 +173,7 @@ private:
         auto destination = wire[uint32_t(data_.tokenStride) + (kEpServerDedupEnable ? 32U : 0U)].template ReinterpretCast<uint32_t>();
         const uint32_t row = tasks_.Begin() + j;
         bool firstHop = false;
-        if (kEpServerDedupEnable) {
+        if (enableDedup_) {
             ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
             firstHop = tail.Header().GetValue(3U) == uint32_t(EpServerDedupTokenType::FirstHop);
             BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
@@ -187,9 +188,9 @@ private:
         if constexpr (Quantized)
             WriteServerDedupPayloadRange(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire,
                 uint32_t(data_.quantCount), uint32_t(data_.scaleBytes));
-        if (kEpServerDedupEnable) DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
+        if (enableDedup_) DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
         DataCopyPad(destinationIndex_[uint64_t(row) * 3U], destination, {1U, 12U, 0U, 0U, 0U});
-        if (kEpServerDedupEnable && firstHop) {
+        if (enableDedup_ && firstHop) {
             ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
             DataCopyPad(relayReadIndex_[uint64_t(row) * k_ * 2U], tail.ReadIndex(),
                 {1U, k_ * 8U, 0U, 0U, 0U});
@@ -226,6 +227,7 @@ private:
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
+    bool enableDedup_ = false;
     uint64_t windowOffset_ = 0;
     static constexpr uint32_t recvCoreNum_ = kEpServerDedupRecvCoreNum;
     uint32_t bs_ = 0U, k_ = 0U, experts_ = 0U, localExperts_ = 0U, receiver_ = 0U;

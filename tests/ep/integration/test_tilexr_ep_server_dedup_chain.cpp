@@ -397,7 +397,7 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
         << ",\"backend\":\"memory\",\"bs\":" << c.bs << ",\"h\":" << c.h << ",\"topk\":" << c.topK
-        << ",\"server_dedup_enabled\":" << (TileXREp::kEpServerDedupEnable ? "true" : "false")
+        << ",\"server_dedup_enabled\":" << (TileXREp::EpServerDedupEnabled(c.bs) ? "true" : "false")
         << ",\"route_mode\":" << Json(TileXREpDemo::RouteModeName(c.routeMode))
         << ",\"seed\":" << c.seed << ",\"quant_mode\":" << c.quantMode
         << ",\"operator_mode\":" << Json(c.operatorMode)

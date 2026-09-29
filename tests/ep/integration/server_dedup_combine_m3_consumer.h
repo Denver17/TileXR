@@ -103,7 +103,7 @@ struct CombineM3Validation : CombineM12Validation {
             << ",\"combine_stage_copy_bytes\":" << type3Rows * c.h * 4U
             << ",\"combine_direct_payload_bytes\":" << directRows * c.h * 2U
             << ",\"combine_direct_wire_bytes\":" << directRows * ((c.h * 2U + 479U) / 480U) * 512U
-            << ",\"combine_control_publish_bytes\":" << (TileXREp::kEpServerDedupEnable ? (64U * 8U + 8U * TileXREp::kEpServerDedupCombineRecvCoreNum) * 32U : 0U)
+            << ",\"combine_control_publish_bytes\":" << (TileXREp::EpServerDedupEnabled(c.bs) ? (64U * 8U + 8U * TileXREp::kEpServerDedupCombineRecvCoreNum) * 32U : 0U)
             << ",\"combine_input_check\":" << Json(both ? "dispatch-final-reference" : "full-snapshot")
             << ",\"combine_inputs_unchanged\":" << (!both && valid ? "true" : "false")
             << ",\"independent_expert_out_unchanged\":"
@@ -113,7 +113,7 @@ struct CombineM3Validation : CombineM12Validation {
             << ",\"expert_out_source\":" << Json(!both ? "standalone_expert_out" :
                 c.quantMode == 0 ? "dispatch_expand_x" : "separate_expert_out");
         if (!m5) out << ",\"y_out_unchanged\":" << checked;
-        if (m5) out << ",\"combine_receive_module\":" << Json(TileXREp::kEpServerDedupEnable ? "M5" : "M6")
+        if (m5) out << ",\"combine_receive_module\":" << Json(TileXREp::EpServerDedupEnabled(c.bs) ? "M5" : "M6")
             << ",\"combine_y_out_validated\":" << checked
             << ",\"combine_result_flags_cleared\":" << checked
             << ",\"combine_final_read_bytes\":" << (receivedRows + partialReceivedRows) * c.h * 2U

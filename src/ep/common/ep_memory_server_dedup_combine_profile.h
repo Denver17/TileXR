@@ -12,7 +12,7 @@ __aicore__ inline
 #endif
 constexpr uint32_t EpCombineProfilingRecordsPerLaunch(uint32_t bs, uint32_t k)
 {
-    const uint32_t required = kEpServerDedupEnable ? 0U :
+    const uint32_t required = EpServerDedupEnabled(bs) ? 0U :
         EpCombineAlign(EpCombineM5TokenCount(bs) * (8U + 4U * k) + 128U, 16U);
     return required > kEpServerDedupCombineProfilingRecordsPerLaunch ? required :
         kEpServerDedupCombineProfilingRecordsPerLaunch;

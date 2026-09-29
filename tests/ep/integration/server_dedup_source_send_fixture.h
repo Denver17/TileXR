@@ -84,6 +84,12 @@ inline std::vector<uint8_t> Payload(const Shape &s, uint32_t rank, const Packet 
     Put(result, tail, rank); Put(result, tail + 4U, packet.token); Put(result, tail + 8U, packet.members[0].k);
     if (!TileXREp::kEpServerDedupEnable) return result;
     Put(result, tail + 12U, uint32_t(packet.members.size() == 1U ? 1U : 2U));
+    // Auto direct packets retain the dedup layout, but only the zero entry
+    // count is defined; the reserved weight and remaining entries are unused.
+    if (!TileXREp::EpServerDedupEnabled(s.bs)) {
+        Put(result, layout.readIndexPayloadOffset, uint32_t(0));
+        return result;
+    }
     const auto index = layout.readIndexPayloadOffset;
     Put(result, index, uint32_t(packet.members.size() - 1U));
     Put(result, index + 4U, packet.members[0].weight);
@@ -129,7 +135,9 @@ inline void CheckPacket(const Shape &s, uint32_t source, const Packet &packet,
     compare(0, uint64_t(s.h) * (s.quantized ? 1U : 2U), "packet hidden");
     if (s.quantized) compare(layout.quantCount, layout.scaleBytes, "packet scale");
     compare(layout.headerPayloadOffset, TileXREp::kEpServerDedupEnable ? 16U : 12U, "packet header");
-    if (TileXREp::kEpServerDedupEnable) compare(layout.readIndexPayloadOffset, 8U * packet.members.size(), "packet read index");
+    if (TileXREp::kEpServerDedupEnable)
+        compare(layout.readIndexPayloadOffset, TileXREp::EpServerDedupEnabled(s.bs) ?
+            8U * packet.members.size() : 4U, "packet read index");
 }
 } // namespace ServerDedupReference
 #endif

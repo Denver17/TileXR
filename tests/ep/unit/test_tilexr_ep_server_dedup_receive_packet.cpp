@@ -57,8 +57,8 @@ struct Packet {
     EpServerDedupDataLayout layout;
     uint32_t k, entries;
     std::vector<uint8_t> payload, wire;
-    Packet(uint32_t h, uint32_t topK, bool quantized, uint32_t role) :
-        layout(TileXREpServerDedupDataLayout(2, h, topK, 96, quantized)), k(topK),
+    Packet(uint32_t h, uint32_t topK, bool quantized, uint32_t role, uint32_t bs = 2U) :
+        layout(TileXREpServerDedupDataLayout(bs, h, topK, 96, quantized)), k(topK),
         entries(!kEpServerDedupEnable || role == 1U ? 0U : (topK == 6U ? 3U : topK - 1U)),
         payload(layout.packedPayloadBytes), wire(layout.tokenStride)
     {
@@ -162,10 +162,12 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
 }
 
 template<bool Quantized>
-void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
+void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U, uint32_t bs = 2U)
 {
-    constexpr uint32_t h = 209U, k = 6U, rank = 8U, world = 16U, experts = 96U, bs = 2U;
-    Packet fixture(h, k, Quantized, role);
+    constexpr uint32_t h = 209U, k = 6U, rank = 8U, world = 16U, experts = 96U;
+    const bool dedup = EpServerDedupEnabled(bs);
+    Packet fixture(h, k, Quantized, role, bs);
+    fixture.SetWord(1U, bs - 1U);
     if (role == 2U) {
         fixture.SetEntry(0U, 49U, 0U); // Same-card relay to another expert.
         fixture.SetEntry(1U, 54U, 0U);
@@ -255,20 +257,20 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U)
     Check(capture.dropped[AscendC::testCore * TileXR::TILEXR_PROFILING_COUNT_STRIDE] == 0U,
         "empty polling does not overflow the trace");
 #endif
-    Check(sends == (role == 2U ? fixture.entries : 0U), "DIRECT and terminal rows do not start relay groups");
+    Check(sends == (dedup && role == 2U ? fixture.entries : 0U), "DIRECT and terminal rows do not start relay groups");
     Check(std::memcmp(hidden.data() + 32U, fixture.payload.data(), hiddenBytes) == 0, "receiver writes the exact hidden row");
     if (Quantized) Check(std::memcmp(scales.data() + 32U, fixture.payload.data() + data.quantCount, data.scaleBytes) == 0,
         "receiver writes MXFP8 scale bytes from their logical payload offset");
-    Check(types[8U] == (kEpServerDedupEnable ? role : 0xcdcdcdcdU), "receiver preserves the original local type before forwarding");
+    Check(types[8U] == (dedup ? role : 0xcdcdcdcdU), "receiver preserves the original local type before forwarding");
     const uint32_t logicalSlot = uint32_t((slot - data.dispatchOffset) / data.tokenStride);
     for (uint32_t word = 0; word < 3U; ++word) {
-        const uint32_t expected = role == 3U ? (word == 0U ? logicalSlot : UINT32_MAX) : fixture.Word(word);
+        const uint32_t expected = dedup && role == 3U ? (word == 0U ? logicalSlot : UINT32_MAX) : fixture.Word(word);
         Check(destinations[8U + word] == expected, "receiver writes exact per-role DestinationIndex words");
     }
     uint32_t counter;
     std::memcpy(&counter, local.data() + counts.counterOffset, 4U);
     Check(counter == initialCounter, "receiver never reads or updates the retired counter");
-    if (role == 2U) {
+    if (dedup && role == 2U) {
         Check(std::memcmp(indices.data() + 8U, fixture.payload.data() + data.readIndexPayloadOffset, k * 8U) == 0,
             "first-hop output preserves every index byte without rebuilding members");
         for (uint32_t i = 0; i < fixture.entries; ++i) {
@@ -591,6 +593,17 @@ void CheckSparsePrefixReceivers()
 int main()
 {
     try {
+#if TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE
+        // Reserved relay bytes and table outputs stay poisoned on direct mode.
+        // Passing first-hop/terminal-looking tail metadata verifies BS controls
+        // consumption, not stale contents of an unused unified-layout field.
+        for (uint32_t bs : {1U, 31U, 32U, 33U, 32U}) {
+            for (uint32_t role : {1U, 2U, 3U}) {
+                CheckReceiver<false>(role, 1, 3U, bs);
+                CheckReceiver<true>(role, 2, 3U, bs);
+            }
+        }
+#else
             if (kEpServerDedupEnable) CheckPacket(1U, 1U, false);
             if (kEpServerDedupEnable) CheckSparsePrefixReceivers();
             for (uint32_t owned = 17U; owned <= 32U; ++owned)
@@ -612,6 +625,7 @@ int main()
             }
             CheckReceiver<false>(kEpServerDedupEnable ? 2U : 1U, 1, 128U);
             CheckReceiver<true>(kEpServerDedupEnable ? 3U : 1U, 2, 128U);
+#endif
     } catch (const std::exception &error) {
         AscendC::GmWriteObserver() = {}; AscendC::GmReadObserver() = {};
         AscendC::PaddedWriteObserver() = {}; AscendC::EventObserver() = {};

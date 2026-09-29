@@ -74,7 +74,7 @@ struct CombineM12Validation {
             "P2.1 TokenNum outside supported range");
         std::vector<uint32_t> types(tokenNum), table2(uint64_t(tokenNum) * 3U);
         if (tokenNum) {
-            if (TileXREp::kEpServerDedupEnable) Check(aclrtMemcpy(types.data(), types.size() * 4U, buffers[5], types.size() * 4U,
+            if (TileXREp::EpServerDedupEnabled(c.bs)) Check(aclrtMemcpy(types.data(), types.size() * 4U, buffers[5], types.size() * 4U,
                 ACL_MEMCPY_DEVICE_TO_HOST), "read P2.1 token types");
             Check(aclrtMemcpy(table2.data(), table2.size() * 4U, buffers[6], table2.size() * 4U,
                 ACL_MEMCPY_DEVICE_TO_HOST), "read P2.1 table2");
@@ -95,7 +95,7 @@ struct CombineM12Validation {
             const bool used = (launchedWindows & (1U << window)) != 0;
             auto base = args.peerMems[c.rank] + window * (args.peerMemBytes / 2U);
             auto control = initialControl;
-            if (used && TileXREp::kEpServerDedupEnable) {
+            if (used && TileXREp::EpServerDedupEnabled(c.bs)) {
                 std::fill_n(control.begin(), TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_BYTES, 0);
                 std::fill_n(control.begin() + TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET,
                     TileXREp::kEpServerDedupCombineRecvCoreNum * 512U, 0);
@@ -149,7 +149,7 @@ struct CombineM12Validation {
             << ",\"combine_type3_rows\":" << type3Rows
             << ",\"combine_algorithm_bytes\":" << type3Rows * c.h * 2U
             << ",\"combine_stage_copy_bytes\":" << type3Rows * c.h * 4U
-            << ",\"combine_control_publish_bytes\":" << (TileXREp::kEpServerDedupEnable ? (64U * 8U + 8U * TileXREp::kEpServerDedupCombineRecvCoreNum) * 32U : 0U)
+            << ",\"combine_control_publish_bytes\":" << (TileXREp::EpServerDedupEnabled(c.bs) ? (64U * 8U + 8U * TileXREp::kEpServerDedupCombineRecvCoreNum) * 32U : 0U)
             << ",\"combine_input_check\":" << Json(both ? "dispatch-final-reference" : "full-snapshot")
             << ",\"combine_inputs_unchanged\":" << (both ? "false" : "true")
             << ",\"y_out_unchanged\":true,\"independent_expert_out_unchanged\":"

@@ -20,6 +20,7 @@ public:
         uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0)
     {
         args_ = args; pipe_ = pipe;
+        enableDedup_ = EpServerDedupEnabled(bs);
         bs_ = bs; h_ = h; k_ = k; localExperts_ = experts / args->rankSize;
         const uint32_t core = GetBlockIdx();
         const uint32_t base = bs / kEpServerDedupSendCoreNum, remainder = bs % kEpServerDedupSendCoreNum;
@@ -37,7 +38,7 @@ public:
     __aicore__ inline void Process(ServerDedupProfile &profile,
         TBufPool<TPosition::VECCALC, 16> &scratch, uint32_t reservedBytes)
     {
-        if (kEpServerDedupEnable && count_ == 0U) return;
+        if (enableDedup_ && count_ == 0U) return;
         const uint64_t fixed = TileXREpServerDedupSendFixedUbBytes(bs_, k_, args_->rankSize,
             count_, reservedBytes, Quantized, data_);
         if (fixed + data_.tokenStride > kEpServerDedupCountUbBytes) { Trap(); return; }
@@ -87,9 +88,11 @@ public:
         routeIds_ = idsBuf_.Get<int32_t>();
         if (count_ != 0U) routeWeights_ = weightInBuf_.Get<float>();
         if (kEpServerDedupEnable) {
-            sourceWeights_ = weightOutBuf_.Get<float>();
-            sourceMasks_ = maskBuf_.Get<uint32_t>();
-            directTasks_ = directBuf_.Get<uint32_t>();
+            if (count_ != 0U) {
+                sourceWeights_ = weightOutBuf_.Get<float>();
+                sourceMasks_ = maskBuf_.Get<uint32_t>();
+                directTasks_ = directBuf_.Get<uint32_t>();
+            }
             serverState_ = serverBuf_.Get<uint32_t>();
             if (args_->rankSize / 8U > 1U && k_ >= 2U) firstHopMasks_ = firstHopBuf_.Get<uint32_t>();
         }
@@ -106,13 +109,13 @@ public:
         }
         PipeBarrier<PIPE_V>();
 
-        if (kEpServerDedupEnable) SendWithDedup(input, profile);
+        if (enableDedup_) SendWithDedup(input, profile);
         else SendWithoutDedup(input, profile);
         for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_V>(lane);
         Sync<HardEvent::S_MTE3>();
-        if (kEpServerDedupEnable) DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
+        if (enableDedup_) DataCopyPad(maskOut_[start_], sourceMasks_, {1U, count_ * 4U, 0U, 0U, 0U});
         if (count_ != 0U) DataCopyPad(weightOut_[uint64_t(start_) * k_],
-            kEpServerDedupEnable ? sourceWeights_ : routeWeights_, {1U, count_ * k_ * 4U, 0U, 0U, 0U});
+            enableDedup_ ? sourceWeights_ : routeWeights_, {1U, count_ * k_ * 4U, 0U, 0U, 0U});
         Sync<HardEvent::MTE3_S>();
     }
 
@@ -191,6 +194,8 @@ private:
     }
     __aicore__ inline void Allocate(TBuf<> &buffer, uint32_t bytes)
     {
+        // Auto keeps the dedup layout even for cores owning routes but no tokens.
+        if (bytes == 0U) return;
         scratch_->InitBuffer(buffer, bytes);
         usedBytes_ += bytes;
     }
@@ -262,9 +267,12 @@ private:
         header.SetValue(2U, firstK);
         if (!kEpServerDedupEnable) return;
         auto index = payload[data_.readIndexPayloadOffset].template ReinterpretCast<uint32_t>();
-        auto weights = index.template ReinterpretCast<float>();
-        token -= start_; // Only dedup weights use this core's contiguous copy partition.
         header.SetValue(3U, uint32_t(mask == 0U ? EpServerDedupTokenType::Direct : EpServerDedupTokenType::FirstHop));
+        // Direct route ownership differs from the weight-copy token partition.
+        // Its reserved relay payload is unused; never index routeWeights_ here.
+        if (!enableDedup_) { index.SetValue(0U, 0U); return; }
+        auto weights = index.template ReinterpretCast<float>();
+        token -= start_;
         weights.SetValue(1U, routeWeights_.GetValue(token * k_ + firstK));
         uint32_t entries = 0U;
         for (uint32_t k = firstK + 1U; mask != 0U && k < k_; ++k) if (mask & (uint32_t(1) << k)) {
@@ -319,6 +327,7 @@ private:
 
     const __gm__ TileXR::CommArgs *args_ = nullptr;
     TPipe *pipe_ = nullptr;
+    bool enableDedup_ = false;
     TBufPool<TPosition::VECCALC, 16> *scratch_ = nullptr;
     uint32_t bs_ = 0, h_ = 0, k_ = 0, localExperts_ = 0, start_ = 0, count_ = 0;
     uint32_t usedBytes_ = 0, lanes_ = 0, packets_ = 0, directCount_ = 0;

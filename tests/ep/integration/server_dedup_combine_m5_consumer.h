@@ -6,7 +6,7 @@ struct CombineM5Validation : CombineM4Validation {
 
     void Initialize(const Config &c, const TileXR::CommArgs &args)
     {
-        if (TileXREp::kEpServerDedupEnable) CombineM4Validation::Initialize(c, args);
+        if (TileXREp::EpServerDedupEnabled(c.bs)) CombineM4Validation::Initialize(c, args);
         else CombineM3Validation::Initialize(c, args);
         BuildFinal(c);
         // This changes only the Host expectation; the kernel owns GM cleanup.

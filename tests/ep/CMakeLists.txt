@@ -10,11 +10,20 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 enable_testing()
-set(TILEXR_EP_SERVER_DEDUP_ENABLE "1" CACHE STRING "Server dedup mode (0 or 1)")
-if(NOT TILEXR_EP_SERVER_DEDUP_ENABLE MATCHES "^[01]$")
-    message(FATAL_ERROR "TILEXR_EP_SERVER_DEDUP_ENABLE must be 0 or 1")
+set(TILEXR_EP_SERVER_DEDUP_ENABLE "1" CACHE STRING "Server dedup policy (auto, 0 or 1)")
+set_property(CACHE TILEXR_EP_SERVER_DEDUP_ENABLE PROPERTY STRINGS auto 0 1)
+if(TILEXR_EP_SERVER_DEDUP_ENABLE STREQUAL "auto")
+    set(TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE 1)
+    set(TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE 1)
+elseif(TILEXR_EP_SERVER_DEDUP_ENABLE MATCHES "^[01]$")
+    set(TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE ${TILEXR_EP_SERVER_DEDUP_ENABLE})
+    set(TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE 0)
+else()
+    message(FATAL_ERROR "TILEXR_EP_SERVER_DEDUP_ENABLE must be auto, 0 or 1")
 endif()
-add_compile_definitions(TILEXR_EP_SERVER_DEDUP_ENABLE=$<IF:$<BOOL:$<TARGET_PROPERTY:TILEXR_TEST_DEDUP_ONLY>>,1,${TILEXR_EP_SERVER_DEDUP_ENABLE}>)
+add_compile_definitions(
+    TILEXR_EP_SERVER_DEDUP_ENABLE=$<IF:$<OR:$<BOOL:$<TARGET_PROPERTY:TILEXR_TEST_DEDUP_ONLY>>,$<BOOL:$<TARGET_PROPERTY:TILEXR_TEST_DEDUP_AUTO>>>,1,${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}>
+    TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=$<IF:$<BOOL:$<TARGET_PROPERTY:TILEXR_TEST_DEDUP_ONLY>>,0,$<IF:$<BOOL:$<TARGET_PROPERTY:TILEXR_TEST_DEDUP_AUTO>>,1,${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}>>)
 
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
@@ -571,7 +580,7 @@ add_test(NAME test_tilexr_ep_server_dedup_profile COMMAND test_tilexr_ep_server_
 set_tests_properties(test_tilexr_ep_server_dedup_profile PROPERTIES TIMEOUT 30)
 install(TARGETS test_tilexr_ep_server_dedup_profile RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_server_dedup_source_send_profile)
+foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_server_dedup_source_send_profile test_tilexr_ep_server_dedup_source_send_auto)
     add_executable(${test_target} unit/test_tilexr_ep_server_dedup_source_send.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp)
     target_include_directories(${test_target} PRIVATE
@@ -585,7 +594,7 @@ foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_serve
 endforeach()
 target_compile_definitions(test_tilexr_ep_server_dedup_source_send_profile PRIVATE __CCE__=1 __CCE_IS_AICORE__=1 TILEXR_ENABLE_PROFILING=1)
 
-foreach(test_target test_tilexr_ep_server_dedup_receive_packet test_tilexr_ep_server_dedup_receive_profile)
+foreach(test_target test_tilexr_ep_server_dedup_receive_packet test_tilexr_ep_server_dedup_receive_profile test_tilexr_ep_server_dedup_receive_packet_auto)
     add_executable(${test_target} unit/test_tilexr_ep_server_dedup_receive_packet.cpp)
     target_include_directories(${test_target} PRIVATE
         unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
@@ -972,3 +981,49 @@ set_target_properties(test_tilexr_ep_server_dedup_combine_m12
     test_tilexr_ep_server_dedup_combine_m3 test_tilexr_ep_server_dedup_combine_m4
     test_tilexr_ep_server_dedup_chain_dry_run test_tilexr_ep_server_dedup_combine_delay
     PROPERTIES TILEXR_TEST_DEDUP_ONLY TRUE)
+
+# Automatic execution keeps the dedup resource layout at both BS boundaries.
+add_executable(test_tilexr_ep_server_dedup_auto_combine
+    unit/test_tilexr_ep_server_dedup_auto_combine.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_auto_combine BEFORE PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake" ${TILEXR_EP_TEST_INCLUDE_DIRS})
+add_test(NAME test_tilexr_ep_server_dedup_auto_combine COMMAND test_tilexr_ep_server_dedup_auto_combine)
+set_tests_properties(test_tilexr_ep_server_dedup_auto_combine PROPERTIES TIMEOUT 180)
+set_target_properties(test_tilexr_ep_server_dedup_source_send_auto
+    test_tilexr_ep_server_dedup_receive_packet_auto test_tilexr_ep_server_dedup_auto_combine
+    PROPERTIES TILEXR_TEST_DEDUP_AUTO TRUE)
+
+if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_auto_consumer
+        COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_auto.py")
+    set_tests_properties(test_tilexr_ep_server_dedup_auto_consumer PROPERTIES TIMEOUT 180)
+endif()
+
+add_executable(test_tilexr_ep_server_dedup_auto_policy
+    unit/test_tilexr_ep_server_dedup_auto_policy.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_layout.cpp
+    ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_layout.cpp)
+target_include_directories(test_tilexr_ep_server_dedup_auto_policy PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
+set_target_properties(test_tilexr_ep_server_dedup_auto_policy PROPERTIES TILEXR_TEST_DEDUP_AUTO TRUE)
+add_test(NAME test_tilexr_ep_server_dedup_auto_policy COMMAND test_tilexr_ep_server_dedup_auto_policy)
+
+# These historical fixtures assert the exact M4 -> M5 handoff cadence. Preserve
+# that phase-specific baseline in auto builds; the auto matrix covers M3/M6 too.
+if(TILEXR_EP_SERVER_DEDUP_ENABLE STREQUAL "auto")
+    set_target_properties(test_tilexr_ep_server_dedup_combine_m5
+        test_tilexr_ep_server_dedup_combine_m5_send16 test_tilexr_ep_server_dedup_combine_m5_send28
+        test_tilexr_ep_server_dedup_combine_m5_send48 test_tilexr_ep_server_dedup_combine_m5_send52
+        PROPERTIES TILEXR_TEST_DEDUP_ONLY TRUE)
+endif()
+foreach(_auto_send_cores IN ITEMS 16 28 48 52)
+    set(_auto_split_target test_tilexr_ep_server_dedup_auto_combine_send${_auto_send_cores})
+    add_executable(${_auto_split_target} unit/test_tilexr_ep_server_dedup_auto_combine.cpp)
+    target_include_directories(${_auto_split_target} BEFORE PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake" ${TILEXR_EP_TEST_INCLUDE_DIRS})
+    target_compile_definitions(${_auto_split_target} PRIVATE
+        $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=${_auto_send_cores}>)
+    set_target_properties(${_auto_split_target} PROPERTIES TILEXR_TEST_DEDUP_AUTO TRUE
+        TILEXR_TEST_COMBINE_SEND_CORES ${_auto_send_cores})
+    add_test(NAME ${_auto_split_target} COMMAND ${_auto_split_target})
+    set_tests_properties(${_auto_split_target} PROPERTIES TIMEOUT 180)
+endforeach()

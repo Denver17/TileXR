@@ -14,7 +14,7 @@ namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
 namespace {
 using ServerDedupTest::Check;
 constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
-constexpr bool dedup = TileXREp::kEpServerDedupEnable;
+constexpr bool dedupLayout = TileXREp::kEpServerDedupEnable;
 
 void CheckReceiveUnpack(uint32_t h, bool quantized)
 {
@@ -96,13 +96,14 @@ void CheckDeferredCountSender()
         Check(record[0] == 0x3f800000U && record[1] == (expert == 1U ? 1U : 0U),
             "sender preparation and lane reuse preserve the delayed count source");
     }
-    Check(mask == (dedup ? 1U : 0U) && output == weight, "count-to-sender handoff preserves token outputs");
+    Check(mask == (TileXREp::EpServerDedupEnabled(1U) ? 1U : 0U) && output == weight, "count-to-sender handoff preserves token outputs");
     counts.Finish();
 }
 
 void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, bool grouped,
     uint32_t source = 0, uint32_t rounds = 1, const std::vector<int32_t> &routePattern = {}, uint64_t peerBytes = ServerDedupTest::kPeerBytes)
 {
+    const bool dedup = TileXREp::EpServerDedupEnabled(bs);
     TileXR::CommArgs args {};
     args.rankSize = ranks;
     args.rank = source;
@@ -140,9 +141,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     AscendC::GmWriteObserver() = [&](const void *destination, const void *payload, uint32_t bytes) {
         Check(bytes == data.tokenStride, "each source packet uses the complete shared stride");
         uint32_t header[4] {}, members = 0U;
-        std::memcpy(header, static_cast<const uint8_t *>(payload) + data.headerWireOffset, dedup ? sizeof(header) : 12U);
-        if (dedup) std::memcpy(&members, static_cast<const uint8_t *>(payload) + data.relayReadIndexWireOffset, 4U);
-        if (dedup) Check(header[3] == (members == 0U ? 1U : 2U), "source packet uses the shared token type enum");
+        std::memcpy(header, static_cast<const uint8_t *>(payload) + data.headerWireOffset, dedupLayout ? sizeof(header) : 12U);
+        if (dedupLayout) std::memcpy(&members, static_cast<const uint8_t *>(payload) + data.relayReadIndexWireOffset, 4U);
+        if (dedupLayout) Check(header[3] == (members == 0U ? 1U : 2U), "source packet uses the shared token type enum");
         writes.push_back({AscendC::testCore, header[1], header[2], members, destination, reinterpret_cast<uintptr_t>(payload)});
     };
     std::map<uint32_t, std::array<std::vector<uint8_t>, 2>> windows;
@@ -180,7 +181,7 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             AscendC::TPipe pipe;
             TileXREp::ServerDedupSender<uint16_t, false, false> sender;
             sender.Init(&args, reinterpret_cast<uint8_t *>(hidden.data()), reinterpret_cast<uint8_t *>(ids.data()),
-                reinterpret_cast<uint8_t *>(weights.data()), dedup ? reinterpret_cast<uint8_t *>(masks.data() + 1) : nullptr,
+                reinterpret_cast<uint8_t *>(weights.data()), dedupLayout ? reinterpret_cast<uint8_t *>(masks.data() + 1) : nullptr,
                 reinterpret_cast<uint8_t *>(output.data() + 1), bs, h, k, experts, &pipe, round + 1U);
             TileXREp::ServerDedupProfile profile;
             profile.Init(reinterpret_cast<GM_ADDR>(&args), 0U);
@@ -298,9 +299,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
             }
             Check(std::memcmp(payload.data(), hidden.data() + packet.token * h, h * 2U) == 0, "full hidden bytes preserve token identity");
             uint32_t header[4] {};
-            std::memcpy(header, payload.data() + data.headerPayloadOffset, dedup ? sizeof(header) : 12U);
+            std::memcpy(header, payload.data() + data.headerPayloadOffset, dedupLayout ? sizeof(header) : 12U);
             Check(header[0] == source && header[1] == packet.token && header[2] == first.k &&
-                (!dedup || header[3] == (packet.members.size() == 1U ? 1U : 2U)), "DIRECT/first-hop header identity and role");
+                (!dedupLayout || header[3] == (packet.members.size() == 1U ? 1U : 2U)), "DIRECT/first-hop header identity and role");
             if (dedup) {
             std::vector<uint32_t> index(k * 2U);
             std::memcpy(index.data(), payload.data() + data.readIndexPayloadOffset, k * 8U);
@@ -337,8 +338,8 @@ int main()
     try {
             // Interleaved servers must not reorder or redistribute original routes.
             // BS=1 also separates route send ownership from token weight-copy ownership.
-            if (!dedup) {
-                for (uint32_t bs : {1U, 13U, sendCoreNum + 1U})
+            {
+                for (uint32_t bs : {1U, 13U, 31U, 32U, 33U, sendCoreNum + 1U})
                     Run(32, 384, bs, 64, 6, false, 16, 3, {192, 0, 96, 288, 1, 193});
             }
             CheckDeferredCountSender();
