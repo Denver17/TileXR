@@ -41,14 +41,22 @@ int main() {
         const uint32_t count = (tokens + kEpServerDedupCombineSendCoreNum - 1) /
             kEpServerDedupCombineSendCoreNum;
         if (count * 12U > EpCombineAlign(tokens == 0 ? 4 : tokens * 4, 256)) return 1;
-        for (uint32_t bs : {1U, 96U, 512U, 16384U})
-        for (uint32_t h : {1U, 17U, 240U, 241U, 7168U, 10000U, 16000U}) {
+        for (uint32_t bs : {1U, 96U, 256U, 512U, 16384U})
+        for (uint32_t h : {1U, 17U, 240U, 241U, 7168U, 8192U, 10000U, 16000U}) {
             for (uint32_t k : {1U, 6U, 32U}) {
                 const auto p = EpCombineM45Layout(tokens, bs, h, k);
-                if (p.inputLanes > 3 || p.outputLanes > 8 || p.finalOutputLanes > 2) return 2;
+                if (p.inputLanes > 7 || p.outputLanes > 4 || p.finalOutputLanes > 2) return 2;
                 if (!p.inputLanes) { if (p.outputLanes) return 3; continue; }
                 if (p.totalBytes > kEpServerDedupCombineRecvUbBytes) return 4;
-                if (p.outputLanes < 8 && p.totalBytes + p.outputBytes <= kEpServerDedupCombineRecvUbBytes) return 5;
+                if (p.inputLanes < 7 && p.totalBytes + p.inputBytes <= kEpServerDedupCombineRecvUbBytes) return 5;
+                const uint32_t fixed = kEpServerDedupCombineResidentUbBytes + p.inputOffset;
+                // Preserve the old read capacity, then maximize capped writes
+                // and use every remaining complete buffer for read-ahead.
+                const uint32_t oldReads = std::min(3U,
+                    (kEpServerDedupCombineRecvUbBytes - fixed - p.outputBytes) / p.inputBytes);
+                if (p.inputLanes < oldReads) return 21;
+                if (p.outputLanes < 4 && fixed + oldReads * p.inputBytes + (p.outputLanes + 1) * p.outputBytes <=
+                    kEpServerDedupCombineRecvUbBytes) return 18;
                 if (p.phaseOffset != 3 * p.computeBytes || p.inputOffset < p.phaseOffset + p.phaseBytes ||
                     p.outputOffset < p.inputOffset + p.inputLanes * p.inputBytes ||
                     p.totalBytes != kEpServerDedupCombineResidentUbBytes + p.outputOffset + p.outputLanes * p.outputBytes) return 6;
@@ -96,8 +104,14 @@ int main() {
         }
     }
     const auto main = EpCombineM45Layout(576, 96, 7168, 6);
-    if (main.inputLanes != 3 || main.outputLanes != 6 || main.finalOutputLanes != 2) return 9;
-    if (kEpServerDedupCombineSendCoreNum == 32 && main.totalBytes != 245280) return 10;
+    if (main.inputLanes != 5 || main.outputLanes != 4 || main.finalOutputLanes != 2) return 9;
+    if (kEpServerDedupCombineSendCoreNum == 32 && main.totalBytes != 243360) return 10;
+    const auto bs256 = EpCombineM45Layout(1536, 256, 7168, 6);
+    if (bs256.inputLanes != 5 || bs256.outputLanes != 4) return 19;
+    if (kEpServerDedupCombineSendCoreNum == 32 && bs256.totalBytes != 243456) return 20;
+    const auto h8192 = EpCombineM45Layout(1536, 256, 8192, 6);
+    if (h8192.inputLanes < 3 || h8192.outputLanes != 3) return 22;
+    if (kEpServerDedupCombineSendCoreNum == 32 && h8192.inputLanes != 4) return 23;
     for (uint32_t tasks = 0; tasks < 20; ++tasks)
         if (EpCombineM5Layout(main, tasks).inputLanes != 7) return 17;
     return 0;

@@ -130,7 +130,7 @@ private:
             const uint32_t span = tokens_ - begin < scanRows_ ? tokens_ - begin : scanRows_;
             // The scan aliases low_ and table caches. Retire their Vector users
             // before MTE2 overwrites them; output slots remain independent/live.
-            // Input lanes 0..2 keep seeded V_MTE2 events live. Use a distinct
+            // Input lanes 0..6 keep seeded V_MTE2 events live. Use a distinct
             // event in this direction for phase scratch, never FetchEventID(0).
             SetFlag<HardEvent::V_MTE2>(7U);
             WaitFlag<HardEvent::V_MTE2>(7U);

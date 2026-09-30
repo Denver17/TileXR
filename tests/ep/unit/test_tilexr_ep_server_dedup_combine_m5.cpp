@@ -319,13 +319,13 @@ void TestPartialTailOverlap(bool bf16)
     Check(AscendC::PendingMte3().empty(), "all leftover M4 slots and M5 clears drained");
 }
 
-void TestEightPartialSlots(bool bf16)
+void TestFourPartialSlots(bool bf16)
 {
     // One source token on this Recv core; last-token flag clear occurs while
-    // all eight M4 output slots (including V_MTE3 event 7) are still in flight.
+    // all four M4 output slots are still in flight.
     SourceFixture f(kEpServerDedupCombineRecvCoreNum, 257U, 6U, bf16, true);
     f.partial = false;
-    f.tokens = 8U * kEpServerDedupCombineRecvCoreNum;
+    f.tokens = 4U * kEpServerDedupCombineRecvCoreNum;
     f.types.assign(f.tokens, 2); f.counts.assign(32U, int32_t(f.tokens));
     f.expert.resize(uint64_t(f.tokens) * f.h);
     f.table.resize(f.tokens * 3U); f.relay.assign(f.tokens * f.k * 2U, 0U);
@@ -333,8 +333,8 @@ void TestEightPartialSlots(bool bf16)
     const float one = 1.0f;
     for (uint32_t row = 0; row < f.tokens; ++row) {
         const uint32_t ordinal = row / kEpServerDedupCombineRecvCoreNum;
-        // Three local-server sends, then five remote-server sends per core.
-        f.table[row * 3U] = ordinal < 5U ? 6 : 8;
+        // One local-server send, then three remote-server sends per core.
+        f.table[row * 3U] = ordinal < 3U ? 6 : 8;
         f.table[row * 3U + 1U] = ordinal; f.table[row * 3U + 2U] = 0;
         f.relay[row * f.k * 2U] = 1; f.relay[row * f.k * 2U + 2U] = f.rank * 2U;
         std::memcpy(&f.relay[row * f.k * 2U + 1U], &one, 4U);
@@ -358,12 +358,12 @@ void TestEightPartialSlots(bool bf16)
     };
     AscendC::EventObserver() = [&](AscendC::HardEvent event, AscendC::TEventID id, bool set) {
         if (event == AscendC::HardEvent::S_MTE3 && id == 7U && set) {
-            Check(retired == 0U && AscendC::PendingMte3().size() == 8U,
-                "clear publishes in a distinct event direction while all eight partials remain pending");
+            Check(retired == 0U && AscendC::PendingMte3().size() == 4U,
+                "clear publishes in a distinct event direction while all four partials remain pending");
             clearPublished = true;
         }
         if (clearPublished && event == AscendC::HardEvent::MTE3_V && !set && !inheritedWait) {
-            Check(id == 6U, "M5 keeps the latest two of eight sends, not the final server's subtotal");
+            Check(id == 2U, "M5 keeps the latest two of four sends, not the final server's subtotal");
             inheritedWait = true;
         }
     };
@@ -374,20 +374,20 @@ void TestEightPartialSlots(bool bf16)
             const auto address = reinterpret_cast<uintptr_t>(dst);
             if (address >= target && address < target + uint64_t(f.bs) * f.k * f.packet) offset = address - target;
         }
-        Check(offset < uint64_t(8U) * f.k * f.packet && bytes == f.packet, "M4 writes one of eight original destinations");
+        Check(offset < uint64_t(4U) * f.k * f.packet && bytes == f.packet, "M4 writes one of four original destinations");
         Check(loaded && computed && clearPublished, "M5 clear, payload and compute precede M4 tail retirement");
         const uint32_t row = uint32_t(offset / (f.k * f.packet)) * kEpServerDedupCombineRecvCoreNum;
         const auto packet = static_cast<const uint8_t *>(src);
         for (uint32_t col = 0; col < f.h; ++col) {
             uint16_t actual; std::memcpy(&actual, packet + col / 240U * 512U + col % 240U * 2U, 2U);
-            Check(actual == f.expert[uint64_t(row) * f.h + col], "all eight retained M4 source slots preserve payload");
+            Check(actual == f.expert[uint64_t(row) * f.h + col], "all four retained M4 source slots preserve payload");
         }
         ++retired;
     };
     f.Run(kEpServerDedupCombineSendCoreNum, 0U);
     AscendC::GmWriteObserver() = {}; AscendC::MulsObserver() = {}; AscendC::EventObserver() = {}; f.ResetHooks();
-    Check(retired == 8U && inheritedWait && std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()),
-        "O8/O5=2 handoff produces yOut and retires retained slot7 exactly once");
+    Check(retired == 4U && inheritedWait && std::equal(f.expected.begin(), f.expected.begin() + f.h, f.output.begin()),
+        "O4/O5=2 handoff produces yOut and retires retained slot3 exactly once");
     Check(AscendC::PendingMte3().empty(), "no inherited packet or clear remains after M6");
 }
 
@@ -499,9 +499,9 @@ int main()
             TestDirectThenFinal(bf16);
             if (kEpServerDedupEnable) {
             TestPartialTailOverlap(bf16);
-            TestEightPartialSlots(bf16);
+            TestFourPartialSlots(bf16);
             TestInputReclaimsPartialSlots(bf16, 6U);
-            TestInputReclaimsPartialSlots(bf16, 7U); // retained outputs wrap the physical ring
+            TestInputReclaimsPartialSlots(bf16, 9U); // retained outputs wrap the physical ring
             TestInputReclaimsPartialSlots(bf16, 11U);
             TestInputReclaimsPartialSlots(bf16, 11U, 32U);
             TestPartialWithoutSource(bf16);

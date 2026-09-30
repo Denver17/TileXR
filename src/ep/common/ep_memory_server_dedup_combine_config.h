@@ -22,7 +22,8 @@ constexpr uint32_t kEpServerDedupCombineUbBytes = 190U * 1024U;
 // CANN 9.1 __NPU_ARCH__=3510 exposes 248 KiB after the 8 KiB system
 // reservation. Recv M4/M5 share 240 KiB; M1/M3 retain their budget.
 constexpr uint32_t kEpServerDedupCombineRecvUbBytes = 240U * 1024U;
-constexpr uint32_t kEpServerDedupCombineM4MaxInputLanes = 3U;
+constexpr uint32_t kEpServerDedupCombineM4MaxInputLanes = 7U; // event 7 belongs to server selection
+constexpr uint32_t kEpServerDedupCombineM4MaxOutputLanes = 4U;
 constexpr uint32_t kEpServerDedupCombineM5MaxInputLanes = 7U; // MTE2_V(7) belongs to probe
 constexpr uint32_t kEpServerDedupCombineM5MaxOutputLanes = 2U;
 constexpr uint32_t kEpServerDedupCombineTableRows = 512U;
@@ -129,11 +130,16 @@ TILEXR_EP_COMBINE_CONSTEXPR EpCombineM45WorkspaceLayout EpCombineM45Layout(
     const uint32_t input = ((h * 2U + 479U) / 480U) * 480U;
     const uint32_t output = ((h * 2U + 479U) / 480U) * 512U;
     if (fixed + input + output > kEpServerDedupCombineRecvUbBytes) return result;
-    const uint32_t reads = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - output) / input);
+    // Preserve the old policy's up-to-three inputs before capping writes.
+    // Spend the remainder on read-ahead; input IDs 0..6 leave ID 7 for scans.
+    const uint32_t baselineReads = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - output) / input);
+    const uint32_t reservedReads = baselineReads > 3U ? 3U : baselineReads;
+    const uint32_t writes = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - reservedReads * input) / output);
+    result.outputLanes = writes > kEpServerDedupCombineM4MaxOutputLanes ?
+        kEpServerDedupCombineM4MaxOutputLanes : writes;
+    const uint32_t reads = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - result.outputLanes * output) / input);
     result.inputLanes = reads > kEpServerDedupCombineM4MaxInputLanes ?
         kEpServerDedupCombineM4MaxInputLanes : reads;
-    const uint32_t writes = uint32_t((kEpServerDedupCombineRecvUbBytes - fixed - result.inputLanes * input) / output);
-    result.outputLanes = writes > 8U ? 8U : writes;
     result.finalOutputLanes = result.outputLanes > kEpServerDedupCombineM5MaxOutputLanes ?
         kEpServerDedupCombineM5MaxOutputLanes : result.outputLanes;
     result.computeBytes = compute;

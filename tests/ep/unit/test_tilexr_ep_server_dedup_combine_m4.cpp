@@ -347,10 +347,14 @@ int main()
             TestPartial(1U, 17U, 2U, bf16, false, 1U, true);
             TestPartial(257U, 257U, 6U, bf16, false, 0U);
             TestPartial(97U, 7168U, 6U, bf16, false, 1U);
-            // More than six tasks per Read core wraps the larger output ring;
-            // K=6 also forces rolling reuse of the three input lanes.
+            // More than four tasks per Read core wraps the output ring;
+            // K=6 also forces rolling reuse of the five input lanes.
             TestPartial(7U * TileXREp::kEpServerDedupCombineRecvCoreNum + 1U,
                 7168U, 6U, bf16, false, 0U);
+            // Small H admits seven read lanes; K=16 rolls them while server
+            // selection still uses event 7 independently of the input ring.
+            TestPartial(7U * TileXREp::kEpServerDedupCombineRecvCoreNum + 1U,
+                257U, 16U, bf16, false, 0U);
         }
         TestPartial(10000U, 17U, 6U, true, true, 0U);
         // Dense maximum row count exercises compact per-server ownership lists

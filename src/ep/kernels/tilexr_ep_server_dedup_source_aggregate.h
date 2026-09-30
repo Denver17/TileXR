@@ -185,8 +185,8 @@ private:
     {
         const uint32_t flags = k_ * blocks_;
         Duplicate<float>(flags_, 0.0f, flags * 8U);
-        // M4 may still own an unconsumed V_MTE3(7) publication for slot 7.
-        // Publish zero via Scalar instead: neither wait drains MTE3, and
+        // Keep flag clears independent of inherited M4 payload events.
+        // Publish zero via Scalar: neither wait drains MTE3, and
         // S_MTE3(7) is independent of the inherited payload event directions.
         Sync<HardEvent::V_S>();
         Sync<HardEvent::S_MTE3>();
