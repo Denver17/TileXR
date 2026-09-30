@@ -6,6 +6,7 @@
 #include "ep_memory_server_dedup_data_layout.h"
 #include "ep_memory_server_dedup_protocol.h"
 #include "tilexr_ep_server_dedup_profile.h"
+#include "tilexr_ep_server_dedup_select.h"
 
 namespace TileXREp {
 using namespace AscendC;
@@ -155,8 +156,12 @@ private:
         // across first hops and server boundaries without an added drain.
         const uint32_t serverNum = args_->rankSize / 8U;
         const uint32_t expertsPerServer = localExperts_ * 8U;
-        uint32_t server = args_->rank / 8U;
+        const uint32_t ownServer = args_->rank / 8U;
         for (uint32_t step = 0; step < serverNum; ++step) {
+            // Match Combine's alternating halves at 128P+, retaining the
+            // original own-server-first ring for smaller worlds.
+            const uint32_t server = serverNum >= 16U ? ServerDedupHalfOrder(serverNum, ownServer, step) :
+                (ownServer + step) % serverNum;
             const uint32_t firstExpert = server * expertsPerServer;
             for (uint32_t task = 0; task < directCount_; ++task) {
                 const uint32_t expert = directTasks_.GetValue(task * 4U + 2U);
@@ -168,7 +173,6 @@ private:
                 sourceMasks_.SetValue(token, sourceMasks_.GetValue(token) | (uint32_t(1) << k));
                 sourceWeights_.SetValue(token * k_ + k, routeWeights_.GetValue(token * k_ + k));
             }
-            if (++server == serverNum) server = 0U;
         }
         profile.End(EpDedupDetailMetric::SendDirect);
     }

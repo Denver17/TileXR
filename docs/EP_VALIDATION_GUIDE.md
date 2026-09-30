@@ -843,7 +843,7 @@ Clang 15.0.5 的 A5 kernel 与 `tilexr-ep` Host 库 profiling OFF/ON 均编译�
 
 固定基线为 **16P、两台各 8 卡 A5、单卡 6 专家（E=96）、BS96/H7168/TopK6/BF16/balance_shift/seed2026**。每 rank 申请 **8 GiB 通信域**（8188 MiB 数据 + 4 MiB runtime Flag），底层另有 1 MiB 地址偏移余量。两个固定 4 GiB 窗口由 `magic % 2` 选择；每窗前 2 MiB 是 cnt/cumsum/prefix/counter，后续 4090 MiB 可用于 Token 区，最后 4 MiB 保留。第一窗尾部空置，第二窗尾部归 runtime；任何 shape 均不得改变窗跨度或越过单窗上限。总专家数 `0<E<=1024` 且能被 rank 数整除。
 
-去重模式下，每个发送核先发第一跳，再从本 server 开始绕回 +1 发送 DIRECT；64P server7 的顺序为 `7→0→1→2→3→4→5→6`，空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
+去重模式下，每个发送核先发第一跳。小于 128P 时，DIRECT 从本 server 开始绕回 +1；64P server7 的顺序为 `7→0→1→2→3→4→5→6`。128P 及以上，DIRECT 与 Combine 一样按本半区/另一半区交替；128P server0 为 `1,9,2,10,3,11,4,12,5,13,6,14,7,15,0,8`。空目标跳过。同 server 内保留原 Token/k 顺序和缓存 q；各核独立推进，不增加 server 边界同步或 MTE3 排空。
 
 非去重 Dispatch（`dedup=0`）从 2026-09-29 起按原始 `expertIds[BS,TopK]` 的展平路由分核，
 不再按 server 重排或轮转分配。设 `N=BS*TopK`、send 核数为 `S`，核 `c` 从
@@ -1474,7 +1474,17 @@ ctest --test-dir build/server-dedup-host --output-on-failure \
 python3 tests/ep/integration/test_server_dedup_chain.py
 ```
 
-本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用；在 GM 搬运替身记录实际发送，核对第一跳优先、DIRECT 从本 server 开始循环且同 server 内保持 Token/k 顺序、每个槽位恰好一包及跨阶段 lane 序号连续。64P/E384 乱序路由覆盖源 server0/3/7、本卡及同 server 跨卡、空目标 server、每核多 Token、第一跳与 DIRECT 混合及三轮复用，profiling OFF/ON 均执行。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+本地 sender 测试执行真实非量化生产逻辑，覆盖原始 q、全部隐藏数据/Flag/尾表、UB/输出边界和环形池复用；在 GM 搬运替身记录实际发送，核对第一跳优先、小于128P时 DIRECT 从本 server 开始循环且同 server 内保持 Token/k 顺序、每个槽位恰好一包及跨阶段 lane 序号连续。64P/E384 乱序路由覆盖源 server0/3/7、本卡及同 server 跨卡、空目标 server、每核多 Token、第一跳与 DIRECT 混合及三轮复用，profiling OFF/ON 均执行。入口六种类型分支做替身编译，Host consumer 六种类型做夹具及错包注入；这些不证明真实 MXFP8 计算、异步 MTE、SyncAll 或 CANN/A5 通过。服务器结果按实际 shape/模式登记到 [调试进度](EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+
+2026-09-30：基于 `26c2e92`，Dispatch 去重 DIRECT 在128P及以上复用 Combine 的
+半区交替映射。发送OFF/ON、自动模式及接收OFF/ON共5项Host回归通过。新增128P
+源server0/7/8/15覆盖全部16个目标，混合第一跳/DIRECT、三轮双窗复用及BS32自动
+非去重保序；120P验证原全环顺序。测试执行真实非量化发送逻辑及GM搬运/事件替身，
+不能证明FP8实机数值或异步设备并发。证据保存于 `build/dispatch-half-interleave/`。
+blue CANN 9.1.0 / ccec Clang 15.0.5 的 A5 `dav-c310-vec` / `CATLASS_ARCH=3510`
+Dispatch kernel 在 auto 策略、profiling OFF/ON 下均编译通过，退出码0。送编的1179个
+文件逐项校验SHA256，最终非文档源码与快照一致；尚未执行128P NPU功能或性能测试。
+用户此前128P性能超时尚未定位，本次发送顺序调整不作为该超时的修复证据。
 
 逐包打点的本地回归还核对每条记录与实际发送对应、空核头、容量/同步标志区边界、Host 容量拒绝、损坏记录拒绝、三个子阶段及最后一包的 trace 语义。纯 CPU 替身只验证记录和导出契约，真实 CANN 9.1 编译、A5 可见性及诊断开销仍需服务器运行确认。维护时不要在热路径逐包写 GM/DCCI，也不要为获取完成时间新增同步；相邻下发点才能保持这里约定的测量含义。
 

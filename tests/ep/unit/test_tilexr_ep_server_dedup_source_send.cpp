@@ -8,6 +8,7 @@
 #include "server_dedup_test_checks.h"
 #include "server_dedup_test_memory.h"
 #include "server_dedup_profile_capture.h"
+#include "combine_server_order_reference.h"
 #include "../integration/server_dedup_source_send_reference.h"
 
 namespace AscendC { uint32_t testCore = 0; uint64_t testCopies = 0; }
@@ -108,6 +109,13 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
     args.rankSize = ranks;
     args.rank = source;
     const uint32_t localExperts = experts / ranks;
+    // Independent ordering oracle shared with Combine at 128P+. Smaller
+    // Dispatch worlds keep their original own-server-first cyclic order.
+    auto serverOrder = CombineServerOrderReference::Order(ranks / 8U, source / 8U);
+    if (ranks < 128U) {
+        std::iota(serverOrder.begin(), serverOrder.end(), 0U);
+        std::rotate(serverOrder.begin(), serverOrder.begin() + source / 8U, serverOrder.end());
+    }
     auto data = TileXREp::TileXREpServerDedupDataLayout(bs, h, k, experts, false);
     std::vector<int32_t> ids(bs * k);
     std::vector<float> weights(bs * k);
@@ -266,9 +274,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 if (dedup && write.entries == 0) {
                     const uint32_t index = write.token * k + write.k;
                     const uint32_t server = uint32_t(ids[index]) / (8U * localExperts);
-                    const uint32_t serverStep = (server + ranks / 8U - source / 8U) % (ranks / 8U);
+                    const uint32_t serverStep = CombineServerOrderReference::Position(serverOrder, server);
                     Check(!directStarted || serverStep >= previousServerStep,
-                        "dedup DIRECT uses cyclic server order");
+                        "dedup DIRECT follows the world-size-specific server order");
                     Check(!directStarted || serverStep != previousServerStep || index > previousDirect,
                         "DIRECT preserves token/k order within each destination server");
                     directStarted = true; previousDirect = index; previousServerStep = serverStep;
@@ -348,6 +356,19 @@ int main()
             CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.
             CheckReceiveUnpack(7168, false); // 30 blocks; old blocks*15 repeat truncates.
             CheckReceiveUnpack(7168, true); // Scales extend into an additional block.
+            // Every target server has DIRECT work. Both source halves, their
+            // boundaries, and repeated windows exercise the 128P interleave.
+            std::vector<int32_t> allServers(16U);
+            for (uint32_t server = 0; server < 16U; ++server) allServers[server] = int32_t(server * 8U);
+            for (uint32_t source : {0U, 56U, 64U, 120U})
+                Run(128, 128, 2U * sendCoreNum, 17, 16, false, source, 3, allServers);
+            for (uint32_t source : {0U, 64U})
+                Run(128, 128, 2U * sendCoreNum, 17, 6, false, source, 3,
+                    {8, 9, 72, 0, 64, 120, 16, 80, 81, 56, 112, 1});
+            // Auto policy must retain original route order at BS <= 32.
+            Run(128, 128, 32, 17, 6, false, 64, 3, {120, 8, 64, 0, 72, 56});
+            allServers.pop_back();
+            Run(120, 120, 2U * sendCoreNum, 17, 15, false, 112, 3, allServers);
             for (uint32_t source : {0U, 16U, 24U, 48U, 56U}) {
                 const uint32_t local = source / 8U;
                 const auto expert = [local](uint32_t step, uint32_t offset = 0U) {

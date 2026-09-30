@@ -223,11 +223,15 @@ start_i=i*base+min(i,remainder)
 seen/grouped/directMask、64B serverState 和 firstHopMasks：第一次遇到远端 Server 时暂列 DIRECT，
 第二次遇到时生成 group 并移出 DIRECT，随后扩充该 group 位图。
 每个 Token 的第一跳立即发送；DIRECT 记录 `(token,k,expert,q)` 写入 16B 的 directTasks。
-第二遍从本 Server 开始按 `(myServer+step)%serverNum` 扫描该任务表，同 Server 内保持 Token/k 顺序。
+第二遍按目标 Server 扫描该任务表，同 Server 内保持 Token/k 顺序。小于 128P 时，
+从本 Server 开始按 `(myServer+step)%serverNum` 轮转；128P 及以上使用与 Combine
+相同的 `ServerDedupHalfOrder`，交替访问本半区和另一半区，各半区从自身相对位置的
+下一项开始轮转。128P server 0 的 DIRECT 顺序为
+`1,9,2,10,3,11,4,12,5,13,6,14,7,15,0,8`。第一跳仍按原 Token 分类顺序先行发送，
+空目标跳过，跨阶段及 Server 切换不重置 packet/lane 序号，也不增加同步或排空。
 
-撤销 `240483c` 的 DIRECT 半区调度时，须保留后续关闭去重路径使用的共享 select 头文件及
-CMake 依赖；该路径仍按半区遍历。发送顺序回归应按去重模式分别验证，避免机械撤销导致
-关闭去重路径编译失败或使用错误的顺序预期。
+Dispatch 只在去重 DIRECT 的 128P+ 分支调用共享排序函数；不要将其小规模的半区
+优先规则应用于 Dispatch 原有的全环顺序。关闭去重的原始路由顺序也独立验证。
 
 | 源端 UB | 大小/职责 |
 | --- | --- |
@@ -237,7 +241,7 @@ CMake 依赖；该路径仍按半区遍历。发送顺序回归应按去重模�
 | sourceMask | align32(count_i*4)，group 保留 returnK，DIRECT 保留原始 k |
 | weightIn / weightOut | 各 align32(count_i*K*4)，只拷入本核权重区间 |
 
-关闭模式使用独立的按Server路由筛选调度，不运行本节的Token分类、不生成DIRECT缓存表或sourceMask；每条路由直发，表5原样复制。包尾、UB及M6接收细节见[关闭去重特性](ep-memory-server-dedup-disabled-mode.md)。
+关闭模式按原始路由连续分核，不运行本节的Token分类、不生成DIRECT缓存表或sourceMask；每条路由直发，表5原样复制。包尾、UB及M6接收细节见[关闭去重特性](ep-memory-server-dedup-disabled-mode.md)。
 
 ## 本卡数据发送流水
 
