@@ -15,8 +15,9 @@ namespace TileXREp {
 // Earlier module tests intentionally own only their stage fixtures. Exercise
 // those production methods without introducing a runtime stop-stage contract.
 struct CombineModuleTestAccess {
-    static void Direct(CombineMemoryServerDedupKernel &kernel)
+    static void Direct(CombineMemoryServerDedupKernel &kernel, bool dedup = true)
     {
+        kernel.enableDedup_ = dedup;
         kernel.ReturnDirectTokens();
         AscendC::PipeBarrier<PIPE_ALL>();
     }

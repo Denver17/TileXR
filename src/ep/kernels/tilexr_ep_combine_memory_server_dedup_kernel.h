@@ -369,7 +369,7 @@ private:
         if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
         for (uint32_t step = 1U; step <= servers; ++step) {
             if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSelectBegin);
-            const uint32_t count = SelectDirectServer(ServerDedupHalfOrder(servers, ownServer, step - 1U));
+            const uint32_t count = SelectDirectServer(ServerDedupHalfOrder(servers, ownServer, step - 1U, enableDedup_));
             const uint32_t first = ServerDedupFirstOwned(core_, owner, kEpServerDedupCombineSendCoreNum);
             owner = (owner + count) % kEpServerDedupCombineSendCoreNum;
             if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSelectEnd);

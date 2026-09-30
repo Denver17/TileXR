@@ -10,12 +10,12 @@ using CombineM12Test::Fixture;
 
 // Reference ordering is independent of the kernel's per-server online scan:
 // sort the complete routed stream, then stripe its positions across Send cores.
-std::vector<uint32_t> DirectSchedule(const Fixture &f, const std::vector<uint32_t> &selected)
+std::vector<uint32_t> DirectSchedule(const Fixture &f, const std::vector<uint32_t> &selected, bool dedup = true)
 {
     auto schedule = selected;
     const uint32_t servers = uint32_t(f.args.rankSize) / 8U;
     const uint32_t ownServer = uint32_t(f.args.rank) / 8U;
-    const auto order = CombineServerOrderReference::Order(servers, ownServer);
+    const auto order = CombineServerOrderReference::Order(servers, ownServer, dedup);
     const auto distance = [&](uint32_t row) {
         return CombineServerOrderReference::Position(order, uint32_t(f.table[row * 3U]) / 8U);
     };
@@ -135,7 +135,7 @@ void DirectRows(uint32_t count, uint32_t h, bool sparse, uint32_t window, uint8_
 }
 
 void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_t h,
-    uint32_t window, bool onlyLocal, bool clustered = false)
+    uint32_t window, bool onlyLocal, bool clustered = false, bool dedup = true)
 {
     Fixture f(count, h, ownRank);
     f.args.rankSize = int(ranks);
@@ -145,7 +145,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
     f.half = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + uint64_t(slots) * packet + 512U;
     f.args.peerMemBytes = f.half * 2U;
     const uint32_t servers = ranks / 8U, ownServer = ownRank / 8U;
-    const auto order = CombineServerOrderReference::Order(servers, ownServer);
+    const auto order = CombineServerOrderReference::Order(servers, ownServer, dedup);
     for (uint32_t row = 0; row < count; ++row) {
         f.types[row] = 1;
         // Cover both periodic routing and expert-sorted source-local clusters.
@@ -165,7 +165,7 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
     const auto tableBefore = f.table;
     std::vector<uint32_t> selected;
     for (uint32_t row = 0; row < count; ++row) selected.push_back(row);
-    const auto schedule = DirectSchedule(f, selected);
+    const auto schedule = DirectSchedule(f, selected, dedup);
     std::set<uint32_t> allWrites;
     const uint32_t sendCores = TileXREp::kEpServerDedupCombineSendCoreNum;
     std::vector<std::vector<uint32_t>> serverCounts(servers, std::vector<uint32_t>(sendCores));
@@ -267,10 +267,10 @@ void DirectServerOrder(uint32_t ranks, uint32_t ownRank, uint32_t count, uint32_
             reinterpret_cast<GM_ADDR>(f.table.data()), reinterpret_cast<GM_ADDR>(f.counts.data()),
             f.untouched.data(), reinterpret_cast<GM_ADDR>(f.types.data()), f.untouched.data(),
             f.untouched.data(), f.untouched.data(), f.tiling.bs, h, 3U, ranks * 2U, 0U, 0U, window, 0U);
-        TileXREp::CombineModuleTestAccess::Direct(kernel);
+        TileXREp::CombineModuleTestAccess::Direct(kernel, dedup);
         Check(scan == servers, "exactly one Vector selection per server, including empty shares");
         Check(issued == expected && observed == expected,
-            "striped DIRECT ownership is exact, own-half first, wrapped, and stable within each server");
+            "striped DIRECT ownership follows the selected half order and is stable within each server");
         Check(AscendC::PendingMte3().empty(), "DIRECT retires all sends at M3 completion");
         for (uint32_t row : observed) ++serverCounts[uint32_t(f.table[row * 3U]) / 8U][core];
         totalCounts[core] = uint32_t(observed.size());
@@ -295,14 +295,20 @@ void TestHalfOrder()
     Check(Order(8U, 2U) == std::vector<uint32_t>({3, 0, 1, 2, 7, 4, 5, 6}), "eight-server example");
     Check(Order(7U, 2U) == std::vector<uint32_t>({0, 1, 2, 6, 3, 4, 5}), "odd lower-half example");
     Check(Order(7U, 6U) == std::vector<uint32_t>({3, 4, 5, 6, 1, 2, 0}), "odd upper-half example");
+    Check(Order(16U, 0U) == std::vector<uint32_t>({1, 9, 2, 10, 3, 11, 4, 12, 5, 13, 6, 14, 7, 15, 0, 8}),
+        "128P lower half alternates from the next relative position");
+    Check(Order(16U, 8U) == std::vector<uint32_t>({9, 1, 10, 2, 11, 3, 12, 4, 13, 5, 14, 6, 15, 7, 8, 0}),
+        "128P upper half starts in its own half");
     for (uint32_t servers = 1U; servers <= 128U; ++servers) {
         for (uint32_t own = 0U; own < servers; ++own) {
-            const auto expected = Order(servers, own);
-            std::set<uint32_t> visited;
-            for (uint32_t i = 0; i < servers; ++i) {
-                const uint32_t actual = TileXREp::ServerDedupHalfOrder(servers, own, i);
-                Check(actual == expected[i], "production mapping matches independent half rotation");
-                Check(actual < servers && visited.insert(actual).second, "mapping covers each server exactly once");
+            for (bool dedup : {false, true}) {
+                const auto expected = Order(servers, own, dedup);
+                std::set<uint32_t> visited;
+                for (uint32_t i = 0; i < servers; ++i) {
+                    const uint32_t actual = TileXREp::ServerDedupHalfOrder(servers, own, i, dedup);
+                    Check(actual == expected[i], "production mapping matches independent half rotation");
+                    Check(actual < servers && visited.insert(actual).second, "mapping covers each server exactly once");
+                }
             }
         }
     }
@@ -327,6 +333,9 @@ int main()
         DirectServerOrder(32U, 26U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, false);
         DirectServerOrder(64U, 10U, 403U, 17U, 0U, false); // ~70% of 96*6, only 1-2 hits/core/server
         DirectServerOrder(128U, 122U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 1U, false);
+        DirectServerOrder(128U, 2U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, false);
+        DirectServerOrder(128U, 66U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 1U, false, false, false);
+        DirectServerOrder(120U, 114U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, false);
         DirectServerOrder(32U, 10U, TileXREp::kEpServerDedupCombineSendCoreNum * 12U, 17U, 0U, true);
         DirectServerOrder(32U, 26U, TileXREp::kEpServerDedupCombineSendCoreNum * 16U + 5U, 17U, 1U, false, true);
         DirectServerOrder(16U, 10U, 10000U, 1U, 0U, false, true);
