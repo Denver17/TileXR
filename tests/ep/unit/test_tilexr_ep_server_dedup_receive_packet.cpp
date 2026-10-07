@@ -232,7 +232,12 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U, uint
     if (emptyProbes != 0U) std::memset(local.data() + slot + 480U, 0, 4U);
     uint32_t flagReads = 0U;
     uint64_t firstRead = 0U, lastRead = 0U;
-    AscendC::GmReadObserver() = [&](const void *pointer, uint32_t) {
+    AscendC::GmReadObserver() = [&](const void *pointer, uint32_t bytes) {
+        const auto address = reinterpret_cast<uintptr_t>(pointer);
+        const auto packet = reinterpret_cast<uintptr_t>(local.data() + slot);
+        if (!dedup && address >= packet && address < packet + data.tokenStride && address != packet + 480U)
+            Check((address - packet) % 512U == 0U && bytes == 480U,
+                "DIRECT loads only payload blocks, without reading Flags into data lanes");
         if (pointer != local.data() + slot + 480U) return;
         lastRead = AscendC::GetSystemCycle();
         if (++flagReads == 1U) firstRead = lastRead;
@@ -422,11 +427,16 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
                         fixtures[pending].wire.data(), data.tokenStride);
                 released = true;
             }
-        } else if (size == data.tokenStride) {
+        } else if (offset % data.tokenStride == 0U) {
+            Check(size == (kEpServerDedupEnable ? data.tokenStride : 480U),
+                "DIRECT begins each lane load with payload only; dedup retains the full packet");
             Check(released && q < owned, "ready packet belongs to this receive owner");
             Check(std::find(loaded.begin(), loaded.end(), q) == loaded.end(), "swap removal never loads a stable row twice");
             Check(!loadPending[loadLane], "prefetch never reuses an unconsumed lane");
             loaded.push_back(q); laneTask[loadLane] = q; loadPending[loadLane] = true;
+        } else if (!kEpServerDedupEnable) {
+            Check(offset % 512U == 0U && size == 480U,
+                "every subsequent DIRECT data read skips the packet Flags");
         }
     };
     ServerDedupTest::ProfileCapture capture(args);

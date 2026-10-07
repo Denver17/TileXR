@@ -309,9 +309,15 @@ template<class T> void DataCopy(GlobalTensor<T> dst, LocalTensor<T> src, uint32_
     });
 }
 template<class T> void DataCopyPad(LocalTensor<T> dst, GlobalTensor<T> src, DataCopyExtParams p, DataCopyPadExtParams<T>) {
-    if (p.blockCount != 1) throw std::runtime_error("unexpected padded block count");
-    if (GmReadObserver()) GmReadObserver()(src.pointer, p.blockLen);
-    ++testCopies; std::memcpy(dst.Data(p.blockLen), src.pointer, p.blockLen);
+    ++testCopies;
+    // GM->UB: source stride is bytes; destination stride is 32B blocks.
+    const uint64_t destinationStep = (p.blockLen + 31U) / 32U * 32U + uint64_t(p.dstStride) * 32U;
+    for (uint32_t block = 0; block < p.blockCount; ++block) {
+        const auto *from = reinterpret_cast<const uint8_t *>(src.pointer) + uint64_t(block) * (p.blockLen + p.srcStride);
+        if (GmReadObserver()) GmReadObserver()(from, p.blockLen);
+        auto to = dst.template ReinterpretCast<uint8_t>()[uint64_t(block) * destinationStep];
+        std::memcpy(to.Data(p.blockLen), from, p.blockLen);
+    }
 }
 template<class T> void DataCopyPad(GlobalTensor<T> dst, LocalTensor<T> src, DataCopyExtParams p) {
     if (src.offset % 32U) throw std::runtime_error("unaligned UB DataCopyPad source");

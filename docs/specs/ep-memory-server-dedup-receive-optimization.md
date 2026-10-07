@@ -13,6 +13,14 @@
 - 第一跳用 t=row，无 AtomicAdd、counter 清零和核末 SyncAll；核末 lane 回收、Flag 清理和本核 PIPE_ALL 保留。
 - 打点为合并空扫描的 probe 与逐 token 的 recv_token；load/metadata/output/relay 子区间已停止生成。
   recv_token 包围 ConsumeLoaded，不含提前预取下发；Publish 不再执行显式 cache clean/invalidate。
+- DIRECT 接收（2026-10-07）：非去重路径统一用 DataCopyPad 将 GM 的每块 480B payload 连续搬入 UB，
+  源步长跳过 32B Flag；适用于所有受支持输入类型及量化模式，包括 auto 实际关闭去重时。
+  压紧后 hidden、可选 scale 和三字段元数据必须使用逻辑 payload 偏移，不能再用 wire 偏移或带 Flag 的输出 helper。
+  GM 协议、去重转发、lane 预算/事件、Probe 和 Flag 清理保持原契约；本项只影响 Dispatch。
+  Host 模拟回归验证字节内容、跳过 Flag、输出边界和 lane 生命周期，实际性能仍须 A5 多 rank 测量。
+  注意 DataCopyPad 的 GM→UB 源 stride 单位为字节（此处 32），不同于 DataCopy 的 32B 块单位。
+  本次验证：dedup=0/1/auto × profiling OFF/ON 六组 CPU 接收回归通过，旧接收代码被新增跳过 Flag 检查拒绝；
+  CANN 9.2 / A5 编译通过（dedup=0 OFF、auto OFF/ON）。blue 无法解析，未完成 CANN 9.1 编译或 NPU 运行验证。
 - Vector ready bitmap、双 Probe、ready 后认领删除、metadata 地址缓存均未实现；不新增整包输入/输出双池。
 
 以下第 1～14 节是历史方案、实验和交付证据，第 15 节是暂缓候选；其中“当前/下一步”均指章节日期，

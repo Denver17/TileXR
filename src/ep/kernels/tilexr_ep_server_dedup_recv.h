@@ -157,7 +157,14 @@ private:
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
         GlobalTensor<uint8_t> source;
         source.SetGlobalBuffer(Slot(j));
-        DataCopy(wire, source, uint32_t(data_.tokenStride));
+        if (enableDedup_) {
+            DataCopy(wire, source, uint32_t(data_.tokenStride));
+        } else {
+            // GM keeps 480B payload + 32B Flag blocks; DIRECT consumes a
+            // contiguous payload in UB. GM source stride is measured in bytes.
+            DataCopyPad(wire, source, {uint16_t(data_.blockCount), 480U, 32U, 0U, 0U},
+                {false, 0U, 0U, 0});
+        }
         SetFlag<HardEvent::MTE2_MTE3>(lane);
         // Publish immediately after this load, before queuing later loads.
         SetFlag<HardEvent::MTE2_S>(lane);
@@ -169,28 +176,38 @@ private:
         profile.Begin(EpDedupDetailMetric::RecvToken);
         WaitFlag<HardEvent::MTE2_S>(lane);
         auto wire = lanesBuf_.Get<uint8_t>()[lane * laneStride_];
+        const uint32_t row = tasks_.Begin() + j;
+        if (!enableDedup_) {
+            // IssueLoad removed the Flags, so every source offset is logical.
+            // Retain lane ownership until all output reads have completed.
+            WaitFlag<HardEvent::MTE2_MTE3>(lane);
+            DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], wire,
+                {1U, hiddenBytes_, 0U, 0U, 0U});
+            if constexpr (Quantized)
+                DataCopyPad(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire[uint32_t(data_.quantCount)],
+                    {1U, uint32_t(data_.scaleBytes), 0U, 0U, 0U});
+            auto header = wire[uint32_t(data_.headerPayloadOffset)].template ReinterpretCast<uint32_t>();
+            DataCopyPad(destinationIndex_[uint64_t(row) * 3U], header, {1U, 12U, 0U, 0U, 0U});
+            SetFlag<HardEvent::MTE3_MTE2>(lane);
+            profile.End(EpDedupDetailMetric::RecvToken);
+            return;
+        }
         auto type = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
         auto destination = wire[uint32_t(data_.tokenStride) + (kEpServerDedupEnable ? 32U : 0U)].template ReinterpretCast<uint32_t>();
-        const uint32_t row = tasks_.Begin() + j;
         bool firstHop = false;
-        if (enableDedup_) {
-            ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
-            firstHop = tail.Header().GetValue(3U) == uint32_t(EpServerDedupTokenType::FirstHop);
-            BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
-            if (firstHop) PrepareServerDedupForward(tail);
-        } else {
-            auto header = wire[data_.headerWireOffset].template ReinterpretCast<uint32_t>();
-            for (uint32_t i = 0; i < 3U; ++i) destination.SetValue(i, header.GetValue(i));
-        }
+        ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
+        firstHop = tail.Header().GetValue(3U) == uint32_t(EpServerDedupTokenType::FirstHop);
+        BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
+        if (firstHop) PrepareServerDedupForward(tail);
         ServerDedupReceiveSync<HardEvent::S_MTE3>();
         WaitFlag<HardEvent::MTE2_MTE3>(lane);
         WriteServerDedupPayloadRange(expandX_[uint64_t(row) * hiddenBytes_], wire, 0U, hiddenBytes_);
         if constexpr (Quantized)
             WriteServerDedupPayloadRange(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire,
                 uint32_t(data_.quantCount), uint32_t(data_.scaleBytes));
-        if (enableDedup_) DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
+        DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
         DataCopyPad(destinationIndex_[uint64_t(row) * 3U], destination, {1U, 12U, 0U, 0U, 0U});
-        if (enableDedup_ && firstHop) {
+        if (firstHop) {
             ServerDedupPacketTail tail(wire, uint32_t(data_.headerWireOffset), uint32_t(data_.relayReadIndexWireOffset));
             DataCopyPad(relayReadIndex_[uint64_t(row) * k_ * 2U], tail.ReadIndex(),
                 {1U, k_ * 8U, 0U, 0U, 0U});
