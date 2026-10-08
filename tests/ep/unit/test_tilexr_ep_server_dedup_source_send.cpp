@@ -302,7 +302,9 @@ void Run(uint32_t ranks, uint32_t experts, uint32_t bs, uint32_t h, uint32_t k, 
                 for (uint32_t word = 0; word < 8U; ++word) {
                     uint32_t flag = 0;
                     std::memcpy(&flag, wire + block * 512U + 480U + word * 4U, 4U);
-                    Check(flag == 0x3f800000U, "all payload/tail blocks have the Memory flag");
+                    const bool keepFlags = packet.members.size() > 1U;
+                    Check(flag == (keepFlags && block == 0U && word == 0U ? 0x3fc00000U : 0x3f800000U),
+                        "only the first Flag word carries this packet's receive-layout hint");
                 }
             }
             Check(std::memcmp(payload.data(), hidden.data() + packet.token * h, h * 2U) == 0, "full hidden bytes preserve token identity");

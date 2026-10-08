@@ -1,4 +1,5 @@
 #include <cstring>
+#include <numeric>
 #include <vector>
 #include "tilexr_ep_server_dedup_recv.h"
 #include "server_dedup_test_checks.h"
@@ -11,6 +12,29 @@ constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
 constexpr uint32_t recvCoreNum = TileXREp::kEpServerDedupRecvCoreNum;
 using namespace TileXREp;
 using ServerDedupTest::Check;
+
+void CheckLayoutReadiness()
+{
+    // Exercise every potentially missing publication word, including the
+    // layout marker, without assuming that 1.5 means an application type.
+    for (uint32_t blocks : {1U, 2U, 16U, 255U}) for (float marker : {1.0f, 1.5f}) {
+        std::vector<float> flags(blocks * 8U, 1.0f);
+        flags[0] = marker;
+        const auto decode = [&]() {
+            return PacketReceiveLayout::Decode(std::accumulate(flags.begin(), flags.end(), 0.0f), blocks);
+        };
+        Check(decode() == (marker == 1.0f ? PacketReceiveLayout::State::Compact : PacketReceiveLayout::State::KeepFlags),
+            "one reduction reports both ready and receive layout");
+        for (uint32_t missing = 0U; missing < flags.size(); ++missing) {
+            const float saved = flags[missing]; flags[missing] = 0.0f;
+            Check(decode() == PacketReceiveLayout::State::Pending,
+                "no missing Flag word can be hidden by the half-unit layout hint");
+            flags[missing] = saved;
+        }
+        std::fill(flags.begin(), flags.end(), 0.0f);
+        Check(decode() == PacketReceiveLayout::State::Pending, "cleared packet is pending");
+    }
+}
 
 void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::ProfileCapture &capture,
     uint32_t rows)
@@ -56,10 +80,12 @@ void CheckReceiveProfile(ServerDedupProfile &profile, const ServerDedupTest::Pro
 struct Packet {
     EpServerDedupDataLayout layout;
     uint32_t k, entries;
+    bool keepFlags;
     std::vector<uint8_t> payload, wire;
     Packet(uint32_t h, uint32_t topK, bool quantized, uint32_t role, uint32_t bs = 2U) :
         layout(TileXREpServerDedupDataLayout(bs, h, topK, 96, quantized)), k(topK),
         entries(!kEpServerDedupEnable || role == 1U ? 0U : (topK == 6U ? 3U : topK - 1U)),
+        keepFlags(EpServerDedupEnabled(bs) && role == 2U),
         payload(layout.packedPayloadBytes), wire(layout.tokenStride)
     {
         for (uint32_t i = 0; i < payload.size(); ++i) payload[i] = uint8_t((i * 37U + i / 480U) % 251U);
@@ -93,6 +119,7 @@ struct Packet {
             std::memcpy(wire.data() + block * 512U, payload.data() + block * 480U, 480U);
             for (uint32_t word = 0; word < 8U; ++word) SetFlagWord(block, word, 0x3f800000U);
         }
+        if (keepFlags) SetFlagWord(0U, 0U, 0x3fc00000U);
     }
     void SetFlagWord(uint32_t block, uint32_t word, uint32_t bits) {
         std::memcpy(wire.data() + block * 512U + 480U + word * 4U, &bits, 4U);
@@ -162,11 +189,13 @@ void CheckPacket(uint32_t h, uint32_t k, bool quantized)
 }
 
 template<bool Quantized>
-void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U, uint32_t bs = 2U)
+void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U, uint32_t bs = 2U,
+    bool forceKeepFlags = false)
 {
     constexpr uint32_t h = 209U, k = 6U, rank = 8U, world = 16U, experts = 96U;
     const bool dedup = EpServerDedupEnabled(bs);
     Packet fixture(h, k, Quantized, role, bs);
+    fixture.keepFlags = fixture.keepFlags || forceKeepFlags;
     fixture.SetWord(1U, bs - 1U);
     if (role == 2U) {
         fixture.SetEntry(0U, 49U, 0U); // Same-card relay to another expert.
@@ -235,9 +264,12 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U, uint
     AscendC::GmReadObserver() = [&](const void *pointer, uint32_t bytes) {
         const auto address = reinterpret_cast<uintptr_t>(pointer);
         const auto packet = reinterpret_cast<uintptr_t>(local.data() + slot);
-        if (!dedup && address >= packet && address < packet + data.tokenStride && address != packet + 480U)
-            Check((address - packet) % 512U == 0U && bytes == 480U,
-                "DIRECT loads only payload blocks, without reading Flags into data lanes");
+        if (address >= packet && address < packet + data.tokenStride && address != packet + 480U) {
+            if (fixture.keepFlags) Check(address == packet && bytes == data.tokenStride,
+                "keepFlags requests a complete packet independently of token type");
+            else Check((address - packet) % 512U == 0U && bytes == 480U,
+                "compact loads skip Flags independently of token type");
+        }
         if (pointer != local.data() + slot + 480U) return;
         lastRead = AscendC::GetSystemCycle();
         if (++flagReads == 1U) firstRead = lastRead;
@@ -283,7 +315,7 @@ void CheckReceiver(uint32_t role, int64_t magic, uint32_t emptyProbes = 0U, uint
             const uint32_t expert = entry & 0xffffU, q = entry >> 16U;
             const auto address = TileXREpServerDedupDispatchOffset(data, 2U, expert / 6U, expert % 6U, q, world, 6U, bs);
             auto expected = fixture;
-            expected.SetWord(3U, 3U); expected.Pack();
+            expected.SetWord(3U, 3U); expected.keepFlags = false; expected.Pack();
             Check(std::memcmp((expert / 6U == rank ? local.data() : peer.data()) + address, expected.wire.data(), data.tokenStride) == 0,
                 "local and peer relay slots retain the type3 common packet and ready flags");
         }
@@ -327,8 +359,11 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
     std::memcpy(local.data() + counts.counterOffset, &zero, 4U);
     std::vector<Packet> fixtures;
     for (uint32_t q = 0; q < bs; ++q) {
-        fixtures.emplace_back(h, k, Quantized, kEpServerDedupEnable && q % 3U == 0U ? 2U : 1U);
+        fixtures.emplace_back(h, k, Quantized, kEpServerDedupEnable ? q % 3U + 1U : 1U, bs);
         auto &packet = fixtures.back();
+        // Direct/Terminal may request either representation; FirstHop must
+        // retain its forwarding packet. Exercise mixed layouts in each batch.
+        if (kEpServerDedupEnable && q % 2U == 0U) packet.keepFlags = true;
         packet.SetWord(0U, 0U); packet.SetWord(1U, q);
         packet.payload[0] = uint8_t(q);
         for (uint32_t entry = 0; entry < packet.entries; ++entry) {
@@ -428,13 +463,13 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
                 released = true;
             }
         } else if (offset % data.tokenStride == 0U) {
-            Check(size == (kEpServerDedupEnable ? data.tokenStride : 480U),
-                "DIRECT begins each lane load with payload only; dedup retains the full packet");
+            Check(size == (fixtures[q].keepFlags ? data.tokenStride : 480U),
+                "lane layout follows the snapshot's keepFlags bit");
             Check(released && q < owned, "ready packet belongs to this receive owner");
             Check(std::find(loaded.begin(), loaded.end(), q) == loaded.end(), "swap removal never loads a stable row twice");
             Check(!loadPending[loadLane], "prefetch never reuses an unconsumed lane");
             loaded.push_back(q); laneTask[loadLane] = q; loadPending[loadLane] = true;
-        } else if (!kEpServerDedupEnable) {
+        } else if (!fixtures[q].keepFlags) {
             Check(offset % 512U == 0U && size == 480U,
                 "every subsequent DIRECT data read skips the packet Flags");
         }
@@ -463,17 +498,21 @@ void CheckBatchReceiver(uint32_t h, uint32_t expectedLanes, uint32_t owned = 24U
         if (Quantized) Check(std::memcmp(scales.data() + 32U + q * data.scaleBytes,
             packet.payload.data() + data.quantCount, data.scaleBytes) == 0, "scale rows follow hidden rows");
         const auto *destination = destinations.data() + 8U + q * 3U;
-        Check(destination[0] == 0U && destination[1] == q && destination[2] == packet.Word(2U) &&
-            types[8U + q] == (kEpServerDedupEnable ? packet.Word(3U) : 0xcdcdcdcdU), "tight 4B/12B metadata lanes follow stable rows");
+        const bool terminal = kEpServerDedupEnable && packet.Word(3U) == 3U;
+        const uint32_t slot = uint32_t((start - data.dispatchOffset) / data.tokenStride) + q;
+        Check(destination[0] == (terminal ? slot : 0U) && destination[1] == (terminal ? UINT32_MAX : q) &&
+            destination[2] == (terminal ? UINT32_MAX : packet.Word(2U)) &&
+            types[8U + q] == (kEpServerDedupEnable ? packet.Word(3U) : 0xcdcdcdcdU),
+            "type and destination semantics are independent of mixed receive layouts");
         const auto *index = indices.data() + 8U + q * k * 2U;
-        if (packet.entries) {
+        if (kEpServerDedupEnable && packet.Word(3U) == 2U) {
             Check(types[8U + q] == 2U && std::memcmp(index,
                 packet.payload.data() + data.readIndexPayloadOffset, k * 8U) == 0,
                 "first-hop retains type2 and exact 48B index row, including unaligned GM row starts");
             for (uint32_t i = 0; i < packet.entries; ++i) {
                 const uint64_t target = start + (uint64_t(i + 1U) * bs + q) * data.tokenStride;
                 auto expected = packet;
-                expected.SetWord(3U, 3U); expected.Pack();
+                expected.SetWord(3U, 3U); expected.keepFlags = false; expected.Pack();
                 Check(std::memcmp(local.data() + target, expected.wire.data(), expected.wire.size()) == 0,
                     "same-card terminal slots remain ready for their other receive owner");
             }
@@ -603,6 +642,11 @@ void CheckSparsePrefixReceivers()
 int main()
 {
     try {
+        CheckLayoutReadiness();
+        for (uint32_t role : {1U, 3U}) {
+            CheckReceiver<false>(role, 1, 3U, 33U, true);
+            CheckReceiver<true>(role, 2, 3U, 33U, true);
+        }
 #if TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE
         // Reserved relay bytes and table outputs stay poisoned on direct mode.
         // Passing first-hop/terminal-looking tail metadata verifies BS controls

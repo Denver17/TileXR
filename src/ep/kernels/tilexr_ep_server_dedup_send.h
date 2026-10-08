@@ -5,6 +5,7 @@
 #include <tilexr_ep_mxfp8_quant.h>
 #include "ep_memory_server_dedup_data_layout.h"
 #include "ep_memory_server_dedup_protocol.h"
+#include "ep_packet_receive_layout.h"
 #include "tilexr_ep_server_dedup_profile.h"
 #include "tilexr_ep_server_dedup_select.h"
 
@@ -318,6 +319,12 @@ private:
         auto inWords = payload.template ReinterpretCast<int32_t>();
         Copy(outWords, inWords, uint64_t(64), uint8_t(data_.blockCount), {1, 1, 16, 15});
         Copy(outWords[64], inWords[64], uint64_t(56), uint8_t(data_.blockCount), {1, 1, 16, 15});
+        // Every reused lane gets this packet's receive-layout hint. Publish
+        // with the payload's existing V_MTE3 dependency, not a new barrier.
+        uint64_t markerMask[2] = {1U, 0U};
+        Duplicate<float>(out.template ReinterpretCast<float>()[PacketReceiveLayout::kMarkerOffset / 4U],
+            mask != 0U ? PacketReceiveLayout::kKeepFlags : PacketReceiveLayout::kCompact,
+            markerMask, 1U, 1U, 8U);
         if constexpr (!Quantized) input.template FreeTensor<XType>(x);
         SetFlag<HardEvent::V_MTE3>(lane); WaitFlag<HardEvent::V_MTE3>(lane);
         GlobalTensor<uint8_t> destinationGm;

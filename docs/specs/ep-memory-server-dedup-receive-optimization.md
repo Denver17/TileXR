@@ -1,5 +1,42 @@
 # Server Dedup 接收优化记录
 
+## 2026-10-08：已确认的接收布局标记方案
+
+接收布局标记独立于 `EpServerDedupTokenType`，只决定 CopyIn 是否保留 Flag。
+每个 packet 仅第一个 32B Flag 块的第一个 float 携带标记：`1.0f` 表示压紧读取，
+`1.5f` 表示完整读取；其他 Flag 字段为 `1.0f`，未就绪/清理后的字段为 `0.0f`。
+不把标记解释为 Direct、FirstHop、Terminal，不从标记生成 TokenType 或 DestinationIndex。
+
+Probe 保持原来的 Flag DMA 和一次 Sum。令 `N=blockCount*8`，和值恰为 N 时 ready 且
+keepFlags=false，恰为 N+0.5 时 ready 且 keepFlags=true，其余结果均不 ready。
+在每字段从 0 发布为有效值的原协议下，任意普通字段未到达时和值最多为 N-0.5，
+标记字段未到达时和值最多为 N-1，因此不能误判完整到达。当前包长范围内整数及 0.5 均可被 FP32 精确表示。
+返回 `readyMask` 和 `keepFlagsMask`，只使用 ready 项的布局位，不增加 header DMA、Probe 同步或 UB 分配。
+
+两个位图绑定本批不可变的 probeIdx snapshot。预取和消费继续按同一倒序遍历，
+各自向 IssueLoad/ConsumeLoaded 传入同一 keepFlags；pending 的末项替换删除不得改变关联。
+keepFlags=true 使用完整 DataCopy；false 使用 DataCopyPad 每块取 480B、源 gap 32B，UB 连续。
+消费按布局选择 wire 或 logical header/read-index 偏移及输出方式；去重元数据仍由 header 类型决定，
+特别是 Terminal 的 DestinationIndex 仍为 `{slot, UINT32_MAX, UINT32_MAX}`。
+
+Dispatch 是此技术的一个调用方：源端仅给需要转发的 packet 设置 1.5，每次复用发送 lane 均覆盖该字段，
+避免上一包标记泄漏；标记更新放在已有 Vector→MTE3 发布依赖内。
+FirstHop 中转在本地元数据快照后将 header 改为 Terminal，并独立把 UB 布局标记改为 1.0，
+两次 Scalar 写均受已有 Scalar→MTE3 依赖保护，随后转发完整 packet。
+下一跳由 Flag 标记选择压紧读取。去重选择、GM 布局尺寸、Flag 清理、lane 预算和核末完成屏障保持原契约。
+该 Flag 语义要求全部参与 rank 同版本部署，不能混用旧内核；不改变 Combine 的协议。
+
+实施顺序：独立布局标记定义与解码 → 源发送标记 → Probe 位图传递 → 布局感知消费和中转降为 1.0 → 回归与真实编译。
+验证覆盖每个 Flag 字段缺失、两种布局与三种类型独立组合、同批混合布局、发送 lane 复用、
+多轮 ping-pong、量化/非量化、auto 切换、转发 packet 和输出元数据。CPU 检查不代替 NPU 时序或性能结论。
+
+本次实现验证（2026-10-08）：发送、接收 CPU 回归分别通过 `dedup=0/1/auto × profiling=0/1` 六组，
+覆盖缺失 Flag 不提前 ready、混合布局的 snapshot/lane 对应、发送 lane 重用及中转标记复位。
+B03 的 CANN 9.2 / A5 Dispatch 内核在 auto 策略、profiling OFF/ON 下均编译通过。
+目标 CANN 9.1 的 `blue` 主机无法解析，未完成该版本编译；CPU 模拟与 A5 编译不能证明 NPU 运行时序或性能收益。
+本次未执行 NPU 测试、安装或八机部署；构建日志及源码/产物 SHA256 保留于本机
+`build/receive-layout-20261008` 和 B03 首机 `/home/hzy/TileXRTest/build/receive-layout-check`。
+
 状态（2026-09-18）：**Dispatch 优化设计阶段收口，当前实现以[主规格](ep-memory-server-dedup.md)为准。**
 本文保留优化过程和未实施候选，不再作为待执行计划。第 15 节的剩余 ≤5 双 Probe 设计暂缓，
 不能用它覆盖当前 pending/退出/UB 契约。接下来的设计工作转入 [Combine](ep-memory-server-dedup-combine-open-topics.md)。
