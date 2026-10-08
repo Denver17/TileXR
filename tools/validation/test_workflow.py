@@ -169,6 +169,23 @@ class HostfileTests(TemporaryRoot):
 
 
 class ConfigTests(TemporaryRoot):
+    def test_256p_configuration_and_rank_mapping(self):
+        self.hostfile.write_text("\n".join(f"192.0.2.{i + 1}" for i in range(33)))
+        with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",
+                "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
+                "TILEXR_VALIDATION_SERVERS": "32", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "256"}):
+            config = self.config()
+            mappings = workflow.rank_mapping(config.hosts())
+            self.assertEqual(len(mappings), 256)
+            self.assertEqual([row["rank"] for row in mappings], list(range(256)))
+            self.assertEqual(mappings[-1], dict(host="192.0.2.32", host_index=31,
+                local_rank=7, device=7, rank=255, rank_size=256))
+            with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_SERVERS": "33"}):
+                with self.assertRaisesRegex(ValueError, "2..32"):
+                    self.config()
+            with self.assertRaises(ValueError):
+                workflow.rank_mapping(workflow.hosts_from_file(self.hostfile))
+
     def test_chain_endpoints_default_to_coordinator_and_propagate_to_remote(self):
         self.hostfile.write_text("192.0.2.1\n192.0.2.2\n")
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_BUILD_MODE": "production",

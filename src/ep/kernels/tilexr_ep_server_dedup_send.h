@@ -76,7 +76,7 @@ public:
             Allocate(weightOutBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 4U, 32U)));
             Allocate(maskBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * 4U, 32U)));
             Allocate(directBuf_, uint32_t(TileXREpDedupAlign(uint64_t(count_) * k_ * 16U, 32U)));
-            Allocate(serverBuf_, 64U);
+            Allocate(serverBuf_, uint32_t(TileXREpServerDedupServerStateBytes(uint32_t(args_->rankSize))));
             const uint32_t remoteServers = args_->rankSize / 8U - 1U;
             const uint32_t maxGroups = remoteServers < k_ / 2U ? remoteServers : k_ / 2U;
             if (maxGroups != 0U) Allocate(firstHopBuf_, uint32_t(TileXREpDedupAlign(maxGroups * 4U, 32U)));

@@ -657,9 +657,20 @@ write_result(root, report, root/'summary.json')
             self.assertEqual(values['TILEXR_VALIDATION_BS'], '96')
             self.assertNotIn('TILEXR_DIRECT_HOSTS_JSON', values)
 
+    def test_cli_accepts_32_servers(self):
+        (self.root / 'tools/validation/workflow.py').write_text(
+            "import os\nfrom pathlib import Path\nfrom run_summary import write_result\n"
+            "assert os.environ['TILEXR_VALIDATION_SERVERS'] == '32'\n"
+            "assert os.environ['TILEXR_VALIDATION_MOE_EXPERT_NUM'] == '256'\n"
+            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
+            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
+        command = subprocess.run([str(self.bash), 'run.sh', '-n', '32', '-e', '256', '-m', '1'],
+            cwd=self.root, env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(command.returncode, 0, command.stdout + command.stderr)
+
     def test_cli_errors_and_help_precede_environment_loading(self):
         self.local.unlink()
-        for args in ([], [''], ['-n'], ['-n', '1', '-e', '96'], ['-n', '17', '-e', '96'],
+        for args in ([], [''], ['-n'], ['-n', '1', '-e', '96'], ['-n', '33', '-e', '264'],
                      ['-n', '8', '-e', '96'], ['-n', '2', '-e', '1025'],
                      ['-n', '2', '-e', '96', '-m', '3'], ['-n', '2', '-e', '96', '-l', '3'],
                      ['-n', '2', '-e', '96', '-l', '3', '-1'],

@@ -54,6 +54,15 @@ TILEXR_EP_DATA_INLINE EpServerDedupDataLayout TileXREpServerDedupDataLayout(
     return layout;
 }
 
+// One uint32 state per server. Keep the existing minimum for smaller worlds.
+TILEXR_EP_DATA_INLINE uint64_t TileXREpServerDedupServerStateBytes(uint32_t ranks)
+{
+    static_assert(TileXR::TILEXR_MAX_RANK_SIZE <= 32 * 8,
+        "Dispatch server masks require at most 32 servers");
+    const uint64_t bytes = TileXREpDedupAlign(uint64_t(ranks / 8U) * sizeof(uint32_t), 32U);
+    return bytes < 64U ? 64U : bytes;
+}
+
 // Fixed sender allocation shared by Host admission and device lane planning.
 // owned is the weight-copy partition, not the non-dedup route ownership.
 TILEXR_EP_DATA_INLINE uint64_t TileXREpServerDedupSendFixedUbBytes(uint32_t bs, uint32_t k,
@@ -69,7 +78,8 @@ TILEXR_EP_DATA_INLINE uint64_t TileXREpServerDedupSendFixedUbBytes(uint32_t bs, 
     if (kEpServerDedupEnable) {
         const uint32_t groups = ranks / 8U - 1U < k / 2U ? ranks / 8U - 1U : k / 2U;
         bytes += TileXREpDedupAlign(uint64_t(owned) * k * 4U, 32U) + TileXREpDedupAlign(uint64_t(owned) * 4U, 32U) +
-            TileXREpDedupAlign(uint64_t(owned) * k * 16U, 32U) + 64U + TileXREpDedupAlign(groups * 4U, 32U);
+            TileXREpDedupAlign(uint64_t(owned) * k * 16U, 32U) +
+            TileXREpServerDedupServerStateBytes(ranks) + TileXREpDedupAlign(groups * 4U, 32U);
     }
     return bytes;
 }

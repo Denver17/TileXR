@@ -14,7 +14,7 @@ int main()
         layout.tokenTypeBytes == (kEpServerDedupEnable ? 3072U : 0U) && layout.relayReadIndexRowStrideBytes == (kEpServerDedupEnable ? 48U : 0U) &&
         layout.relayReadIndexBytes == (kEpServerDedupEnable ? 36864U : 0U) && layout.sourceMaskBytes == (kEpServerDedupEnable ? 16U : 0U) && layout.yOutBytes == 104,
         "independent expected five-table and tensor sizes");
-    for (int64_t ranks : {32, 64, 128}) {
+    for (int64_t ranks : {32, 64, 128, 136, 256}) {
         for (int64_t k : {1, 6, 32}) {
             Check(TileXREpBuildMemoryServerDedupCombineLayout(ranks, 96, 7168, k, ranks, &layout) == TILEXR_SUCCESS,
                 "L=1 remains supported with full K relay stride");
@@ -28,7 +28,7 @@ int main()
         int64_t r = 64, b = 4, h = 13, k = 6, e = 192;
         switch (i) {
             case 0: r = 8; break;
-            case 1: r = 136; break;
+            case 1: r = 264; e = 528; break;
             case 2: r = 17; break;
             case 3: b = 0; break;
             case 4: h = 0; break;

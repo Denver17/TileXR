@@ -353,6 +353,11 @@ int main()
                     Run(32, 384, bs, 64, 6, false, 16, 3, {192, 0, 96, 288, 1, 193});
             }
             CheckDeferredCountSender();
+            // Upper-half server states (16 and 31) and bit 31 must survive
+            // mixed DIRECT/FirstHop routes, all source halves and lane reuse.
+            for (uint32_t source : {0U, 128U, 255U})
+                Run(256, 256, 2U * sendCoreNum, 17, 6, false, source, 3,
+                    {128, 129, 248, 249, 0, 8, 248, 0, 128, 8, 16, 255});
             CheckReceiveUnpack(32, false);
             CheckReceiveUnpack(240, false); // Exactly one 480B data block.
             CheckReceiveUnpack(241, false); // Hidden data crosses the first flag.

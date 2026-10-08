@@ -382,8 +382,8 @@ class Config:
         self.server_count = None
         if self.is_run and os.environ.get("TILEXR_VALIDATION_SERVERS") is not None:
             self.server_count = int(os.environ["TILEXR_VALIDATION_SERVERS"])
-            if not 2 <= self.server_count <= 16:
-                raise ValueError("-n 必须为 2..16 台服务器")
+            if not 2 <= self.server_count <= 32:
+                raise ValueError("-n 必须为 2..32 台服务器")
         self.dedup = 1
         self.profiling = False
         self.core_overrides = {}
@@ -1192,8 +1192,8 @@ def pid_identity(pid):
 
 
 def rank_mapping(hosts):
-    if not 2 <= len(hosts) <= 16 or any(len(host["devices"]) != 8 for host in hosts):
-        raise ValueError("多 rank 检查点要求 2 至 16 台主机，每台恰好 8 个 device ID；完整验收分别使用 64P 和 128P")
+    if not 2 <= len(hosts) <= 32 or any(len(host["devices"]) != 8 for host in hosts):
+        raise ValueError("多 rank 检查点要求 2 至 32 台主机，每台恰好 8 个 device ID，最多 256P")
     return [{"host": host["host"], "host_index": index, "local_rank": local_rank,
              "device": device, "rank": index * 8 + local_rank, "rank_size": len(hosts) * 8}
             for index, host in enumerate(hosts) for local_rank, device in enumerate(host["devices"])]

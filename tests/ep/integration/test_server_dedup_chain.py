@@ -134,6 +134,23 @@ class ChainConsumerTests(unittest.TestCase):
         self.processes.append(process)
         return process
 
+    def test_256p_consumer_rank_boundaries_without_device_launch(self):
+        env = dict(self.environment, TILEXR_INTERNAL_ACCEPTANCE_STAGE="",
+                   TILEXR_VALIDATION_MOE_EXPERT_NUM="256", TILEXR_VALIDATION_BS="96")
+        for rank in (0, 128, 255):
+            with self.subTest(rank=rank):
+                result = subprocess.run([str(self.executable), "--dry-run", "run-256p", "build-identity",
+                    "unknown", f"node-{rank // 8}", str(rank // 8), str(rank % 8), str(rank % 8),
+                    str(rank), "256"], env=env, capture_output=True, text=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for host, local, rank, ranks in ((32, 0, 256, 256), (31, 8, 255, 256), (0, 0, 0, 264)):
+            result = subprocess.run([str(self.executable), "--dry-run", "run-256p", "build-identity",
+                "unknown", f"node-{host}", str(host), str(local), "0", str(rank), str(ranks)],
+                env=env, capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("rank/device identity out of range", result.stderr)
+        self.assertFalse(list(Path(self.trace.name).iterdir()), "dry-run must not call ACL or communicator")
+
     def trace_lines(self, rank):
         path = Path(self.trace.name) / str(rank)
         return path.read_text().splitlines() if path.exists() else []

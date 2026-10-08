@@ -1,5 +1,28 @@
 # EP 验证与人工测试
 
+## 256P 规模扩展（2026-10-08）
+
+普通入口支持 `-n 2..32`，每台固定 8 卡，最多 256P。hostfile 前 32 台须为实际参测机器；
+256P 的总专家数须为 256 的倍数且不超过 1024，可选 256/512/768/1024。
+例如原 BS96/H7168/TopK6、BF16→MXFP8 E4M3 的 Dispatch 性能测试可使用：
+
+```bash
+bash run.sh -n 32 -e 256 -m 1 -l 100 20 bs=96 h=7168 topk=6 dtype=bf16 dispatch_quant_mode=4 fp8_format=e4m3 operator_mode=dispatch
+```
+
+扩规模不能只放宽 `run.sh`：Python 配置/rank 映射、consumer 的 rankSize 解析、
+通信 rank 上限与 Kernel 按服务器索引的 UB 状态表必须一致。旧版发送状态表只有 16 个 uint32，
+32 台需 128B；Host 预算和 Kernel 分配共用计算函数，小规模保留原有 64B 最小值。
+32 位服务器位图可覆盖编号 0..31，继续扩容须先调整位图表示。
+
+`TILEXR_MAX_RANK_SIZE` 从 128 扩到 256 改变了 `CommArgs` 数组尺寸及后续字段偏移。
+必须统一重新编译通信库、EP Host、AICore 内核和 consumer，并将同一构建产物部署到全部参测 rank；
+旧二进制不可混用。Host/CPU 回归与编译仅证明对应边界，不代表 256P 实机正确性或性能通过。
+
+本次编译验证：B03 CANN 9.2 / A5 的 `tile-comm`、`tilexr-ep`（含 Dispatch/Combine 内核）
+在 auto、profiling OFF 下构建通过；日志及源文件摘要保留于 `build/256p-verification/`。
+CANN 9.1 的 `blue` 主机名无法解析，未完成该版本编译。未启动 NPU 或部署新安装包。
+
 ## 日常构建、同步和运行（不使用 checkpoint）
 
 普通入口已弃用 `TILEXR_VALIDATION_CHECKPOINT`；旧 shell 导出、旧部署配置及旧验收 manifest
@@ -1102,7 +1125,7 @@ bash run.sh -n 8 -e 512 -m 0 -l 3 0
 
 | 参数 | 含义 | 默认值/约束 |
 | --- | --- | --- |
-| `-n N` | 服务器数，总卡数为 8N | 必填，2..16，清单必须有足够机器 |
+| `-n N` | 服务器数，总卡数为 8N | 必填，2..32，清单必须有足够机器 |
 | `-e E` | 总专家数，单卡专家数为 E/(8N) | 必填，1..1024，须被 8N 整除 |
 | `-m M` | 0=functional、1=performance、2=breakdown | 默认 0 |
 | `-l L W` | 测量 L 轮、预热 W 轮 | 默认 1 0；L>=1、W>=0，均为 uint32 |

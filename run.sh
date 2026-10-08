@@ -6,7 +6,7 @@ cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
 usage() {
     cat <<'HELP'
 Usage: bash run.sh -n SERVERS -e EXPERTS [-m 0|1|2] [-l LOOPS WARMUP] [key=value ...]
-  -n  Number of servers from the beginning of hostfile (2..16, 8 devices each).
+  -n  Number of servers from the beginning of hostfile (2..32, 8 devices each).
   -e  Total experts (1..1024, divisible by 8 * SERVERS).
   -m  0=functional (default), 1=performance, 2=breakdown.
   -l  Measurement loops and warmup loops (default: 1 0).
@@ -45,7 +45,7 @@ while (( $# )); do
             (( $# >= 2 )) || fail "missing value for $key"
             value=$2
             case "$key" in
-                -n) [[ $value =~ ^([2-9]|1[0-6])$ ]] || fail '-n must be an integer in 2..16'; servers=$value;;
+                -n) [[ $value =~ ^([2-9]|[12][0-9]|3[0-2])$ ]] || fail '-n must be an integer in 2..32'; servers=$value;;
                 -e) [[ $value =~ ^[1-9][0-9]{0,3}$ ]] && (( value <= 1024 )) || fail '-e must be an integer in 1..1024'; experts=$value;;
                 -m) case "$value" in 0) run_mode=functional;; 1) run_mode=performance;; 2) run_mode=breakdown;; *) fail '-m must be 0, 1 or 2';; esac;;
             esac

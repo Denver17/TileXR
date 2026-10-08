@@ -34,7 +34,7 @@ using GM_ADDR = uint8_t*;
 
 namespace TileXR {
 
-constexpr int TILEXR_MAX_RANK_SIZE = 128; // 最大支持的npu卡数
+constexpr int TILEXR_MAX_RANK_SIZE = 256; // 最大支持的npu卡数
 constexpr int RANK_SIZE_TWO = 2;  // 可用SIO的规模，以及是否需要跨卡搬运数据核的分界规模
 constexpr int64_t IPC_BUFF_MAX_SIZE = 1022LL * 1024 * 1024;
 constexpr int64_t CREDIT_IPC_STRIDE = 512;

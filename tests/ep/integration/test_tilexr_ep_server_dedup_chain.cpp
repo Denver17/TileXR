@@ -273,12 +273,14 @@ Config Parse(int argc, char **argv)
     Require(!c.run.empty() && c.run.size() < 128 && !c.build.empty() && c.build.size() < 128 &&
         !c.host.empty(), "invalid run/build/host identity");
     int *fields[] = {&c.hostIndex, &c.localRank, &c.device, &c.rank, &c.rankSize};
+    const int limits[] = {TileXR::TILEXR_MAX_RANK_SIZE / 8 - 1, 7, 255,
+        TileXR::TILEXR_MAX_RANK_SIZE - 1, TileXR::TILEXR_MAX_RANK_SIZE};
     for (int i = 0; i < 5; ++i) {
         const int64_t value = Number(argv[i + 5], "rank identity");
-        Require(value <= 255, "rank/device identity out of range");
+        Require(value <= limits[i], "rank/device identity out of range");
         *fields[i] = static_cast<int>(value);
     }
-    Require(c.rankSize >= 16 && c.rankSize <= 128 && c.rankSize % 8 == 0 && c.localRank < 8 &&
+    Require(c.rankSize >= 16 && c.rankSize <= TileXR::TILEXR_MAX_RANK_SIZE && c.rankSize % 8 == 0 && c.localRank < 8 &&
         c.rank < c.rankSize && c.rank == c.hostIndex * 8 + c.localRank, "invalid 8P/server mapping");
     Require(!c.dryRun || c.device == c.localRank, "dry-run requires device == local_rank");
     c.bs = Number(std::getenv("TILEXR_VALIDATION_BS"), "TILEXR_VALIDATION_BS");
