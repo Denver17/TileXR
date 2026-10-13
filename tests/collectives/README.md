@@ -208,10 +208,32 @@ Current shim coverage is:
 - `broadcast`
 - equal-split `alltoall` when the selected topology supports the standalone TileXR AllToAll path
 
-The adapter intentionally falls back for disabled feature flags, non-NPU tensors, non-contiguous tensors, uneven
-`all_gatherv` / `reduce_scatterv` style size lists, mismatched AllToAll scatter/gather dimensions, unsupported
-dtypes or shapes, and missing TileXR libraries. The shim smoke validates TileXR's Python ABI and torch-npu tensor
-pointer path; it is not a substitute for final vllm-ascend inference validation with a real model.
+The framework adapter owns a native communicator per CPU group. Unsupported
+non-NPU/empty/dtype contracts and AllToAll use the original framework path;
+non-contiguous supported inputs are materialized on the NPU. Missing native
+artifacts fail group startup, and native operation failures propagate rather
+than replaying through the original backend. Standalone shim smoke validates
+the Python ABI and pointer path; it does not qualify framework group ownership.
+See [the integration contract](../../docs/specs/vllm-ascend-collectives.md).
+
+On an already qualified single-node 910B environment with vLLM and vllm-ascend
+0.18.0 loaded, run the group integration check with the selected Python:
+
+```bash
+export PYTHONPATH="$PWD/integrations/vllm_ascend:$PYTHONPATH"
+export VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_INSTALL_PREFIX="$PWD/install"
+export TILEXR_COMM_ID=127.0.0.1:29688
+python -m torch.distributed.run --nproc_per_node=8 --master_port=29686 \
+  tests/collectives/integration/vllm_group_npu.py
+```
+
+Optional `TILEXR_VALIDATION_OUTPUT` names an existing directory for per-rank
+JSON results. The test requires all eight requested devices to be available.
+It checks two overlapping TP8 groups, even/odd TP4 groups with local-root
+broadcast, fp16/bf16 arithmetic, layout/axis semantics, cross-stream ordering,
+and two creation/destruction cycles. Require eight `correct=true` records and
+zero fallback/error for the four exercised operations. Its total route counts
+are rank-local. It does not qualify AllToAll, multi-node, graph or fusion paths.
 
 Expected success lines include:
 
@@ -242,5 +264,18 @@ probe reached the real vLLM V1 engine and spawned workers with `NPUCommunicator 
 stopped on a vllm-ascend worker import dependency (`torchvision`) before `LLM.generate()` completed. After installing
 `torchvision` / `torchaudio` and sourcing NNAL ATB to resolve `libatb.so`, the same probe reached HCCL/Gloo
 initialization and model weight loading, then stopped on a vLLM/vllm-ascend source mismatch:
-`set_forward_context() got an unexpected keyword argument 'virtual_engine'`. The PR is not complete until
-vllm-ascend inference validation is run or the remaining inference-level blocker is resolved and documented.
+`set_forward_context() got an unexpected keyword argument 'virtual_engine'`. That historical source mismatch was resolved in the retained 2026-10-09
+qualification by using matching official vLLM/vllm-ascend 0.18.0 source trees,
+an isolated triton-ascend 3.2.0 backend with the official CANN 9.x compatibility
+patches, and a task-local toolkit path compatibility layout. Shared framework
+and toolkit installations were not changed.
+
+The resulting 910B3 x8 / CANN 9.1 / driver 25.5.0 eager qualification used real
+Qwen3.5-4B weights with TP8. Three generation calls with two prompts per call
+and 16 output tokens per prompt matched the original backend's token IDs.
+Each of eight ranks recorded request deltas of 6,240 TileXR AllReduce and 96
+AllGather calls, with zero fallback/error. Engine startup counts were excluded
+from those deltas. The group integration check additionally passed two cycles
+of overlapping TP8 and odd/even TP4 groups and the one-rank-missing-library
+startup agreement check. All eight cards were idle after exit. These are
+correctness/ownership results, not performance or graph/fusion qualification.

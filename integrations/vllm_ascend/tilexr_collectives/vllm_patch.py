@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 from typing import Callable
 
-from .vllm_adapter import TileXRVllmCollectivesAdapter, enabled
+from .vllm_adapter import enabled
+from .group_binding import bind_group
 
 
 _PATCH_MARKER = "_tilexr_collectives_patch_applied"
@@ -37,24 +38,6 @@ def _initial_route_counts() -> dict[str, dict[str, int]]:
     return {name: {"tilexr": 0, "fallback": 0, "error": 0} for name in _ROUTE_METHODS}
 
 
-def _ensure_adapter(self, install_prefix: str):
-    adapter = getattr(self, "_tilexr_collectives_adapter", None)
-    if adapter is not None:
-        return adapter
-    try:
-        adapter = TileXRVllmCollectivesAdapter(
-            rank=int(self.rank),
-            world_size=int(self.world_size),
-            install_prefix=install_prefix,
-        )
-    except Exception as exc:
-        self._tilexr_collectives_last_error = exc
-        _trace(f"adapter init fallback: {type(exc).__name__}: {exc}")
-        return None
-    self._tilexr_collectives_adapter = adapter
-    return adapter
-
-
 def _count_route(self, method_name: str, route: str) -> None:
     counts = getattr(self, "_tilexr_collectives_route_counts", None)
     if counts is None:
@@ -72,7 +55,7 @@ def _call_tilexr_or_original(
     *args,
     **kwargs,
 ):
-    adapter = _ensure_adapter(self, install_prefix)
+    adapter = self._tilexr_collectives_adapter
     if adapter is None:
         _count_route(self, method_name, "fallback")
         return original(self, *args, **kwargs)
@@ -86,8 +69,8 @@ def _call_tilexr_or_original(
     except Exception as exc:
         self._tilexr_collectives_last_error = exc
         _count_route(self, method_name, "error")
-        _trace(f"{method_name} adapter error; fallback: {type(exc).__name__}: {exc}")
-        return original(self, *args, **kwargs)
+        _trace(f"{method_name} adapter error: {type(exc).__name__}: {exc}")
+        raise
     if result is None:
         self._tilexr_collectives_last_error = getattr(adapter, "last_error", None)
         _count_route(self, method_name, "fallback")
@@ -107,11 +90,22 @@ def _patch_init(cls, install_prefix: str) -> None:
     def __init__(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
         self._tilexr_collectives_install_prefix = install_prefix
-        self._tilexr_collectives_adapter = None
+        self._tilexr_collectives_adapter = (
+            bind_group(self, install_prefix) if int(self.world_size) > 1 else None
+        )
         self._tilexr_collectives_last_error = None
         self._tilexr_collectives_route_counts = _initial_route_counts()
 
     cls.__init__ = __init__
+    original_destroy = cls.destroy
+
+    def destroy(self):
+        adapter = self._tilexr_collectives_adapter
+        if adapter is not None:
+            adapter.close()
+        return original_destroy(self)
+
+    cls.destroy = destroy
 
 
 def _patch_collective_methods(cls, install_prefix: str) -> None:

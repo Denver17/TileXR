@@ -418,6 +418,7 @@ bash scripts/driver_fix.sh
 - [reference/README.md](reference/README.md): ignored reference-only source checkouts
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
+- [docs/VLLM_ASCEND_INTEGRATION.md](docs/VLLM_ASCEND_INTEGRATION.md): vLLM integration architecture, call stacks, and usage
 - [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch/combine build, demo, and cross-node transport notes
 - [AGENTS.md](AGENTS.md): repository guidance for AI coding agents
 - [docs/diagrams/](docs/diagrams/): editable draw.io sources for the README architecture diagrams (SVGs embed the diagram XML, so they reopen in draw.io)

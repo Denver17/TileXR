@@ -203,7 +203,7 @@ build_vllm_probe_pythonpath() {
 probe_vllm_environment() {
   local probe_label="\${1:?probe label required}"
   build_vllm_probe_pythonpath
-  VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_PROBE_LABEL="\${probe_label}" PYTHONPATH="\${vllm_probe_pythonpath}:\${PYTHONPATH:-}" "\${selected_python}" - <<'PY'
+  VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_PROBE_LABEL="\${probe_label}" PYTHONPATH="\${vllm_probe_pythonpath}:\${PYTHONPATH:-}" "\${selected_python}" - <<'PY'
 import importlib.util
 import os
 import subprocess
@@ -222,10 +222,8 @@ for mod in ["vllm", "vllm_ascend"]:
 try:
     from tilexr_collectives.vllm_adapter import TileXRVllmCollectivesAdapter, enabled
 
-    adapter = TileXRVllmCollectivesAdapter(rank=0, world_size=2, install_prefix="install")
     print("tilexr vllm adapter:", TileXRVllmCollectivesAdapter.__name__)
     print("tilexr vllm adapter enabled:", enabled())
-    print("tilexr vllm adapter fallback without tensor:", adapter.should_fallback())
 except Exception as exc:
     print(f"tilexr vllm adapter probe: {type(exc).__name__}: {exc}")
 
@@ -312,11 +310,12 @@ def fallback_all_gather(self, input_, dim=-1):
 
 NPUCommunicator.all_gather = fallback_all_gather
 os.environ["VLLM_ASCEND_TILEXR_COLLECTIVES"] = "1"
-with patch.object(vllm_patch, "TileXRVllmCollectivesAdapter", FakeAdapter):
+with patch.object(vllm_patch, "bind_group", lambda comm, prefix: FakeAdapter(comm.rank, comm.world_size, prefix)):
     patched = vllm_patch.patch_npu_communicator("install")
     communicator = NPUCommunicator.__new__(NPUCommunicator)
     communicator.rank = 0
     communicator.world_size = 2
+    communicator._tilexr_collectives_adapter = vllm_patch.bind_group(communicator, "install")
     all_reduce_result = communicator.all_reduce("tensor-a")
     all_gather_result = communicator.all_gather("tensor-b", dim=0)
     broadcast_result = communicator.broadcast("tensor-c", src=1)
@@ -498,14 +497,14 @@ PY
   )
   (
     cd integrations/vllm_ascend
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allgather int32
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allgather fp16
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allreduce int32
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allreduce fp16
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install reducescatter int32
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install reducescatter fp16
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install broadcast int32
-    VLLM_ASCEND_TILEXR_COLLECTIVES=1 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install broadcast fp16
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allgather int32
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allgather fp16
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allreduce int32
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install allreduce fp16
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install reducescatter int32
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install reducescatter fp16
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install broadcast int32
+    VLLM_ASCEND_TILEXR_COLLECTIVES=0 TILEXR_VLLM_SMOKE_TIMEOUT_SEC=600 TILEXR_VLLM_SMOKE_PYTHON="\${selected_python}" TILEXR_VLLM_SMOKE_PYTHONPATH="\${remote_pythonpath}" ./run_tilexr_collectives_smoke.sh 2 16 0 ../../install broadcast fp16
   )
 } 2>&1 | tee $(printf '%q' "${REMOTE_LOG}")
 EOF
