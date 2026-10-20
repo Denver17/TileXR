@@ -103,7 +103,7 @@ class CombineDryRunTests(unittest.TestCase):
             self.configure(OPERATOR_MODE=op, RUN_MODE=mode, LOOPS=3, WARMUP=2)
             row = self.invoke()
             self.assertEqual((row["run_mode"], row["loops"], row["warmup"]), (mode, 3, 2))
-        for ranks in (16, 64, 128):
+        for ranks in (16, 64, 128, 256):
             self.configure(OPERATOR_MODE="both", MOE_EXPERT_NUM=ranks * 2, TOPK=2)
             for rank in range(ranks):
                 self.invoke(rank=rank, ranks=ranks)
@@ -131,9 +131,17 @@ class CombineDryRunTests(unittest.TestCase):
         self.invoke()
 
     def test_invalid_rank_mapping(self):
-        for identity in ({4: 1}, {5: 8}, {6: 1}, {7: 1}, {8: 8}, {8: 129}):
+        for identity in ({4: 1}, {7: 1}, {8: 8}, {8: 129}):
             with self.subTest(identity=identity):
-                self.invoke(identity=identity, error="mapping" if 6 not in identity else "device == local_rank")
+                self.invoke(identity=identity, error="mapping")
+        self.invoke(identity={6: 1}, error="device == local_rank")
+
+    def test_rank_identity_field_limits(self):
+        # host index, local rank, device, global rank and world size have
+        # distinct limits; reject them before constructing the rank mapping.
+        for identity in ({4: 32}, {5: 8}, {6: 256}, {7: 256}, {8: 257}):
+            with self.subTest(identity=identity):
+                self.invoke(identity=identity, error="rank/device identity out of range")
 
     def test_combine_has_no_dispatch_route_or_count_ub_constraint(self):
         self.configure(OPERATOR_MODE="combine", BS=1, TOPK=3, MOE_EXPERT_NUM=32)

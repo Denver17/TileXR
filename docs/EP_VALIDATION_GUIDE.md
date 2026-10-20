@@ -11,6 +11,12 @@ Combine profiling 生命周期测试曾首先在 `measurements.breakdown_record`
 复核时先检查第一条异常，再用 Python 3.8 的测量/报告测试和原 CTest consumer 验证；
 这些是 Host 行为证据，不证明 A5 通信正确性。
 
+256-rank 扩展后，consumer 先检查每个身份字段的独立上限，再检查 8P/server 映射关系。
+例如 `local_rank=8` 应报 identity 越界，不能继续期待后续 mapping 错误。修改解析上限时
+须同步检查拒绝发生的边界，并覆盖 256 ranks 的合法映射以及 host/local/device/rank/world-size
+各字段越界；保留“不调用 ACL/通信”的 dry-run 断言。PR #177 的首轮新 CI 已通过 profiling
+consumer，发现并定位了上述旧错误预期；该次结果为 EP CTest 68/69，不记作全套通过。
+
 共享 AICore 构建 helper 的选项会影响所有 EP kernel。Server Dedup 的 overflow recording
 策略必须在两个 dedup target 显式选择，其他 EP target 保留原有开启配置；检查生成的编译
 选项只能证明配置隔离，实际编译仍须使用匹配版本的 CANN。
