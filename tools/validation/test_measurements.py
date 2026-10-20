@@ -147,7 +147,7 @@ class MeasurementTests(unittest.TestCase):
         self.assertEqual(result["source"]["path"], str(path))
 
     def test_performance_reuses_static_kernel_name_matching(self):
-        static = measure.KERNEL_NAME.removesuffix("_kernel") + "_static_0123456789abcdef"
+        static = "tilexr_ep_dispatch_memory_server_dedup_static_0123456789abcdef"
         self.csv_profile([1], kernel=static)
         self.assertEqual(measure.performance_record(self.root, 1, 0)["source"]["matched_kernel_names"], [static])
 

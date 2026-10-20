@@ -65,6 +65,7 @@ class CombineProfileTests(single.CombineChainTests):
         for mode in ("dispatch", "combine", "both"):
             for run_mode in ("functional", "performance", "breakdown"):
                 with self.subTest(mode=mode, run_mode=run_mode):
+                    self.reset_case()
                     processes = [self.start_profile(rank, mode, run_mode) for rank in range(16)]
                     for rank, process in enumerate(processes):
                         output, errors = process.communicate(timeout=25)
@@ -95,11 +96,11 @@ class CombineProfileTests(single.CombineChainTests):
                                 self.assertEqual(c["sample_us"], [50.0])
                         elif run_mode != "breakdown":
                             self.assertNotIn(PROFILE_MARKER, output)
-                    self.reset_case()
 
     def test_combine_capture_fault_does_not_hide_dispatch_evidence(self):
         for fault in ("missing", "capture", "overflow", "end"):
             with self.subTest(fault=fault):
+                self.reset_case()
                 processes = [self.start_profile(rank, "both", "breakdown", TEST_COMBINE_PROFILE_FAULT=fault)
                              for rank in range(16)]
                 for rank, process in enumerate(processes):
@@ -119,7 +120,6 @@ class CombineProfileTests(single.CombineChainTests):
                             config, result = self.parse_evidence(rank, output, "both")
                             with self.assertRaises(ValueError):
                                 operator_measurements.validate_operator_measurements(result, config)
-                self.reset_case()
 
     def test_export_failure_prevents_pass_after_safe_cleanup(self):
         processes = [self.start_profile(rank, "both", "breakdown", TEST_FAIL_STAGE="combine-profiling-export")

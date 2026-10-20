@@ -52,7 +52,11 @@ set(TILEXR_EP_KERNEL_INCLUDES
 )
 
 function(tilexr_add_ep_aicore_kernel target source output)
-    cmake_parse_arguments(ARG "" "" "DEPENDS;DEFINITIONS" ${ARGN})
+    cmake_parse_arguments(ARG "DISABLE_OVERFLOW_RECORDING" "" "DEPENDS;DEFINITIONS" ${ARGN})
+    set(record_overflow true)
+    if(ARG_DISABLE_OVERFLOW_RECORDING)
+        set(record_overflow false)
+    endif()
     set_source_files_properties("${source}" PROPERTIES
         LANGUAGE CCE
         OBJECT_DEPENDS "${ARG_DEPENDS}")
@@ -65,7 +69,7 @@ function(tilexr_add_ep_aicore_kernel target source output)
         -Wno-deprecated-declarations
         "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
         "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
-        "SHELL:-mllvm -cce-aicore-record-overflow=false"
+        "SHELL:-mllvm -cce-aicore-record-overflow=${record_overflow}"
         "SHELL:-mllvm -cce-aicore-addr-transform"
         "SHELL:-mllvm -cce-aicore-dcci-insert-for-scalar=false"
         ${TILEXR_EP_AICORE_ARCH}
@@ -163,6 +167,7 @@ set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP
 tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"
     "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
+    DISABLE_OVERFLOW_RECORDING
     DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
         TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
         $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
@@ -191,6 +196,7 @@ set(TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP
 tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
     "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp"
     "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
+    DISABLE_OVERFLOW_RECORDING
     DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
         TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
         $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>

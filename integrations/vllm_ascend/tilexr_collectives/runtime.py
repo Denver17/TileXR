@@ -60,12 +60,18 @@ def _void_p(value: int | ctypes.c_void_p | None) -> ctypes.c_void_p:
     return ctypes.c_void_p(int(value))
 
 
+class TileXRUniqueId(ctypes.Structure):
+    _fields_ = [("data", ctypes.c_char * 128)]
+
+
 class TileXRCollectivesRuntime:
     def __init__(
         self,
         rank: int,
         world_size: int,
         install_prefix: str | os.PathLike[str] | None = None,
+        *,
+        initialize: bool = True,
     ):
         if world_size <= 0:
             raise ValueError(f"world_size must be positive, got {world_size}")
@@ -87,14 +93,35 @@ class TileXRCollectivesRuntime:
         self._comm_lib = ctypes.CDLL(comm_lib_path, mode=ctypes.RTLD_GLOBAL)
         self._collectives_lib = ctypes.CDLL(collectives_lib_path, mode=ctypes.RTLD_GLOBAL)
         self._configure_symbols()
-        ret = self._comm_lib.TileXRCommInitRankLocal(
-            ctypes.c_int(self.world_size),
-            ctypes.c_int(self.rank),
-            ctypes.byref(self._comm),
-        )
-        self._check("TileXRCommInitRankLocal", ret, f"rank={self.rank} world_size={self.world_size}")
+        if initialize:
+            self.initialize()
+
+    def unique_id(self, domain: int) -> bytes:
+        uid = TileXRUniqueId()
+        ret = self._comm_lib.TileXRGetUniqueId(ctypes.byref(uid), ctypes.c_int(domain))
+        self._check("TileXRGetUniqueId", ret, f"domain={domain}")
+        return bytes(uid)
+
+    def initialize(self, unique_id: bytes | None = None) -> None:
+        if self._closed or self._comm.value:
+            raise RuntimeError("TileXR runtime is closed or already initialized")
+        if unique_id is None:
+            operation = "TileXRCommInitRankLocal"
+            args = (ctypes.c_int(self.world_size), ctypes.c_int(self.rank), ctypes.byref(self._comm))
+        else:
+            operation = "TileXRCommInitRank"
+            uid = TileXRUniqueId.from_buffer_copy(unique_id)
+            args = (uid, ctypes.c_int(self.world_size), ctypes.c_int(self.rank), ctypes.byref(self._comm))
+        ret = getattr(self._comm_lib, operation)(*args)
+        self._check(operation, ret, f"rank={self.rank} world_size={self.world_size}")
 
     def _configure_symbols(self) -> None:
+        self._comm_lib.TileXRGetUniqueId.argtypes = [ctypes.POINTER(TileXRUniqueId), ctypes.c_int]
+        self._comm_lib.TileXRGetUniqueId.restype = ctypes.c_int
+        self._comm_lib.TileXRCommInitRank.argtypes = [
+            TileXRUniqueId, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
+        ]
+        self._comm_lib.TileXRCommInitRank.restype = ctypes.c_int
         self._comm_lib.TileXRCommInitRankLocal.argtypes = [
             ctypes.c_int,
             ctypes.c_int,
@@ -175,7 +202,7 @@ class TileXRCollectivesRuntime:
             _void_p(recv_ptr),
             ctypes.c_int64(int(send_count)),
             ctypes.c_int(int(tilexr_dtype)),
-            self._comm,
+            _void_p(self.comm_ptr),
             _void_p(stream_ptr),
         )
         self._check("TileXRAllGather", ret, f"rank={self.rank} count={send_count} dtype={tilexr_dtype}")
@@ -193,7 +220,7 @@ class TileXRCollectivesRuntime:
             _void_p(recv_ptr),
             ctypes.c_int64(int(send_count_per_peer)),
             ctypes.c_int(int(tilexr_dtype)),
-            self._comm,
+            _void_p(self.comm_ptr),
             _void_p(stream_ptr),
         )
         self._check(
@@ -216,7 +243,7 @@ class TileXRCollectivesRuntime:
             ctypes.c_int64(int(count)),
             ctypes.c_int(int(tilexr_dtype)),
             ctypes.c_int(TILEXR_REDUCE_SUM),
-            self._comm,
+            _void_p(self.comm_ptr),
             _void_p(stream_ptr),
         )
         self._check("TileXRAllReduce", ret, f"rank={self.rank} count={count} dtype={tilexr_dtype}")
@@ -235,7 +262,7 @@ class TileXRCollectivesRuntime:
             ctypes.c_int64(int(recv_count)),
             ctypes.c_int(int(tilexr_dtype)),
             ctypes.c_int(TILEXR_REDUCE_SUM),
-            self._comm,
+            _void_p(self.comm_ptr),
             _void_p(stream_ptr),
         )
         self._check("TileXRReduceScatter", ret, f"rank={self.rank} recv_count={recv_count} dtype={tilexr_dtype}")
@@ -253,7 +280,7 @@ class TileXRCollectivesRuntime:
             ctypes.c_int64(int(count)),
             ctypes.c_int(int(tilexr_dtype)),
             ctypes.c_int(int(root)),
-            self._comm,
+            _void_p(self.comm_ptr),
             _void_p(stream_ptr),
         )
         self._check("TileXRBroadcast", ret, f"rank={self.rank} count={count} dtype={tilexr_dtype} root={root}")

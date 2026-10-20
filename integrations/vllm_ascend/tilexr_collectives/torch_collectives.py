@@ -57,6 +57,12 @@ def _current_stream_ptr(device_index: int) -> int:
     return int(stream_value)
 
 
+def _record_stream(*tensors) -> None:
+    stream = _torch().npu.current_stream()
+    for tensor in tensors:
+        tensor.record_stream(stream)
+
+
 def _validate_npu_contiguous(tensor, name: str) -> None:
     if tensor.device.type != "npu":
         raise ValueError(f"{name} must be on an NPU device, got {tensor.device}")
@@ -120,6 +126,7 @@ def all_gather(tensor, rank: int, world_size: int, install_prefix: str, dim: int
     _bind_npu_device(device_index)
     rt = _select_runtime(runtime, rank, world_size, install_prefix, device_index)
     output = torch.empty((world_size * moved.numel(),), dtype=moved.dtype, device=moved.device)
+    _record_stream(moved, output)
     rt.all_gather(
         send_ptr=moved.data_ptr(),
         recv_ptr=output.data_ptr(),
@@ -140,6 +147,7 @@ def all_reduce(tensor, rank: int, world_size: int, install_prefix: str, runtime=
     _bind_npu_device(device_index)
     rt = _select_runtime(runtime, rank, world_size, install_prefix, device_index)
     output = torch.empty_like(tensor)
+    _record_stream(tensor, output)
     rt.all_reduce(
         send_ptr=tensor.data_ptr(),
         recv_ptr=output.data_ptr(),
@@ -166,6 +174,7 @@ def reduce_scatter(tensor, rank: int, world_size: int, install_prefix: str, dim:
     rt = _select_runtime(runtime, rank, world_size, install_prefix, device_index)
     output_shape = (moved.shape[0] // world_size, *moved.shape[1:])
     output = torch.empty(output_shape, dtype=moved.dtype, device=moved.device)
+    _record_stream(moved, output)
     rt.reduce_scatter(
         send_ptr=moved.data_ptr(),
         recv_ptr=output.data_ptr(),
@@ -186,6 +195,7 @@ def broadcast(tensor, rank: int, world_size: int, install_prefix: str, root: int
     _bind_npu_device(device_index)
     rt = _select_runtime(runtime, rank, world_size, install_prefix, device_index)
     output = tensor.contiguous()
+    _record_stream(output)
     rt.broadcast(
         buf_ptr=output.data_ptr(),
         count=output.numel(),
@@ -223,6 +233,7 @@ def all_to_all(
     _bind_npu_device(device_index)
     rt = _select_runtime(runtime, rank, world_size, install_prefix, device_index)
     output = torch.empty_like(moved)
+    _record_stream(moved, output)
     rt.all_to_all(
         send_ptr=moved.data_ptr(),
         recv_ptr=output.data_ptr(),

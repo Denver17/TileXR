@@ -191,7 +191,7 @@ class OperatorMeasurementTests(unittest.TestCase):
             paths.append(evidence["artifacts"]["perfetto_trace.json"])
             trace = json.loads(Path(paths[-1]).read_text())
             metadata = trace["metadata"]
-            self.assertEqual(metadata["operator"], measure.kernel_name(operator).removesuffix("_kernel"))
+            self.assertEqual(metadata["operator"], f"tilexr_ep_{operator}_memory_server_dedup")
             attributes = metadata["attributes"]
             self.assertEqual(attributes["run_id"], "run-test")
             self.assertEqual(attributes["kernel_sha256"], self.hashes[operator])

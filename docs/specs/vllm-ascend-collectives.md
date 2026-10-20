@@ -1,59 +1,108 @@
 # vllm-ascend Collective Integration Specification
 
-## Scope
+Architecture, call stacks and runnable usage examples are in the
+[vLLM integration design and guide](../VLLM_ASCEND_INTEGRATION.md).
 
-`integrations/vllm_ascend/` provides an optional Python adapter that exposes
-TileXR collectives to selected vllm-ascend paths without changing the core
-runtime ABI. It is an integration shim, not a second collective implementation.
+## Scope and components
 
-The integration owns Python-side loading, capability checks, tensor validation,
-and framework adaptation. `libtilexr-collectives.so` owns the actual collective
-launch and `libtile-comm.so` owns communicator state.
+`integrations/vllm_ascend/` adapts ordinary eager-mode `NPUCommunicator`
+collectives without changing the native ABI. Fusion operators (including
+`npu_mm_all_reduce_base`) and graph/compile execution are outside this scope.
+Use `enforce_eager=True` for the qualified model path.
 
-## Components
+- `runtime.py` loads `libtile-comm.so` and `libtilexr-collectives.so`, declares
+  their ctypes ABI, and propagates native errors.
+- `group_binding.py` binds one independently owned native runtime to each
+  framework CPU ProcessGroup during communicator construction.
+- `torch_collectives.py` handles dtype, layout, raw pointers and stream lifetime.
+  Its rank/size/device cache is for standalone smoke tools only; framework
+  communicators always pass their owned runtime explicitly.
+- `vllm_adapter.py` preserves framework mutation, dimension and local-root
+  contracts and orders calls that share native workspace.
+- `vllm_patch.py` wraps construction, ordinary collective methods and destruction.
+  `sitecustomize.py` activates the patch only when
+  `VLLM_ASCEND_TILEXR_COLLECTIVES=1`; explicit patching is also supported.
 
-- `tilexr_collectives/runtime.py` loads the installed native libraries and
-  translates native failures into actionable Python errors.
-- `tilexr_collectives/torch_collectives.py` validates Torch/NPU tensors and
-  presents the supported collective operations.
-- `tilexr_collectives/vllm_adapter.py` contains framework-facing adaptation.
-- `tilexr_collectives/vllm_patch.py` limits source patching to the supported
-  integration boundary.
-- `sitecustomize.py` provides the opt-in bootstrap used by deployment and smoke
-  tests; importing unrelated Python code must not activate TileXR implicitly.
+## Communication group ownership
 
-## Runtime Contract
+Use the registered CPU ProcessGroup's ordered global members, local rank and
+size. The group root allocates a domain from its process-local sequence and
+root global rank, reserving a device-sized interval for the native default
+endpoint's device offset. It creates a 128-byte unique ID with
+`TileXRGetUniqueId`, broadcasts the complete bytes (including embedded zeroes)
+inside that CPU group, and all members call `TileXRCommInitRank` with that ID.
+Distinct groups, including groups with identical members/rank/size, have
+independent domains, native flags, memory and handles. No new native API is
+required. Group identity is exposed on the adapter as `domain` and `members`.
 
-Input tensors must be NPU-resident, contiguous where required by the native
-operation, and use a supported dtype and shape. The adapter preserves the
-framework stream. The vllm patch is fail-open: unsupported tensor contracts,
-adapter initialization failures, missing native artifacts, and native-call
-errors return control to the original vllm-ascend collective. It never copies
-through CPU as a TileXR operation.
+This allocator is qualified for one node with one worker per global rank and
+uniform device visibility. Separate jobs must use separate bootstrap endpoints
+(`TILEXR_COMM_ID`). The domain is an offset to the configured native bootstrap
+port, not an unbounded namespace; exhausted port range is a startup error.
+This qualification does not establish multi-node or UDMA domain behavior.
 
-The integration reuses the application's rank identity and TileXR communicator
-lifecycle. TileXR itself does not create an HCCL data path, but the original
-operation selected by fallback may use the application's existing backend.
-Library and Python module selection must be explicit so that a stale installed
-artifact cannot be mistaken for the source under test.
+Before native bootstrap, ranks use one CPU all-gather to agree that native
+libraries and symbols loaded. The CPU group then distributes the root's unique
+ID or creation error. There is no per-operation CPU agreement or distributed
+recovery protocol. The framework continues to own collective participation,
+ordering, worker failure handling and startup timeouts.
 
-## Failure Handling
+## Tensor and stream contract
 
-- Missing libraries, symbols, unsupported tensor contracts, and adapter errors
-  are retained as `last_error`/trace diagnostics when available, then fall back
-  to the original operation.
-- Patch/bootstrap logic is idempotent for one process and must not recursively
-  wrap an already adapted operation.
-- Initialization failure does not leave a partially active adapter.
-- Per-operation route counters distinguish `tilexr`, `fallback`, and `error`.
-- Remote deployment scripts must report the source and installed artifact
-  identity used by the smoke run.
+AllReduce returns and mutates the same input object, matching the framework.
+The native reduction writes a separate output and a current-stream copy updates
+the input; this avoids assuming native in-place alias support. Broadcast also
+mutates and returns its input, with `src` interpreted as a group-local root.
+AllGather concatenates along the requested dimension. ReduceScatter matches
+`DeviceCommunicatorBase`'s `movedim(0, dim)` before scatter and after scatter,
+including the observable 3-D behavior in vLLM 0.18.0.
 
-## Verification Boundary
+Non-contiguous supported inputs are materialized on the NPU. Native input,
+output and intermediate allocations are recorded on the current NPU stream;
+ctypes launches do not automatically register their allocator use. A group lock
+orders host enqueue, and stream events order successive group operations across
+execution streams because the native communicator shares workspace. Ordinary
+operations do not synchronize the device. Destruction synchronizes the owning
+device before native memory is freed, is idempotent after success, and preserves
+the handle if native destruction fails. Close groups consistently on all ranks.
 
-Source-level tests cover loader, patch, and adapter behavior. The smoke scripts
-exercise the installed integration on a selected environment. These checks do
-not prove every vllm-ascend inference path, topology, or production workload;
-claims remain scoped to the exercised operation, dtype, rank count, and host.
-A TileXR-only validation must also show that every exercised operation incremented
-the `tilexr` route and that no `fallback` or `error` route was used.
+Supported dtypes are int8, int32, int64, fp16, fp32 and bf16 subject to the native
+operation/hardware contract. Inputs must satisfy the operation's shape and
+rank-participation requirements. Unsupported dtype, non-NPU or empty input
+uses the original framework operation before any TileXR launch. AllToAll stays
+with the original framework path: native AllToAll requires `TOPO_910_93`, which
+is not qualified by the 910B TP8 model environment. Fusion paths are untouched.
+
+## Error and route contract
+
+Explicit bootstrap and group initialization errors propagate. Python normally
+ignores ordinary `sitecustomize` exceptions, so explicit opt-in bootstrap failure
+uses `SystemExit` to prevent silent backend substitution. Environment inspection
+and standalone shim tools run with the framework opt-in disabled. A submitted native operation error propagates
+and marks its adapter failed; it must never replay through HCCL. Switching
+collective implementations after one rank has submitted work can mismatch rank
+participation and hang. Later calls on a failed or closed adapter also fail.
+The patch is idempotent and records per-operation `tilexr`, `fallback` and
+`error` counters, along with the last exception for diagnostics. These counts
+are rank-local; summing eight ranks does not represent global invocation count.
+
+Library and Python module selection must identify the actual deployed artifacts.
+The standalone Torch wrapper is distinct from the framework adapter; its smoke
+coverage alone cannot qualify group ownership or framework mutation semantics.
+
+## Verification boundary and reusable lessons
+
+Focused unit tests cover unique-ID ABI, startup error propagation/readiness,
+domain allocation, independent ownership, routing and destruction failure.
+`tests/collectives/integration/vllm_group_npu.py` verifies overlapping TP8 groups,
+nonzero-global-root TP4 subgroups, creation/destruction reuse, fp16/bf16 values,
+non-contiguous/3-D tensors and alternating execution streams on a qualified node.
+Reuse the retained official HCCL environment qualification; do not rerun it for
+an integration code change.
+
+The retained deployment evidence additionally compares a real Qwen3.5-4B TP8
+model with the original backend across multiple prompts and generation calls.
+Model evidence must show all required ranks and route deltas after engine-ready,
+not only startup counters. Diagnostic route file writes are not a performance
+baseline. Matching token output validates the exercised inference requests,
+not every model, dtype, topology, fusion path, graph mode or deployment workload.

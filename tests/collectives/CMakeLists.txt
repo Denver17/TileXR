@@ -205,9 +205,9 @@ else()
 endif()
 
 set(TILEXR_COLLECTIVES_TEST_LINK_DIRS
+    ${ASCEND_DRIVER_PATH}/lib64/driver
     ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64
     ${ASCEND_HOME_PATH}/${ARCH}-linux/devlib
-    ${ASCEND_DRIVER_PATH}/lib64/driver
 )
 
 function(TileXRAddAscendRpathLink target_name)

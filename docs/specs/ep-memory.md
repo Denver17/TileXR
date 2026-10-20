@@ -6,18 +6,39 @@
 Memory 后端使用 communicator 的 peer 映射承载同节点和跨节点通信。
 它与 UDMA 后端相互独立，不能仅根据拓扑选择后端。
 
-正在讨论的[服务器级去重设计](ep-memory-server-dedup.md)记录了未来模式所需的转发元数据，
-尚不属于已实现的 ABI。
+已实现的 Server Dedup 通过独立的 `TileXRMoeEpDispatchMemoryServerDedup` 和
+`TileXRMoeEpCombineMemoryServerDedup` 入口提供服务器级去重及返回归约。
+其五表协议、布局及运行限制见[Dispatch/Combine 联合设计](ep-memory-server-dedup-dispatch-combine-design.md)
+和公共头文件 `tilexr_ep.h`；不能与普通 Memory 入口的元数据混用。
 
 Host 层负责校验公共参数、构建当前轮次的窗口布局，从 Host 库的 `tilexr/kernels`
 目录加载所选 kernel，并通过已注册的 AICore signature 发起 launch。
 Communicator 和 stream 由调用方提供，EP 不拥有它们；EP 仅拥有自身的 launch 元数据和 kernel 注册资源。
 
-EP 打包在 configure 阶段不依赖具体 SoC。普通 Dispatch/Combine 及其 Memory 变体均仅支持 A5，
-同一次安装交付四个外置 AICore object，不生成 910B EP kernel 变体。
+EP 打包在 configure 阶段不依赖具体 SoC。普通 Dispatch/Combine、Memory 及 Server Dedup
+变体均仅支持 A5，同一次安装交付六个生产外置 AICore object，不生成 910B EP kernel 变体。
 `libtilexr-ep.so` 在每个公共入口调用 `aclrtGetSocName()` 检查 SoC；
 对于非 A5 硬件，在准备 context、加载或注册 kernel、推进 magic 值之前，
 返回 `TILEXR_ERROR_NOT_SUPPORT`。
+
+## Server Dedup 契约与部署
+
+- Dispatch 支持 FP16/BF16 输入，以及非量化或 MXFP8 E4M3/E5M2 输出；Combine 当前仅支持
+  FP16/BF16、`quantMode=0`。Dispatch 的量化支持不代表 Combine 支持量化输入。
+- Dispatch 输出 tokenType、destinationIndex、relayReadIndex、sourceMask、expertScales 五表，
+  有效行数由 sendCounts 前缀末项给出；表与输入行序须保留到对应 Combine 完成。
+- 默认构建策略为 `dedup=auto`：保持统一去重资源布局，按原始每 rank `BS<=32` 走直接路径、
+  `BS>32` 执行去重；显式 `0/1` 强制对应布局。Host、kernel 和 consumer 必须使用同一构建配置。
+- Combine 完成 staging/readiness、DIRECT 返回、加权 partial 返回及源端归约（M1–M5）；
+  非去重模式使用直接返回与 M6 归约。两算子复用 magic 选取的双窗口，同一 communicator
+  须在同一 stream 串行提交，且所有 rank 使用一致的模式、shape/layout 与核分配。
+- 独立 GM tiling 由 communicator 缓存到销毁；Dispatch/Combine profiling 使用独立记录区域。
+  必须配套部署 `libtile-comm`、EP Host 库和外置 kernel，不能只替换一个算子二进制。
+- 最大 rank 从 128 扩至 256 改变了 `CommArgs` 的数组尺寸、后续字段偏移和相关 credit 布局。
+  所有消费这些公共结构的 Host/kernel（包括其他通信后端、collectives 和下游）均须重新编译，
+  全部 rank 部署同一版本。256-rank 配置/Host 检查不代表 256P 实机正确性或性能通过。
+- 关闭 overflow recording 的编译设置仅用于两个 Server Dedup kernel；其他 EP kernel
+  保留原有开启设置。具体编译与设备证据见[EP 验证指南](../EP_VALIDATION_GUIDE.md)。
 
 ## Dispatch 契约
 

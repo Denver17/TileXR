@@ -1,5 +1,27 @@
 # EP 验证与人工测试
 
+## Host CI 的 Python 兼容边界
+
+Ubuntu 20.04 Host CI 使用 Python 3.8；完整七步验证 CLI 仍要求 Python 3.9+。
+由 CTest consumer 导入的共享测量/报告模块必须支持 Python 3.8，不能沿用 CLI 的版本假设。
+Combine profiling 生命周期测试曾首先在 `measurements.breakdown_record` 的
+`str.removesuffix()` 抛出 AttributeError；该异常跳过用例末尾清理后，后续子用例又出现
+累积 sync 计数和残留 capture 错误，不能把这些继发失败归因于 kernel 同步。
+固定 kernel 名的后缀处理使用兼容切片，并在每个子用例启动前清理上一轮进程/trace。
+复核时先检查第一条异常，再用 Python 3.8 的测量/报告测试和原 CTest consumer 验证；
+这些是 Host 行为证据，不证明 A5 通信正确性。
+
+共享 AICore 构建 helper 的选项会影响所有 EP kernel。Server Dedup 的 overflow recording
+策略必须在两个 dedup target 显式选择，其他 EP target 保留原有开启配置；检查生成的编译
+选项只能证明配置隔离，实际编译仍须使用匹配版本的 CANN。
+
+2026-10-20 PR #177 整理验证：Python 3.8.10 对未修复版本复现上述 AttributeError，
+修复后 measurement 22、operator measurement 13、breakdown trace 21、通用 profiling 81 项通过。
+独立静态审查核对了两个 target 的编译选项隔离和 256-rank 的 Host/Kernel 状态表预算。
+Windows 本地缺少 POSIX C++ 编译环境，未完成原始 CTest consumer 回归；以该 PR 的新 Host CI
+结果补充此边界。`blue` 无法解析，配置的 B03 构建主机 SSH 超时，本轮未完成 CANN 9.1/A5
+编译或任何 NPU 测试；上面的 Python 检查不替代这些证据。
+
 ## 256P 规模扩展（2026-10-08）
 
 普通入口支持 `-n 2..32`，每台固定 8 卡，最多 256P。hostfile 前 32 台须为实际参测机器；

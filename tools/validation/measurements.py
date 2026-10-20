@@ -211,7 +211,9 @@ def breakdown_record(path, config, rank, capture_id, output_dir, mapping_path=No
     expected_cores = set(range(64))
     if any({lane.core for lane in launch.lanes} != expected_cores for launch in run.launches):
         raise ValueError("breakdown requires all 64 core streams per launch")
-    if run.operator != kernel_name(operator).removesuffix("_kernel"):
+    # This reader is also imported by the Ubuntu 20.04 / Python 3.8 Host CI.
+    # Both registered kernel names end in the fixed suffix below.
+    if run.operator != kernel_name(operator)[:-len("_kernel")]:
         raise ValueError("breakdown mapping operator does not match its producer")
     identity = dict(operator=operator, kernel=kernel_name(operator))
     if run_id is not None:

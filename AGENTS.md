@@ -2,11 +2,11 @@
 
 Ask the user to install missing `ascendc-development` or `superpowers-neo` skills from [LingquLab/skills](https://github.com/LingquLab/skills).
 
-## Default Workspace and Branch
+## Workspace and Branch
 
-- Default code path: `/users/hzy/workspace/TileXR`.
-- Default working branch: `codex/SilentEmotion`, tracking `origin/codex/SilentEmotion`. Continue subsequent work on this branch unless the user explicitly requests another branch.
-- Before locating or changing code, verify the repository root and current branch. Server dedup Dispatch development is on this branch; inspecting `main` can lead to selecting the unrelated EP memory implementation.
+- Before locating or changing code, verify the repository root, current branch, and working-tree status in the user's selected workspace.
+- Continue on the task's intended branch; do not switch to a historical development branch or assume a machine-specific checkout path.
+- Ordinary EP Memory and Server Dedup have separate entry points and implementations. Follow the selected public API and build target when locating code.
 
 ## Project
 

@@ -792,9 +792,9 @@ if(BUILD_TILEXR_EP_DEMO)
 
     target_link_directories(tilexr_ep_dispatch_demo PRIVATE
         "${TILEXR_INSTALL_LIB_SEARCH_DIR}"
+        "${ASCEND_DRIVER_PATH}/lib64/driver"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64"
         "${ASCEND_HOME_PATH}/${ARCH}-linux/devlib"
-        "${ASCEND_DRIVER_PATH}/lib64/driver"
     )
 
     target_link_libraries(tilexr_ep_dispatch_demo PRIVATE

@@ -1,0 +1,15 @@
+{
+  "inventory": "tools/tssh/clusters.json",
+  "clusters": ["c01-b03", "c01-b08"],
+  "devices_per_host": 8,
+  "state_dir": "/var/lib/tilexr-npu-scheduler",
+  "bind": "0.0.0.0",
+  "port": 12345,
+  "public_url": "http://141.61.94.70:12345",
+  "poll_interval_seconds": 5,
+  "idle_release_seconds": 60,
+  "probe_timeout_seconds": 15,
+  "connect_timeout_seconds": 10,
+  "max_parallel_ssh": 16,
+  "max_log_bytes": 16777216
+}
