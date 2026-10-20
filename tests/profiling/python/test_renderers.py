@@ -4,12 +4,12 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from tools.profiling.analysis import analyze_run
-from tools.profiling.html_report import render_analysis_markdown, render_report_html
-from tools.profiling.io import atomic_write_json, atomic_write_text
-from tools.profiling.model import Diagnostic
-from tools.profiling.pairing import load_profile_run
-from tools.profiling.perfetto import render_perfetto
+from tilexr_profiling.analysis import analyze_run
+from tilexr_profiling.html_report import render_analysis_markdown, render_report_html
+from tilexr_profiling.io import atomic_write_json, atomic_write_text
+from tilexr_profiling.model import Diagnostic
+from tilexr_profiling.pairing import load_profile_run
+from tilexr_profiling.perfetto import render_perfetto
 
 from _fixtures import mapping_document, overlapping_child_capture, record_block, stream_id, write_capture
 
@@ -146,6 +146,8 @@ class ProfilingRendererTests(unittest.TestCase):
 
         self.assertIn("unavailable", markdown)
         self.assertIn("unavailable", report)
+        self.assertIn("unknown", markdown)
+        self.assertIn("unknown", report)
         self.assertIn("no_usable_critical_interval", markdown)
 
         trace = render_perfetto(run, analysis)

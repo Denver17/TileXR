@@ -17,6 +17,7 @@
 #include "acl/acl_rt.h"
 #include "alltoall_a5_common.h"
 #include "collective_kernel.h"
+#include "profiling_capture_queue.h"
 #include "tilexr_internal.h"
 #include "tilexr_types.h"
 
@@ -31,19 +32,39 @@ struct RetiredA5Resource {
     void *workspace = nullptr;
 };
 
-struct A5AllToAllRuntime {
+struct CommonCollectiveRuntime {
     void *workspace = nullptr;
     uint64_t workspaceCapacity = 0U;
     TileXRUDMAProfileHandle profile = 0U;
     TileXR::TileXRUDMAProfileView profileView {};
     int64_t previousMagic = 0;
     bool launched = false;
-    uint32_t profilingLaunchSlot = 0U;
+    bool a5Resources = false;
+    std::shared_ptr<ProfilingCaptureQueue> captures;
     bool cleanupPending = false;
     bool destroying = false;
     aclrtStream stream = nullptr;
     std::vector<RetiredA5Resource> retiredResources;
 };
+
+void *AcquireCapture(CommonCollectiveRuntime &runtime, aclrtStream stream,
+    uint32_t lanes, int rank, int rankSize) noexcept
+{
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
+    const char *directory = std::getenv("TILEXR_PROFILING_OUTPUT_DIR");
+    if (!directory || !*directory) return nullptr;
+    try {
+        if (!runtime.captures) runtime.captures = std::make_shared<ProfilingCaptureQueue>();
+        return runtime.captures->Acquire(stream, lanes, rank, rankSize);
+    } catch (const std::exception &error) {
+        std::cerr << "TileXR profiling skipped: " << error.what() << "\n";
+        return nullptr;
+    }
+#else
+    (void)runtime; (void)stream; (void)lanes; (void)rank; (void)rankSize;
+    return nullptr;
+#endif
+}
 
 class InternalResourceGuard {
 public:
@@ -69,7 +90,7 @@ private:
     bool locked_ = false;
 };
 
-bool ProfileMatches(const A5AllToAllRuntime &runtime,
+bool ProfileMatches(const CommonCollectiveRuntime &runtime,
     const HostLaunchContext &context)
 {
     if (runtime.workspace == nullptr || runtime.profile == 0U ||
@@ -88,7 +109,7 @@ bool ProfileMatches(const A5AllToAllRuntime &runtime,
             runtime.profileView.registryHost, context.hostArgs->rankSize);
 }
 
-int CleanupRetiredProfiles(TileXRCommPtr comm, A5AllToAllRuntime &runtime)
+int CleanupRetiredProfiles(TileXRCommPtr comm, CommonCollectiveRuntime &runtime)
 {
     int firstError = TileXR::TILEXR_SUCCESS;
     for (auto &resource : runtime.retiredResources) {
@@ -105,7 +126,7 @@ int CleanupRetiredProfiles(TileXRCommPtr comm, A5AllToAllRuntime &runtime)
     return firstError;
 }
 
-int CleanupAllProfiles(TileXRCommPtr comm, A5AllToAllRuntime &runtime)
+int CleanupAllProfiles(TileXRCommPtr comm, CommonCollectiveRuntime &runtime)
 {
     int firstError = TileXR::TILEXR_SUCCESS;
     if (runtime.profile != 0U) {
@@ -121,7 +142,7 @@ int CleanupAllProfiles(TileXRCommPtr comm, A5AllToAllRuntime &runtime)
     return firstError == TileXR::TILEXR_SUCCESS ? retiredRet : firstError;
 }
 
-int CleanupRetiredWorkspaces(A5AllToAllRuntime &runtime)
+int CleanupRetiredWorkspaces(CommonCollectiveRuntime &runtime)
 {
     int firstError = TileXR::TILEXR_SUCCESS;
     for (auto it = runtime.retiredResources.begin();
@@ -140,13 +161,20 @@ int CleanupRetiredWorkspaces(A5AllToAllRuntime &runtime)
     return firstError;
 }
 
-int DestroyA5Runtime(TileXRCommPtr comm, void *opaque)
+int DestroyCollectiveRuntime(TileXRCommPtr comm, void *opaque)
 {
-    auto *runtime = static_cast<A5AllToAllRuntime *>(opaque);
+    auto *runtime = static_cast<CommonCollectiveRuntime *>(opaque);
     if (runtime == nullptr) {
         return TileXR::TILEXR_SUCCESS;
     }
     runtime->destroying = true;
+    if (!runtime->a5Resources) {
+        // Generic captures are optional and may be absent on another rank.
+        // The communicator destroy entry point performs the common agreement.
+        if (runtime->captures && !runtime->captures->Drain()) return TileXR::TILEXR_ERROR_INTERNAL;
+        delete runtime;
+        return TileXR::TILEXR_SUCCESS;
+    }
     const aclError syncRet = runtime->stream == nullptr ?
         ACL_SUCCESS : aclrtSynchronizeStream(runtime->stream);
     int ret = TileXRCommAgreeInternalStatus(comm,
@@ -183,12 +211,17 @@ int DestroyA5Runtime(TileXRCommPtr comm, void *opaque)
         runtime->cleanupPending = true;
         return ret;
     }
+    // A5 owners exist on every rank after coordinated resource creation. Keep
+    // them until the same fixed drain agreement succeeds, including retries.
+    ret = TileXRCommAgreeInternalStatus(comm, !runtime->captures || runtime->captures->Drain() ?
+        TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_INTERNAL);
+    if (ret != TileXR::TILEXR_SUCCESS) return ret;
     delete runtime;
     return TileXR::TILEXR_SUCCESS;
 }
 
 int CreateA5Resources(TileXRCommPtr comm, const HostLaunchContext &context,
-    uint64_t bytes, A5AllToAllRuntime &candidate)
+    uint64_t bytes, CommonCollectiveRuntime &candidate)
 {
     uint32_t qpCount = 0U;
     int ret = TileXRUDMAGetQpCount(comm, &qpCount);
@@ -248,18 +281,18 @@ int CreateA5Resources(TileXRCommPtr comm, const HostLaunchContext &context,
 
 int GetOrCreateA5Runtime(TileXRCommPtr comm, const HostLaunchContext &context,
     uint64_t requiredBytes, aclrtStream stream,
-    A5AllToAllRuntime **runtimeOut)
+    CommonCollectiveRuntime **runtimeOut)
 {
     void *opaque = nullptr;
     int ret = TileXRCommGetInternalResource(comm, &opaque);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-    auto *runtime = static_cast<A5AllToAllRuntime *>(opaque);
+    auto *runtime = static_cast<CommonCollectiveRuntime *>(opaque);
     if (runtime != nullptr && runtime->destroying) {
         return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
     }
-    if (runtime != nullptr && runtime->stream != stream) {
+    if (runtime != nullptr && runtime->workspace != nullptr && runtime->stream != stream) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (runtime != nullptr && requiredBytes <= runtime->workspaceCapacity) {
@@ -282,34 +315,42 @@ int GetOrCreateA5Runtime(TileXRCommPtr comm, const HostLaunchContext &context,
         return TileXR::TILEXR_SUCCESS;
     }
 
-    A5AllToAllRuntime candidate {};
+    CommonCollectiveRuntime candidate {};
     ret = CreateA5Resources(comm, context, requiredBytes, candidate);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-    if (runtime == nullptr) {
+    candidate.a5Resources = true;
+    if (runtime == nullptr || !runtime->a5Resources) {
         candidate.stream = stream;
-        auto *newRuntime = new (std::nothrow) A5AllToAllRuntime(candidate);
-        const int localNewStatus = newRuntime == nullptr ?
-            TileXR::TILEXR_ERROR_INTERNAL : TileXR::TILEXR_SUCCESS;
-        ret = TileXRCommAgreeInternalStatus(comm, localNewStatus);
+        const bool needsOwner = runtime == nullptr;
+        auto *newRuntime = needsOwner ? new (std::nothrow) CommonCollectiveRuntime(candidate) : runtime;
+        // Every rank takes these same phases, including ranks with a generic
+        // optional profiling owner and ranks whose optional allocation failed.
+        ret = TileXRCommAgreeInternalStatus(comm, newRuntime ?
+            TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_INTERNAL);
         if (ret != TileXR::TILEXR_SUCCESS) {
-            delete newRuntime;
+            if (needsOwner) delete newRuntime;
             (void)TileXRUDMAProfileUnregister(comm, candidate.profile);
             (void)aclrtFree(candidate.workspace);
             return ret;
         }
-        runtime = newRuntime;
-        ret = TileXRCommAttachInternalResource(comm, runtime, DestroyA5Runtime);
-        const int localAttachStatus = ret;
+        const int localAttachStatus = needsOwner ?
+            TileXRCommAttachInternalResource(comm, newRuntime, DestroyCollectiveRuntime) : TileXR::TILEXR_SUCCESS;
         ret = TileXRCommAgreeInternalStatus(comm, localAttachStatus);
         if (ret != TileXR::TILEXR_SUCCESS) {
-            if (localAttachStatus == TileXR::TILEXR_SUCCESS) {
-                (void)TileXRCommDetachInternalResource(comm, runtime);
+            if (needsOwner) {
+                if (localAttachStatus == TileXR::TILEXR_SUCCESS) (void)TileXRCommDetachInternalResource(comm, newRuntime);
+                delete newRuntime;
             }
-            (void)DestroyA5Runtime(comm, runtime);
+            (void)TileXRUDMAProfileUnregister(comm, candidate.profile);
+            (void)aclrtFree(candidate.workspace);
             return ret;
         }
+        if (!needsOwner) {
+            candidate.captures = runtime->captures;
+            *runtime = std::move(candidate);
+        } else runtime = newRuntime;
     } else {
         const aclError syncRet = aclrtSynchronizeStream(stream);
         const int localSyncStatus = syncRet == ACL_SUCCESS ?
@@ -325,14 +366,14 @@ int GetOrCreateA5Runtime(TileXRCommPtr comm, const HostLaunchContext &context,
         void *oldWorkspace = runtime->workspace;
         const int64_t previousMagic = runtime->previousMagic;
         const bool launched = runtime->launched;
-        const uint32_t profilingLaunchSlot = runtime->profilingLaunchSlot;
+        auto captures = runtime->captures;
         const bool cleanupPending = runtime->cleanupPending;
         std::vector<RetiredA5Resource> retiredResources =
             std::move(runtime->retiredResources);
         *runtime = candidate;
         runtime->previousMagic = previousMagic;
         runtime->launched = launched;
-        runtime->profilingLaunchSlot = profilingLaunchSlot;
+        runtime->captures = std::move(captures);
         runtime->cleanupPending = cleanupPending;
         runtime->retiredResources = std::move(retiredResources);
         RetiredA5Resource retired {oldProfile, oldWorkspace};
@@ -359,6 +400,27 @@ int GetOrCreateA5Runtime(TileXRCommPtr comm, const HostLaunchContext &context,
 }
 
 } // namespace
+
+void *AcquireCollectiveProfiling(TileXRCommPtr comm, const HostLaunchContext &context,
+    aclrtStream stream, uint32_t lanes)
+{
+#if !defined(TILEXR_ENABLE_PROFILING) || TILEXR_ENABLE_PROFILING == 0
+    (void)comm; (void)context; (void)stream; (void)lanes;
+    return nullptr;
+#else
+    void *opaque = nullptr;
+    if (TileXRCommGetInternalResource(comm, &opaque) != TileXR::TILEXR_SUCCESS) return nullptr;
+    auto *runtime = static_cast<CommonCollectiveRuntime *>(opaque);
+    if (!runtime) {
+        std::unique_ptr<CommonCollectiveRuntime> candidate(new (std::nothrow) CommonCollectiveRuntime());
+        if (!candidate) return nullptr;
+        if (TileXRCommAttachInternalResource(comm, candidate.get(), DestroyCollectiveRuntime) != TileXR::TILEXR_SUCCESS) return nullptr;
+        runtime = candidate.release();
+    }
+    if (runtime->destroying) return nullptr;
+    return AcquireCapture(*runtime, stream, lanes, context.hostArgs->rank, context.hostArgs->rankSize);
+#endif
+}
 
 int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context)
 {
@@ -424,21 +486,12 @@ int LaunchA5AllToAll(TileXRCommPtr comm, const HostLaunchContext &context,
     if (!layout.valid) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
-    A5AllToAllRuntime *runtime = nullptr;
+    CommonCollectiveRuntime *runtime = nullptr;
     ret = GetOrCreateA5Runtime(
         comm, context, layout.workspaceBytes, stream, &runtime);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-#if defined(TILEXR_ENABLE_PROFILING)
-    const uint32_t recordsPerCore =
-        context.hostArgs->tilexrProfilingRecordsPerCore;
-    if ((context.hostArgs->extraFlag & TileXR::ExtraFlag::PROFILING) != 0U &&
-        !TileXRGrouped::ProfilingLaunchSlotValid(
-            runtime->profilingLaunchSlot, recordsPerCore)) {
-        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
-    }
-#endif
     const aclError memsetRet = aclrtMemsetAsync(
         static_cast<uint8_t *>(runtime->workspace) + layout.statusOffset,
         TileXRGrouped::kStatusBytes, 0, TileXRGrouped::kStatusBytes, stream);
@@ -474,7 +527,9 @@ int LaunchA5AllToAll(TileXRCommPtr comm, const HostLaunchContext &context,
     args.secondaryWeight = TileXRGrouped::kRouteParts -
         TileXRGrouped::kPrimaryRouteParts;
     args.firstInvocation = runtime->launched ? 0U : 1U;
-    args.profilingLaunchSlot = runtime->profilingLaunchSlot;
+    args.profilingGM = static_cast<uint8_t *>(AcquireCapture(*runtime, stream,
+        TileXRGrouped::kSendCoreCount + TileXRGrouped::kGroupWidth,
+        context.hostArgs->rank, context.hostArgs->rankSize));
     for (uint32_t plane = 0U; plane < TileXRGrouped::kPlaneCount; ++plane) {
         args.payloadOffset[plane] = layout.payloadOffset[plane];
         args.signalOffset[plane] = layout.signalOffset[plane];
@@ -484,11 +539,6 @@ int LaunchA5AllToAll(TileXRCommPtr comm, const HostLaunchContext &context,
     if (ret == TileXR::TILEXR_SUCCESS) {
         runtime->previousMagic = magic;
         runtime->launched = true;
-#if defined(TILEXR_ENABLE_PROFILING)
-        if ((context.hostArgs->extraFlag & TileXR::ExtraFlag::PROFILING) != 0U) {
-            ++runtime->profilingLaunchSlot;
-        }
-#endif
     }
     return ret;
 }

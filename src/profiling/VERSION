@@ -1,0 +1,4 @@
+TileXR Profiling SDK 1.0.0
+DeviceView ABI: 1
+Records protocol: tilexr_profiling_records.v1
+Host implementation standard: C++14

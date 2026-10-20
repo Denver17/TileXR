@@ -1,3 +1,5 @@
+> Historical design. Online APIs and the old Python entry point below have been superseded by [the maintained profiling guide](../../tools/profiling/README.md). These old examples are not supported commands.
+
 # TileXR Generic Profiling Tool Design
 
 ## Status

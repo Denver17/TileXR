@@ -61,7 +61,6 @@ constexpr uint32_t kStatusSdmaFailed = 6U;
 constexpr uint32_t kStatusSdmaPrewarmFailed = 7U;
 constexpr uint32_t kWorkspaceRegion = 0U;
 constexpr uint32_t kProfileRegionCount = 1U;
-constexpr uint32_t kProfilingRecordsPerLaunch = 144U;
 
 struct alignas(8) KernelArgs {
     uint8_t *commArgs;
@@ -85,10 +84,11 @@ struct alignas(8) KernelArgs {
     uint32_t primaryWeight;
     uint32_t secondaryWeight;
     uint32_t firstInvocation;
-    uint32_t profilingLaunchSlot;
+    uint32_t reservedProfiling;
     uint64_t payloadOffset[kPlaneCount];
     uint64_t signalOffset[kPlaneCount];
     uint64_t signalSourceOffset;
+    uint8_t *profilingGM;
 };
 
 struct Layout {
@@ -161,12 +161,6 @@ TILEXR_GROUPED_HOST_DEVICE_INLINE KernelVariant SelectKernelVariant(uint32_t ran
 TILEXR_GROUPED_HOST_DEVICE_INLINE bool SupportedQpCount(uint32_t qpCount)
 {
     return qpCount == kDirectSharedQpCount;
-}
-
-TILEXR_GROUPED_HOST_DEVICE_INLINE bool ProfilingLaunchSlotValid(
-    uint32_t launchSlot, uint32_t recordsPerCore)
-{
-    return launchSlot < recordsPerCore / kProfilingRecordsPerLaunch;
 }
 
 TILEXR_GROUPED_HOST_DEVICE_INLINE uint32_t DirectQp(

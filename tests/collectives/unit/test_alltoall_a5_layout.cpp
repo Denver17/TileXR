@@ -1,4 +1,5 @@
 #include <cassert>
+#include <cstddef>
 #include <cstdint>
 #include <set>
 
@@ -219,15 +220,15 @@ void TestSupportedQpCount()
     assert(!TileXRGrouped::SupportedQpCount(48U));
 }
 
-void TestProfilingLaunchCapacity()
+void TestProfilingDescriptorABI()
 {
-    static_assert(TileXRGrouped::kProfilingRecordsPerLaunch == 144U,
-        "grouped profiling launch stride changed");
-    assert(TileXRGrouped::ProfilingLaunchSlotValid(0U, 144U));
-    assert(!TileXRGrouped::ProfilingLaunchSlotValid(1U, 144U));
-    assert(TileXRGrouped::ProfilingLaunchSlotValid(55U, 8192U));
-    assert(!TileXRGrouped::ProfilingLaunchSlotValid(56U, 8192U));
-    assert(!TileXRGrouped::ProfilingLaunchSlotValid(0U, 143U));
+    TileXRGrouped::KernelArgs args {};
+    uint8_t descriptor[72] {};
+    args.profilingGM = descriptor;
+    assert(args.profilingGM == descriptor);
+    assert(args.reservedProfiling == 0U);
+    static_assert(sizeof(TileXRGrouped::KernelArgs) == 192U, "Host/Kernel argument ABI");
+    static_assert(offsetof(TileXRGrouped::KernelArgs, profilingGM) == 184U, "descriptor follows signal source");
 }
 
 } // namespace
@@ -244,6 +245,6 @@ int main()
     TestSupportedRanksAndKernelDispatch();
     TestIpcOwnership();
     TestSupportedQpCount();
-    TestProfilingLaunchCapacity();
+    TestProfilingDescriptorABI();
     return 0;
 }

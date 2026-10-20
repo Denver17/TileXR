@@ -1006,6 +1006,12 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "  touch \"${TILEXR_TEST_LATER_CASE:?}\"\n"
                 "  exit 0\n"
                 "fi\n"
+                "if [[ \"${1:-}\" == '-B' && \"${2:-}\" == '-m' && \"${3:-}\" == 'unittest' ]]; then\n"
+                "  exit 0\n"
+                "fi\n"
+                "if [[ \"${1:-}\" == */scripts/ci/check_profiling_python.py ]]; then\n"
+                "  exit 0\n"
+                "fi\n"
                 "exec \"${TILEXR_TEST_REAL_PYTHON:?}\" \"$@\"\n",
                 encoding="utf-8",
             )
@@ -1035,13 +1041,15 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 line for line in result.stdout.splitlines()
                 if line.startswith("[host-check] ")
             ]
-            self.assertEqual(6, len(case_lines))
+            self.assertEqual(8, len(case_lines))
             expected = [
                 "shell-syntax",
                 "ci-ctest",
                 "comm-host",
                 "ep-host",
                 "data-as-flag",
+                "profiling-host",
+                "profiling-python",
                 "collectives-vllm-patch",
             ]
             self.assertEqual(
@@ -1049,7 +1057,7 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
             self.assertIn("[host-check] ep-host: FAIL (exit=23", result.stdout)
-            self.assertIn("Host cases: 6 total, 5 passed, 1 failed", result.stdout)
+            self.assertIn("Host cases: 8 total, 7 passed, 1 failed", result.stdout)
             self.assertIn("Failed cases: ep-host", result.stdout)
 
 

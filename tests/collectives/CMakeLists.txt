@@ -295,7 +295,9 @@ add_test(NAME test_alltoall_a5_candidate COMMAND test_alltoall_a5_candidate)
 if(Python3_Interpreter_FOUND)
     add_test(
         NAME test_alltoall_a5_profiling_mapping
-        COMMAND ${Python3_EXECUTABLE}
+        COMMAND ${CMAKE_COMMAND} -E env
+                "PYTHONPATH=${TILEXR_ROOT}/tools/profiling/python"
+                ${Python3_EXECUTABLE}
                 ${CMAKE_CURRENT_SOURCE_DIR}/unit/test_alltoall_a5_profiling_mapping.py
     )
     add_test(

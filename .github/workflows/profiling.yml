@@ -1,0 +1,60 @@
+name: Profiling SDK and Package
+
+"on":
+  pull_request:
+    paths:
+      - "src/include/tilexr/profiling*"
+      - "src/include/tilexr/profiling/**"
+      - "src/profiling/**"
+      - "src/collectives/host/profiling_capture_queue.h"
+      - "tools/profiling/**"
+      - "tests/profiling/**"
+      - "examples/profiling/**"
+      - "scripts/ci/check_profiling_python.py"
+      - ".github/workflows/profiling.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Offline package / Python ${{ matrix.python }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Provision packaging tools
+        run: python -m pip install build "setuptools>=61" wheel
+      - name: Editable package and behavior tests
+        run: |
+          python -m pip install --no-build-isolation --no-deps -e tools/profiling
+          python -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
+      - name: Offline wheel and sdist consumers
+        run: python scripts/ci/check_profiling_python.py --work-dir "$RUNNER_TEMP/profiling-package"
+
+  host_sdk:
+    name: C++14 Host SDK and installed consumer
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - name: Configure without CANN or communication dependencies
+        run: cmake -S src/profiling -B build/profiling-host -DTILEXR_PROFILING_BUILD_TESTS=ON -DTILEXR_PROFILING_WITH_ACL=OFF
+      - name: Build C++14 contract tests
+        run: cmake --build build/profiling-host --parallel 2
+      - name: Host behavior and external installed consumer
+        run: ctest --test-dir build/profiling-host --output-on-failure -L profiling_host
+      - name: Verify default CTest has no hardware tests
+        run: |
+          ctest --test-dir build/profiling-host --show-only=json-v1 > build/profiling-host/tests.json
+          python -c 'import json; d=json.load(open("build/profiling-host/tests.json")); assert not any("profiling_npu" in p.get("value", []) for t in d["tests"] for p in t.get("properties", []) if p["name"] == "LABELS")'

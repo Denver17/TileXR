@@ -33,6 +33,7 @@ struct AscendCCLKernelArgs {
     const void *scale = nullptr;
     int64_t scaleCount = 0;
     const void *offset = nullptr;
+    const void *profilingGM = nullptr;
 };
 
 struct CollectiveLaunchAttrs {

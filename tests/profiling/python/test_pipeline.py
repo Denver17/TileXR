@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.profiling import generate_reports
+from tilexr_profiling import generate_reports
 
 from _fixtures import mapping_document, record_block, stream_id, write_capture
 
@@ -20,7 +20,7 @@ class ProfilingPipelineTests(unittest.TestCase):
         command = [
             sys.executable,
             "-m",
-            "tools.profiling",
+            "tilexr_profiling",
             "--mapping",
             str(mapping_path),
             "--records",
@@ -93,7 +93,7 @@ class ProfilingPipelineTests(unittest.TestCase):
 
     def test_help_exposes_only_generic_input_pair(self):
         result = subprocess.run(
-            [sys.executable, "-m", "tools.profiling", "--help"],
+            [sys.executable, "-m", "tilexr_profiling", "--help"],
             cwd=REPO_ROOT,
             text=True,
             stdout=subprocess.PIPE,

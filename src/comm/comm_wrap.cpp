@@ -15,6 +15,7 @@
 #include <acl/acl_rt.h>
 
 #include "tilexr_comm.h"
+#include "tilexr_internal_resource_cleanup.h"
 #include "tilexr_log.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
@@ -424,13 +425,12 @@ int TileXRCommDestroy(TileXRCommPtr comm)
         return TILEXR_INVALID_VALUE;
     }
     auto *c = static_cast<TileXRComm *>(comm);
-    const int resourceRet = c->FinalizeInternalResource();
+    // Optional local profiling ownership must not choose which ranks enter
+    // cleanup agreement. Successful local resources have already been detached;
+    // peers retaining failed items can retry destruction without replaying them.
+    const int resourceRet = TileXR::FinalizeInternalResourceTogether(*c);
     if (resourceRet != TILEXR_SUCCESS) {
         return resourceRet;
-    }
-    const int profilingRet = c->AgreeInternalStatus(c->FinalizeProfiling());
-    if (profilingRet != TILEXR_SUCCESS) {
-        return profilingRet;
     }
     const int udmaRet = c->FinalizeUDMA();
     if (udmaRet != TILEXR_SUCCESS) {

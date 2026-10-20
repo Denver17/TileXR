@@ -13,7 +13,7 @@
 #if defined(__DAV_C220_VEC__) || defined(__DAV_C220_CUBE__) || defined(__DAV_C310_VEC__)
 
 #include "op_def.h"
-#include "tilexr_profiling.h"
+#include "tilexr/profiling.h"
 #include "allgather.h"
 #include "91093/allgather_hierarchy_double_ring.h"
 #include "allreduce_quant.h"
@@ -54,8 +54,8 @@
 extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR"))) void TileXRDescriptor() {}
 
 #define TILEXR_COARSE_PERF_BEGIN(tokenName) \
-    TileXR::ProfilingRecorder<2U> tokenName; \
-    const bool tokenName##Enabled = (extraFlag & ExtraFlag::PROFILING) != 0U; \
+    TileXR::Profiling::Recorder<2U> tokenName; \
+    const bool tokenName##Enabled = profilingGM != nullptr; \
     if (tokenName##Enabled) { \
         tokenName.RecordMarker<0U, 1U>(); \
     }
@@ -63,7 +63,7 @@ extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR")))
 #define TILEXR_COARSE_PERF_END(tokenName) \
     if (tokenName##Enabled) { \
         tokenName.RecordMarker<1U, 2U>(); \
-        tokenName.Flush(commArgs); \
+        tokenName.Flush(profilingGM, static_cast<uint32_t>(AscendC::GetBlockIdx())); \
     }
 
 #define CLASS_OP_QUANT_LAUNCH(name, outputType, inputType) \

@@ -25,6 +25,10 @@ struct HostLaunchContext {
     int64_t magic = 0;
 };
 
+// Caller holds the communicator resource lock through kernel enqueue.
+void *AcquireCollectiveProfiling(TileXRCommPtr comm, const HostLaunchContext &context,
+    aclrtStream stream, uint32_t lanes);
+
 int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context);
 
 bool IsA5AllToAllCandidate(const HostLaunchContext &context,

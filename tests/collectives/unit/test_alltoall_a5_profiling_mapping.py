@@ -1,12 +1,9 @@
-import sys
 import unittest
 from pathlib import Path
 
+from tilexr_profiling.mapping import load_mapping
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(REPO_ROOT))
-
-from tools.profiling.mapping import load_mapping
 
 
 MAPPING_PATH = (

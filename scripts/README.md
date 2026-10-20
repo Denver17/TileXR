@@ -80,6 +80,15 @@ bash scripts/download_open_source_deps.sh --check
 The CI operator runbook is [docs/CI.md](../docs/CI.md). Primary entrypoints are:
 
 - `scripts/ci/host_checks.sh`: Ubuntu-compatible fast host validation.
+  Its tracked-shell syntax scan invokes `bash -n` separately for every script;
+  passing several paths to one Bash invocation checks only the first script
+  and treats the rest as positional arguments.
+- `scripts/ci/check_profiling_python.py`: offline profiling wheel/sdist release
+  checks, including isolated installations, CLI 0/1/2 and API report generation.
+  Preinstall `build`, `setuptools`, `wheel`, and `venv/ensurepip`; the runner
+  downloads nothing. Run `python3 scripts/ci/check_profiling_python.py`; optional
+  `--work-dir /external/evidence` retains the distributions and consumer results
+  outside the source repository. This check does not require CANN or an NPU.
 - `scripts/ci/control/gate.py`: sealed `blue` build, queue, hardware, cleanup,
   and result controller; invoke it through the trusted workflow.
 - `scripts/ci/provision/{account,cann,control,runner,verify}.sh`: idempotent

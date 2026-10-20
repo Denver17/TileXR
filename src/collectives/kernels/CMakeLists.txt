@@ -19,6 +19,8 @@ endif()
 
 file(GLOB_RECURSE TILEXR_COLLECTIVES_KERNEL_DEPENDS CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/*.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.cce"
 )
 
@@ -68,9 +70,9 @@ target_compile_options(tilexr_collectives_op_tmp PRIVATE
         ${CCE_COMPILE_OPTION}
         --cce-aicore-arch=${TILEXR_COLLECTIVES_AICORE_ARCH}
 )
-target_compile_definitions(tilexr_collectives_op_tmp PRIVATE
-        TILEXR_ENABLE_PROFILING=1
-)
+if(TILEXR_COLLECTIVES_ENABLE_PROFILING)
+    target_compile_definitions(tilexr_collectives_op_tmp PRIVATE TILEXR_ENABLE_PROFILING=1)
+endif()
 
 set(TILEXR_COLLECTIVES_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_collectives_op.o")
 add_custom_command(

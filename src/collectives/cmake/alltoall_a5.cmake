@@ -41,12 +41,17 @@ set(TILEXR_GROUPED_KERNEL_INCLUDES
     -I${CMAKE_SOURCE_DIR}/src/include
     -I${CMAKE_CURRENT_SOURCE_DIR}/kernels)
 
+# Header SDK edits must rebuild both external kernel variants with their Host.
+file(GLOB_RECURSE TILEXR_GROUPED_PROFILING_HEADERS CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/*.h")
+list(APPEND TILEXR_GROUPED_PROFILING_HEADERS "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling.h")
+
 tilexr_add_moonep_kernel(tilexr_alltoall_a5_kernel
     SOURCE "${TILEXR_GROUPED_KERNEL_SOURCE}"
     BINARY "${TILEXR_GROUPED_KERNEL_BINARY}"
     OPTIONS ${TILEXR_GROUPED_KERNEL_OPTIONS} -DTILEXR_GROUPED_KERNEL_VARIANT_64=1
     INCLUDES ${TILEXR_GROUPED_KERNEL_INCLUDES}
-    DEPENDS
+    DEPENDS ${TILEXR_GROUPED_PROFILING_HEADERS}
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/alltoall_a5_common.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"
@@ -57,7 +62,7 @@ tilexr_add_moonep_kernel(tilexr_alltoall_a5_kernel_128
     BINARY "${TILEXR_GROUPED_KERNEL_128_BINARY}"
     OPTIONS ${TILEXR_GROUPED_KERNEL_OPTIONS} -DTILEXR_GROUPED_KERNEL_VARIANT_128=1
     INCLUDES ${TILEXR_GROUPED_KERNEL_INCLUDES}
-    DEPENDS
+    DEPENDS ${TILEXR_GROUPED_PROFILING_HEADERS}
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/alltoall_a5_common.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"

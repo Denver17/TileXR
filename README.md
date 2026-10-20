@@ -339,29 +339,30 @@ LD_LIBRARY_PATH="$TILEXR_LIBDIR:${LD_LIBRARY_PATH:-}" \
 
 The perf tool prints latency, algorithm bandwidth, bus bandwidth, and error counts, with optional CSV output.
 
-Collectives can emit the common PR #143 records without a Collectives-specific
-session or report path. Set the capture environment before communicator
-initialization, run a normal operation, and parse the records after communicator
-destruction:
+Profiling uses the independent header SDK and the installable
+`tilexr_profiling` analyzer. Build collectives with
+`TILEXR_COLLECTIVES_ENABLE_PROFILING=ON`, set `TILEXR_PROFILING_OUTPUT_DIR`,
+and distribute a fresh `TILEXR_PROFILING_CAPTURE_ID` UUID to the participating
+ranks. The resource owner prepares a bounded pool, samples one kernel per
+capture, and exports each capture to `<output>/<capture_uuid>/rank-<rank>.records.bin`
+at communicator cleanup. Exhausted sampling budgets do not stop business work.
+Warmup must run without capture (the perf driver handles this).
+
+Install the analyzer with `python3 -m pip install --no-build-isolation --no-deps tools/profiling`.
+For each capture directory:
 
 ```bash
-mkdir -p run
-capture_id="$(python3 -c 'import uuid; print(uuid.uuid4())')"
-export TILEXR_PROFILING_CAPTURE_ID="$capture_id"
-export TILEXR_PROFILING_RECORDS_PATH="$PWD/run/collective-${capture_id}-rank-{rank}.records.bin"
-tools/collectives/run_collective_perf.sh 2 0 build/tests/collectives \
-  --op allgather --min-bytes 67108864 --max-bytes 67108864 \
-  --iters 1 --warmup-iters 0 --datatype int32 --check 1
-python3 -m tools.profiling \
+python3 -m tilexr_profiling \
   --mapping tools/collectives/tilexr_collectives.mapping.json \
-  --records "run/collective-${capture_id}-rank-0.records.bin" \
-  --records "run/collective-${capture_id}-rank-1.records.bin" \
-  --output-dir "run/collective-${capture_id}-profile"
+  --records run/profiles/CAPTURE_UUID/rank-0.records.bin \
+  --records run/profiles/CAPTURE_UUID/rank-1.records.bin \
+  --output-dir run/profile-report
 ```
 
-The output directory contains `perfetto_trace.json`, `analysis.md`, and
-`report.html`. See [tests/collectives/README.md](tests/collectives/README.md) for
-script arguments, skip behavior, timeout handling, and topology limitations.
+The output contains `perfetto_trace.json`, `analysis.md`, and `report.html`.
+See the [profiling guide](tools/profiling/README.md) for the standalone SDK,
+[Add4 example](examples/profiling/README.md), format, statistics, and validation
+boundaries. The old communicator-owned multi-launch capture is retired.
 
 ## EP Dispatch Validation
 

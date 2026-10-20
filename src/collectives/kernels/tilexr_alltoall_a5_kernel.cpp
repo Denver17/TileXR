@@ -7,7 +7,7 @@
 
 #include "alltoall_a5_common.h"
 #include "kernel_operator.h"
-#include "tilexr_profiling.h"
+#include "tilexr/profiling.h"
 #include "tilexr_sdma.h"
 #include "tilexr_udma.h"
 
@@ -49,17 +49,17 @@ constexpr uint32_t kEventSdmaWaitBase = 11000U;
 
 __aicore__ inline uint64_t ProfilingCycle()
 {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     return static_cast<uint64_t>(AscendC::GetSystemCycle());
 #else
     return 0U;
 #endif
 }
 
-__aicore__ inline void RecordInterval(TileXR::DirectProfilingWriter *writer,
+__aicore__ inline void RecordInterval(TileXR::Profiling::DirectWriter *writer,
     uint32_t beginEvent, uint32_t endEvent, uint64_t begin, uint64_t end)
 {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     if (writer != nullptr) {
         writer->RecordAt(beginEvent, begin);
         writer->RecordAt(endEvent, end);
@@ -73,10 +73,10 @@ __aicore__ inline void RecordInterval(TileXR::DirectProfilingWriter *writer,
 #endif
 }
 
-__aicore__ inline void RecordPeerInterval(TileXR::DirectProfilingWriter *writer,
+__aicore__ inline void RecordPeerInterval(TileXR::Profiling::DirectWriter *writer,
     uint32_t eventBase, uint32_t peer, uint64_t begin, uint64_t end)
 {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     RecordInterval(writer,
         eventBase + peer * kEventPeerStride,
         eventBase + peer * kEventPeerStride + 1U,
@@ -90,10 +90,10 @@ __aicore__ inline void RecordPeerInterval(TileXR::DirectProfilingWriter *writer,
 #endif
 }
 
-__aicore__ inline void FinishSendProfiling(TileXR::DirectProfilingWriter *writer,
+__aicore__ inline void FinishSendProfiling(TileXR::Profiling::DirectWriter *writer,
     uint64_t kernelBegin, uint64_t sendBegin)
 {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     const uint64_t end = ProfilingCycle();
     RecordInterval(writer, kEventSendBegin, kEventSendEnd, sendBegin, end);
     RecordInterval(writer, kEventKernelBegin, kEventKernelEnd, kernelBegin, end);
@@ -106,10 +106,10 @@ __aicore__ inline void FinishSendProfiling(TileXR::DirectProfilingWriter *writer
 }
 
 __aicore__ inline void FinishReceiveProfiling(
-    TileXR::DirectProfilingWriter *writers, uint64_t kernelBegin,
+    TileXR::Profiling::DirectWriter *writers, uint64_t kernelBegin,
     uint64_t receiveBegin)
 {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     const uint64_t end = ProfilingCycle();
     for (uint32_t lane = 0U; lane < TileXRGrouped::kGroupWidth; ++lane) {
         RecordInterval(&writers[lane], kEventReceiveBegin, kEventReceiveEnd,
@@ -265,7 +265,7 @@ __aicore__ inline bool SendRoute(const KernelContext &ctx, uint32_t core,
     uint32_t lane, uint32_t route, uint32_t group, uint32_t peer,
     AscendC::LocalTensor<uint8_t> wqeLocal,
     AscendC::LocalTensor<uint8_t> ipcLocal,
-    TileXR::DirectProfilingWriter *profiler)
+    TileXR::Profiling::DirectWriter *profiler)
 {
     const uint64_t creditBegin = ProfilingCycle();
     uint64_t observed = 0U;
@@ -384,7 +384,7 @@ __aicore__ inline bool Ready(const KernelContext &ctx, uint32_t group,
 }
 
 __aicore__ inline bool CopyPeer(const KernelContext &ctx, uint32_t peer,
-    TileXR::DirectProfilingWriter *profiler)
+    TileXR::Profiling::DirectWriter *profiler)
 {
     __gm__ uint8_t *src = ctx.workspace + ctx.payloadOffset[ActivePlane(ctx)] +
         static_cast<uint64_t>(peer) * ctx.bytesPerPeer;
@@ -392,7 +392,7 @@ __aicore__ inline bool CopyPeer(const KernelContext &ctx, uint32_t peer,
     const uint32_t channel = peer % 16U;
     const uint64_t copyBegin = ProfilingCycle();
     const uint64_t submitBegin = ProfilingCycle();
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     TileXR::SDMASubmitTrace submitTrace {};
     const uint64_t event = TileXR::SDMACopyNbi(ctx.comm, dst, src,
         ctx.bytesPerPeer, channel, &submitTrace);
@@ -407,7 +407,7 @@ __aicore__ inline bool CopyPeer(const KernelContext &ctx, uint32_t peer,
     const uint64_t copyEnd = ProfilingCycle();
     RecordPeerInterval(profiler, kEventReceiveCopyBase, peer, copyBegin, copyEnd);
     RecordPeerInterval(profiler, kEventSdmaSubmitBase, peer, submitBegin, submitEnd);
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     RecordPeerInterval(profiler, kEventSdmaPrepareBase, peer,
         submitTrace.prepareBegin, submitTrace.prepareEnd);
     RecordPeerInterval(profiler, kEventSdmaCacheCleanBase, peer,
@@ -437,10 +437,10 @@ __aicore__ inline bool CopySelf(const KernelContext &ctx)
 
 __aicore__ inline void RunReceive(const KernelContext &ctx,
     AscendC::LocalTensor<uint8_t> ipcLocal,
-    TileXR::DirectProfilingWriter *profilers)
+    TileXR::Profiling::DirectWriter *profilers)
 {
     bool completed[TileXRGrouped::kMaxRankSize] = {};
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     uint64_t waitBegins[TileXRGrouped::kMaxRankSize] = {};
 #endif
     uint32_t remaining = ctx.rankSize - 1U;
@@ -458,7 +458,7 @@ __aicore__ inline void RunReceive(const KernelContext &ctx,
                 if (completed[peer]) {
                     continue;
                 }
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
                 if (waitBegins[peer] == 0U) {
                     waitBegins[peer] = ProfilingCycle();
                 }
@@ -466,9 +466,9 @@ __aicore__ inline void RunReceive(const KernelContext &ctx,
                 if (!Ready(ctx, group, peer, ipcLocal)) {
                     continue;
                 }
-                TileXR::DirectProfilingWriter *profiler =
+                TileXR::Profiling::DirectWriter *profiler =
                     profilers == nullptr ? nullptr : &profilers[peer % 16U];
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
                 RecordPeerInterval(profiler, kEventReceiveWaitBase, peer,
                     waitBegins[peer], ProfilingCycle());
 #endif
@@ -515,10 +515,10 @@ extern "C" __global__ __aicore__ void TILEXR_GROUPED_KERNEL_ENTRY(
     uint32_t rank, uint32_t rankSize, uint32_t groupCount,
     uint32_t primaryQp, uint32_t secondaryQp,
     uint32_t primaryWeight, uint32_t secondaryWeight,
-    uint32_t firstInvocation, uint32_t profilingLaunchSlot,
+    uint32_t firstInvocation, uint32_t reservedProfiling,
     uint64_t payloadOffset0, uint64_t payloadOffset1,
     uint64_t signalOffset0, uint64_t signalOffset1,
-    uint64_t signalSourceOffset)
+    uint64_t signalSourceOffset, GM_ADDR profilingGM)
 {
     const uint32_t core = static_cast<uint32_t>(AscendC::GetBlockIdx());
     AscendC::TPipe pipe;
@@ -546,7 +546,8 @@ extern "C" __global__ __aicore__ void TILEXR_GROUPED_KERNEL_ENTRY(
     };
     (void)elementsPerPeer;
     (void)bytesPerRank;
-    (void)profilingLaunchSlot;
+    (void)reservedProfiling;
+    (void)profilingGM;
     if (ctx.comm == nullptr || ctx.profileInfo == nullptr || ctx.registry == nullptr ||
         ctx.input == nullptr || ctx.output == nullptr || ctx.workspace == nullptr ||
         ctx.status == nullptr || !TileXRGrouped::ValidRankSize(ctx.rankSize) ||
@@ -560,10 +561,9 @@ extern "C" __global__ __aicore__ void TILEXR_GROUPED_KERNEL_ENTRY(
         return;
     }
     if (core < TileXRGrouped::kSendCoreCount) {
-#if defined(TILEXR_ENABLE_PROFILING)
-        TileXR::DirectProfilingWriter profiler;
-        profiler.Initialize(commArgsGM, core, profilingLaunchSlot,
-            TileXRGrouped::kProfilingRecordsPerLaunch);
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
+        TileXR::Profiling::DirectWriter profiler;
+        profiler.Initialize(profilingGM, core);
         const uint64_t kernelBegin = ProfilingCycle();
         const uint64_t sendBegin = kernelBegin;
 #endif
@@ -574,73 +574,71 @@ extern "C" __global__ __aicore__ void TILEXR_GROUPED_KERNEL_ENTRY(
                 ctx.rank, ctx.rankSize, group, lane);
             if (peer >= 0 && !SendRoute(ctx, core, lane, route, group,
                     static_cast<uint32_t>(peer), wqeLocal, ipcLocal,
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
                     &profiler
 #else
                     nullptr
 #endif
                     )) {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
                 FinishSendProfiling(&profiler, kernelBegin, sendBegin);
 #endif
                 return;
             }
         }
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
         FinishSendProfiling(&profiler, kernelBegin, sendBegin);
 #endif
         return;
     }
     if (core == TileXRGrouped::kSendCoreCount) {
-#if defined(TILEXR_ENABLE_PROFILING)
-        TileXR::DirectProfilingWriter profilers[TileXRGrouped::kGroupWidth];
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
+        TileXR::Profiling::DirectWriter profilers[TileXRGrouped::kGroupWidth];
         for (uint32_t lane = 0U; lane < TileXRGrouped::kGroupWidth; ++lane) {
             profilers[lane].Initialize(
-                commArgsGM, TileXRGrouped::kSendCoreCount + lane,
-                profilingLaunchSlot,
-                TileXRGrouped::kProfilingRecordsPerLaunch);
+                profilingGM, TileXRGrouped::kSendCoreCount + lane);
         }
         const uint64_t kernelBegin = ProfilingCycle();
         const uint64_t prewarmBegin = kernelBegin;
 #endif
         const bool prewarmOk = !ctx.firstInvocation || TileXR::SDMAPrewarmSqPages(
             ctx.comm, 16U, ipcLocal);
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
         RecordInterval(&profilers[0], kEventSdmaPrewarmBegin,
             kEventSdmaPrewarmEnd, prewarmBegin, ProfilingCycle());
 #endif
         if (!prewarmOk) {
             RecordStatus(ctx.status, core, kStatusSdmaPrewarmFailed,
                 0U, static_cast<int32_t>(ctx.rank), 0U);
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
             FinishReceiveProfiling(profilers, kernelBegin, ProfilingCycle());
 #endif
             return;
         }
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
         const uint64_t selfCopyBegin = ProfilingCycle();
 #endif
         if (!CopySelf(ctx)) {
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
             RecordInterval(&profilers[0], kEventSelfCopyBegin,
                 kEventSelfCopyEnd, selfCopyBegin, ProfilingCycle());
             FinishReceiveProfiling(profilers, kernelBegin, ProfilingCycle());
 #endif
             return;
         }
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
         RecordInterval(&profilers[0], kEventSelfCopyBegin,
             kEventSelfCopyEnd, selfCopyBegin, ProfilingCycle());
         const uint64_t receiveBegin = ProfilingCycle();
 #endif
         RunReceive(ctx, ipcLocal,
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
             profilers
 #else
             nullptr
 #endif
             );
-#if defined(TILEXR_ENABLE_PROFILING)
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
         FinishReceiveProfiling(profilers, kernelBegin, receiveBegin);
 #endif
     }

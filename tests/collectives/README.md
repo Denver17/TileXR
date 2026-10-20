@@ -77,7 +77,7 @@ uniform eight-rank nodes and global rank sizes divisible by eight from 8 through
 Use `--batch-timing 1` to enqueue all measured iterations after warmup and
 synchronize the stream once at the end. The reported average is the batch Host
 wall time divided by the iteration count. Batch timing is rejected when
-`TILEXR_PROFILING_RECORDS_PATH` enables profiling; because it has no
+`TILEXR_PROFILING_OUTPUT_DIR` enables profiling; because it has no
 per-iteration samples, text and CSV output show `N/A` for `min(us)` and
 `max(us)`.
 
@@ -101,12 +101,16 @@ allreduce/reducescatter runs require `--datatype int32`; `--check=0` measures an
 
 ### Operator-Internal Profiling
 
-Collectives uses the common profiling runtime and report tool. Set
-`TILEXR_PROFILING_RECORDS_PATH` and `TILEXR_PROFILING_CAPTURE_ID` before the
-communicator is initialized, run the normal perf command, and invoke
-`python3 -m tools.profiling` after communicator destruction with
-`tools/collectives/tilexr_collectives.mapping.json`. No Collectives-specific
-session, probe operation, trace schema, or report script is required.
+Collectives uses the [independent profiling SDK](../../tools/profiling/README.md).
+Enable the build flag, set `TILEXR_PROFILING_OUTPUT_DIR` and distribute a fresh
+`TILEXR_PROFILING_CAPTURE_ID` seed across ranks. The perf driver suppresses
+profiling during warmup; the first prepared pool supports up to four sampled
+kernel invocations, each with a separate UUID. Capture exhaustion is logged and
+business execution continues. After communicator cleanup, analyze rank files
+from one UUID directory with `python3 -m tilexr_profiling` and
+`tools/collectives/tilexr_collectives.mapping.json` (or the A5 mapping for A5).
+Never combine different capture directories into one report. Reported timer
+conversion comes from the mapping; verify its frequency for the actual target.
 
 ## Skip Behavior
 

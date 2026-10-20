@@ -69,6 +69,7 @@ include_directories(
 if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
     add_subdirectory(tests/profiling)
 endif()
+add_subdirectory(src/profiling)
 add_subdirectory(src/comm)
 if(TILEXR_BUILD_EP)
     add_subdirectory(src/ep)

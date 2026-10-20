@@ -19,6 +19,7 @@
 #include "collective_utils.h"
 #include "runtime/kernel.h"
 #include "tilexr_kernel_binary_loader.h"
+#include "tilexr_internal.h"
 
 namespace TileXRCollectives {
 namespace Host {
@@ -242,6 +243,16 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
     args.magic = magic;
     args.op = attrs.op;
     args.root = attrs.root;
+
+    // Serialize resource acquisition and enqueue with communicator cleanup.
+    struct ResourceLock {
+        TileXRCommPtr comm;
+        bool locked;
+        explicit ResourceLock(TileXRCommPtr c) : comm(c), locked(TileXRCommLockInternalResource(c) == TileXR::TILEXR_SUCCESS) {}
+        ~ResourceLock() { if (locked) (void)TileXRCommUnlockInternalResource(comm); }
+    } resourceLock(comm);
+    if (!resourceLock.locked) return TileXR::TILEXR_ERROR_INTERNAL;
+    args.profilingGM = AcquireCollectiveProfiling(comm, context, stream, blockDim);
 
     rtTaskCfgInfo_t cfgInfo {};
     cfgInfo.schemMode = 1;

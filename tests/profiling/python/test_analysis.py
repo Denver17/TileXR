@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.profiling.analysis import analyze_run
-from tools.profiling.pairing import load_profile_run
+from tilexr_profiling.analysis import analyze_run
+from tilexr_profiling.pairing import load_profile_run
 
 from _fixtures import (
     overlapping_child_capture,

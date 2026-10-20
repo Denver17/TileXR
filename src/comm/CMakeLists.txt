@@ -102,8 +102,6 @@ configure_file(
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         comm_wrap.cpp
-        tilexr_profiling_runtime.cpp
-        tilexr_profiling_runtime.h
         tilexr_internal.cpp
         tilexr_internal.h
         tilexr_log.h

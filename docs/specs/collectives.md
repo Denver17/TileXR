@@ -59,20 +59,26 @@ tearing down the communicator so the caller can retry destruction.
 
 ## Profiling
 
-Collectives uses the common recorder from `src/include/tilexr_profiling.h` at
-the original coarse kernel begin/end locations. It adds no Host launch argument,
-session API, records schema, or report implementation. The existing `commArgs`
-kernel argument supplies the common profiling GM state, and runtime enablement
-is controlled by `TILEXR_PROFILING_RECORDS_PATH` and the other common profiling
-environment variables.
+Collectives uses `<tilexr/profiling.h>` with the same Recorder/DirectWriter and
+AclCapture API available to external operators. Its internal Host/Kernel
+arguments pass an independent DeviceView. CommArgs profiling fields remain
+reserved ABI slots only; no SDK code interprets them.
 
-`tools/collectives/tilexr_collectives.mapping.json` gives the two events their
-operator-owned meaning. After communicator destruction exports records, the
-unchanged `tools/profiling` command validates and renders them.
+The common resource owner keeps asynchronous captures alive, with at most four
+prepared captures and a 64 MiB budget. `TILEXR_PROFILING_OUTPUT_DIR` enables
+sampling; multi-rank callers distribute a fresh `TILEXR_PROFILING_CAPTURE_ID`
+seed and match launch order. Each capture writes a separate UUID directory.
+First preparation costs allocation/upload; subsequent acquisition performs no
+collection, I/O, free, or stream wait. Budget exhaustion skips profiling.
+Existing resource cleanup drains locally before its fixed rank status phases.
+A5 retains every owner until its common drain phase succeeds, so retries do not
+change the rank collective sequence. Generic optional owners can be absent;
+communicator destruction always performs the outer status phase on every rank.
 
-Do not remove `ExtraFlag::PROFILING` or `CommArgs::tilexrProfiling*` while
-cleaning legacy Collectives profiling. Those fields belong to the common
-runtime and are required by every PR #143 producer.
+Use `python3 -m tilexr_profiling` and the operator-owned mapping after cleanup.
+See [the API reference](../../tools/profiling/API_REFERENCE.md). Warmup does not
+record, and one stream in each capture has one critical interval; repeated
+kernels are never accumulated into one stream.
 
 The installed `tilexr_collectives_perf.h` and `tilexr_perf_trace.h` files are
 declaration-free compatibility headers. Keep the filenames in the install

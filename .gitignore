@@ -104,3 +104,6 @@ install_manifest.txt
 patches/
 temp/
 Testing/
+
+# Local Python distribution metadata
+*.egg-info/

@@ -597,7 +597,7 @@ bool ParseOptions(int argc, char **argv, Options &options)
         std::cerr << "ERROR: invalid option value" << std::endl;
         return false;
     }
-    const char *profilingRecordsPath = std::getenv("TILEXR_PROFILING_RECORDS_PATH");
+    const char *profilingRecordsPath = std::getenv("TILEXR_PROFILING_OUTPUT_DIR");
     if (options.batchTiming && profilingRecordsPath != nullptr && profilingRecordsPath[0] != '\0') {
         std::cerr << "ERROR: --batch-timing does not support profiling" << std::endl;
         return false;
@@ -962,6 +962,16 @@ bool MeasureBatch(const Options &options, void *devSend, void *devRecv, int64_t 
 bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count, TileXRCommPtr comm,
              aclrtStream stream, Measurement &measurement)
 {
+    struct WarmupProfilingPause {
+        bool enabled;
+        std::string directory;
+        WarmupProfilingPause() : enabled(std::getenv("TILEXR_PROFILING_OUTPUT_DIR") != nullptr),
+            directory(enabled ? std::getenv("TILEXR_PROFILING_OUTPUT_DIR") : "")
+        { if (enabled) unsetenv("TILEXR_PROFILING_OUTPUT_DIR"); }
+        ~WarmupProfilingPause() { if (enabled) setenv("TILEXR_PROFILING_OUTPUT_DIR", directory.c_str(), 1); }
+    };
+    {
+    WarmupProfilingPause pause;
     for (int i = 0; i < options.warmupIters; ++i) {
         if (!CallCollective(options, devSend, devRecv, count, comm, stream)) {
             return false;
@@ -969,6 +979,7 @@ bool Measure(const Options &options, void *devSend, void *devRecv, int64_t count
     }
     if (!CheckAcl(options.rank, "aclrtSynchronizeStream warmup", aclrtSynchronizeStream(stream))) {
         return false;
+    }
     }
 
     if (options.batchTiming) {

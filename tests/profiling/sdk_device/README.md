@@ -1,0 +1,35 @@
+# Device protocol CPU tests
+
+These tests compile the actual SDK device headers with a small Ascend C surface
+substitute. They exercise sparse/empty slots, slot replacement, compact counts,
+overflow, zero and maximum timestamps, initialization reuse, invalid IDs,
+single-lane ownership, repeated publication, saturated arithmetic, ABI validation,
+address alignment and overflow, and the 65535/65536 lane boundary.
+
+From the repository root, using a C++14 compiler:
+
+```sh
+c++ -std=c++14 -Wall -Wextra -pedantic -D__CCE__ -D__CCE_IS_AICORE__ \
+  -DTILEXR_ENABLE_PROFILING=1 -Isrc/include \
+  -Itests/profiling/sdk_device/stubs tests/profiling/sdk_device/test_device.cpp \
+  -o /tmp/tilexr-device-protocol
+/tmp/tilexr-device-protocol
+```
+
+`test_switch.cpp` also compiles with the same substitute for undefined, `0`, and
+`1` switch values, and as a normal Host translation unit. Values outside `0/1`
+must fail compilation. The independent SDK CMake registers these Host tests.
+
+The substitute provides CPU pointers and a controllable cycle intrinsic only.
+It proves no device instruction ordering, scalar store visibility, physical
+timer semantics, CANN compatibility, register placement, spill behavior, or
+overhead. Those require target CANN compilation and explicit NPU execution.
+In particular, a final scalar state store is not a release primitive: consumers
+must wait for the bound ACL stream before reading payload or state. Never use
+these tests to justify live Host polling or shared-lane writers.
+
+The reusable lesson from the old sparse writer is to initialize validity IDs,
+read timestamps only after checking validity, and distinguish compact record
+counts from physical alignment. A count rounded to eight hides missing events
+and cannot distinguish an empty committed lane from an unexecuted lane; the
+new completion state carries that distinction.

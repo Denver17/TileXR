@@ -144,6 +144,7 @@ struct CommArgs {
     uint64_t peerMemBytes = 0U;
     int32_t commDomain = 0;
     uint32_t reserved0 = 0U;
+    // Reserved ABI slots; profiling uses an independent DeviceView.
     GM_ADDR tilexrProfilingTimestampsGM = nullptr;
     GM_ADDR tilexrProfilingEventIdsGM = nullptr;
     GM_ADDR tilexrProfilingRecordCountsGM = nullptr;

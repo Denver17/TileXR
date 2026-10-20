@@ -2,9 +2,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.profiling.mapping import load_mapping, parse_mapping_document
-from tools.profiling.model import ProfilingInputError
-from tools.profiling.pairing import load_profile_run
+from tilexr_profiling.mapping import load_mapping, parse_mapping_document
+from tilexr_profiling.model import ProfilingInputError
+from tilexr_profiling.pairing import load_profile_run
 
 from _fixtures import (
     CAPTURE_ID,
