@@ -33,6 +33,50 @@
 
 仍需单独取证：Linux hard-link/O_EXCL 并发/故障分支、Python 3.9、真实 CANN/设备编译开关、NPU GM 可见性、Add4 数值及搬迁、生产多 rank/48 lane/异步保持、marker/flush 开销与 spill。GitHub workflow 已配置，不表示已执行通过。
 
+### 2.1 2026-10-21 WSL / CANN 9.1 无 NPU 验证
+
+本次来源为 `54d8757ba3a3f6efa65273908c66aa3d8a5d191d` 加
+`examples/profiling/CMakeLists.txt` 的头文件搜索路径修复。开始时 Windows Git
+工作区干净；WSL Git 未启用对应 CRLF 转换，会把同一工作区误报为大量修改，
+使用 Windows Git 或单次 `git -c core.autocrlf=true status --short` 核对，未改全局配置。
+
+环境：WSL2 Ubuntu 22.04.5 / x86_64，GCC 11.4.0、CMake 3.22.1、Python 3.10.12；
+source `/usr/local/Ascend/cann-9.1.0/set_env.sh`，compiler/runtime/OPP 元数据为
+9.1.0，bisheng 基于 clang 15.0.5。无 `/dev/davinci*`、无 npu-smi；asys
+报告缺少 `libdrvdsmi.so`，driver/firmware/真实 SoC 未知。Ascend950 是编译目标，
+不是探测到的设备。环境检查使用 `ascendc-env-check` 的只读脚本。
+
+| 检查 | 本次结果与边界 |
+|---|---|
+| 全部已注册 CTest | **14/14 通过**；Host 标签 12 项、Python 标签 2 项、CANN 标签 1 项，round-trip 标签重叠，不能相加 |
+| Python / A5 mapping | Python 3.10.12 的 81 项通过；A5 mapping 另 3 项通过；未验证 Python 3.9/3.12 |
+| Linux 文件行为 | `profiling_sdk_host` 通过，执行 hard-link 发布、O_EXCL 冲突、write/fsync/close/link/unlink 故障及 6 进程单赢家断言；文件位于 WSL 挂载的 Windows 工作区，不外推其他文件系统 |
+| SDK 生命周期及消费 | ACL/queue mock、CPU writer、六种开关、真实 writer→mock ACL→v1→Python 三报告往返、安装后 executable/shared library/多 TU consumer 均通过 |
+| 真实 ACL | C++14 真实 CANN 头/ascendcl 编译、链接及 `profiling_acl_compile` 通过；该测试只关闭未初始化 capture，不执行设备分配或 kernel |
+| 独立 CANN 消费 | 将中英文主指南中的 CMake 原样复制到仓外，仅提供已安装 SDK prefix 与 CANN，构建并运行关闭未初始化 capture 的 smoke 成功；ELF NEEDED 为 ascendcl 和标准库，无 TileXR 动态库；未初始化设备，不是采集运行证据。日志：`independent-cann-consumer.log` |
+| Add4 | 源树构建及从安装 SDK 复制到仓外后的独立构建/安装通过；Host C++14，设备 `dav-c310-vec` / `gnu++17`；外置 AICore ELF 单独安装，Host 无 TileXR 动态库依赖，安装 ELF 无 devlib RPATH |
+| 真实设备编译宏 | 使用同一 Add4 kernel 和实际 bisheng 参数，宏未定义/0/1 各自编译成功；2 因 `TILEXR_ENABLE_PROFILING must be 0 or 1` 拒绝。CPU Host/device 的 2 也按该断言拒绝 |
+| Python 发行 | 独立 venv 补齐 build/setuptools/wheel；wheel 及 sdist 重建 wheel 各在仓外独立安装，通过 `-I` CLI 0/1/2、导入来源和 API 三报告检查 |
+| shell | 当前工作区 `host_checks.sh` 含 CRLF，直接 `bash -n` 失败；两个入口分别经 `tr -d '\r' < SCRIPT \| bash -n` 通过，仅检查归一化输入，未改脚本或运行整套 CI |
+
+构建、CTest、安装命令使用第 5 节开关，构建根为
+`build/profiling-wsl-20261021/cann`。证据目录为 `build/profiling-wsl-20261021/`：
+`environment.log`、`cann-env.log`、`cann-state.json`、`npu-info.log`、
+`configure.log`、`build.log`、`ctest.log`、`cann/Testing/Temporary/LastTest.log`、
+`a5-mapping.log`、`package.log`、`external-configure.log`、`external-build.log`、
+`external-install.log`、`switch-matrix.log`（完整编译命令）、`artifacts.log`（ELF/ldd/hash）、
+`final-checks.log`。仓外消费根路径记录在对应日志中；这些生成物均不提交。
+
+尚未覆盖：真实 ACL 初始化/错误恢复、NPU GM 可见性、Add4 数值/记录/搬迁运行、
+生产 collectives 配套全构建及多 rank/48 lane/异步、timer 校准、开销/spill、设备 C++14。
+本机 `ldd` 中 HAL 解析到 toolkit devlib stub（由环境提供），不是生产 driver。
+不能从这次通过推断 N/I 层验收或任何 UDMA 数据面结果；未运行 HCCL Test。
+
+复用教训：CANN 9.1 的 `runtime/kernel.h` 可能位于
+`<arch>-linux/pkg_inc/runtime/runtime/`，其依赖的 `profiling/prof_api.h` 又要求
+`<arch>-linux/pkg_inc`。Add4 必须同时搜索 runtime 头目录并提供 pkg_inc，
+通过真实 Host 编译和仓外已安装 SDK 构建验证，不能以设备 kernel 单独编译成功替代。
+
 ## 3. P：离线 Python 与独立发行
 
 已有构建依赖时，从源码安装并运行行为测试：
@@ -63,7 +107,7 @@ try {
 发行验证前准备 `build`、`setuptools>=61`、`wheel`。runner 使用本地构建产物，不从公网安装待测包；传一个可写 evidence 根目录，每次运行在其下创建独立工作目录：
 
 ```bash
-python3 scripts/ci/check_profiling_python.py --work-dir build/profiling-package-evidence
+python3 scripts/ci/check_profiling_python.py --work-dir /path/outside-repository/profiling-package-evidence
 ```
 
 通过标准是结尾 `PASS: wheel and sdist install independently; isolated CLI 0/1/2 and API reports verified.`，并保存完整日志。runner 实际生成完整、不完整、损坏 fixture，检查安装来源与三报告；只检查 wheel 存在或 CLI help 不足。最低 Python 3.9 与 Python 3.12 要分别跑，参见 [workflow](../../.github/workflows/profiling.yml)。

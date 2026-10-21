@@ -372,6 +372,13 @@ ctest --test-dir build-profiling-cann --output-on-failure -L profiling_cann
 
 ## 9. 2026-10-20 实现接续与本地验收
 
+后续验证：2026-10-21 在 WSL2 / CANN 9.1 完成无 NPU 的 P/H/C 层验证，
+14/14 CTest、真实 Add4 设备编译及仓外安装消费、wheel/sdist 隔离消费、真实设备宏
+未定义/0/1 和非法 2 合同均通过；修复 Add4 对 CANN 9.1 runtime/pkg_inc
+头文件布局的搜索。环境、日志、失败边界和未覆盖项见
+[TESTING 第 2.1 节](../../tools/profiling/TESTING.md)。该证据不关闭设备数值、GM 可见性、
+生产集成或性能验收，也不代替下述历史结果。
+
 本轮在 `C:\Git_data\tileXR` 接续已有未提交改造，保留并复核 SDK、Python 包、collectives 和 Add4 的同一套实现。开始时 HEAD/main 为 `efa5d80d87aea2eb60e4df770625a31236ee9a93`；认证 `git ls-remote --heads origin refs/heads/main refs/heads/codex/TileXR_Profiling_Upgrade` 再次返回两条相同 SHA，本地 origin 引用也一致，无需 fetch、checkout 或合并。用户明确选择本次只做本地验证与提交，未启动远端硬件工作。
 
 ### 9.1 代码交付状态

@@ -360,8 +360,8 @@ python3 -m tilexr_profiling \
 ```
 
 The output contains `perfetto_trace.json`, `analysis.md`, and `report.html`.
-See the [profiling guide](tools/profiling/README.md) for the standalone SDK,
-[Add4 example](examples/profiling/README.md), format, statistics, and validation
+See the profiling guide ([English](tools/profiling/README.md) / [简体中文](tools/profiling/README.zh-CN.md)) for the standalone SDK,
+Add4 example ([English](examples/profiling/README.md) / [简体中文](examples/profiling/README.zh-CN.md)), format, statistics, and validation
 boundaries. The old communicator-owned multi-launch capture is retired.
 The [current design](docs/specs/profiling.md) and
 [testing guide](tools/profiling/TESTING.md) map the implementation to test commands,

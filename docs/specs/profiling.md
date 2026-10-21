@@ -15,6 +15,12 @@
 
 当前交付包含：header-only C++ SDK、可独立安装的 Python 包、collectives 调用方迁移、独立 Add4 示例。SDK 不管理 communicator、业务 kernel 启动、rank 协调或测量轮次；离线分析器不依赖 CANN、设备或 TileXR 动态库。
 
+工具定位为 CANN 应用的独立 profiling SDK，不要求安装 TileXR 通信运行时、collectives
+或 EP。公共命名空间/头文件中的 TileXR 名称不是运行时依赖。SDK 没有 Ascend950
+专用门禁；当前该限制仅在 Add4 示例构建中，不能传播为整个工具的支持条件，也不能
+反向推断所有 SoC 已验证。对外说明必须区分“依赖合同”“示例目标”“实际验证范围”，
+其他目标仍需对应 Ascend C 编译、timer 换算与硬件记录证据。
+
 版本独立演进：SDK `1.0.0`、DeviceView ABI `1`、磁盘协议 `mapping.v1/records.v1`、Python 包 `0.1.0`。权威版本分别在 [SDK VERSION](../../src/profiling/VERSION)、[types.h](../../src/include/tilexr/profiling/types.h)、[pyproject.toml](../../tools/profiling/pyproject.toml)。内存 ABI 变化不自动改变历史文件格式。
 
 ## 2. 组件与数据流

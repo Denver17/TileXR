@@ -1,6 +1,10 @@
 # Operator profiling
 
-The maintained entry point is [README.md](README.md), with the same public
+使用入口：[简体中文](README.zh-CN.md) / [English](README.md)。两版覆盖安装、
+算子接入、离线分析、无 NPU 验证、成功标准和交接要求。
+
+The maintained entry points are [English](README.md) and
+[简体中文](README.zh-CN.md), with the same public
 SDK and offline package for TileXR and external operators.
 
 The former communicator-owned multi-launch capture and `tools.profiling`
