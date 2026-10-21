@@ -14,6 +14,7 @@ for UDMA data-plane claims. Sources under `reference/` are comparison-only.
 | Feature | Specification |
 | --- | --- |
 | Collective runtime and profiling | [collectives.md](collectives.md) |
+| Independent profiling SDK and offline analysis | [profiling.md](profiling.md) |
 | vllm-ascend collective integration | [vllm-ascend-collectives.md](vllm-ascend-collectives.md) |
 | Offline checker | [checker.md](checker.md) |
 | Data-as-flag device protocol | [data-as-flag.md](data-as-flag.md) |

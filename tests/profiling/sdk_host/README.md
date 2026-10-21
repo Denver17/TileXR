@@ -1,5 +1,9 @@
 # Standalone profiling Host validation
 
+See the [current design](../../../docs/specs/profiling.md) and
+[testing guide](../../../tools/profiling/TESTING.md) for lifecycle invariants,
+the full test matrix, platform gaps, and evidence handoff.
+
 Run without CANN, the root TileXR project, or submodules:
 
 ```sh

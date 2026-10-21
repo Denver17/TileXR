@@ -4,6 +4,11 @@ The offline analyzer reads `tilexr_profiling_mapping.v1` JSON and
 `tilexr_profiling_records.v1` binary files. It needs Python 3.9 or newer and
 has no runtime dependencies on CANN, NPUs, TileXR libraries, or the source tree.
 
+For the implemented architecture, ownership and invariants, see the
+[current design](../../docs/specs/profiling.md). For test selection, commands,
+acceptance criteria and evidence handoff, see the [testing guide](TESTING.md).
+Both guides include Chinese explanations for human and AI maintainers.
+
 ```bash
 # From a source checkout, using preinstalled setuptools and wheel:
 python3 -m pip install --no-build-isolation --no-deps tools/profiling

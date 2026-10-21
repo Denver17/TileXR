@@ -1,5 +1,9 @@
 # Device protocol CPU tests
 
+See the [current design](../../../docs/specs/profiling.md) and
+[testing guide](../../../tools/profiling/TESTING.md) for the ABI contract and
+the separate CPU, CANN compiler, and NPU acceptance boundaries.
+
 These tests compile the actual SDK device headers with a small Ascend C surface
 substitute. They exercise sparse/empty slots, slot replacement, compact counts,
 overflow, zero and maximum timestamps, initialization reuse, invalid IDs,
