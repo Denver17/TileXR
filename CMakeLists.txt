@@ -8,11 +8,14 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
+# Configure the core runtime and opt-in libraries, tests and install components.
+# TileLang/Relay consume prebuilt device artifacts; this build does not run TVM.
 cmake_minimum_required(VERSION 3.16)
 
 project(tilexr LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 14)
 option(TILEXR_BUILD_COLLECTIVES "Build optional TileXR collectives library" OFF)
+option(TILEXR_BUILD_RELAY "Build optional generic TileRelay runtime" OFF)
 option(TILEXR_BUILD_EP "Build TileXR EP communication library" OFF)
 option(TILEXR_BUILD_MOONEP_PLANNER "Build A5-only MoonEP Planner library" OFF)
 option(TILEXR_BUILD_MOONEP "Build TileXR MoonEP ABI and native stage libraries" OFF)
@@ -71,6 +74,12 @@ if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
 endif()
 add_subdirectory(src/profiling)
 add_subdirectory(src/comm)
+if(TILEXR_BUILD_RELAY)
+    add_subdirectory(src/relay)
+    if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
+        add_subdirectory(tests/relay)
+    endif()
+endif()
 if(TILEXR_BUILD_EP)
     add_subdirectory(src/ep)
 endif()

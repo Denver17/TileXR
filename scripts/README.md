@@ -59,6 +59,25 @@ bash scripts/cann_local_install.sh
 
 ## Dependency Building
 
+### `build_tilexr_relay.py`
+
+Generate ABI-v1 TileRelay content-addressed pure AICore ELF/Plan pairs using the
+separately built, pinned TileLang Ascend compiler and CANN 9.1.
+This opt-in tool does not build dependencies or modify the system environment.
+
+```bash
+python scripts/build_tilexr_relay.py --operator allgather_gemm \
+  --rows 1024 --n 4096 --k 4096 --blocks 16 \
+  --compiler-revision 87e6d1c2f0a9d2ff6a9013d9a1202325c4a619b1 \
+  --output build/relay-kernels
+```
+
+Use `--operator gemm_allreduce` for GEMM followed by AllReduce SUM. See
+[TileLang integration](../docs/TILELANG_INTEGRATION.md) for installation and
+operator contracts. CMake consumes prebuilt artifacts when
+`TILEXR_RELAY_KERNEL_DIR` is supplied; the optional Host library build never
+invokes the Python compiler. The ABI-v0 builder is historical only.
+
 ### `download_open_source_deps.sh`
 **Purpose**: Download fixed-version source archives used by `prepare.sh`.
 
@@ -464,6 +483,12 @@ bash scripts/plog_grep.sh "your_search_term"
 ```
 
 ## Notes
+
+The optional Relay builder is `build_tilexr_relay.py` for ABI-v1 Python operators
+and content-addressed external ELF/Plan pairs. It requires the separately pinned
+TileLang Ascend compiler and CANN environment, not root or package installation.
+The production Host runtime never invokes it implicitly. See
+[TileLang integration](../docs/TILELANG_INTEGRATION.md#tilerelay-core-python-defined-operators).
 
 - **Root user required**: Most scripts need root access for NPU device operations
 - **Source common_env.sh**: Always source before building or testing

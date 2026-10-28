@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""Exercise CI control/Host-check behavior with isolated fake commands and repos."""
 
 import os
 import pathlib
@@ -539,7 +540,6 @@ class ControlSourceContractTests(unittest.TestCase):
             "set -euo pipefail",
             "TILEXR_CI_BUILD_ROOT",
             'git -C "${ROOT_DIR}" ls-files -z --',
-            'bash -n "${tracked_shell_files[@]}"',
             'cmake -S "${ROOT_DIR}/tests/ci"',
             "ctest --output-on-failure",
             'cmake -S "${ROOT_DIR}/tests/comm"',
@@ -758,6 +758,27 @@ class HardwareHelperBehaviorTests(unittest.TestCase):
             self.assertFalse(marker.exists())
 
 class HostChecksBehaviorTests(unittest.TestCase):
+    def test_shell_syntax_checks_every_tracked_script(self):
+        source = (ROOT / "scripts/ci/host_checks.sh").read_text(encoding="utf-8")
+        function = extract_shell_function(source, "check_tracked_shell_syntax")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            scripts = root / "scripts" / "ci"
+            scripts.mkdir(parents=True)
+            first, second = scripts / "first.sh", scripts / "second script.sh"
+            for path in (first, second):
+                path.write_text("true\n", encoding="utf-8")
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            subprocess.run(["git", "-C", str(root), "add", "scripts"], check=True)
+            harness = "set -euo pipefail\nROOT_DIR={}\n{}\ncheck_tracked_shell_syntax\n".format(
+                shlex.quote(str(root)), function)
+            result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+            self.assertEqual(0, result.returncode, result.stderr)
+            second.write_text("if then\n", encoding="utf-8")
+            result = subprocess.run(["bash", "-c", harness], capture_output=True, text=True)
+            self.assertNotEqual(0, result.returncode)
+            self.assertIn(second.name, result.stderr)
+
     def materialize_host_checks(self, root):
         destination = root / "scripts" / "ci" / "host_checks.sh"
         destination.parent.mkdir(parents=True)
@@ -1006,6 +1027,9 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "  touch \"${TILEXR_TEST_LATER_CASE:?}\"\n"
                 "  exit 0\n"
                 "fi\n"
+                "if [[ \"${1:-}\" == '-m' && \"${2:-}\" == 'unittest' ]]; then\n"
+                "  exit 0\n"
+                "fi\n"
                 "if [[ \"${1:-}\" == '-B' && \"${2:-}\" == '-m' && \"${3:-}\" == 'unittest' ]]; then\n"
                 "  exit 0\n"
                 "fi\n"
@@ -1041,13 +1065,14 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 line for line in result.stdout.splitlines()
                 if line.startswith("[host-check] ")
             ]
-            self.assertEqual(8, len(case_lines))
+            self.assertEqual(9, len(case_lines))
             expected = [
                 "shell-syntax",
                 "ci-ctest",
                 "comm-host",
                 "ep-host",
                 "data-as-flag",
+                "relay-host",
                 "profiling-host",
                 "profiling-python",
                 "collectives-vllm-patch",
@@ -1057,7 +1082,7 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
             self.assertIn("[host-check] ep-host: FAIL (exit=23", result.stdout)
-            self.assertIn("Host cases: 8 total, 7 passed, 1 failed", result.stdout)
+            self.assertIn("Host cases: 9 total, 8 passed, 1 failed", result.stdout)
             self.assertIn("Failed cases: ep-host", result.stdout)
 
 

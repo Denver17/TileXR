@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Run the maintained CANN-free Host CI cases and aggregate their results.
+# Build outputs stay in a validated task directory; this script launches no NPUs.
 
 set -euo pipefail
 
@@ -179,6 +181,14 @@ run_data_as_flag_tests() {
     (cd "${BUILD_ROOT}/data-as-flag" && ctest --output-on-failure)
 }
 
+run_relay_host_tests() {
+    cmake -S "${ROOT_DIR}/tests/relay" -B "${BUILD_ROOT}/relay"
+    cmake --build "${BUILD_ROOT}/relay" -j"$(nproc)"
+    (cd "${BUILD_ROOT}/relay" && ctest --output-on-failure)
+    python3 -m unittest discover -s "${ROOT_DIR}/tests/relay" -p 'test_*.py'
+    python3 -m unittest discover -s "${ROOT_DIR}/tools/relay" -p 'test_check_*.py'
+}
+
 run_profiling_host_tests() {
     cmake -S "${ROOT_DIR}/src/profiling" -B "${BUILD_ROOT}/profiling" \
         -DTILEXR_PROFILING_BUILD_TESTS=ON -DTILEXR_PROFILING_WITH_ACL=OFF
@@ -259,6 +269,7 @@ run_and_accumulate_case ci-ctest run_ci_ctest
 run_and_accumulate_case comm-host run_comm_host_tests
 run_and_accumulate_case ep-host run_ep_host_tests
 run_and_accumulate_case data-as-flag run_data_as_flag_tests
+run_and_accumulate_case relay-host run_relay_host_tests
 run_and_accumulate_case profiling-host run_profiling_host_tests
 run_and_accumulate_case profiling-python run_profiling_python_tests
 run_and_accumulate_case collectives-vllm-patch \

@@ -125,6 +125,15 @@ cmake --build build-collectives -j"$(nproc)"
 cmake --install build-collectives
 ```
 
+Add `-DTILEXR_BUILD_RELAY=ON` to build/install `libtilexr-relay.so` and
+`tilexr_relay.h` for Python-defined fused operators using the single ABI-v1
+runtime. Relay does not require collectives. Offline compiler/DSL sources are
+pinned under `3rdparty/`; Python package installation is opt-in via
+`TILEXR_INSTALL_RELAY_PYTHON`. See [the integration guide](docs/TILELANG_INTEGRATION.md).
+The specialized ABI-v0 API and Host pipeline are removed from the active tree;
+their [frozen historical baseline](tools/relay/README.md#frozen-baseline-build)
+is an explicit external benchmark dependency, never a production fallback.
+
 Additional expected output:
 
 ```text
@@ -422,6 +431,8 @@ bash scripts/driver_fix.sh
 - [reference/README.md](reference/README.md): ignored reference-only source checkouts
 - [docs/CANN_VERSION_MIGRATION.md](docs/CANN_VERSION_MIGRATION.md): CANN 9.1.0 migration notes
 - [tests/collectives/README.md](tests/collectives/README.md): optional collectives correctness and performance tools
+- [tools/relay/README.md](tools/relay/README.md): two-rank TileRelay benchmark and frozen Host pipeline comparison
+- [docs/TILELANG_INTEGRATION.md](docs/TILELANG_INTEGRATION.md): optional TileRelay libraries, public APIs and compiler setup
 - [docs/VLLM_ASCEND_INTEGRATION.md](docs/VLLM_ASCEND_INTEGRATION.md): vLLM integration architecture, call stacks, and usage
 - [tests/ep/README.md](tests/ep/README.md): standalone EP dispatch/combine build, demo, and cross-node transport notes
 - [AGENTS.md](AGENTS.md): repository guidance for AI coding agents

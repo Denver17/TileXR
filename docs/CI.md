@@ -99,6 +99,8 @@ cleanup.
 - comm logging and spdlog compile binaries;
 - EP host tests;
 - the data-as-flag header compile test;
+- Relay Host mocks, Python contracts, and offline benchmark trace checkers in
+  `tools/relay`;
 - standalone profiling C++14 layout, writer, mocked ACL/queue, installed consumer,
   and SDK-to-Python round-trip tests;
 - canonical profiling Python behavior tests and offline distribution consumers
