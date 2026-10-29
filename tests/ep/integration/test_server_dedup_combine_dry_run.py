@@ -1,4 +1,4 @@
-"""C3: run the shared C++ consumer without ACL, communicator or device calls."""
+"""Run the shared C++ consumer without ACL, communicator or device calls."""
 import argparse
 import itertools
 import json
@@ -9,30 +9,29 @@ import sys
 import tempfile
 import unittest
 
-CHECKPOINT = "ep-sdedup-combine-p1-dry-run"
 MARKER = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS "
 CONSUMER = None
 
 
 class CombineDryRunTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="tilexr-combine-c3-")
+        self.temp = tempfile.TemporaryDirectory(prefix="tilexr-combine-dry-run-")
         self.addCleanup(self.temp.cleanup)
         # Deliberately omit rendezvous and profiling configuration. Any attempt
         # to initialize ACL is logged and fails before a device can be touched.
         self.env = {k: v for k, v in os.environ.items() if not k.startswith(
             ("TILEXR_", "TEST_"))}
         self.env.update(TEST_TRACE_DIR=self.temp.name, TEST_FAIL_STAGE="init")
-        self.configure(CHECKPOINT=CHECKPOINT, BS=96, H=7168, TOPK=6,
+        self.configure(BS=96, H=7168, TOPK=6,
                        MOE_EXPERT_NUM=96, DTYPE="bf16")
 
     def configure(self, **values):
         for key, value in values.items():
-            self.env["TILEXR_INTERNAL_ACCEPTANCE_STAGE" if key == "CHECKPOINT" else "TILEXR_VALIDATION_" + key] = str(value)
+            self.env["TILEXR_VALIDATION_" + key] = str(value)
 
     def invoke(self, *, rank=0, ranks=16, identity=None, dry_run=True, error=None):
         host, local = divmod(rank, 8)
-        args = ["run-c3", "build-c3", "unknown", f"host-{host}",
+        args = ["run-dry-run", "build-dry-run", "unknown", f"host-{host}",
                 str(host), str(local), str(local), str(rank), str(ranks)]
         if identity:
             for index, value in identity.items():
@@ -52,7 +51,7 @@ class CombineDryRunTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(len(lines), 1, result.stdout)
         record = json.loads(lines[0])
-        self.assertEqual(record["checkpoint"], CHECKPOINT)
+        self.assertIsNone(record["checkpoint"])
         self.assertEqual(record["status"], "PASS")
         self.assertEqual(record["rank"], rank)
         self.assertEqual(record["rank_size"], ranks)
@@ -153,12 +152,6 @@ class CombineDryRunTests(unittest.TestCase):
         self.configure(OPERATOR_MODE="both")
         self.invoke(error="dispatch layout")
 
-    def test_unimplemented_device_execution_is_rejected(self):
-        self.invoke(dry_run=False, error="requires --dry-run")
-        self.configure(CHECKPOINT="ep-sdedup-p2-dispatch")
-        for op in ("combine", "both"):
-            self.configure(OPERATOR_MODE=op)
-            self.invoke(dry_run=False, error="requires a Combine acceptance checkpoint")
 
 
 if __name__ == "__main__":

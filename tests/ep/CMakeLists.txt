@@ -27,11 +27,8 @@ add_compile_definitions(
 
 option(BUILD_TILEXR_EP_DEMO "Build TileXR EP dispatch hardware demo" OFF)
 option(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST "Build the MoonEP Plan multi-rank peer-memory hardware test" OFF)
-option(BUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST "Build installed A5 Combine empty-kernel consumer" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST "Build installed A5 server dedup registration consumer" OFF)
 option(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST "Build installed A5 server dedup chain consumer" OFF)
-option(BUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST "Enable the installed 4 GiB boundary test in the chain consumer" OFF)
-option(BUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST "Enable the installed 8 GiB Combine boundary probe" OFF)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 include(${TILEXR_ROOT}/src/cmake/TileXREpCoreConfig.cmake)
@@ -140,7 +137,7 @@ aclError aclrtMemcpy(void *dst, size_t destMax, const void *src,
 #endif
 #endif
 ]=])
-# The C3 target compiles the existing consumer against observable Host substitutes.
+# The Host target compiles the existing consumer against observable Host substitutes.
 file(WRITE "${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR}/acl/acl.h" [=[
 #ifndef TILEXR_EP_FAKE_ACL_H
 #define TILEXR_EP_FAKE_ACL_H
@@ -334,11 +331,11 @@ foreach(test_name IN ITEMS protocol layout host_validation host_profile_validati
     set(test_target test_tilexr_ep_server_dedup_${test_name})
     target_include_directories(${test_target} PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
     add_test(NAME ${test_target} COMMAND ${test_target})
-    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-p1-abi-host TIMEOUT 120)
+    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-abi-host TIMEOUT 120)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 
-# Combine public ABI and Host validation replace launch; C2 separately tests
+# Combine public ABI and Host validation replace launch; launch tests exercise
 # the production launcher and installed A5 artifact.
 set(TILEXR_EP_SERVER_DEDUP_COMBINE_HOST_SOURCES
     ${TILEXR_ROOT}/src/ep/host/ep_memory_server_dedup_combine_layout.cpp
@@ -357,11 +354,11 @@ foreach(test_name IN ITEMS layout host_validation public_abi)
     set(test_target test_tilexr_ep_server_dedup_combine_${test_name})
     target_include_directories(${test_target} PRIVATE ${TILEXR_EP_TEST_INCLUDE_DIRS})
     add_test(NAME ${test_target} COMMAND ${test_target})
-    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-p1-abi-host TIMEOUT 120)
+    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-abi-host TIMEOUT 120)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 
-# C3 uses the same source and production layout validation as the device consumer.
+# The dry-run target uses the same source and production layout validation as the device consumer.
 # Runtime substitutes record every call; the dry-run test requires no such calls.
 find_package(Threads REQUIRED)
 add_executable(test_tilexr_ep_server_dedup_chain_dry_run
@@ -378,7 +375,6 @@ target_link_libraries(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE Threads:
 # Global-route and numeric oracles run on the CPU even in performance mode.
 # Keep them optimized under the workflow's Debug build, with strict FP order.
 target_compile_options(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE -O2 -fno-fast-math -ffp-contract=off)
-target_compile_definitions(test_tilexr_ep_server_dedup_chain_dry_run PRIVATE TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1)
 install(TARGETS test_tilexr_ep_server_dedup_chain_dry_run RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 if(Python3_Interpreter_FOUND)
     add_test(NAME test_tilexr_ep_server_dedup_combine_dry_run
@@ -386,59 +382,17 @@ if(Python3_Interpreter_FOUND)
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_dry_run.py"
             --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
     set_tests_properties(test_tilexr_ep_server_dedup_combine_dry_run PROPERTIES
-        LABELS ep-sdedup-combine-p1-dry-run TIMEOUT 120)
+        LABELS ep-sdedup-combine-dry-run TIMEOUT 120)
 endif()
 
-# C4 reuses the same Host consumer for lifecycle/fault-injection coverage.
+# Complete functional, lifecycle and profiling regression against Host substitutes.
 if(Python3_Interpreter_FOUND)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_m5_consumer
+    add_test(NAME test_tilexr_ep_server_dedup_combine_consumer
         COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m5.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine.py"
             --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_m5_consumer PROPERTIES
-        LABELS ep-sdedup-combine-p2-m5 TIMEOUT 240)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_m4_consumer
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m4.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_m4_consumer PROPERTIES
-        LABELS ep-sdedup-combine-p2-m4 TIMEOUT 180)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_m3_consumer
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m3.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_m3_consumer PROPERTIES
-        LABELS ep-sdedup-combine-p2-m3 TIMEOUT 180)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_m12_consumer
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_m12.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_m12_consumer PROPERTIES
-        LABELS ep-sdedup-combine-p2-m12 TIMEOUT 180)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_chain
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_chain.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_chain PROPERTIES
-        LABELS ep-sdedup-combine-p1-chain-single TIMEOUT 120)
-endif()
-# C5 adds continuous batch and shared-magic lifecycle coverage to that consumer.
-if(Python3_Interpreter_FOUND)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_multi
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_multi.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_multi PROPERTIES
-        LABELS ep-sdedup-combine-p1-chain-multi TIMEOUT 120)
-endif()
-# C7 keeps the boundary probe separate from the business-operator batch.
-if(Python3_Interpreter_FOUND)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_boundary_consumer
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_boundary.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_boundary_consumer PROPERTIES
-        LABELS ep-sdedup-combine-p1-memory-boundary TIMEOUT 120)
+    set_tests_properties(test_tilexr_ep_server_dedup_combine_consumer PROPERTIES
+        LABELS ep-sdedup-combine TIMEOUT 480)
 endif()
 add_executable(test_tilexr_ep_server_dedup_combine_boundary_launch
     unit/test_tilexr_ep_server_dedup_combine_boundary_launch.cpp
@@ -454,7 +408,7 @@ target_include_directories(test_tilexr_ep_server_dedup_combine_boundary_kernel B
 foreach(test_name IN ITEMS launch kernel)
     set(test_target test_tilexr_ep_server_dedup_combine_boundary_${test_name})
     add_test(NAME ${test_target} COMMAND ${test_target})
-    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-p1-memory-boundary TIMEOUT 30)
+    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-memory-boundary TIMEOUT 30)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
 add_executable(test_tilexr_ep_server_dedup_combine_delay
@@ -469,15 +423,6 @@ add_test(NAME test_tilexr_ep_server_dedup_combine_delay
 set_tests_properties(test_tilexr_ep_server_dedup_combine_delay PROPERTIES TIMEOUT 30)
 install(TARGETS test_tilexr_ep_server_dedup_combine_delay RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-# C6 reuses the consumer and separately validates production profile regions.
-if(Python3_Interpreter_FOUND)
-    add_test(NAME test_tilexr_ep_server_dedup_combine_profile
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine_profile.py"
-            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_profile PROPERTIES
-        LABELS ep-sdedup-combine-p1-profile TIMEOUT 120)
-endif()
 add_executable(test_tilexr_ep_server_dedup_combine_profile_regions
     unit/test_tilexr_ep_server_dedup_combine_profile_regions.cpp
     ${TILEXR_ROOT}/src/comm/tilexr_profiling_runtime.cpp)
@@ -506,7 +451,7 @@ target_include_directories(test_tilexr_ep_server_dedup_combine_m12 BEFORE PRIVAT
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
     "${TILEXR_ROOT}/src/include" "${TILEXR_ROOT}/src/ep/common")
 add_test(NAME test_tilexr_ep_server_dedup_combine_m12 COMMAND test_tilexr_ep_server_dedup_combine_m12)
-set_tests_properties(test_tilexr_ep_server_dedup_combine_m12 PROPERTIES LABELS ep-sdedup-combine-p2-m12 TIMEOUT 120)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_m12 PROPERTIES LABELS ep-sdedup-combine-m12 TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_combine_m12 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_ep_server_dedup_combine_m3
@@ -515,7 +460,7 @@ target_include_directories(test_tilexr_ep_server_dedup_combine_m3 BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
     "${TILEXR_ROOT}/src/include" "${TILEXR_ROOT}/src/ep/common")
 add_test(NAME test_tilexr_ep_server_dedup_combine_m3 COMMAND test_tilexr_ep_server_dedup_combine_m3)
-set_tests_properties(test_tilexr_ep_server_dedup_combine_m3 PROPERTIES LABELS ep-sdedup-combine-p2-m3 TIMEOUT 120)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_m3 PROPERTIES LABELS ep-sdedup-combine-m3 TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_combine_m3 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_ep_server_dedup_combine_m4
@@ -524,7 +469,7 @@ target_include_directories(test_tilexr_ep_server_dedup_combine_m4 BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
     "${TILEXR_ROOT}/src/include" "${TILEXR_ROOT}/src/ep/common")
 add_test(NAME test_tilexr_ep_server_dedup_combine_m4 COMMAND test_tilexr_ep_server_dedup_combine_m4)
-set_tests_properties(test_tilexr_ep_server_dedup_combine_m4 PROPERTIES LABELS ep-sdedup-combine-p2-m4 TIMEOUT 120)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_m4 PROPERTIES LABELS ep-sdedup-combine-m4 TIMEOUT 120)
 install(TARGETS test_tilexr_ep_server_dedup_combine_m4 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_ep_server_dedup_combine_m5
@@ -533,7 +478,7 @@ target_include_directories(test_tilexr_ep_server_dedup_combine_m5 BEFORE PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/unit/server_dedup_combine_delay_fake"
     "${TILEXR_ROOT}/src/include" "${TILEXR_ROOT}/src/ep/common")
 add_test(NAME test_tilexr_ep_server_dedup_combine_m5 COMMAND test_tilexr_ep_server_dedup_combine_m5)
-set_tests_properties(test_tilexr_ep_server_dedup_combine_m5 PROPERTIES LABELS ep-sdedup-combine-p2-m5 TIMEOUT 180)
+set_tests_properties(test_tilexr_ep_server_dedup_combine_m5 PROPERTIES LABELS ep-sdedup-combine-m5 TIMEOUT 180)
 install(TARGETS test_tilexr_ep_server_dedup_combine_m5 RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 # Unequal groups catch an M5 owner/UB budget still tied to the Read core count.
@@ -546,7 +491,7 @@ foreach(_m5_send_cores IN ITEMS 16 28 48 52)
         $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM=${_m5_send_cores}>)
     set_property(TARGET ${_m5_split_target} PROPERTY TILEXR_TEST_COMBINE_SEND_CORES ${_m5_send_cores})
     add_test(NAME ${_m5_split_target} COMMAND ${_m5_split_target})
-    set_tests_properties(${_m5_split_target} PROPERTIES LABELS ep-sdedup-combine-p2-m5 TIMEOUT 180)
+    set_tests_properties(${_m5_split_target} PROPERTIES LABELS ep-sdedup-combine-m5 TIMEOUT 180)
 endforeach()
 
 # Runs the production count/cumsum methods against synchronous CPU API substitutes.
@@ -662,26 +607,6 @@ add_executable(test_tilexr_ep_kernel_launch
     ${TILEXR_ROOT}/src/ep/host/ep_dispatch_memory_host.cpp
     ${TILEXR_ROOT}/src/ep/host/ep_combine_memory_host.cpp
 )
-
-add_executable(test_tilexr_ep_server_dedup_combine_launch
-    $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
-target_include_directories(test_tilexr_ep_server_dedup_combine_launch BEFORE PRIVATE
-    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS})
-target_compile_definitions(test_tilexr_ep_server_dedup_combine_launch PRIVATE TILEXR_EP_TEST_COMBINE_C2=1)
-add_test(NAME test_tilexr_ep_server_dedup_combine_launch COMMAND test_tilexr_ep_server_dedup_combine_launch)
-set_tests_properties(test_tilexr_ep_server_dedup_combine_launch PROPERTIES
-    LABELS ep-sdedup-combine-p1-empty-kernel TIMEOUT 120)
-install(TARGETS test_tilexr_ep_server_dedup_combine_launch RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-add_executable(test_tilexr_ep_server_dedup_combine_profile_launch
-    $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
-target_include_directories(test_tilexr_ep_server_dedup_combine_profile_launch BEFORE PRIVATE
-    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS})
-target_compile_definitions(test_tilexr_ep_server_dedup_combine_profile_launch PRIVATE
-    TILEXR_EP_TEST_COMBINE_C2=1 TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=1)
-add_test(NAME test_tilexr_ep_server_dedup_combine_profile_launch COMMAND test_tilexr_ep_server_dedup_combine_profile_launch)
-set_tests_properties(test_tilexr_ep_server_dedup_combine_profile_launch PROPERTIES TIMEOUT 120)
-install(TARGETS test_tilexr_ep_server_dedup_combine_profile_launch RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 add_executable(test_tilexr_ep_kernel_launch_profile
     $<TARGET_PROPERTY:test_tilexr_ep_kernel_launch,SOURCES>)
@@ -833,29 +758,8 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST)
         SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")
     add_test(NAME test_tilexr_ep_server_dedup_registration COMMAND test_tilexr_ep_server_dedup_registration)
     set_tests_properties(test_tilexr_ep_server_dedup_registration PROPERTIES
-        LABELS ep-sdedup-p1-empty-kernel TIMEOUT 120)
+        LABELS ep-sdedup-empty-kernel TIMEOUT 120)
     install(TARGETS test_tilexr_ep_server_dedup_registration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endif()
-
-if(BUILD_TILEXR_EP_SERVER_DEDUP_COMBINE_REGISTRATION_TEST)
-    find_library(TILEXR_EP_COMBINE_DEDUP_INSTALLED_LIB tilexr-ep
-        PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
-    add_executable(test_tilexr_ep_server_dedup_combine_registration
-        integration/test_tilexr_ep_server_dedup_combine_registration.cpp)
-    target_include_directories(test_tilexr_ep_server_dedup_combine_registration PRIVATE
-        "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_INCLUDEDIR}"
-        "${TILEXR_ROOT}/src/ep/host" "${TILEXR_ROOT}/src/ep/common"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/include")
-    target_link_directories(test_tilexr_ep_server_dedup_combine_registration PRIVATE
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64" "${ASCEND_DRIVER_PATH}/lib64/driver")
-    target_link_libraries(test_tilexr_ep_server_dedup_combine_registration PRIVATE
-        ${TILEXR_EP_COMBINE_DEDUP_INSTALLED_LIB} ascendcl ${CMAKE_DL_LIBS})
-    set_target_properties(test_tilexr_ep_server_dedup_combine_registration PROPERTIES
-        SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")
-    add_test(NAME test_tilexr_ep_server_dedup_combine_registration COMMAND test_tilexr_ep_server_dedup_combine_registration)
-    set_tests_properties(test_tilexr_ep_server_dedup_combine_registration PROPERTIES
-        LABELS ep-sdedup-combine-p1-empty-kernel TIMEOUT 120)
-    install(TARGETS test_tilexr_ep_server_dedup_combine_registration RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
 if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)
@@ -877,18 +781,6 @@ if(BUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST)
         "${ASCEND_DRIVER_PATH}/lib64/driver")
     target_link_libraries(test_tilexr_ep_server_dedup_chain PRIVATE
         ${TILEXR_EP_CHAIN_INSTALLED_LIB} ${TILEXR_EP_CHAIN_COMM_LIB} ascendcl)
-    if(BUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST)
-        find_library(TILEXR_EP_BOUNDARY_TEST_LIB tilexr-ep-memory-boundary-test
-            PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
-        target_link_libraries(test_tilexr_ep_server_dedup_chain PRIVATE ${TILEXR_EP_BOUNDARY_TEST_LIB})
-        target_compile_definitions(test_tilexr_ep_server_dedup_chain PRIVATE TILEXR_EP_MEMORY_BOUNDARY_TEST=1)
-    endif()
-    if(BUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST)
-        find_library(TILEXR_EP_COMBINE_BOUNDARY_TEST_LIB tilexr-ep-combine-memory-boundary-test
-            PATHS "${TILEXR_INSTALL_PREFIX}/${TILEXR_INSTALL_LIBDIR}" NO_DEFAULT_PATH REQUIRED)
-        target_link_libraries(test_tilexr_ep_server_dedup_chain PRIVATE ${TILEXR_EP_COMBINE_BOUNDARY_TEST_LIB})
-        target_compile_definitions(test_tilexr_ep_server_dedup_chain PRIVATE TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1)
-    endif()
     set_target_properties(test_tilexr_ep_server_dedup_chain PROPERTIES
         SKIP_BUILD_RPATH TRUE INSTALL_RPATH "$ORIGIN/../${TILEXR_INSTALL_LIBDIR}")
     # 由现有 validation controller 按 rank 调度，不作为每节点 Host ctest。

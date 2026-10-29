@@ -11,6 +11,7 @@ from unittest import mock
 
 import measurements as measure
 import operator_measurements as operators
+from current_run_fixture import combine_traffic, combine_events
 from test_profiling_fixture import CAPTURE_ID, combine_loop_events, write_capture
 
 
@@ -22,12 +23,12 @@ class OperatorMeasurementTests(unittest.TestCase):
         self.config = dict(run_mode="breakdown", operator_mode="both", rank_size=2, loops=3, warmup=2,
             bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", block_dim="auto",
             route_mode="balance_shift", seed=2026, quant_mode=0, dispatch_quant_mode=0,
-            combine_quant_mode=0, fp8_format="e4m3")
+            combine_quant_mode=0, fp8_format="e4m3", implemented_through="M5", scope="full")
         self.hashes = dict(dispatch="d" * 64, combine="c" * 64)
 
     def capture(self, rank, operator, *, fault="", events=None):
         if operator == "combine" and events is None:
-            events = {core: [(0, 0x3001), (50000 + rank * 1000, 0x3002)] for core in range(64)}
+            events = combine_events()
         path = write_capture(self.root / f"rank-{rank}.{operator}.records.v1", rank=rank,
             events_by_core=events, fault=fault)
         directory = self.root / f"profile-rank-{rank}" / operator
@@ -35,7 +36,7 @@ class OperatorMeasurementTests(unittest.TestCase):
             shutil.rmtree(directory)
         return operators.breakdown_record(path, self.config, rank, CAPTURE_ID,
             directory, operator=operator,
-            run_id="run-test", kernel_sha=self.hashes[operator])
+            run_id="run-test", kernel_sha=self.hashes[operator], record=combine_traffic(self.config, rank))
 
     def test_m6_capture_and_traffic_require_only_direct_returns(self):
         self.config.update(implemented_through="M5", scope="full", server_dedup_enabled=False)
@@ -121,7 +122,7 @@ class OperatorMeasurementTests(unittest.TestCase):
             measure.breakdown_record(path, self.config, 0, CAPTURE_ID, self.root / "missing", operator="combine")
 
     def records(self, mode="both"):
-        return [dict(rank=rank, run_id="run-test", status="PASS", operator_measurements={
+        return [dict(combine_traffic(self.config, rank), run_id="run-test", status="PASS", operator_measurements={
             operator: dict(breakdown=self.capture(rank, operator))
             for operator in operators.active_operators(dict(self.config, operator_mode=mode))})
             for rank in range(self.config["rank_size"])]
@@ -141,7 +142,7 @@ class OperatorMeasurementTests(unittest.TestCase):
 
     def performance(self, directory, rank, operator):
         return operators.performance_record(directory, 3, 2, operator=operator, run_id="run-test",
-            rank=rank, kernel_sha=self.hashes[operator])
+            rank=rank, kernel_sha=self.hashes[operator], config=dict(self.config, run_mode="performance"), record=combine_traffic(self.config, rank))
 
     def validate(self, row, config=None):
         operators.validate_operator_measurements(row, config or self.config,
@@ -154,7 +155,7 @@ class OperatorMeasurementTests(unittest.TestCase):
         self.assertEqual(dispatch["sample_us"], [4, 6, 8])
         self.assertEqual(combine["sample_us"], [52, 53, 54])
         self.assertEqual(dispatch["source"]["path"], combine["source"]["path"])
-        row = dict(rank=0, operator_measurements=dict(dispatch=dict(performance=dispatch), combine=dict(performance=combine)))
+        row = dict(combine_traffic(self.config), operator_measurements=dict(dispatch=dict(performance=dispatch), combine=dict(performance=combine)))
         self.validate(row, dict(self.config, run_mode="performance"))
         for count in (0, 4, 6):
             directory = self.profile(combine=[50] * count)
@@ -165,7 +166,7 @@ class OperatorMeasurementTests(unittest.TestCase):
 
     def test_each_measurement_is_bound_to_operator_rank_run_kernel_and_final_launch(self):
         directory = self.profile()
-        row = dict(rank=0, operator_measurements={operator: dict(performance=self.performance(directory, 0, operator))
+        row = dict(combine_traffic(self.config), operator_measurements={operator: dict(performance=self.performance(directory, 0, operator))
                                                 for operator in ("dispatch", "combine")})
         config = dict(self.config, run_mode="performance")
         mutations = dict(operator="dispatch", rank=1, run_id="other-run", kernel=measure.KERNEL_NAME,
@@ -198,10 +199,10 @@ class OperatorMeasurementTests(unittest.TestCase):
             self.assertEqual(attributes["operator"], operator)
             self.assertEqual(attributes["captured_launch"], 4)
             if operator == "combine":
-                self.assertEqual(set(evidence["stages_us"]), {"kernel_total", "empty_wait"})
-                self.assertEqual(evidence["sample_us"], [50])
+                self.assertEqual(set(evidence["stages_us"]), set(operators.return_stage_counts(self.config)))
+                self.assertEqual(evidence["sample_us"], [7])
                 events = [event for event in trace["traceEvents"] if event["ph"] == "X"]
-                self.assertEqual(len(events), 128)
+                self.assertEqual(len(events), 384)
                 self.assertEqual({event["args"]["rank"] for event in events}, {0})
         self.assertNotEqual(*paths)
         changed = copy.deepcopy(row)
@@ -212,14 +213,14 @@ class OperatorMeasurementTests(unittest.TestCase):
 
     def test_missing_duplicate_and_overflow_events_cannot_be_complete(self):
         for fault in ("missing-end", "duplicate-start", "overflow", "accumulating"):
-            events = {core: [(0, 0x3001), (50000, 0x3002)] for core in range(64)}
+            events = combine_events()
             if fault == "missing-end":
                 events[63].pop()
             if fault == "duplicate-start":
                 events[63].insert(1, (1, 0x3001))
-            evidence = self.capture(0, "combine", fault=fault, events=events)
-            row = dict(rank=0, operator_measurements=dict(combine=dict(breakdown=evidence)))
             with self.subTest(fault=fault), self.assertRaises(ValueError):
+                evidence = self.capture(0, "combine", fault=fault, events=events)
+                row = dict(combine_traffic(self.config), operator_measurements=dict(combine=dict(breakdown=evidence)))
                 self.validate(row, dict(self.config, operator_mode="combine"))
         path = write_capture(self.root / "wrong.records.v1")
         with self.assertRaisesRegex(ValueError, "mapping operator"):
@@ -272,22 +273,22 @@ class OperatorMeasurementTests(unittest.TestCase):
         self.assertEqual(result["dispatch"]["status"], "complete")
         self.assertEqual(result["combine"]["status"], "incomplete")
 
-    def test_combine_summary_has_zero_bytes_no_bandwidth_and_across_rank_latency(self):
+    def test_combine_summary_reports_traffic_and_across_rank_latency(self):
         config = dict(self.config, operator_mode="combine", rank_size=16, run_mode="performance")
         records = []
         for rank in range(16):
             directory = self.profile(rank, combine=[500, 500, 50 + rank, 52 + rank, 54 + rank])
-            records.append(dict(rank=rank, run_id="run-test", operator_measurements=dict(
+            records.append(dict(combine_traffic(self.config, rank), run_id="run-test", operator_measurements=dict(
                 combine=dict(performance=self.performance(directory, rank, "combine")))))
         summary = operators.summarize_operator_measurements(records, config, "run-test", self.hashes)
         combine = summary["combine"]
         self.assertEqual(combine["latency_us"], dict(median=59.5, minimum=52, maximum=67, mean=59.5))
-        self.assertEqual(combine["algorithm_bytes"], 0)
-        self.assertEqual(combine["algorithm_communication_bytes"], 0)
-        self.assertIsNone(combine["algorithm_bandwidth_gbps"])
+        self.assertEqual(combine["algorithm_bytes"], 16 * combine_traffic(config)["combine_algorithm_bytes"])
+        self.assertEqual(combine["algorithm_communication_bytes"], 16 * 4 * 15360)
+        self.assertGreater(combine["algorithm_bandwidth_gbps"]["minimum"], 0)
         self.assertNotIn("bandwidth_gbps", combine)
         report = operators.render_operator_measurements(summary)
-        for text in ("empty/framework", "N/A", "min=52.000 us median=59.500 us max=67.000 us", "c" * 64):
+        for text in ("scope=full", "logical_payload_GB/s", "min=52.000 us median=59.500 us max=67.000 us", "c" * 64):
             self.assertIn(text, report)
         for invalid in (records[:-1], records[:-1] + [records[0]]):
             with self.assertRaises(ValueError):
@@ -303,12 +304,12 @@ class OperatorMeasurementTests(unittest.TestCase):
                 relay_packets=2, relay_received=2, relay_bytes=2 * 15872, data_bytes=9 * 15872,
                 token_stride=15872, local_data_bytes=15872, same_server_data_bytes=15872,
                 cross_server_data_bytes=7 * 15872)
-            records.append(dict(rank=rank, run_id="run-test", dispatch=dispatch, operator_measurements={
+            records.append(dict(combine_traffic(self.config, rank), run_id="run-test", dispatch=dispatch, operator_measurements={
                 operator: dict(performance=self.performance(directory, rank, operator))
                 for operator in ("dispatch", "combine")}))
         summary = operators.summarize_operator_measurements(records, config, "run-test", self.hashes)
         self.assertEqual(summary["dispatch"]["algorithm_communication_bytes"], (9 * 15872 + 90 * 32) * 16)
-        self.assertEqual(summary["combine"]["algorithm_communication_bytes"], 0)
+        self.assertEqual(summary["combine"]["algorithm_communication_bytes"], 16 * 4 * 15360)
         self.assertEqual(summary["dispatch"]["latency_us"]["median"], 6)
         self.assertEqual(summary["combine"]["latency_us"]["median"], 53)
         self.assertIn("bandwidth_gbps", summary["dispatch"])
@@ -322,17 +323,17 @@ class OperatorMeasurementTests(unittest.TestCase):
         config = dict(self.config, operator_mode="combine")
         summary = operators.summarize_operator_measurements(records, config, "run-test", self.hashes)["combine"]
         self.assertEqual(summary["last_launch"], 4)
-        self.assertEqual(summary["latency_us"]["median"], 50.5)
+        self.assertEqual(summary["latency_us"]["median"], 7)
         self.assertEqual(summary["breakdown"]["ticks_per_us"], 1000)
-        self.assertEqual(set(summary["breakdown"]["stages_us"]), {"kernel_total", "empty_wait"})
-        self.assertEqual(summary["algorithm_bytes"], 0)
+        self.assertEqual(set(summary["breakdown"]["stages_us"]), set(operators.return_stage_counts(self.config)))
+        self.assertEqual(summary["algorithm_bytes"], 2 * combine_traffic(config)["combine_algorithm_bytes"])
 
     def test_functional_has_no_measurements(self):
         config = dict(self.config, run_mode="functional")
         self.assertEqual(operators.summarize_operator_measurements([dict(rank=0)], config, "run-test", self.hashes), {})
         self.assertEqual(operators.render_operator_measurements({}), "")
         with self.assertRaises(ValueError):
-            self.validate(dict(rank=0, operator_measurements={"combine": {}}), config)
+            self.validate(dict(combine_traffic(self.config), operator_measurements={"combine": {}}), config)
 
 
 if __name__ == "__main__":

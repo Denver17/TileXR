@@ -209,7 +209,6 @@ int RunProfile(bool largeFixture)
         }
     } catch (const std::exception &error) { std::cerr << error.what() << '\n'; return 1; }
     if (ServerDedupTest::Failures() != 0) return 1;
-    std::cout << "EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_PASS\n";
     return 0;
 }
 
@@ -219,7 +218,10 @@ int main()
         // Keep the same real writer/event-order checks on both sides of the
         // runtime threshold, including M6's delayed readiness and loop markers.
         if (RunProfile(false) != 0) return 1;
-        return RunProfile(true);
+        if (RunProfile(true) != 0) return 1;
+    } else if (RunProfile(TileXREp::kEpServerDedupEnable) != 0) {
+        return 1;
     }
-    return RunProfile(TileXREp::kEpServerDedupEnable);
+    std::cout << "EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_PASS\n";
+    return 0;
 }

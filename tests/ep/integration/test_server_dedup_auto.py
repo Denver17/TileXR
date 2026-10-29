@@ -2,19 +2,16 @@
 from pathlib import Path
 import unittest
 
-import test_server_dedup_combine_chain as chain
+import test_server_dedup_combine as chain
 from profiling.records import load_record_files
 
 
-class AutoDedupConsumerTests(chain.CombineChainTests):
+class AutoDedupConsumerTests(chain.CombineTests):
     compile_definitions = ["-DTILEXR_EP_SERVER_DEDUP_ENABLE=1", "-DTILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=1"]
 
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE="ep-sdedup-combine-p2-m5",
-                                TILEXR_VALIDATION_H="17", TILEXR_VALIDATION_TOPK="6",
-                                TILEXR_VALIDATION_COMBINE_FIXTURE="balanced",
-                                TILEXR_VALIDATION_COMBINE_OBSERVATION="batch",
+        self.environment.update(TILEXR_VALIDATION_H="17", TILEXR_VALIDATION_TOPK="6",
                                 TEST_FORBID_UNUSED_METADATA_READ="1")
 
     def test_original_bs_controls_routes_and_final_aggregation(self):

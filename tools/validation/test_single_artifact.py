@@ -19,8 +19,8 @@ class SingleArtifactTests(unittest.TestCase):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n")
         environment = dict(TILEXR_VALIDATION_ROOT=str(self.root),
                            TILEXR_VALIDATION_BUILD_MODE="production",
-                           TILEXR_VALIDATION_CHECKPOINT=workflow.COMBINE_M5_CHECKPOINT,
-                           TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_M5_CHECKPOINT,
+
+
                            TILEXR_COMM_ID="192.0.2.1:10177",
                            TILEXR_DEMO_BARRIER_ADDR="192.0.2.1:10274")
         patch = mock.patch.dict(os.environ, environment, clear=True)
@@ -40,7 +40,7 @@ class SingleArtifactTests(unittest.TestCase):
                         checkpoint=config.checkpoint, architecture=workflow.platform.machine(),
                         server_dedup_profiling=profiling,
                         server_dedup_contract=workflow.DISPATCH_ABI,
-                        server_dedup_combine_contract=workflow.combine_contract(config.checkpoint),
+                        server_dedup_combine_contract=workflow.combine_contract(),
                         server_dedup_profile_schema=workflow.measurements.RECORDS_SCHEMA,
                         artifacts=workflow.artifact_files(config.install), tests=[])
         workflow.write_json(config.install / "manifest.json", manifest)
@@ -92,8 +92,8 @@ class SingleArtifactTests(unittest.TestCase):
         for profiling, dedup in ((False, 1), (True, 1), (False, 0), (True, 0), (False, 1)):
             config, _ = self.install_fixture(profiling, dedup)
             work = workflow.validation_build_directory(config)
-            self.assertEqual(work.name, f"validation-combine-p24-profile-{'on' if profiling else 'off'}-dedup-{dedup}")
-            self.assertEqual(config.install, self.root / "install/validation-combine-p24")
+            self.assertEqual(work.name, f"server-dedup-profile-{'on' if profiling else 'off'}-dedup-{dedup}")
+            self.assertEqual(config.install, self.root / "install/server-dedup")
             builds.add(work)
             installs.add(config.install)
             work.mkdir(parents=True, exist_ok=True)

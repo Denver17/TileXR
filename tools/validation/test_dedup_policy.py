@@ -17,14 +17,14 @@ class DedupPolicyTests(unittest.TestCase):
                 with self.subTest(policy=policy, bs=bs), tempfile.TemporaryDirectory() as directory:
                     manifest = dict(server_dedup_enabled=layout, server_dedup_protocol=2,
                         server_dedup_core_config=dict(dispatch_send_core_num=32, combine_send_core_num=32),
-                        mode="host", checkpoint=workflow.CHECKPOINT,
+                        mode="host", checkpoint=None, server_dedup_contract=workflow.DISPATCH_ABI, server_dedup_combine_contract=workflow.combine_contract(), server_dedup_profiling=False,
                         architecture=platform.machine(), artifacts={})
                     if policy is not None:
                         manifest["server_dedup_policy"] = policy
                     install = Path(directory)
                     (install / "manifest.json").write_text(json.dumps(manifest))
-                    config = SimpleNamespace(install=install, chain=dict(bs=bs), mode="host",
-                        checkpoint=workflow.CHECKPOINT, action="run")
+                    config = SimpleNamespace(install=install, chain=dict(bs=bs, run_mode="functional"), mode="host",
+                        checkpoint=None, action="run")
                     with mock.patch.object(workflow, "artifact_files", return_value={}):
                         workflow.verify_build(config)
                     expected = bs > 32 if policy == "auto" else layout

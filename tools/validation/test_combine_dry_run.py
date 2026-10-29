@@ -20,7 +20,7 @@ class CombineDryRunConfigurationTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         environment = {key: value for key, value in os.environ.items() if not key.startswith("TILEXR_")}
         environment.update(TILEXR_VALIDATION_ROOT=str(self.root), TILEXR_VALIDATION_BUILD_MODE="host",
-                           TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.COMBINE_DRY_RUN_CHECKPOINT)
+                           )
         patch = mock.patch.dict(os.environ, environment, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
@@ -62,14 +62,8 @@ class CombineDryRunConfigurationTests(unittest.TestCase):
             with self.subTest(environment=environment), mock.patch.dict(os.environ, {
                     "TILEXR_VALIDATION_" + key: value for key, value in environment.items()}), self.assertRaises(ValueError):
                 workflow.Config("case-dry-run")
-        for operator in ("combine", "both"):
-            with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_OPERATOR_MODE": operator,
-                    "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
-                    "TILEXR_VALIDATION_BUILD_MODE": "production"}), self.assertRaisesRegex(ValueError, "C4"):
-                workflow.Config("run")
-
     def test_normal_controller_uses_current_package_without_chain_or_device_markers(self):
-        os.environ.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE")
+        os.environ.pop("TILEXR_INTERNAL_ACCEPTANCE_STAGE", None)
         os.environ["TILEXR_VALIDATION_CHECKPOINT"] = "obsolete"
         self.test_local_controller_verifies_every_rank_and_rejects_invalid_identity_or_side_effect()
 

@@ -18,7 +18,7 @@ _tilexr_os_arch() {
 export TILEXR_OS_ARCH=`_tilexr_os_arch`
 export TILEXR_CANN_VER="9.1.0"
 
-# 七步 Host checkpoint 不使用 SoC/卡数；普通公共入口保留硬件探测。
+# Host 验证不使用 SoC/卡数；普通公共入口保留硬件探测。
 if [ "${TILEXR_ENV_LIGHTWEIGHT:-0}" != 1 ]; then
     export TILEXR_SOC_NAME=`soc_name`
     export TILEXR_OPS_NAME=`ops_name`

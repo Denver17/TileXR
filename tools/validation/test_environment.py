@@ -157,20 +157,6 @@ class EnvironmentTests(unittest.TestCase):
         self.assertNotIn("MPI_HOME", entries[0])
         self.assertFalse(self.probes.exists())
 
-    def test_deployment_boundary_selector_cannot_override_active_action(self):
-        (self.root / "validation.local.sh").write_text("export TILEXR_VALIDATION_BOUNDARY_PROBE=1\n")
-        for active in (None, "0", "1"):
-            environment = dict(self.environment)
-            if active is not None:
-                environment["TILEXR_VALIDATION_BOUNDARY_PROBE"] = active
-            result = self.run_shell('source "$1/set_env.sh"\n'
-                                    'source "$1/set_env.sh"\n'
-                                    '"$TILEXR_VALIDATION_PYTHON" "$1/snapshot.py"\n', environment)
-            entry = self.snapshots(result)[0]
-            if active is None:
-                self.assertNotIn("TILEXR_VALIDATION_BOUNDARY_PROBE", entry)
-            else:
-                self.assertEqual(entry["TILEXR_VALIDATION_BOUNDARY_PROBE"], active)
 
     def test_new_cann_script_takes_effect_on_next_source(self):
         first, _, _ = self.fake_cann("first-toolkit")

@@ -13,8 +13,11 @@ import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/validation"))
 import measurements
+import operator_measurements
 import workflow
-from test_profiling_fixture import CAPTURE_ID
+from uuid import NAMESPACE_URL, uuid5
+
+CAPTURE_ID = str(uuid5(NAMESPACE_URL, "tilexr-validation:run-identity"))
 from profiling.records import load_record_files
 
 
@@ -71,8 +74,7 @@ class ChainConsumerTests(unittest.TestCase):
         cls.executable = cls.folder / "consumer"
         result = subprocess.run([
             compiler, "-std=c++14", "-O2", "-fno-fast-math", "-ffp-contract=off",
-            "-Wall", "-Wextra", "-Werror", "-pthread", "-DTILEXR_EP_MEMORY_BOUNDARY_TEST=1",
-            "-DTILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=1", *cls.compile_definitions,
+            "-Wall", "-Wextra", "-Werror", "-pthread", *cls.compile_definitions,
             "-I", str(include.parent), "-I", str(ROOT / "src/include"),
             "-I", str(ROOT / "src/comm"), "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
             str(SOURCE / "test_tilexr_ep_server_dedup_chain.cpp"),
@@ -108,9 +110,6 @@ class ChainConsumerTests(unittest.TestCase):
             self.environment.pop("TILEXR_VALIDATION_" + key, None)
         self.environment.pop("TILEXR_VALIDATION_ROUTE_MODE", None)
         self.environment.pop("TILEXR_VALIDATION_SEED", None)
-        # This suite asserts the historical Dispatch marker/contract. Ordinary
-        # no-checkpoint runs are covered separately by CombineM5Tests.
-        self.environment["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = "ep-sdedup-p2-dispatch"
         self.environment.pop("TILEXR_VALIDATION_LOOPS", None)
         self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
         self.environment.pop("TILEXR_VALIDATION_RUN_MODE", None)
@@ -127,6 +126,7 @@ class ChainConsumerTests(unittest.TestCase):
         env.update(environment or {})
         if env.get("TILEXR_VALIDATION_RUN_MODE") == "breakdown":
             env.setdefault("TILEXR_PROFILING_CAPTURE_ID", CAPTURE_ID)
+            env.setdefault("TILEXR_PROFILING_COMBINE_RECORDS_PATH", str(Path(self.trace.name) / f"rank-{rank}.combine.records.v1"))
             env.setdefault("TILEXR_PROFILING_RECORDS_PATH", str(Path(self.trace.name) / f"rank-{rank}.records.v1"))
         process = subprocess.Popen([str(self.executable), run, "build-identity", "unknown", f"node-{rank // 8}",
             str(rank // 8), str(rank % 8), str(rank % 8), str(rank), "16"],
@@ -135,7 +135,7 @@ class ChainConsumerTests(unittest.TestCase):
         return process
 
     def test_256p_consumer_rank_boundaries_without_device_launch(self):
-        env = dict(self.environment, TILEXR_INTERNAL_ACCEPTANCE_STAGE="",
+        env = dict(self.environment,
                    TILEXR_VALIDATION_MOE_EXPERT_NUM="256", TILEXR_VALIDATION_BS="96")
         for rank in (0, 128, 255):
             with self.subTest(rank=rank):
@@ -245,51 +245,8 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertNotIn("_PASS", output)
                 self.assertEqual(self.trace_lines(0), [])
 
-    def test_memory_boundary_all_ranks_validate_capacity_and_roundtrip(self):
-        # This probe does not route tokens: Dispatch divisibility/epoch rules do not apply.
-        environment = {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": "ep-sdedup-p1-memory-boundary",
-                       "TILEXR_VALIDATION_BS": "1", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "33"}
-        processes = [self.start(rank, environment=environment) for rank in range(16)]
-        for rank, process in enumerate(processes):
-            output, errors = process.communicate(timeout=20)
-            self.assertEqual(process.returncode, 0, output + errors)
-            linked, = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")
-            record, = self.records(output, "EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS")
-            self.assertEqual(linked["peer_mem_bytes"], 4 * 1024 ** 3)
-            self.assertEqual(record["boundary_offset"], 4 * 1024 ** 3 - 32)
-            self.assertEqual(record["rank"], rank)
-            for key in ("initial_zero", "device_initial_zero", "device_readback_ff", "host_boundary_ff", "guard_zero"):
-                self.assertIs(record[key], True)
-            calls = self.trace_lines(rank)
-            self.assertEqual(calls.count("comm-init-sized"), 1)
-            self.assertEqual(calls.count("boundary-launch"), 1)
-            self.assertNotIn("launch", calls)  # No Dispatch call or old checkpoint regression.
-            self.assertEqual(calls[-1], "finalize")
 
-    def test_memory_boundary_rejects_bad_capacity(self):
-        process = self.start(0, environment={"TILEXR_INTERNAL_ACCEPTANCE_STAGE": "ep-sdedup-p1-memory-boundary",
-                                           "TEST_BOUNDARY_FAULT": "capacity"})
-        output, errors = process.communicate(timeout=5)
-        self.assertNotEqual(process.returncode, 0)
-        self.assertNotIn("_PASS", output)
-        self.assertIn("not exactly 4 GiB", errors)
 
-    def test_memory_boundary_detects_missing_operations_and_corruption(self):
-        for fault in ("initial", "no-launch", "no-write", "no-read", "guard"):
-            with self.subTest(fault=fault):
-                process = self.start(0, environment={"TILEXR_INTERNAL_ACCEPTANCE_STAGE": "ep-sdedup-p1-memory-boundary",
-                                                   "TEST_BOUNDARY_FAULT": fault})
-                peers = []
-                try:
-                    peers = [self.barrier_peer(rank, 0) for rank in range(1, 16)]
-                    output, errors = process.communicate(timeout=5)
-                    self.assertNotEqual(process.returncode, 0)
-                    self.assertNotIn("EP_SERVER_DEDUP_MEMORY_BOUNDARY_PASS", output)
-                    self.assertIn("ERROR", errors)
-                    self.assertIn("expected=", errors)
-                finally:
-                    for peer in peers:
-                        peer.close()
 
     def test_single_dispatch_lifecycle_for_six_type_combinations(self):
         for dtype in ("bf16", "fp16"):
@@ -308,7 +265,7 @@ class ChainConsumerTests(unittest.TestCase):
                         records.append(record)
                         linked, = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")
                         self.assertEqual(linked["peer_mem_bytes"], 8 * 1024 ** 3)
-                        self.assertEqual(record["checkpoint"], "ep-sdedup-p2-dispatch")
+                        self.assertIsNone(record["checkpoint"])
                         self.assertEqual(record["dtype"], dtype)
                         self.assertEqual(record["quant_mode"], int(quant))
                         self.assertEqual(record["fp8_format"], format)
@@ -368,12 +325,10 @@ class ChainConsumerTests(unittest.TestCase):
                     self.check_five_tables(records)
                 for path in Path(self.trace.name).iterdir(): path.unlink()
 
-    def test_checkpoint_and_loop_validation_precedes_initialization(self):
+    def test_loop_validation_precedes_initialization(self):
         cases = [{"TILEXR_VALIDATION_LOOPS": value} for value in ("", "0", "-1", "abc", "4294967296")]
         cases += [{"TILEXR_VALIDATION_WARMUP": value} for value in ("", "-1", "4294967296", "abc")]
         cases += [{"TILEXR_VALIDATION_RUN_MODE": value} for value in ("", "unknown")]
-        cases += [{"TILEXR_INTERNAL_ACCEPTANCE_STAGE": value} for value in
-                  ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p1-profile", "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send")]
         cases += [{"TILEXR_VALIDATION_QUANT_MODE": "3"}, {"TILEXR_VALIDATION_FP8_FORMAT": "invalid"}]
         for env in cases:
             with self.subTest(env=env):
@@ -437,7 +392,7 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertNotEqual(process.returncode, 0, output + errors)
                 self.assertIn("EP_SERVER_DEDUP_FAIL rank=1 stage=dispatch-read", errors)
                 self.assertIn("read consumed dispatch slot ret=92", errors)
-                for marker in ("DISPATCH_PASS", "DISPATCH_INVALID", "BREAKDOWN_PASS"):
+                for marker in ("DISPATCH_PASS", "DISPATCH_INVALID", "OPERATOR_BREAKDOWN_PASS"):
                     self.assertNotIn("EP_SERVER_DEDUP_" + marker, output)
                 self.assertIn("wrong-bank-read", self.trace_lines(rank))
             else:
@@ -540,15 +495,18 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertEqual(record["cleanup"], "complete")
                 config = dict(record, block_dim="auto")
                 if mode == "breakdown":
-                    marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
-                    record["breakdown"] = measurements.breakdown_record(
+                    marker = self.records(output, "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS")[0]
+                    record["breakdown"] = operator_measurements.breakdown_record(
                         Path(marker["records_path"]), config, rank, CAPTURE_ID,
-                        Path(self.trace.name) / f"profile-rank-{rank}")
+                        Path(self.trace.name) / f"profile-rank-{rank}",
+                        operator="dispatch", run_id=record["run_id"], kernel_sha="a" * 64)
+                    record["operator_measurements"] = {"dispatch": {"breakdown": record["breakdown"]}}
                     self.assertEqual(record["breakdown"]["status"], "complete")
                 record["chain"] = self.records(output, "EP_SERVER_DEDUP_CHAIN_PASS")[0]
                 mapping = {key: record[key] for key in ("rank", "rank_size", "host", "host_index", "local_rank", "device")}
                 manifest = dict(build_id=record["build_id"], checkpoint=record["checkpoint"], source=dict(commit=None),
-                                server_dedup_profile_schema=measurements.RECORDS_SCHEMA)
+                                server_dedup_profile_schema=measurements.RECORDS_SCHEMA,
+                                artifacts={"lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o": "a" * 64})
                 workflow.validate_rank_records([record], [mapping], record["run_id"], manifest, config,
                                                check_measurements=mode != "performance", allow_invalid_output=True)
             self.assertGreater(invalid, 0)
@@ -565,7 +523,7 @@ class ChainConsumerTests(unittest.TestCase):
                 if rank == 1:
                     self.assertNotEqual(process.returncode, 0, output + errors)
                     self.assertIn("EP_SERVER_DEDUP_FAIL", errors)
-                    for marker in ("DISPATCH_PASS", "DISPATCH_INVALID", "BREAKDOWN_PASS"):
+                    for marker in ("DISPATCH_PASS", "DISPATCH_INVALID", "OPERATOR_BREAKDOWN_PASS"):
                         self.assertNotIn("EP_SERVER_DEDUP_" + marker, output)
                 else:
                     self.assertEqual(process.returncode, 0, output + errors)
@@ -583,7 +541,7 @@ class ChainConsumerTests(unittest.TestCase):
                 with self.subTest(rank=rank, fault=fault):
                     self.assertEqual(process.returncode, 0, output + errors)
                     self.assertEqual(len(self.records(output, "EP_SERVER_DEDUP_DISPATCH_PASS")), 1)
-                    marker = self.records(output, "EP_SERVER_DEDUP_BREAKDOWN_PASS")[0]
+                    marker = self.records(output, "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS")[0]
                     self.assertEqual(marker["schema"], measurements.RECORDS_SCHEMA)
                     self.assertEqual(marker["launches"], 5)
                     self.assertEqual(marker["captured_launches"], 1)

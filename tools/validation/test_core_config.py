@@ -12,7 +12,7 @@ from unittest import mock
 
 import workflow
 import run_summary
-import test_combine_m5 as m5
+import current_run_fixture as m5
 
 
 class CoreConfigTests(unittest.TestCase):
@@ -32,7 +32,7 @@ class CoreConfigTests(unittest.TestCase):
         install.mkdir(exist_ok=True)
         manifest = dict(server_dedup_core_config=cores, server_dedup_enabled=True,
             server_dedup_protocol=2, mode="host", checkpoint=None,
-            server_dedup_combine_contract=workflow.combine_contract(None, cores["combine_send_core_num"]),
+            server_dedup_combine_contract=workflow.combine_contract(cores["combine_send_core_num"]),
             server_dedup_contract=workflow.DISPATCH_ABI, server_dedup_profiling=False,
             architecture=workflow.platform.machine(), artifacts={})
         workflow.write_json(install / "manifest.json", manifest)
@@ -90,7 +90,7 @@ class CoreConfigTests(unittest.TestCase):
                     workflow.verify_build(config)
 
     def test_24_core_consumer_passes_real_validation_after_loading_package(self):
-        fixture = m5.CombineM5Tests()
+        fixture = m5.CurrentRunFixture()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         config, mappings, records = fixture.m5_records("combine", "performance", 100, 50)

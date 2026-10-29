@@ -106,7 +106,7 @@ patches/
 temp/
 Testing/
 
-# 七步验证的部署配置和源码导出记录。
+# EP 验证的部署配置和源码导出记录。
 /validation.local.sh
 /hostfile
 /.tilexr-source.json

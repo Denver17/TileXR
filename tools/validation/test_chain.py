@@ -8,14 +8,15 @@ import unittest
 from unittest import mock
 
 import workflow
-from test_workflow import TemporaryRoot
+from current_run_fixture import CurrentRunFixture
 
 
-class ChainTests(TemporaryRoot):
+class ChainTests(CurrentRunFixture):
     def setUp(self):
         super().setUp()
-        os.environ.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.DISPATCH_CHECKPOINT,
-                          TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
+        os.environ.update(
+                          TILEXR_VALIDATION_OPERATOR_MODE="dispatch", TILEXR_VALIDATION_LOOPS="1", TILEXR_VALIDATION_WARMUP="0", TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_COMM_ID="192.0.2.1:10177")
+        os.environ.pop("TILEXR_VALIDATION_SERVERS", None)
         os.environ.pop("TILEXR_DEMO_BARRIER_ADDR", None)
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
 
@@ -24,7 +25,7 @@ class ChainTests(TemporaryRoot):
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, operator_mode="dispatch", dispatch_quant_mode=0, combine_quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
-                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0))
+                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0, implemented_through="M5", scope="full", combine_send_core_num=32))
         original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "64"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
@@ -99,19 +100,8 @@ class ChainTests(TemporaryRoot):
                 self.assertEqual(config.chain["moe_expert_num"], experts)
 
     def test_requires_both_current_markers_and_one_completed_launch(self):
-        manifest = {"build_id": "build", "checkpoint": workflow.DISPATCH_CHECKPOINT, "source": {"commit": "a" * 40}}
-        config = self.config()
-        mappings = workflow.rank_mapping(self.config().hosts())[:8]
-        records = []
-        for mapping in mappings:
-            identity = dict(workflow.rank_record(mapping, "run", manifest), pid=mapping["rank"] + 100, server_dedup_enabled=True, **config.chain)
-            records.append(dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
-                                submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
-                                first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
-                                local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
-                                relay_packets=2, relay_received=2, relay_bytes=31744, data_bytes=111104,
-                                relay_validated=True, dispatch_outputs_validated=True, five_tables_validated=True, member_addresses_validated=True, flags_cleared=True,
-                                first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch"))
+        config, mappings, records = self.m5_records("dispatch", loops=1, warmup=0)
+        manifest = self.manifest
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
                                    (None, "route_mode", "random"), ("chain", "route_mode", "balance"),
@@ -124,7 +114,7 @@ class ChainTests(TemporaryRoot):
                                    ("chain", "peer_mem_bytes", 4 * 1024 ** 3),
                                    ("chain", "peer_mem_bytes", 8 * 1024 ** 3 + 32),
                                    ("chain", "pid", 777), ("chain", "run_id", "old-run"),
-                                   ("chain", "checkpoint", workflow.DRY_RUN_CHECKPOINT)):
+                                   ("chain", "checkpoint", "foreign")):
             changed = copy.deepcopy(records)
             target = changed[0][marker] if marker else changed[0]
             target[key] = value
@@ -142,9 +132,6 @@ class ChainTests(TemporaryRoot):
                 for key, value in (("LOOPS", "0"), ("WARMUP", "-1")):
                     with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), self.assertRaises(ValueError):
                         self.config()
-        for checkpoint in ("ep-sdedup-p1-chain-single", "ep-sdedup-p1-chain-multi", "ep-sdedup-p2-first-hop", "ep-sdedup-p2-source-send"):
-            with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": checkpoint}), self.assertRaises(ValueError):
-                self.config()
         for quant, format, stride in (("0", "e4m3", 15872), ("4", "e4m3", 8192), ("4", "e5m2", 8192)):
             with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_QUANT_MODE": quant, "TILEXR_VALIDATION_FP8_FORMAT": format}):
                 self.assertEqual(workflow.source_send_stride(self.config().chain), stride)
@@ -157,20 +144,9 @@ class ChainTests(TemporaryRoot):
                 self.assertEqual(workflow.source_send_stride(dict(h=h, quant_mode=quant, topk=k)), expected)
 
     def test_multi_requires_all_configured_rounds_and_batch_identity(self):
-        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.DISPATCH_CHECKPOINT
-        os.environ["TILEXR_VALIDATION_LOOPS"] = "1"
-        config = self.config()
-        manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
-        mapping = workflow.rank_mapping(config.hosts())[0]
-        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100, server_dedup_enabled=True,
-                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "run_mode", "loops", "warmup", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope")})
-        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=8 * 1024 ** 3),
-                      submitted=1, completed=1, warmup_submitted=0, warmup_completed=0, cleanup="complete",
-                      first_hop_packets=2, first_hop_received=2, first_hop_bytes=31744, token_stride=15872, direct_packets=3, direct_received=3, direct_bytes=47616,
-                                local_data_bytes=15872, same_server_data_bytes=47616, cross_server_data_bytes=47616,
-                                relay_packets=2, relay_received=2, relay_bytes=31744, data_bytes=111104,
-                                relay_validated=True, dispatch_outputs_validated=True, five_tables_validated=True, member_addresses_validated=True, flags_cleared=True,
-                      first_hop_validated=True, direct_validated=True, route_coverage_validated=True, source_outputs_validated=True, weights_unchanged=True, native_status="dispatch")
+
+        config, mappings, records = self.m5_records("dispatch", loops=1, warmup=0)
+        manifest, mapping, record = self.manifest, mappings[0], records[0]
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
         for key, value in (("first_hop_validated", False), ("token_stride", 8192), ("first_hop_bytes", 1),
                            ("direct_validated", False), ("relay_validated", False), ("dispatch_outputs_validated", False),
@@ -181,33 +157,12 @@ class ChainTests(TemporaryRoot):
                            ("quant_mode", 3), ("kernel_scope", "cnt_cumsum"), ("loops", 3), ("submitted", 4), ("completed", 4), ("completed", 6),
                            ("completed", True), ("warmup_submitted", 1), ("warmup_completed", None),
                            ("run_mode", "performance"), ("cleanup", "failed"),
-                           ("checkpoint", workflow.CHAIN_CHECKPOINT)):
+                           ("checkpoint", "foreign")):
             with self.subTest(key=key, value=value), self.assertRaises(workflow.Failure):
                 workflow.validate_rank_records([dict(record, **{key: value})], [mapping], "run", manifest, config.chain)
         with self.assertRaises(workflow.Failure):
             workflow.validate_rank_records([record], [mapping], "run", manifest)
 
-    def test_memory_boundary_requires_capacity_and_each_read_write_assertion(self):
-        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
-        config = self.config()
-        manifest = {"build_id": "build", "checkpoint": config.checkpoint, "source": {"commit": "a" * 40}}
-        mapping = workflow.rank_mapping(config.hosts())[0]
-        identity = dict(workflow.rank_record(mapping, "run", manifest), pid=100, server_dedup_enabled=True,
-                        **{key: config.chain[key] for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "route_mode", "seed", "quant_mode", "fp8_format", "kernel_scope")})
-        record = dict(identity, chain=dict(identity, peer_count=16, peer_mem_bytes=4 * 1024 ** 3),
-                      peer_mem_bytes=4 * 1024 ** 3, boundary_offset=4 * 1024 ** 3 - 32, probe_bytes=32,
-                      submitted=1, completed=1, cleanup="complete", initial_zero=True, device_initial_zero=True,
-                      device_readback_ff=True, host_boundary_ff=True, guard_zero=True)
-        workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
-        changed = copy.deepcopy(record)
-        changed["chain"]["peer_mem_bytes"] = 8 * 1024 ** 3
-        with self.assertRaises(workflow.Failure):
-            workflow.validate_rank_records([changed], [mapping], "run", manifest, config.chain)
-        for key, value in (("peer_mem_bytes", 12 * 1024 ** 2), ("boundary_offset", 0), ("probe_bytes", 31),
-                           ("initial_zero", False), ("device_initial_zero", False), ("device_readback_ff", False),
-                           ("host_boundary_ff", False), ("guard_zero", False), ("completed", 0)):
-            with self.subTest(key=key), self.assertRaises(workflow.Failure):
-                workflow.validate_rank_records([dict(record, **{key: value})], [mapping], "run", manifest, config.chain)
 
     def test_dispatch_tables_require_all_ranks_matching_one_case(self):
         config = dict(self.config().chain, rank_size=16, bs=2, topk=3)
@@ -231,13 +186,6 @@ class ChainTests(TemporaryRoot):
             with self.subTest(fault=fault), self.assertRaises(ValueError):
                 workflow.validate_dispatch_tables(changed, config)
 
-    def test_memory_boundary_is_one_functional_case(self):
-        os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.MEMORY_BOUNDARY_CHECKPOINT
-        self.assertEqual(self.config().chain["run_mode"], "functional")
-        for key, value in (("RUN_MODE", "performance"), ("RUN_MODE", "breakdown"), ("LOOPS", "2"), ("WARMUP", "1")):
-            with self.subTest(key=key, value=value), mock.patch.dict(os.environ, {"TILEXR_VALIDATION_" + key: value}), \
-                    self.assertRaises(ValueError):
-                self.config()
 
 
 if __name__ == "__main__":

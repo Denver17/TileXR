@@ -279,127 +279,98 @@ def combine_loop_core_totals(run):
     return {name: dict(cores=cores, **_statistics(list(cores.values()))) for name, cores in totals.items()}
 
 
-def combine_breakdown_timeline(run, config=None):
-    """Keep real module intervals; retained C6 captures contain only the total."""
-    if config and config.get("implemented_through") in ("M3", "M4", "M5"):
-        if config["implemented_through"] != "M5" and (config["loops"] != 1 or config["warmup"] != 0):
-            raise ValueError("M3/M4 captures exactly one launch without warmup")
-        # Retained captures may predate this split. If either child is present,
-        # require the full split on every participating core, not just totals.
-        m2_split = any(sample.name in ("m2_prepare_notify", "m2_server_wait")
-                       for launch in run.launches for lane in launch.lanes for sample in lane.samples)
-        loop_detail = any(sample.name in COMBINE_LOOP_MODULES
-                          for launch in run.launches for lane in launch.lanes for sample in lane.samples)
-        if loop_detail and config.get("server_dedup_enabled") is not False:
-            raise ValueError("Combine loop detail requires dedup=0")
-        launches = []
-        for launch in run.launches:
-            lanes = []
-            for lane in launch.lanes:
-                expected = {"kernel_total", "m1_init", "m1_stage", "m6_drain"}
-                expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
-                if m2_split:
-                    if lane.core >= 56:
-                        expected.add("m2_prepare_notify")
-                    if lane.core >= config.get("combine_send_core_num", 32):
-                        expected.add("m2_server_wait")
-                if config["implemented_through"] in ("M4", "M5") and lane.core >= config.get("combine_send_core_num", 32):
-                    expected.add("m4_partial")
-                if config["implemented_through"] == "M5" and lane.core >= config.get("combine_send_core_num", 32):
-                    expected.add("m5_final")
-                if config.get("server_dedup_enabled") is False:
-                    expected = {"kernel_total", "m1_init", "m6_drain"}
-                    expected.add("m6_final" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
-                token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final", "m6_token_issue": "m6_final"}
-                actual = [sample.name for sample in lane.samples
-                          if sample.kind == "interval" and sample.name not in token_stages and sample.name not in COMBINE_LOOP_MODULES]
-                if set(actual) != expected or len(actual) != len(expected):
-                    raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))
-                samples = []
-                if loop_detail:
-                    counts = {name: sum(s.name == name for s in lane.samples) for name in COMBINE_LOOP_MODULES}
-                    recv = 64 - config.get("combine_send_core_num", 32)
-                    local = lane.core - config.get("combine_send_core_num", 32)
-                    required = {}
-                    if local >= 0:
-                        tokens = config["bs"] // recv + (local < config["bs"] % recv)
-                        required = dict(m6_prepare=1, m6_retire=1, m6_ready_wait=tokens,
-                            m6_token_prepare=tokens, m6_output=tokens,
-                            m6_loop_input_wait=tokens * config["topk"],
-                            m6_loop_compute_prefetch=tokens * config["topk"])
-                    else:
-                        selected = counts["m3_server_select"] != 0
-                        required = dict(m3_prepare=1, m3_server_select=config["rank_size"] // 8 if selected else 0,
-                            m3_retire=int(selected), m3_loop_read=counts["m3_loop_read"],
-                            m3_loop_pack_send=counts["m3_loop_read"])
-                    if any(counts[name] != required.get(name, 0) for name in counts):
-                        raise ValueError("Combine loop/core role coverage mismatch: " + str(lane.core))
-                modules = {**token_stages, **COMBINE_LOOP_MODULES}
-                sequences = dict.fromkeys(modules, 0)
-                for sample in lane.samples:
-                    if sample.name in sequences:
-                        if modules[sample.name] not in expected:
-                            raise ValueError("Combine token/core role coverage mismatch: " + str(lane.core))
-                        # records.v1 contains timestamps and event IDs, not TokenId.
-                        # M4 and M5 share a core, but have independent task sets.
-                        # Identify each task by its module-local execution order.
-                        sequence = sequences[sample.name]
-                        sample = replace(sample, instance_id=sequence,
-                            attributes={**sample.attributes, "task_sequence": sequence,
-                                        "task_sequence_scope": "stage/core" if sample.name in COMBINE_LOOP_MODULES else "module/core",
-                                        "timing": "Scalar elapsed including existing waits; no added completion fence",
-                                        **({"token_sequence": sequence // config["topk"],
-                                            "topk_iteration": sequence % config["topk"]}
-                                           if sample.name in ("m6_loop_input_wait", "m6_loop_compute_prefetch") else {})})
-                        sequences[sample.name] += 1
-                    if sample.name == "m4_partial" and config["implemented_through"] == "M5":
-                        sample = replace(sample, attributes={**sample.attributes,
-                            "timing": "instruction issue and read/vector handoff; MTE3 may remain in flight",
-                            "mte3_completion_required": False})
-                    if sample.name in ("m2_prepare_notify", "m2_server_wait"):
-                        sample = replace(sample, attributes={**sample.attributes,
-                            "timing": ("local 64-core prepare wait, clear and ready notification issue"
-                                       if sample.name == "m2_prepare_notify" else
-                                       "local server 8-card ready wait and clear issue"),
-                            "mte3_completion_required": False})
-                    if sample.name == "m3_mte3_complete" and "m3_direct" not in expected:
-                        raise ValueError("Combine M3 completion marker on non-Send core")
-                    samples.append(sample)
-                lanes.append(replace(lane, samples=tuple(samples)))
-            launches.append(replace(launch, lanes=tuple(lanes)))
-        return replace(run, launches=tuple(launches), attributes={**run.attributes,
-            "scope": "full" if config["implemented_through"] == "M5" else "partial", "implemented_through": config["implemented_through"],
-            **({"m4_m5_handoff": "read/vector retired; output slots inherited without MTE3 drain"}
-               if config["implemented_through"] == "M5" and config.get("server_dedup_enabled") is not False else {}),
-            "timing": "latest launch; module intervals and optional per-token instruction issue, no added fences"})
-    if config and config.get("implemented_through") == "M2":
-        common = {"kernel_total", "m1_init", "m1_select", "m1_stage_copy", "m1_prepare_publish", "m6_drain", "p21_delay_50us"}
-        for launch in run.launches:
-            for lane in launch.lanes:
-                expected = set(common)
-                if lane.core >= config.get("combine_send_core_num", 32):
-                    expected.update(("m2_ready_wait", "m2_ready_clear"))
-                if lane.core >= 56:
-                    expected.update(("m2_prepare_wait", "m2_notify"))
-                actual = [sample.name for sample in lane.samples if sample.kind == "interval"]
-                if set(actual) != expected or len(actual) != len(expected):
-                    raise ValueError("M1/M2 breakdown core role or interval coverage mismatch: " + str(lane.core))
-        return replace(run, attributes={**run.attributes, "scope": "partial", "implemented_through": "M2",
-            "timing": "M1/M2 explicit intervals; 50 us wait separately measured, never subtracted from total"})
+def combine_breakdown_timeline(run, config):
+    """Validate and annotate the current full Combine module intervals."""
+    if not config:
+        raise ValueError("Combine breakdown requires current run configuration")
+    # Retained captures may predate this split. If either child is present,
+    # require the full split on every participating core, not just totals.
+    m2_split = any(sample.name in ("m2_prepare_notify", "m2_server_wait")
+                   for launch in run.launches for lane in launch.lanes for sample in lane.samples)
+    loop_detail = any(sample.name in COMBINE_LOOP_MODULES
+                      for launch in run.launches for lane in launch.lanes for sample in lane.samples)
+    if loop_detail and config.get("server_dedup_enabled") is not False:
+        raise ValueError("Combine loop detail requires dedup=0")
     launches = []
     for launch in run.launches:
         lanes = []
         for lane in launch.lanes:
-            samples = list(lane.samples)
-            samples.extend(replace(sample, name="empty_wait", stage_id=0x3003,
-                parent_stage_id=sample.stage_id, category="wait", critical=False,
-                attributes={**sample.attributes, "scope": "empty/framework"})
-                for sample in lane.samples if sample.critical and sample.raw_end > sample.raw_start)
+            expected = {"kernel_total", "m1_init", "m1_stage", "m6_drain"}
+            expected.add("m2_control" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
+            if m2_split:
+                if lane.core >= 56:
+                    expected.add("m2_prepare_notify")
+                if lane.core >= config.get("combine_send_core_num", 32):
+                    expected.add("m2_server_wait")
+            if lane.core >= config.get("combine_send_core_num", 32):
+                expected.add("m4_partial")
+            if lane.core >= config.get("combine_send_core_num", 32):
+                expected.add("m5_final")
+            if config.get("server_dedup_enabled") is False:
+                expected = {"kernel_total", "m1_init", "m6_drain"}
+                expected.add("m6_final" if lane.core >= config.get("combine_send_core_num", 32) else "m3_direct")
+            token_stages = {"m4_token_issue": "m4_partial", "m5_token_issue": "m5_final", "m6_token_issue": "m6_final"}
+            actual = [sample.name for sample in lane.samples
+                      if sample.kind == "interval" and sample.name not in token_stages and sample.name not in COMBINE_LOOP_MODULES]
+            if set(actual) != expected or len(actual) != len(expected):
+                raise ValueError("Combine module/core role coverage mismatch: " + str(lane.core))
+            samples = []
+            if loop_detail:
+                counts = {name: sum(s.name == name for s in lane.samples) for name in COMBINE_LOOP_MODULES}
+                recv = 64 - config.get("combine_send_core_num", 32)
+                local = lane.core - config.get("combine_send_core_num", 32)
+                required = {}
+                if local >= 0:
+                    tokens = config["bs"] // recv + (local < config["bs"] % recv)
+                    required = dict(m6_prepare=1, m6_retire=1, m6_ready_wait=tokens,
+                        m6_token_prepare=tokens, m6_output=tokens,
+                        m6_loop_input_wait=tokens * config["topk"],
+                        m6_loop_compute_prefetch=tokens * config["topk"])
+                else:
+                    selected = counts["m3_server_select"] != 0
+                    required = dict(m3_prepare=1, m3_server_select=config["rank_size"] // 8 if selected else 0,
+                        m3_retire=int(selected), m3_loop_read=counts["m3_loop_read"],
+                        m3_loop_pack_send=counts["m3_loop_read"])
+                if any(counts[name] != required.get(name, 0) for name in counts):
+                    raise ValueError("Combine loop/core role coverage mismatch: " + str(lane.core))
+            modules = {**token_stages, **COMBINE_LOOP_MODULES}
+            sequences = dict.fromkeys(modules, 0)
+            for sample in lane.samples:
+                if sample.name in sequences:
+                    if modules[sample.name] not in expected:
+                        raise ValueError("Combine token/core role coverage mismatch: " + str(lane.core))
+                    # records.v1 contains timestamps and event IDs, not TokenId.
+                    # M4 and M5 share a core, but have independent task sets.
+                    # Identify each task by its module-local execution order.
+                    sequence = sequences[sample.name]
+                    sample = replace(sample, instance_id=sequence,
+                        attributes={**sample.attributes, "task_sequence": sequence,
+                                    "task_sequence_scope": "stage/core" if sample.name in COMBINE_LOOP_MODULES else "module/core",
+                                    "timing": "Scalar elapsed including existing waits; no added completion fence",
+                                    **({"token_sequence": sequence // config["topk"],
+                                        "topk_iteration": sequence % config["topk"]}
+                                       if sample.name in ("m6_loop_input_wait", "m6_loop_compute_prefetch") else {})})
+                    sequences[sample.name] += 1
+                if sample.name == "m4_partial" and config["implemented_through"] == "M5":
+                    sample = replace(sample, attributes={**sample.attributes,
+                        "timing": "instruction issue and read/vector handoff; MTE3 may remain in flight",
+                        "mte3_completion_required": False})
+                if sample.name in ("m2_prepare_notify", "m2_server_wait"):
+                    sample = replace(sample, attributes={**sample.attributes,
+                        "timing": ("local 64-core prepare wait, clear and ready notification issue"
+                                   if sample.name == "m2_prepare_notify" else
+                                   "local server 8-card ready wait and clear issue"),
+                        "mte3_completion_required": False})
+                if sample.name == "m3_mte3_complete" and "m3_direct" not in expected:
+                    raise ValueError("Combine M3 completion marker on non-Send core")
+                samples.append(sample)
             lanes.append(replace(lane, samples=tuple(samples)))
         launches.append(replace(launch, lanes=tuple(lanes)))
     return replace(run, launches=tuple(launches), attributes={**run.attributes,
-        "scope": "empty/framework", "algorithm_bytes": 0, "algorithm_bandwidth": "N/A",
-        "timing": "Scalar boundaries around the empty kernel's 50 us wait; no Combine algorithm"})
+        "scope": "full", "implemented_through": "M5",
+        **({"m4_m5_handoff": "read/vector retired; output slots inherited without MTE3 drain"}
+           if config.get("server_dedup_enabled") is not False else {}),
+        "timing": "latest launch; module intervals and optional per-token instruction issue, no added fences"})
 
 
 # CANN 9.1 的 GetSystemCycle 文档明确规定 950PR/950DT 为 1 GHz；A2/A3 的 50 MHz 不适用。

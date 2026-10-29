@@ -23,8 +23,6 @@ option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
 option(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
     "Enable standard GM event capture in the Server Dedup kernel" OFF)
-option(TILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST
-    "Build the isolated A5 4 GiB peer-window boundary test" OFF)
 
 # EP is distributed as one package. All kernels are A5-only binaries;
 # unsupported devices are rejected by libtilexr-ep.so at runtime.
@@ -286,56 +284,6 @@ set_target_properties(tilexr-ep PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(TARGETS tilexr-ep LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_ep.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
-if(TILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST)
-    set(_boundary_dir "${CMAKE_SOURCE_DIR}/tests/ep/integration")
-    set(_boundary_binary "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_memory_boundary_test_kernel.o")
-    tilexr_add_ep_aicore_kernel(tilexr_ep_memory_boundary_test_kernel
-        "${_boundary_dir}/memory_boundary_kernel.cpp" "${_boundary_binary}"
-        DEPENDS "${CMAKE_SOURCE_DIR}/src/include/comm_args.h")
-    add_library(tilexr-ep-memory-boundary-test SHARED
-        "${_boundary_dir}/memory_boundary_launch.cpp"
-        "${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp")
-    target_include_directories(tilexr-ep-memory-boundary-test PRIVATE
-        "${CMAKE_SOURCE_DIR}/src/include" "${CMAKE_SOURCE_DIR}/src/common"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc")
-    target_link_directories(tilexr-ep-memory-boundary-test PRIVATE "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64")
-    target_link_libraries(tilexr-ep-memory-boundary-test PRIVATE runtime ${CMAKE_DL_LIBS})
-    set_target_properties(tilexr-ep-memory-boundary-test PROPERTIES INSTALL_RPATH "$ORIGIN")
-    add_dependencies(tilexr-ep-memory-boundary-test tilexr_ep_memory_boundary_test_kernel)
-    tilexr_attach_kernel_artifacts(tilexr-ep-memory-boundary-test
-        FILES "${_boundary_binary}" TARGETS tilexr_ep_memory_boundary_test_kernel)
-    install(TARGETS tilexr-ep-memory-boundary-test LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-endif()
-
-option(TILEXR_EP_BUILD_COMBINE_MEMORY_BOUNDARY_TEST
-    "Build the test-only two-window Combine boundary probe" OFF)
-if(TILEXR_EP_BUILD_COMBINE_MEMORY_BOUNDARY_TEST)
-    set(_combine_boundary_dir "${CMAKE_SOURCE_DIR}/tests/ep/integration")
-    set(_combine_boundary_binary "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_combine_memory_boundary_test_kernel.o")
-    tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_boundary_test_kernel
-        "${_combine_boundary_dir}/combine_memory_boundary_kernel.cpp" "${_combine_boundary_binary}"
-        DEPENDS "${_combine_boundary_dir}/combine_memory_boundary_test.h"
-            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
-            "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
-            "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
-    add_library(tilexr-ep-combine-memory-boundary-test SHARED
-        "${_combine_boundary_dir}/combine_memory_boundary_launch.cpp"
-        "${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp")
-    target_include_directories(tilexr-ep-combine-memory-boundary-test PRIVATE
-        "${CMAKE_SOURCE_DIR}/src/include" "${CMAKE_SOURCE_DIR}/src/common"
-        "${CMAKE_CURRENT_SOURCE_DIR}/common"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/include"
-        "${ASCEND_HOME_PATH}/${ARCH}-linux/pkg_inc")
-    target_link_directories(tilexr-ep-combine-memory-boundary-test PRIVATE "${ASCEND_HOME_PATH}/${ARCH}-linux/lib64")
-    target_link_libraries(tilexr-ep-combine-memory-boundary-test PRIVATE runtime ${CMAKE_DL_LIBS})
-    set_target_properties(tilexr-ep-combine-memory-boundary-test PROPERTIES INSTALL_RPATH "$ORIGIN")
-    add_dependencies(tilexr-ep-combine-memory-boundary-test tilexr_ep_combine_memory_boundary_test_kernel)
-    tilexr_attach_kernel_artifacts(tilexr-ep-combine-memory-boundary-test
-        FILES "${_combine_boundary_binary}" TARGETS tilexr_ep_combine_memory_boundary_test_kernel)
-    install(TARGETS tilexr-ep-combine-memory-boundary-test LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-endif()
 
 install(FILES profiling/server_dedup.mapping.json profiling/server_dedup_combine.mapping.json
     DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/profiling)

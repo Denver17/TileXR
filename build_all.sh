@@ -19,7 +19,6 @@ for argument in "$@"; do
     esac
 done
 printf '[build] Loading environment\n'
-unset TILEXR_VALIDATION_CHECKPOINT TILEXR_INTERNAL_ACCEPTANCE_STAGE
 export TILEXR_VALIDATION_ACTION=build
 source "$(dirname -- "${BASH_SOURCE[0]}")/set_env.sh"
 # Build options are explicit and independent of all runtime case parameters.

@@ -1,24 +1,14 @@
 // Shared Combine tensor fixtures and invariant checks.
 // These expert values exercise routing and copies; they do not model expert computation.
-void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes, uint64_t generation = 0)
+void InitializeCombineExpert(const Config &c, void *data, uint64_t bytes)
 {
-    const uint16_t one = c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? 0x3f80U : 0x3c00U;
-    std::vector<uint16_t> chunk(512U * 1024U, one);
+    std::vector<uint16_t> chunk(512U * 1024U);
     for (uint64_t offset = 0; offset < bytes;) {
         const uint64_t count = std::min<uint64_t>(bytes - offset, chunk.size() * sizeof(uint16_t));
-        if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine()) {
-            for (uint64_t i = 0; i < count / 2U; ++i) {
-                const uint64_t element = offset / 2U + i;
-                chunk[i] = CombineM4Reference::ExpertBits(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16,
-                    c.rank, element / c.h, element % c.h, c.operatorMode == "both");
-            }
-        } else if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3") {
-            for (uint64_t i = 0; i < count / 2U; ++i) {
-                const uint64_t element = offset / 2U + i;
-                // Finite, exact dtype bits distinguish rank, original row, column and round.
-                chunk[i] = static_cast<uint16_t>(one + (element / c.h * 17U +
-                    element % c.h * 3U + c.rank * 11U + generation * 29U) % 113U);
-            }
+        for (uint64_t i = 0; i < count / 2U; ++i) {
+            const uint64_t element = offset / 2U + i;
+            chunk[i] = CombineM4Reference::ExpertBits(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16,
+                c.rank, element / c.h, element % c.h, c.operatorMode == "both");
         }
         Check(aclrtMemcpy(static_cast<uint8_t *>(data) + offset, bytes - offset,
             chunk.data(), count, ACL_MEMCPY_HOST_TO_DEVICE), "initialize combine expertOut");
@@ -31,9 +21,6 @@ void InitializeStandaloneCombine(const Config &c,
 {
     using namespace ServerDedupReference;
     auto shape = SourceSendShape(c);
-    // Arithmetic checkpoints honor the configured global routes. Earlier
-    // standalone fixtures retain balanced routes for incomplete global epochs.
-    if (c.checkpoint != "ep-sdedup-combine-p2-m4" && !c.FullCombine()) shape.routeMode = TileXREpDemo::RouteMode::Balance;
     shape.quantized = false;
     const auto rows = DispatchRows(shape, c.rank);
     Require(rows.size() <= layout.capacityRows, "standalone Combine row capacity");
@@ -43,10 +30,9 @@ void InitializeStandaloneCombine(const Config &c,
     std::vector<uint32_t> relay(layout.relayReadIndexBytes / 4U, 0);
     std::vector<uint32_t> mask(c.bs, 0);
     auto weights = Weights(shape, c.rank);
-    if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine())
-        for (uint32_t token = 0; token < uint32_t(c.bs); ++token)
-            for (uint32_t k = 0; k < uint32_t(c.topK); ++k)
-                weights[token * c.topK + k] = CombineM4Reference::Weight(c.rank, token, k);
+    for (uint32_t token = 0; token < uint32_t(c.bs); ++token)
+        for (uint32_t k = 0; k < uint32_t(c.topK); ++k)
+            weights[token * c.topK + k] = CombineM4Reference::Weight(c.rank, token, k);
     for (size_t i = 0; i < rows.size(); ++i) {
         const auto &row = rows[i];
         ++prefix[(row.expert % (c.experts / c.rankSize)) * c.rankSize + row.source];
@@ -55,26 +41,14 @@ void InitializeStandaloneCombine(const Config &c,
         std::copy(address.begin(), address.end(), assist.begin() + i * 3U);
         if (row.FirstHop()) {
             auto words = RelayReadIndex(row);
-            if (c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine())
-                for (size_t member = 0; member < row.packet.members.size(); ++member)
-                    words[member * 2U + 1U] = FloatBits(CombineM4Reference::Weight(
-                        row.source, row.token, row.packet.members[member].k));
+            for (size_t member = 0; member < row.packet.members.size(); ++member)
+                words[member * 2U + 1U] = FloatBits(CombineM4Reference::Weight(
+                    row.source, row.token, row.packet.members[member].k));
             std::copy(words.begin(), words.end(), relay.begin() + i * c.topK * 2U);
         }
     }
     for (size_t i = 1; i < prefix.size(); ++i) prefix[i] += prefix[i - 1];
-    if (c.combineFixture != "balanced") {
-        const uint32_t count = c.combineFixture == "empty" ? 0U :
-            static_cast<uint32_t>(std::min<uint64_t>(layout.capacityRows, 10000U));
-        std::fill(prefix.begin(), prefix.end(), 0);
-        prefix.back() = count;
-        std::fill(types.begin(), types.end(), 0);
-        for (uint32_t row = 0; row < count; ++row) {
-            // Holes cross table-cache batches; slots deliberately differ from row and packed position.
-            types[row] = row % 7U == 2U || row % 11U == 5U ? 3U : 1U;
-            assist[row * 3U] = static_cast<uint32_t>(c.experts * c.bs - 1U - row);
-        }
-    }
+
     const auto packets = SourcePackets(Ids(shape, c.rank), weights, c.rank, c.rankSize, c.experts, c.topK);
     for (const auto &packet : packets) {
         const auto &first = packet.members.front();
@@ -114,11 +88,11 @@ std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
         "relayReadIndex", "sourceMask", "yOut"};
     std::vector<CombineTensorSnapshot> snapshots;
     for (size_t i = 0; i < 8U; ++i) {
-        if (sizes[i] == 0U || (c.FullCombine() && indices[i] == 13U)) continue;
+        if (sizes[i] == 0U || indices[i] == 13U) continue;
         if (!TileXREp::EpServerDedupEnabled(c.bs) &&
             (indices[i] == 5U || indices[i] == 7U || indices[i] == 8U)) continue;
         // A continuous Dispatch batch legitimately rewrites its output tensors.
-        // Independent expertOut is invariant; yOut is invariant only before M5.
+        // Independent expertOut is invariant; yOut is validated numerically.
         if (dispatchBatch && indices[i] != 12U && indices[i] != 13U) continue;
         snapshots.push_back({names[i], buffers[indices[i]], std::vector<uint8_t>(sizes[i])});
         auto &snapshot = snapshots.back();
@@ -141,30 +115,6 @@ void ValidateCombineTensors(const std::vector<CombineTensorSnapshot> &snapshots)
             offset += count;
         }
     }
-}
-
-std::string CombineSingleDetails(const Config &c, uint64_t peerBytes)
-{
-    const bool both = c.operatorMode == "both";
-    const int64_t dispatchMagic = both ? 1 : 0;
-    const int64_t combineMagic = both ? 2 : 1;
-    // Fresh communicator, one successful launch per active operator. Never take
-    // an extra magic to observe the value.
-    std::ostringstream out;
-    out << ",\"dispatch_submitted\":" << (both ? 1 : 0)
-        << ",\"dispatch_completed\":" << (both ? 1 : 0)
-        << ",\"combine_submitted\":1,\"combine_completed\":1"
-        << ",\"dispatch_last_magic\":" << dispatchMagic << ",\"combine_last_magic\":" << combineMagic
-        << ",\"dispatch_window_offset\":" << (both ? TileXREp::TileXREpServerDedupWindowOffset(dispatchMagic, peerBytes) : 0U)
-        << ",\"combine_window_offset\":" << TileXREp::TileXREpServerDedupWindowOffset(combineMagic, peerBytes)
-        << ",\"kernel_scope\":" << Json(both ? "dispatch-combine-empty" : "combine-empty")
-        << ",\"native_status\":\"combine-empty\",\"combine_empty\":true,\"combine_delay_us\":50"
-        << ",\"combine_inputs_unchanged\":true,\"y_out_unchanged\":true"
-        << ",\"five_tables_linked\":" << (both ? "true" : "false")
-        << ",\"send_counts_linked\":" << (both ? "true" : "false")
-        << ",\"expert_out_source\":" << Json(!both ? "standalone_expert_out" :
-            c.quantMode == 0 ? "dispatch_expand_x" : "separate_expert_out");
-    return out.str();
 }
 
 // Caller-derived sequence: each successful public operator call consumes one
@@ -201,23 +151,3 @@ struct OperatorProgress {
                 TileXREp::TileXREpServerDedupWindowOffset(lastMagic, peerBytes));
     }
 };
-
-std::string CombineMultiDetails(const Config &c, uint64_t peerBytes,
-    const OperatorProgress &dispatch, const OperatorProgress &combine)
-{
-    const bool both = c.operatorMode == "both";
-    std::ostringstream out;
-    out << dispatch.Details("dispatch", peerBytes) << combine.Details("combine", peerBytes)
-        << ",\"stream_synchronizations\":1"
-        << ",\"kernel_scope\":" << Json(both ? "dispatch-combine-empty" : "combine-empty")
-        << ",\"native_status\":\"combine-empty\",\"combine_empty\":true,\"combine_delay_us\":50"
-        << ",\"combine_input_check\":" << Json(both ? "dispatch-final-reference" : "full-snapshot")
-        << ",\"combine_inputs_unchanged\":" << (both ? "false" : "true")
-        << ",\"y_out_unchanged\":true,\"independent_expert_out_unchanged\":"
-        << (!both || c.quantMode != 0 ? "true" : "false")
-        << ",\"five_tables_linked\":" << (both ? "true" : "false")
-        << ",\"send_counts_linked\":" << (both ? "true" : "false")
-        << ",\"expert_out_source\":" << Json(!both ? "standalone_expert_out" :
-            c.quantMode == 0 ? "dispatch_expand_x" : "separate_expert_out");
-    return out.str();
-}

@@ -38,37 +38,6 @@ class BatchTests(unittest.TestCase):
                     self.assertNotIn("PASS", result.stdout)
                     self.assertIn("Failed", result.stdout)
 
-    def test_commit_entry_selects_current_p24_checkpoint_and_propagates_failure(self):
-        repo = Path(__file__).resolve().parents[2]
-        bash = Path(sys.executable).parent / "bash"
-        if not bash.exists():
-            bash = Path(shutil.which("bash"))
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            shutil.copy2(repo / 'run_commit_validation.sh', root / 'run_commit_validation.sh')
-            shutil.copy2(repo / 'set_env.sh', root / 'set_env.sh')
-            (root / 'scripts').mkdir()
-            (root / 'scripts/common_env.sh').write_text('# environment fixture\n')
-            cann = root / 'cann-env.sh'
-            cann.write_text('# CANN fixture\n')
-            (root / 'tools/validation').mkdir(parents=True)
-            (root / 'tools/validation/workflow.py').write_text(
-                'import json, os, pathlib, sys\n'
-                'pathlib.Path("calls").write_text(json.dumps({"argv": sys.argv[1:], '
-                '"checkpoint": os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"], '
-                '"mode": os.environ["TILEXR_VALIDATION_BUILD_MODE"]}))\n'
-                'raise SystemExit(19)\n', encoding='utf-8')
-            result = subprocess.run([str(bash), 'run_commit_validation.sh'], cwd=root,
-                env=dict(os.environ, PATH=str(bash.parent) + os.pathsep + os.environ['PATH'],
-                         TILEXR_VALIDATION_PYTHON=sys.executable,
-                         TILEXR_INTERNAL_ACCEPTANCE_STAGE='ep-sdedup-p2-dispatch',
-                         TILEXR_VALIDATION_BUILD_MODE='production',
-                         TILEXR_CANN_ENV_SCRIPT=str(cann)),
-                text=True, capture_output=True, timeout=10)
-            self.assertEqual(result.returncode, 19, result.stderr)
-            self.assertEqual(json.loads((root / 'calls').read_text()), {
-                'argv': ['commit-validate'], 'checkpoint': 'ep-sdedup-combine-p2-m5', 'mode': 'production'})
-            self.assertNotIn('PASS', result.stdout + result.stderr)
 
     def test_batch_invokes_core_cases_without_build_or_sync(self):
         with tempfile.TemporaryDirectory() as directory:

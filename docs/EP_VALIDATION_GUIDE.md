@@ -100,9 +100,13 @@ both 连接真实 Dispatch 输出元数据与 Combine，并使用测试定义的
 ```bash
 cmake -S tests/ep -B build/server-dedup-host
 cmake --build build/server-dedup-host -j2
-ctest --test-dir build/server-dedup-host --output-on-failure
+ctest --test-dir build/server-dedup-host -j1 --output-on-failure
 python3 -m unittest discover -s tools/validation -p 'test_*.py'
 ```
+
+Host consumer 测试会分配多 rank 参考数据，内存受限环境应串行运行 CTest；
+并行进程被系统终止不能作为算子数值失败的证据。构建期间保持源码不变，
+否则构建入口会拒绝将变化中的源码与产物关联。
 
 对现有安装包执行登记的 Host C++ 与 Python 测试：
 

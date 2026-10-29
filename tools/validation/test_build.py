@@ -22,7 +22,7 @@ class ProductionChecksTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.install = self.root / "install"
         self.log = self.root / "logs"
-        self.names = ("TileXRMoeEpDispatchMemoryServerDedup", "TileXRMoeEpDispatchMemory")
+        self.names = ("TileXRMoeEpDispatchMemoryServerDedup", "TileXRMoeEpDispatchMemory", "TileXRMoeEpCombineMemoryServerDedup")
         self.symbols = "\n".join(f"{name} T 1000 10" for name in self.names)
         patch = mock.patch.dict(os.environ, {"ASCEND_DRIVER_PATH": str(self.root / "driver")})
         patch.start()
@@ -37,39 +37,25 @@ class ProductionChecksTests(unittest.TestCase):
             return f"libascend_hal.so => {self.root / 'driver/lib64/driver/libascend_hal.so'} (0x1000)\n"
         self.fail(f"unexpected command: {argv}")
 
-    def check(self, checkpoint=workflow.CHECKPOINT):
+    def check(self, checkpoint=None):
         with mock.patch.object(workflow, "require_tools"), \
                 mock.patch.object(workflow, "execute", side_effect=self.inspect_fixture) as execute:
             workflow.runtime_check(SimpleNamespace(mode="production", checkpoint=checkpoint), self.install, self.log)
         return execute
 
-    def test_empty_kernel_inspects_installed_elf_once(self):
-        execute = self.check(workflow.EMPTY_KERNEL_CHECKPOINT)
-        self.assertEqual(execute.call_args_list[0].args[0],
-                         ["readelf", "-h", self.install / "lib/tilexr/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.o"])
-        self.assertEqual(len(execute.call_args_list), 4)
-
-    def test_combine_c2_requires_its_symbol_and_inspects_its_artifact(self):
-        with self.assertRaisesRegex(ValueError, "TileXRMoeEpCombineMemoryServerDedup"):
-            self.check(workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT)
-        self.symbols += "\nTileXRMoeEpCombineMemoryServerDedup T 3000 10\n"
-        execute = self.check(workflow.COMBINE_EMPTY_KERNEL_CHECKPOINT)
-        self.assertEqual(execute.call_args_list[0].args[0],
-                         ["readelf", "-h", self.install / "lib/tilexr/kernels/tilexr_ep_combine_memory_server_dedup_kernel.o"])
-        self.assertEqual(len(execute.call_args_list), 4)
 
     def test_c_abi_functions_pass_and_remaining_library_checks_run(self):
         execute = self.check()
-        self.assertEqual([call.args[0][0] for call in execute.call_args_list], ["nm", "readelf", "ldd"])
+        self.assertEqual([call.args[0][0] for call in execute.call_args_list], ["readelf", "nm", "readelf", "ldd"])
 
     def test_each_required_function_must_be_defined_with_its_exact_name(self):
         for missing in self.names:
-            other = next(name for name in self.names if name != missing)
+            other = "\n".join(f"{name} T 2000 10" for name in self.names if name != missing)
             for replacement in ("", f"{missing}_helper T 1000 10", f"prefix_{missing} T 1000 10",
                                 f"_Z{len(missing)}{missing}v T 1000 10", f"{missing} U",
                                 f"{missing} t 1000 10", f"{missing} D 1000 8"):
                 with self.subTest(missing=missing, replacement=replacement):
-                    self.symbols = f"{other} T 2000 10\n{replacement}"
+                    self.symbols = f"{other}\n{replacement}"
                     with self.assertRaisesRegex(ValueError, "生产库缺少导出符号：" + missing) as error:
                         self.check()
                     self.assertIn(str(self.install / "lib/libtilexr-ep.so"), str(error.exception))
@@ -82,18 +68,22 @@ class BuildTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "source"
         self.root.mkdir()
-        (self.root / "hostfile").write_text("127.0.0.1\n", encoding="utf-8")
+        (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         (self.root / "CMakeLists.txt").write_text("# copied source without Git\n", encoding="utf-8")
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith("TILEXR_VALIDATION_")}
-        environment.update(TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.CHECKPOINT,
+        environment.update(
                            TILEXR_VALIDATION_ROOT=str(self.root),
                            TILEXR_VALIDATION_BUILD_MODE="host",
                            TILEXR_VALIDATION_TIMEOUT="30")
         patch = mock.patch.dict(os.environ, environment, clear=True)
         patch.start()
         self.addCleanup(patch.stop)
-        self.names = sorted(workflow.REQUIRED_TESTS)
+        mapping = self.root / "src/ep/profiling"
+        mapping.mkdir(parents=True)
+        for filename in ("server_dedup.mapping.json", "server_dedup_combine.mapping.json"):
+            (mapping / filename).write_text("{}")
+        self.names = sorted(workflow.COMBINE_TESTS)
         self.commands = []
         self.install_prefixes = {}
         self.generation = 0
@@ -112,13 +102,25 @@ class BuildTests(unittest.TestCase):
             directory = Path(args[args.index("-B") + 1])
             self.install_prefixes[directory] = Path(next(
                 arg.split("=", 1)[1] for arg in args if arg.startswith("-DCMAKE_INSTALL_PREFIX=")))
+        if "--build" in args:
+            directory = Path(args[args.index("--build") + 1])
+            for name in [*self.names, workflow.COMBINE_DRY_RUN_PROGRAM, workflow.CHAIN_PROGRAM]:
+                target = directory / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(f"fixture generation {self.generation}\n")
+        if "-B" in args:
+            stage = self.install_prefixes[directory]
+            for filename in ("server_dedup.mapping.json", "server_dedup_combine.mapping.json"):
+                for base in (self.root / "src/ep/profiling", stage / "share/tilexr/profiling"):
+                    base.mkdir(parents=True, exist_ok=True)
+                    (base / filename).write_text("{}")
         if "--install" in args:
             directory = Path(args[args.index("--install") + 1])
             stage = self.install_prefixes[directory]
             if directory.name == "production":
                 files = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
                 files += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o"
-                          for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup")]
+                          for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup", "combine_memory_server_dedup")]
                 if any("-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST=ON" in command for command, _, _ in self.commands):
                     files += ["lib/libtilexr-ep-memory-boundary-test.so",
                               "lib/tilexr/kernels/tilexr_ep_memory_boundary_test_kernel.o"]
@@ -134,7 +136,7 @@ class BuildTests(unittest.TestCase):
         if args[0] == "ctest":
             host_build = Path(args[args.index("--test-dir") + 1])
             output = json.dumps({"tests": [{"name": name,
-                                           "command": [str(host_build / "bin" / name)]}
+                                           "command": ([sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine.py")), "--consumer", str(host_build / workflow.COMBINE_DRY_RUN_PROGRAM)] if name in workflow.CONSUMER_TESTS else [sys.executable, str(self.root / "tests/ep/unit/test_server_dedup_combine_config.py")] if name == workflow.COMBINE_CONFIG_TEST else [str(host_build / name)])}
                                           for name in self.names]})
         else:
             output = "fixture command completed\n"
@@ -174,7 +176,7 @@ class BuildTests(unittest.TestCase):
     def test_production_build_needs_no_inventory_or_runtime_case(self):
         (self.root / "hostfile").unlink()
         with mock.patch.dict(os.environ, {
-                "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
+
                 "TILEXR_VALIDATION_SERVERS": "invalid", "TILEXR_VALIDATION_MOE_EXPERT_NUM": "invalid",
                 "TILEXR_VALIDATION_RUN_MODE": "invalid", "TILEXR_VALIDATION_LOOPS": "invalid",
                 "TILEXR_VALIDATION_TIMEOUT": "invalid", "TILEXR_COMM_ID": "invalid",
@@ -190,7 +192,7 @@ class BuildTests(unittest.TestCase):
         for boundary in ("start", "exit"):
             with self.subTest(boundary=boundary):
                 self.build_fixture(config)
-                with redirect_stdout(io.StringIO()):
+                with redirect_stdout(io.StringIO()), mock.patch.object(workflow, "execute", return_value="VERIFY_PASS"):
                     workflow.sync(config)
                 self.assertTrue((config.logs / "sync.json").is_file())
 
@@ -228,10 +230,10 @@ class BuildTests(unittest.TestCase):
         self.names.append("test_new_additional_host_case")
         manifest, _ = self.build_fixture()
         self.assertEqual({test["name"] for test in manifest["tests"]}, set(self.names))
-        self.assertGreater(len(manifest["tests"]), len(workflow.REQUIRED_TESTS))
+        self.assertEqual(len(manifest["tests"]), len(workflow.COMBINE_TESTS) + 1)
         for missing in ("test_tilexr_ep_server_dedup_protocol", "test_tilexr_ep_layout"):
             with self.subTest(missing=missing):
-                self.names = sorted(workflow.REQUIRED_TESTS - {missing}) + ["test_replacement"]
+                self.names = sorted(workflow.COMBINE_TESTS - {missing}) + ["test_replacement"]
                 with mock.patch.object(workflow, "runtime_check") as runtime, \
                         mock.patch.object(workflow, "require_tools"), \
                         mock.patch.object(workflow, "execute", side_effect=self.compiled_command), \
@@ -240,34 +242,6 @@ class BuildTests(unittest.TestCase):
                 runtime.assert_not_called()
                 self.assertFalse((self.config().install / "manifest.json").exists())
 
-    def test_empty_kernel_build_requires_installed_registration_consumer(self):
-        with mock.patch.dict(os.environ, {"TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.EMPTY_KERNEL_CHECKPOINT}):
-            config = self.config("production")
-        with self.assertRaisesRegex(ValueError, workflow.REGISTRATION_TEST):
-            self.build_fixture(config)
-        self.names.append(workflow.REGISTRATION_TEST)
-        manifest, _ = self.build_fixture(config)
-        self.assertEqual(manifest["checkpoint"], workflow.EMPTY_KERNEL_CHECKPOINT)
-        self.assertIn(workflow.REGISTRATION_TEST, [test["name"] for test in manifest["tests"]])
-        configure = [args for args, _, _ in self.commands if "-S" in args][-1]
-        self.assertIn("-DBUILD_TILEXR_EP_SERVER_DEDUP_REGISTRATION_TEST=ON", configure)
-        self.assertIn(f"-DTILEXR_INSTALL_PREFIX={workflow.validation_build_directory(config) / 'install'}", configure)
-
-    def test_chain_build_installs_native_consumer_without_adding_per_host_test(self):
-        (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
-        for checkpoint in (workflow.DISPATCH_CHECKPOINT, workflow.MEMORY_BOUNDARY_CHECKPOINT):
-            with self.subTest(checkpoint=checkpoint), mock.patch.dict(os.environ, {
-                    "TILEXR_INTERNAL_ACCEPTANCE_STAGE": checkpoint, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
-                config = self.config("production")
-                self.install_chain = False
-                with self.assertRaisesRegex(ValueError, workflow.CHAIN_PROGRAM):
-                    self.build_fixture(config)
-                self.install_chain = True
-                manifest, _ = self.build_fixture(config)
-                self.assertEqual(len(manifest["tests"]),
-                                 0 if checkpoint == workflow.MEMORY_BOUNDARY_CHECKPOINT else len(workflow.REQUIRED_TESTS))
-                self.assertNotIn(workflow.CHAIN_PROGRAM, [test["name"] for test in manifest["tests"]])
-                self.assertIn("bin/" + workflow.CHAIN_PROGRAM, manifest["artifacts"])
 
     def test_duplicate_test_name_cannot_replace_independent_execution(self):
         self.names.append(self.names[0])
@@ -280,7 +254,7 @@ class BuildTests(unittest.TestCase):
 
     def test_dispatch_rejects_previous_launch_abi(self):
         with mock.patch.dict(os.environ, {
-                'TILEXR_INTERNAL_ACCEPTANCE_STAGE': workflow.DISPATCH_CHECKPOINT,
+
                 'TILEXR_COMM_ID': '192.0.2.1:10177'}):
             config = self.config('production')
             manifest, _ = self.build_fixture(config)
@@ -306,7 +280,7 @@ class BuildTests(unittest.TestCase):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         for mode in ("functional", "performance"):
             with self.subTest(mode=mode), mock.patch.dict(os.environ, {
-                    "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
+
                     "TILEXR_VALIDATION_RUN_MODE": mode, "TILEXR_COMM_ID": "192.0.2.1:10177"}):
                 self.commands.clear()
                 self.build_fixture(self.config("production"))
@@ -321,7 +295,7 @@ class BuildTests(unittest.TestCase):
     def test_breakdown_build_enables_count_profile_and_rejects_baseline_or_legacy_package(self):
         (self.root / "hostfile").write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         with mock.patch.dict(os.environ, {
-                "TILEXR_INTERNAL_ACCEPTANCE_STAGE": workflow.DISPATCH_CHECKPOINT,
+
                 "TILEXR_VALIDATION_BREAKDOWN": "1", "TILEXR_VALIDATION_RUN_MODE": "breakdown", "TILEXR_COMM_ID": "192.0.2.1:10177"}):
             config = self.config("production")
             manifest, _ = self.build_fixture(config)

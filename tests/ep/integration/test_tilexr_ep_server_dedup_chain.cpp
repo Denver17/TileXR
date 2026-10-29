@@ -38,12 +38,6 @@
 #include "server_dedup_dispatch_reference.h"
 #include "server_dedup_combine_m4_reference.h"
 #include <map>
-#ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
-#include "memory_boundary_test.h"
-#endif
-#ifdef TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST
-#include "combine_memory_boundary_test.h"
-#endif
 
 namespace {
 using Clock = std::chrono::steady_clock;
@@ -144,7 +138,7 @@ int64_t Number(const char *text, const char *name)
 }
 
 struct Config {
-    std::string run, build, commit, host, checkpoint, runMode;
+    std::string run, build, commit, host, runMode;
     int hostIndex, localRank, device, rank, rankSize;
     uint32_t loops = 1;
     uint32_t warmup = 0;
@@ -155,11 +149,7 @@ struct Config {
     int64_t quantMode = 0; // Dispatch; retain the legacy configuration alias.
     int64_t combineQuantMode = 0;
     std::string operatorMode = "dispatch";
-    std::string combineFixture = "balanced";
-    std::string combineObservation = "batch";
-    bool FullCombine() const { return checkpoint.empty() || checkpoint == "ep-sdedup-combine-p2-m5"; }
     bool dryRun = false;
-    bool boundaryProbe = false;
     std::string fp8Format = "e4m3";
     sockaddr_in barrier {};
 };
@@ -190,52 +180,13 @@ Config Parse(int argc, char **argv)
     }
     Require(argc == 10, "expected [--dry-run] run build commit host host_index local_rank device rank rank_size");
     c.run = argv[1]; c.build = argv[2]; c.commit = argv[3]; c.host = argv[4];
-    const char *checkpoint = std::getenv("TILEXR_INTERNAL_ACCEPTANCE_STAGE");
-    c.checkpoint = checkpoint == nullptr ? "" : checkpoint;
-    Require(c.checkpoint == "ep-sdedup-p2-dispatch" ||
-        c.checkpoint == "ep-sdedup-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p1-dry-run" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine(),
-        "unsupported TILEXR_INTERNAL_ACCEPTANCE_STAGE");
-    if (const char *probe = std::getenv("TILEXR_VALIDATION_BOUNDARY_PROBE")) {
-        Require(std::strcmp(probe, "0") == 0 || std::strcmp(probe, "1") == 0,
-            "boundary_probe must be 0/1");
-        c.boundaryProbe = std::strcmp(probe, "1") == 0;
-    }
-    Require(!c.boundaryProbe || c.checkpoint == "ep-sdedup-combine-p1-memory-boundary",
-        "boundary_probe requires C7 checkpoint");
-    Require(c.checkpoint != "ep-sdedup-combine-p1-dry-run" || c.dryRun,
-        "Combine C3 requires --dry-run");
     if (const char *op = std::getenv("TILEXR_VALIDATION_OPERATOR_MODE")) c.operatorMode = op;
     Require(c.operatorMode == "dispatch" || c.operatorMode == "combine" || c.operatorMode == "both",
         "operator_mode must be dispatch/combine/both");
-    Require(c.dryRun || c.operatorMode == "dispatch" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine(),
-        "Combine device execution requires a Combine acceptance checkpoint");
-    if (const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_FIXTURE")) c.combineFixture = value;
-    if (const char *value = std::getenv("TILEXR_VALIDATION_COMBINE_OBSERVATION")) c.combineObservation = value;
-    Require(c.combineFixture == "balanced" || c.combineFixture == "sparse" || c.combineFixture == "empty",
-        "combine_fixture must be balanced/sparse/empty");
-    Require(c.combineObservation == "batch" || c.combineObservation == "per-round",
-        "combine_observation must be batch/per-round");
-    Require(c.combineFixture == "balanced" || (c.checkpoint == "ep-sdedup-combine-p2-m12" && c.operatorMode == "combine"),
-        "nonbalanced Combine fixtures require P2.1 combine-only");
     const char *mode = std::getenv("TILEXR_VALIDATION_RUN_MODE");
     c.runMode = mode == nullptr ? "functional" : mode;
     Require(c.runMode == "functional" || c.runMode == "performance" || c.runMode == "breakdown",
         "unsupported TILEXR_VALIDATION_RUN_MODE");
-    Require(c.combineObservation == "batch" || (c.checkpoint == "ep-sdedup-combine-p2-m12" &&
-        c.runMode == "functional" && c.operatorMode != "dispatch"), "per-round observation requires P2.1 functional Combine");
     const char *loopsText = std::getenv("TILEXR_VALIDATION_LOOPS");
     const char *warmupText = std::getenv("TILEXR_VALIDATION_WARMUP");
     const int64_t loops = loopsText == nullptr ? 1 :
@@ -246,18 +197,6 @@ Config Parse(int argc, char **argv)
     Require(warmup <= UINT32_MAX, "TILEXR_VALIDATION_WARMUP must be in [0, UINT32_MAX]");
     c.loops = static_cast<uint32_t>(loops);
     c.warmup = static_cast<uint32_t>(warmup);
-    Require((c.checkpoint != "ep-sdedup-combine-p2-m3" && c.checkpoint != "ep-sdedup-combine-p2-m4") ||
-        (c.loops == 1 && c.warmup == 0 && c.combineObservation == "batch"),
-        "M3/M4 require loops=1, warmup=0 and batch observation in every mode");
-    Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-single" ||
-        (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
-        "C4 requires functional mode, loops=1, warmup=0");
-    Require(c.dryRun || c.checkpoint != "ep-sdedup-combine-p1-chain-multi" ||
-        c.runMode == "functional", "C5 requires functional mode");
-    Require(c.checkpoint != "ep-sdedup-combine-p1-memory-boundary" || c.runMode == "functional",
-        "C7 requires functional mode");
-    Require(!c.boundaryProbe || (!c.dryRun && c.loops == 1 && c.warmup == 0),
-        "C7 boundary probe requires real functional mode, loops=1, warmup=0");
     if (const char *routeMode = std::getenv("TILEXR_VALIDATION_ROUTE_MODE"))
         c.routeMode = TileXREpDemo::ParseRouteMode(routeMode);
     if (const char *seedText = std::getenv("TILEXR_VALIDATION_SEED")) {
@@ -267,9 +206,6 @@ Config Parse(int argc, char **argv)
         Require(seed <= UINT32_MAX, "TILEXR_VALIDATION_SEED must be in [0, UINT32_MAX]");
         c.seed = static_cast<uint32_t>(seed);
     }
-    Require(c.checkpoint != "ep-sdedup-p1-memory-boundary" ||
-        (c.runMode == "functional" && c.loops == 1 && c.warmup == 0),
-        "memory-boundary requires functional mode, loops=1, warmup=0");
     Require(!c.run.empty() && c.run.size() < 128 && !c.build.empty() && c.build.size() < 128 &&
         !c.host.empty(), "invalid run/build/host identity");
     int *fields[] = {&c.hostIndex, &c.localRank, &c.device, &c.rank, &c.rankSize};
@@ -287,12 +223,7 @@ Config Parse(int argc, char **argv)
     c.h = Number(std::getenv("TILEXR_VALIDATION_H"), "TILEXR_VALIDATION_H");
     c.topK = Number(std::getenv("TILEXR_VALIDATION_TOPK"), "TILEXR_VALIDATION_TOPK");
     c.experts = Number(std::getenv("TILEXR_VALIDATION_MOE_EXPERT_NUM"), "TILEXR_VALIDATION_MOE_EXPERT_NUM");
-    if ((c.checkpoint == "ep-sdedup-p2-dispatch" || c.checkpoint == "ep-sdedup-combine-p1-chain-single" ||
-        c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine() || c.dryRun) &&
-        !c.boundaryProbe && c.operatorMode != "combine") {
+    if (c.operatorMode != "combine") {
         Require(c.experts > 0 && c.experts % c.rankSize == 0,
             "total experts must be divisible by rank count");
         if (c.routeMode == TileXREpDemo::RouteMode::BalanceShift && c.topK > 0) {
@@ -351,10 +282,8 @@ struct ProfilePaths {
 ProfilePaths ConfigureProfiling(const Config &c)
 {
     ProfilePaths paths;
-    const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine();
     const bool dispatch = c.runMode == "breakdown" && c.operatorMode != "combine";
-    const bool combine = c.runMode == "breakdown" && split && c.operatorMode != "dispatch";
+    const bool combine = c.runMode == "breakdown" && c.operatorMode != "dispatch";
     const auto configure = [&](const char *name, bool enabled, std::string &path) {
         if (!enabled) {
             Check(unsetenv(name), "disable inactive operator capture");
@@ -394,7 +323,7 @@ void Marker(const Config &c, const char *name, const std::string &details, const
 {
     std::cout << name << " {\"run_id\":" << Json(c.run) << ",\"build_id\":" << Json(c.build)
         << ",\"commit\":" << (c.commit == "unknown" ? "null" : Json(c.commit))
-        << ",\"checkpoint\":" << (c.checkpoint.empty() ? "null" : Json(c.checkpoint)) << ",\"status\":" << Json(status) << ",\"host\":" << Json(c.host)
+        << ",\"checkpoint\":null" << ",\"status\":" << Json(status) << ",\"host\":" << Json(c.host)
         << ",\"run_mode\":" << Json(c.runMode) << ",\"loops\":" << c.loops << ",\"warmup\":" << c.warmup
         << ",\"host_index\":" << c.hostIndex << ",\"local_rank\":" << c.localRank << ",\"device\":" << c.device
         << ",\"rank\":" << c.rank << ",\"rank_size\":" << c.rankSize << ",\"pid\":" << getpid()
@@ -403,19 +332,13 @@ void Marker(const Config &c, const char *name, const std::string &details, const
         << ",\"route_mode\":" << Json(TileXREpDemo::RouteModeName(c.routeMode))
         << ",\"seed\":" << c.seed << ",\"quant_mode\":" << c.quantMode
         << ",\"operator_mode\":" << Json(c.operatorMode)
-        << ",\"boundary_probe\":" << (c.boundaryProbe ? "true" : "false")
         << ",\"dispatch_quant_mode\":" << c.quantMode
         << ",\"combine_quant_mode\":" << c.combineQuantMode
         << ",\"fp8_format\":" << Json(c.fp8Format)
         << ",\"moe_expert_num\":" << c.experts << ",\"dtype\":"
         << Json(c.dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16");
-    if (c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine()) {
-        std::cout << ",\"implemented_through\":" << Json(c.FullCombine() ? "M5" : c.checkpoint == "ep-sdedup-combine-p2-m4" ? "M4" :
-            c.checkpoint == "ep-sdedup-combine-p2-m3" ? "M3" : "M2") << ",\"scope\":" <<
-            Json(c.FullCombine() ? "full" : "partial")
-            << ",\"combine_fixture\":" << Json(c.combineFixture)
-            << ",\"combine_observation\":" << Json(c.combineObservation);
-    }
+    std::cout << ",\"implemented_through\":\"M5\",\"scope\":\"full\"";
+
     std::cout << details << '}' << std::endl;
 }
 
@@ -545,11 +468,8 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 {
     Require(args.rank == c.rank && args.rankSize == c.rankSize && args.localRank == c.localRank &&
         args.localRankSize == 8 && args.commDomain == 0, "communicator rank mapping mismatch");
-    // The standalone boundary probe retains its historical 4 GiB allocation.
-    const uint64_t expectedBytes = c.checkpoint == "ep-sdedup-p1-memory-boundary" ?
-        UINT64_C(4) * 1024 * 1024 * 1024 : kServerDedupPeerBytes;
-    Require(args.peerMemBytes == expectedBytes,
-        "peer window is not exactly " + std::to_string(expectedBytes >> 30) +
+    Require(args.peerMemBytes == kServerDedupPeerBytes,
+        "peer window is not exactly " + std::to_string(kServerDedupPeerBytes >> 30) +
         " GiB; actual=" + std::to_string(args.peerMemBytes));
     for (int rank = 0; rank < c.rankSize; ++rank) {
         const uintptr_t begin = reinterpret_cast<uintptr_t>(args.peerMems[rank]);
@@ -561,20 +481,11 @@ void ValidateComm(const Config &c, const TileXR::CommArgs &args)
 #include "server_dedup_source_send_consumer.h"
 #include "server_dedup_dispatch_consumer.h"
 #include "server_dedup_combine_consumer.h"
-#include "server_dedup_combine_m12_consumer.h"
-#include "server_dedup_combine_m3_consumer.h"
-#include "server_dedup_combine_m4_consumer.h"
-#include "server_dedup_combine_m5_consumer.h"
+#include "server_dedup_combine_validation.h"
 
-#ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
-#include "memory_boundary_consumer.h"
-#endif
-#ifdef TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST
-#include "combine_memory_boundary_consumer.h"
-#endif
 
 // Resolve configuration with production layout arithmetic before any runtime,
-// profiling, socket or device operation. This describes C4 wiring, not tensors.
+// profiling, socket or device operation. This describes interface wiring without allocating tensors.
 int DryRun(const Config &c)
 {
     const bool dispatch = c.operatorMode != "combine";
@@ -607,29 +518,7 @@ int DryRun(const Config &c)
 int Run(const Config &c)
 {
     if (c.dryRun) return DryRun(c);
-    if (c.boundaryProbe) {
-#ifdef TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST
-        return RunCombineMemoryBoundary(c);
-#else
-        throw std::runtime_error("Combine boundary test kernel was not built");
-#endif
-    }
-    if (c.checkpoint == "ep-sdedup-p1-memory-boundary") {
-#ifdef TILEXR_EP_MEMORY_BOUNDARY_TEST
-        return RunMemoryBoundary(c);
-#else
-        throw std::runtime_error("memory-boundary test kernel was not built");
-#endif
-    }
     ConsumerWallTimer wall(c.rank);
-    const bool m12 = c.checkpoint == "ep-sdedup-combine-p2-m12";
-    const bool m3 = c.checkpoint == "ep-sdedup-combine-p2-m3";
-    const bool m4 = c.checkpoint == "ep-sdedup-combine-p2-m4";
-    const bool m5 = c.FullCombine();
-    const bool observeRounds = c.combineObservation == "per-round";
-    const bool multi = m12 || m3 || m4 || m5 || c.checkpoint == "ep-sdedup-combine-p1-chain-multi" ||
-        c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-        c.checkpoint == "ep-sdedup-combine-p1-memory-boundary";
     const bool runDispatch = c.operatorMode != "combine";
     const bool runCombine = c.operatorMode != "dispatch";
     TileXREp::EpMemoryServerDedupLayout layout {};
@@ -647,10 +536,7 @@ int Run(const Config &c)
     std::string validationError, validationStage, combineDetails;
     OperatorProgress dispatchProgress, combineProgress;
     int64_t sequenceMagic = 0;
-    CombineM12Validation m12Validation;
-    CombineM3Validation m3Validation;
-    CombineM4Validation m4Validation;
-    CombineM5Validation m5Validation;
+    CombineValidation combineValidation;
     uint64_t streamSynchronizations = 0;
     const auto profilePaths = ConfigureProfiling(c);
     const auto progressStarted = Clock::now();
@@ -763,10 +649,7 @@ int Run(const Config &c)
             Check(aclrtMemset(buffers[13], sizes[13], 0xa5, sizes[13]), "initialize combine yOut");
         }
         enterStage("reference-build");
-        if (m12 && runCombine) m12Validation.Initialize(c, *host);
-        if (m3 && runCombine) m3Validation.Initialize(c, *host);
-        if (m4 && runCombine) m4Validation.Initialize(c, *host);
-        if (m5 && runCombine) m5Validation.Initialize(c, *host);
+        if (runCombine) combineValidation.Initialize(c, *host);
         Check(TileXREp::TileXREpValidateServerDedupAllocations(allocations.data(), allocations.size(), c.device),
             "caller allocation validation");
         enterStage("chain-barrier");
@@ -776,11 +659,10 @@ int Run(const Config &c)
             ",\"peer_mem_bytes\":" + std::to_string(host->peerMemBytes));
         const auto outputDtype = c.quantMode == 0 ? TileXR::TILEXR_DATA_TYPE_RESERVED :
             (c.fp8Format == "e4m3" ? TileXR::TILEXR_DATA_TYPE_FP8E4M3 : TileXR::TILEXR_DATA_TYPE_FP8E5M2);
-        // C4 retains its synchronized full-snapshot boundary. C5 submits the
-        // entire D/C batch on one stream with no per-round Host observation.
+        // Submit the whole batch on one stream before Host observation.
         const uint64_t calls = uint64_t(c.warmup) + c.loops;
         std::vector<CombineTensorSnapshot> snapshots;
-        if (multi && runCombine) {
+        if (runCombine) {
             enterStage("combine-snapshot");
             snapshots = CaptureCombineTensors(c, combineLayout, buffers, runDispatch);
         }
@@ -797,12 +679,9 @@ int Run(const Config &c)
                 static_cast<const uint32_t *>(buffers[8])), "TileXRMoeEpCombineMemoryServerDedup");
             combineProgress.Submit(warming, ++sequenceMagic);
         };
-        for (uint64_t call = 0; (runDispatch || multi) && call < calls; ++call) {
+        for (uint64_t call = 0; call < calls; ++call) {
             const bool warming = call < c.warmup;
-            if (m12 && observeRounds && !runDispatch) {
-                InitializeCombineExpert(c, buffers[12], sizes[12], call + 1U);
-                snapshots = CaptureCombineTensors(c, combineLayout, buffers);
-            }
+
             batch = warming ? "warmup" : "measurement";
             submission = warming ? call + 1U : call - c.warmup + 1U;
             if (runDispatch) {
@@ -819,41 +698,24 @@ int Run(const Config &c)
                     "TileXRMoeEpDispatchMemoryServerDedup");
                 dispatchProgress.Submit(warming, ++sequenceMagic);
             }
-            if (multi && runCombine) {
+            if (runCombine) {
                 launchCombine(warming);
-                if (m5) m5Validation.NoteLaunch(combineProgress.lastMagic, 0U);
-                if (m4) m4Validation.NoteLaunch(combineProgress.lastMagic, 0U);
-                if (m3) m3Validation.NoteLaunch(combineProgress.lastMagic, 0U);
-                if (m12) m12Validation.NoteLaunch(combineProgress.lastMagic, observeRounds && !runDispatch ? call + 1U : 0U);
+                combineValidation.NoteLaunch(combineProgress.lastMagic);
             }
             if (warming) ++warmupSubmitted;
             else ++submitted;
-            if (m12 && observeRounds) {
-                enterStage("combine-round-sync");
-                Check(aclrtSynchronizeStream(stream), "P2.1 diagnostic round synchronize");
-                ++streamSynchronizations;
-                barrier.Run(static_cast<uint32_t>(10U + call * 2U));
-                safeCleanup = true;
-                ValidateCombineTensors(snapshots);
-                m12Validation.Validate(c, *host, combineLayout, buffers);
-                barrier.Run(static_cast<uint32_t>(11U + call * 2U));
-                safeCleanup = false;
-            }
         }
-        if (runDispatch || multi) {
-            enterStage("stream-sync");
-            if (!observeRounds) {
-                Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
-                ++streamSynchronizations;
-            }
-            enterStage("batch-barrier");
-            barrier.Run(2);
-            completed = submitted;
-            warmupCompleted = warmupSubmitted;
-            dispatchProgress.Complete();
-            if (multi) combineProgress.Complete();
-            safeCleanup = true;
-        }
+        enterStage("stream-sync");
+        Check(aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
+        ++streamSynchronizations;
+
+        enterStage("batch-barrier");
+        barrier.Run(2);
+        completed = submitted;
+        warmupCompleted = warmupSubmitted;
+        dispatchProgress.Complete();
+        combineProgress.Complete();
+        safeCleanup = true;
         if (runDispatch) {
             enterStage("count-read");
             std::vector<int32_t> actualPrefix(c.experts), referenceCounts(c.experts, 0);
@@ -884,52 +746,23 @@ int Run(const Config &c)
             }
             enterStage("dispatch-read");
             dispatch = ValidateDispatch(c, *host, layout, buffers, weightsHost, dispatchProgress.lastMagic);
-            if (multi) dispatch += ",\"dispatch_first_magic\":" + std::to_string(dispatchProgress.firstMagic) +
+            dispatch += ",\"dispatch_first_magic\":" + std::to_string(dispatchProgress.firstMagic) +
                 ",\"dispatch_window_mask\":" + std::to_string(dispatchProgress.windowMask) +
                 ",\"stream_synchronizations\":" + std::to_string(streamSynchronizations);
         }
         if (runCombine) {
-            if (!multi) {
-                enterStage("combine-snapshot");
-                snapshots = CaptureCombineTensors(c, combineLayout, buffers);
-                launchCombine(false);
-                enterStage("combine-sync");
-                Check(aclrtSynchronizeStream(stream), "combine aclrtSynchronizeStream");
-                enterStage("combine-barrier");
-                barrier.Run(3);
-                combineProgress.Complete();
-                safeCleanup = true;
-            }
+
             enterStage("combine-read");
             ValidateCombineTensors(snapshots);
-            if (m5) {
-                m5Validation.Validate(c, *host, combineLayout, buffers);
-                combineDetails = m5Validation.Details(c, host->peerMemBytes, dispatchProgress,
-                    combineProgress, streamSynchronizations);
-            } else if (m4) {
-                m4Validation.Validate(c, *host, combineLayout, buffers);
-                combineDetails = m4Validation.Details(c, host->peerMemBytes, dispatchProgress,
-                    combineProgress, streamSynchronizations);
-            } else if (m3) {
-                m3Validation.Validate(c, *host, combineLayout, buffers);
-                combineDetails = m3Validation.Details(c, host->peerMemBytes, dispatchProgress,
-                    combineProgress, streamSynchronizations);
-            } else if (m12) {
-                if (!observeRounds) m12Validation.Validate(c, *host, combineLayout, buffers);
-                combineDetails = m12Validation.Details(c, host->peerMemBytes, dispatchProgress,
-                    combineProgress, streamSynchronizations);
-            } else combineDetails = multi ? CombineMultiDetails(c, host->peerMemBytes, dispatchProgress, combineProgress) :
-                CombineSingleDetails(c, host->peerMemBytes);
+            combineValidation.Validate(c, *host, combineLayout, buffers);
+            combineDetails = combineValidation.Details(c, host->peerMemBytes, dispatchProgress,
+                combineProgress, streamSynchronizations);
         }
         executionSucceeded = true;
     } catch (const OutputValidationFailure &error) {
         validationError = error.what();
         validationStage = stage;
-        if (m5 && runCombine) combineDetails = m5Validation.Details(c, kServerDedupDataMiB * 1024ULL * 1024ULL,
-            dispatchProgress, combineProgress, streamSynchronizations, false);
-        if (m4 && runCombine) combineDetails = m4Validation.Details(c, kServerDedupDataMiB * 1024ULL * 1024ULL,
-            dispatchProgress, combineProgress, streamSynchronizations, false);
-        if (m3 && runCombine) combineDetails = m3Validation.Details(c, kServerDedupDataMiB * 1024ULL * 1024ULL,
+        if (runCombine) combineDetails = combineValidation.Details(c, kServerDedupDataMiB * 1024ULL * 1024ULL,
             dispatchProgress, combineProgress, streamSynchronizations, false);
         std::cerr << "EP_SERVER_DEDUP_VALIDATION_FAIL rank=" << c.rank << " stage=" << stage
             << " " << validationError << std::endl;
@@ -977,10 +810,8 @@ int Run(const Config &c)
             ",\"warmup_completed\":" + std::to_string(warmupCompleted) + ",\"cleanup\":\"complete\"";
         const auto profileMarker = [&](const char *op, const std::string &path) {
             if (path.empty()) return;
-            const bool split = c.checkpoint == "ep-sdedup-combine-p1-profile" ||
-                c.checkpoint == "ep-sdedup-combine-p2-m12" || c.checkpoint == "ep-sdedup-combine-p2-m3" || c.checkpoint == "ep-sdedup-combine-p2-m4" || c.FullCombine();
-            Marker(c, split ? "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS" : "EP_SERVER_DEDUP_BREAKDOWN_PASS",
-                (split ? ",\"operator\":" + Json(op) : "") +
+            Marker(c, "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS",
+                (",\"operator\":" + Json(op)) +
                 ",\"schema\":\"tilexr_profiling_records.v1\",\"records_path\":" + Json(path) +
                 ",\"capture_id\":" + Json(std::getenv("TILEXR_PROFILING_CAPTURE_ID")) +
                 ",\"launches\":" + std::to_string(uint64_t(c.warmup) + c.loops) +
@@ -998,10 +829,13 @@ int Run(const Config &c)
                 ",\"warmup_completed\":" + std::to_string(combineProgress.warmupCompleted) +
                 ",\"cleanup\":\"complete\"" + combineDetails);
         } else if (runCombine) {
-            if ((m3 || m4 || m5) && runDispatch) {
+            if (runDispatch) {
                 if (!dispatch.empty()) Marker(c, "EP_SERVER_DEDUP_DISPATCH_PASS", details + dispatch);
                 else Marker(c, "EP_SERVER_DEDUP_DISPATCH_INVALID", details +
-                    dispatchProgress.Details("dispatch", kServerDedupDataMiB * 1024ULL * 1024ULL) +
+                    dispatchProgress.Details("dispatch", kServerDedupPeerBytes) +
+                    ",\"last_magic\":" + std::to_string(dispatchProgress.lastMagic) +
+                    ",\"window_offset\":" + std::to_string(TileXREp::TileXREpServerDedupWindowOffset(
+                        dispatchProgress.lastMagic, kServerDedupPeerBytes)) +
                     ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"token_stride\":" +
                     std::to_string(layout.data.tokenStride) + ",\"validation_status\":\"FAIL\",\"validation_stage\":" +
                     Json(validationStage) + ",\"validation_error\":" + Json(validationError), "FAIL");
@@ -1012,15 +846,20 @@ int Run(const Config &c)
                 ",\"validation_error\":" + Json(validationError), "FAIL");
         } else {
             Marker(c, "EP_SERVER_DEDUP_DISPATCH_INVALID", details +
+                dispatchProgress.Details("dispatch", kServerDedupPeerBytes) +
+                ",\"last_magic\":" + std::to_string(dispatchProgress.lastMagic) +
+                ",\"window_offset\":" + std::to_string(TileXREp::TileXREpServerDedupWindowOffset(
+                    dispatchProgress.lastMagic, kServerDedupPeerBytes)) +
+                ",\"stream_synchronizations\":" + std::to_string(streamSynchronizations) +
                 ",\"kernel_scope\":\"dispatch\",\"native_status\":\"dispatch\",\"token_stride\":" +
                 std::to_string(layout.data.tokenStride) + ",\"validation_status\":\"FAIL\",\"validation_stage\":" +
                 Json(validationStage) + ",\"validation_error\":" + Json(validationError), "FAIL");
         }
     }
-    // M3/M4/M5 mirror Dispatch's capture contract: a completed execution emits a
+    // A completed execution emits a
     // structured INVALID result for the coordinator, which exports available
     // measurements/trace and then returns validation FAIL.
-    return executionSucceeded && (m3 || m4 || m5 || !runCombine || validationError.empty()) ? 0 : 1;
+    return executionSucceeded ? 0 : 1;
 }
 } // namespace
 

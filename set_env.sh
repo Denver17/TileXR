@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 七步验证入口。CANN 路径等在 validation.local.sh 配置，hostfile 一次性填写实际主机。
+# EP 验证入口。CANN 路径等在 validation.local.sh 配置，hostfile 一次性填写实际主机。
 # source 只加载环境；hostfile 内容由运行入口读取，不创建或修改配置文件。
 # validation.local.sh 示例（只需修改实际环境不同的项，不提交部署配置）：
 #   TILEXR_CANN_ENV_SCRIPT=/path/to/cann-9.1.0/set_env.sh
@@ -11,17 +11,15 @@
 # 本入口只加载环境；测试参数属于调用脚本。
 # 局部作用域隔离旧配置文件遗留的测试参数，保留调用方传入值。
 _tilexr_load_deployment_config() {
-    local TILEXR_VALIDATION_CHECKPOINT TILEXR_INTERNAL_ACCEPTANCE_STAGE TILEXR_VALIDATION_BUILD_MODE
+    local TILEXR_VALIDATION_BUILD_MODE
     local TILEXR_VALIDATION_RUN_MODE TILEXR_VALIDATION_LOOPS TILEXR_VALIDATION_WARMUP
     local TILEXR_VALIDATION_BS TILEXR_VALIDATION_H TILEXR_VALIDATION_TOPK
     local TILEXR_VALIDATION_MOE_EXPERT_NUM TILEXR_VALIDATION_DTYPE TILEXR_VALIDATION_BLOCK_DIM
     local TILEXR_VALIDATION_QUANT_MODE TILEXR_VALIDATION_FP8_FORMAT
     local TILEXR_VALIDATION_OPERATOR_MODE TILEXR_VALIDATION_DISPATCH_QUANT_MODE TILEXR_VALIDATION_COMBINE_QUANT_MODE
-    local TILEXR_VALIDATION_COMBINE_FIXTURE TILEXR_VALIDATION_COMBINE_OBSERVATION
-    local TILEXR_VALIDATION_DRY_RUN TILEXR_VALIDATION_BOUNDARY_PROBE
+    local TILEXR_VALIDATION_DRY_RUN
     local TILEXR_VALIDATION_SERVERS TILEXR_VALIDATION_BREAKDOWN TILEXR_VALIDATION_ACTION
     local TILEXR_VALIDATION_TIMEOUT
-    local TILEXR_VALIDATION_RESUME_SUMMARY
     local TILEXR_VALIDATION_CASE_ANALYSIS
     local TILEXR_VALIDATION_ROUTE_MODE TILEXR_VALIDATION_SEED
     # Endpoints belong to this invocation, never to a copied machine config.
@@ -49,8 +47,7 @@ _tilexr_validation_env() {
     # Distribution, artifact verification and local Host tests do not load CANN
     # or resolve runtime endpoints.
     if [[ ${TILEXR_VALIDATION_ACTION:-} == sync || ${TILEXR_VALIDATION_ACTION:-} == verify ||
-          ${TILEXR_VALIDATION_ACTION:-} == host-validate || ${TILEXR_VALIDATION_ACTION:-} == case-dry-run ||
-          ( ${TILEXR_VALIDATION_ACTION:-} == commit-validate && ${TILEXR_VALIDATION_BUILD_MODE:-} == host ) ]]; then
+          ${TILEXR_VALIDATION_ACTION:-} == host-validate || ${TILEXR_VALIDATION_ACTION:-} == case-dry-run ]]; then
         command -v "$TILEXR_VALIDATION_PYTHON" >/dev/null || return 1
         printf 'ENV_READY root=%s\n' "$root"
         return 0

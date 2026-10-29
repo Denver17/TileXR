@@ -30,7 +30,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         repo = Path(__file__).resolve().parents[2]
-        for name in ("set_env.sh", "run_commit_validation.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "run_host_validation.sh", "tools/validation/measurements.py", "tools/validation/operator_measurements.py",
+        for name in ("set_env.sh", "build_all.sh", "sync.sh", "run_case.sh", "run.sh", "run_host_validation.sh", "tools/validation/measurements.py", "tools/validation/operator_measurements.py",
                      "tools/ep/msprof_kernel_stats.py", "tools/validation/run_summary.py"):
             target = self.root / name
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +70,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
             self.assertNotIn("TILEXR_COMM_ID", values)
             self.assertNotIn("TILEXR_DEMO_BARRIER_ADDR", values)
             self.assertNotIn("TILEXR_VALIDATION_RUN_MODE", values)
-            for key in ("TILEXR_VALIDATION_LOOPS", "TILEXR_INTERNAL_ACCEPTANCE_STAGE"):
+            for key in ("TILEXR_VALIDATION_LOOPS",):
                 self.assertEqual(values.get(key), overrides.get(key))
 
     def test_run_discards_stale_endpoints_but_preserves_cli_overrides(self):
@@ -115,7 +115,7 @@ class RuntimeConfigurationTests(unittest.TestCase):
         # for sync or dispatch-only runs after the default build advances.
         legacy = self.root / "install/validation/manifest.json"
         legacy.parent.mkdir(parents=True)
-        legacy.write_text(json.dumps(dict(checkpoint=workflow.DISPATCH_CHECKPOINT)))
+        legacy.write_text(json.dumps(dict(checkpoint=None)))
         for mode in (0, 1, 2):
             for operator in ("dispatch", "combine", "both"):
                 with self.subTest(mode=mode, operator=operator):
@@ -140,14 +140,6 @@ class RuntimeConfigurationTests(unittest.TestCase):
                     self.assertEqual([r["hosts"] for r in records], [8, 8, 8])
                     self.assertEqual((records[-1]["chain"]["loops"], records[-1]["chain"]["warmup"]), (100, 50))
 
-    def test_production_environment_preserves_explicit_checkpoint(self):
-        command = 'source ./set_env.sh >/dev/null; printf "%s" "$TILEXR_INTERNAL_ACCEPTANCE_STAGE"'
-        for checkpoint in (workflow.DISPATCH_CHECKPOINT, workflow.COMBINE_M4_CHECKPOINT):
-            result = subprocess.run([str(self.bash), "-c", command], cwd=self.root,
-                env=dict(self.env, TILEXR_VALIDATION_BUILD_MODE="production", TILEXR_VALIDATION_ACTION="sync",
-                         TILEXR_INTERNAL_ACCEPTANCE_STAGE=checkpoint), capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual(result.stdout, checkpoint)
 
     def test_single_case_alias_changes_parameters_without_writing_environment_file(self):
         stub = self.root / "tools/validation/workflow.py"
@@ -283,48 +275,8 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertEqual(len(result.stdout.splitlines()), 2)
                 self.assert_launcher_timing(result, output)
 
-    def test_commit_entry_selects_p24_production_before_workflow_preflight(self):
-        (self.root / "tools/validation/workflow.py").write_text(
-            "import os,json,sys; print(json.dumps(dict(action=sys.argv[1], env=dict(os.environ))))\n")
-        cann = self.root / "cann-env.sh"
-        cann.write_text("# environment fixture\n")
-        with self.local.open("a") as local:
-            local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n"
-                        "TILEXR_EP_SERVER_DEDUP_TEST_DEVICE=5\n")
-        before = self.local.read_bytes()
-        result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
-                                env=self.env, capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        values = json.loads(result.stdout.splitlines()[-1])
-        self.assertEqual(values["action"], "commit-validate")
-        self.assertEqual(values["env"]["TILEXR_INTERNAL_ACCEPTANCE_STAGE"], workflow.COMBINE_M5_CHECKPOINT)
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_BUILD_MODE"], "production")
-        self.assertEqual(values["env"]["TILEXR_VALIDATION_ACTION"], "commit-validate")
-        self.assertNotIn("TILEXR_EP_SERVER_DEDUP_TEST_DEVICE", values["env"])
-        self.assertFalse((self.root / "hostfile").exists())
-        self.assertEqual(self.local.read_bytes(), before)
 
-    def test_commit_rejects_resume_and_clears_stale_deployment_values(self):
-        (self.root / "tools/validation/workflow.py").write_text(
-            "import os,json; print(json.dumps(dict(os.environ)))\n")
-        cann = self.root / "cann-env.sh"
-        cann.write_text("# environment fixture\n")
-        with self.local.open("a") as local:
-            local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n"
-                        "export TILEXR_VALIDATION_RESUME_SUMMARY=deployment-stale.json\n")
-        path = str(self.root / "old run/summary.json")
-        result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
-            env=dict(self.env, TILEXR_VALIDATION_RESUME_SUMMARY="shell-stale.json"),
-            capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        values = json.loads(result.stdout.splitlines()[-1])
-        self.assertNotIn("TILEXR_VALIDATION_RESUME_SUMMARY", values)
-        for args in (["--resume"], ["--resume", ""], ["--resume", path], ["--resume", path, "extra"]):
-            result = subprocess.run([str(self.bash), "run_commit_validation.sh", *args], cwd=self.root,
-                                    env=self.env, capture_output=True, text=True, timeout=10)
-            self.assertEqual(result.returncode, 2)
-
-    def test_normal_run_ignores_stale_acceptance_stages(self):
+    def test_normal_run_accepts_current_operator_modes(self):
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json\nfrom pathlib import Path\nfrom run_summary import write_result\n"
             "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
@@ -334,34 +286,20 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         cann.write_text("# environment fixture\n")
         with self.local.open("a") as local:
             local.write("TILEXR_CANN_ENV_SCRIPT=" + shlex.quote(str(cann)) + "\n")
-        for operator, checkpoint, loops, warmup, mode, accepted in (
-                ("combine", None, "1", "0", "0", True),
-                ("both", None, "1", "0", "0", True),
-                ("dispatch", workflow.COMBINE_MULTI_CHECKPOINT, "5", "2", "0", True),
-                ("both", workflow.COMBINE_CHAIN_CHECKPOINT, "1", "0", "0", True),
-                ("both", workflow.COMBINE_CHAIN_CHECKPOINT, "5", "2", "0", True),
-                ("both", workflow.COMBINE_MULTI_CHECKPOINT, "5", "2", "1", True),
-                ("both", workflow.COMBINE_MULTI_CHECKPOINT, "5", "2", "0", True),
-                ("both", None, "1", "0", "1", True),
-                ("combine", None, "1", "0", "2", True),
-                ("both", workflow.COMBINE_PROFILE_CHECKPOINT, "5", "2", "0", True),
-                ("both", workflow.COMBINE_BOUNDARY_CHECKPOINT, "5", "2", "2", True)):
-            with self.subTest(operator=operator, checkpoint=checkpoint, mode=mode):
-                output = self.root / "run" / (operator + str(checkpoint) + loops + mode)
-                env = dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output), TILEXR_VALIDATION_BOUNDARY_PROBE="1")
-                if checkpoint:
-                    env["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = checkpoint
-                    env["TILEXR_VALIDATION_CHECKPOINT"] = checkpoint
+        for operator, loops, warmup, mode in (
+                ("combine", "1", "0", "0"), ("both", "1", "0", "0"),
+                ("dispatch", "5", "2", "0"), ("both", "5", "2", "0"),
+                ("both", "5", "2", "1"), ("combine", "1", "0", "2"),
+                ("both", "5", "2", "2")):
+            with self.subTest(operator=operator, mode=mode):
+                output = self.root / "run" / (operator + loops + mode)
+                env = dict(self.env, TILEXR_VALIDATION_RESULT_ROOT=str(output))
                 result = subprocess.run([str(self.bash), "run.sh", "-n", "2", "-e", "96", "-m", mode,
                                          "-l", loops, warmup, "operator_mode=" + operator], cwd=self.root,
                                         env=env, capture_output=True, text=True, timeout=10)
-                self.assertEqual(result.returncode == 0, accepted, result.stdout + result.stderr)
-                if accepted:
-                    values = json.loads((output / "config.json").read_text())
-                    self.assertEqual(values["TILEXR_VALIDATION_BOUNDARY_PROBE"], "0")
-                    self.assertNotIn("TILEXR_INTERNAL_ACCEPTANCE_STAGE", values)
-                    self.assertNotIn("TILEXR_VALIDATION_CHECKPOINT", values)
-                    self.assertEqual((values["TILEXR_VALIDATION_LOOPS"], values["TILEXR_VALIDATION_WARMUP"]), (loops, warmup))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                values = json.loads((output / "config.json").read_text())
+                self.assertEqual((values["TILEXR_VALIDATION_LOOPS"], values["TILEXR_VALIDATION_WARMUP"]), (loops, warmup))
 
     def test_case_dry_run_resolves_new_modes_before_loading_runtime(self):
         self.local.write_text("TILEXR_CANN_ENV_SCRIPT=/missing/cann\n"
@@ -389,7 +327,7 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
             self.assertEqual(config["env"]["TILEXR_VALIDATION_DISPATCH_QUANT_MODE"], "4")
             self.assertEqual(config["env"]["TILEXR_VALIDATION_COMBINE_QUANT_MODE"], "0")
             self.assertNotIn("TILEXR_INTERNAL_ACCEPTANCE_STAGE", config["env"])
-            self.assertEqual(config["env"]["TILEXR_VALIDATION_BOUNDARY_PROBE"], "0")
+            self.assertNotIn("TILEXR_VALIDATION_BOUNDARY_PROBE", config["env"])
             self.assertNotIn("unexpected-cann-load", (output / "environment.log").read_text())
 
     def test_combine_cli_rejects_conflicts_and_later_stages_without_loading_environment(self):
@@ -405,15 +343,6 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
                 self.assertNotIn("validation.local.sh", result.stderr)
         self.assertFalse((self.root / "run").exists())
 
-    def test_commit_environment_failure_never_runs_workflow(self):
-        (self.root / "tools/validation/workflow.py").write_text("raise AssertionError('must not run')\n")
-        result = subprocess.run([str(self.bash), "run_commit_validation.sh"], cwd=self.root,
-            env=dict(self.env, TILEXR_VALIDATION_PYTHON=str(self.root / "missing-python")),
-            capture_output=True, text=True, timeout=10)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("COMMIT_VALIDATION_FAIL", result.stdout + result.stderr)
-        self.assertIn("type=CONFIG_FAILED", result.stdout + result.stderr)
-        self.assertNotIn("AssertionError", result.stdout + result.stderr)
 
     def test_build_default_selects_current_combine_package_for_production(self):
         (self.root / "tools/validation/workflow.py").write_text(
@@ -421,16 +350,16 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         # A prior installed boundary checkpoint must not select an obsolete build.
         installed = self.root / 'install/validation/manifest.json'
         installed.parent.mkdir(parents=True)
-        installed.write_text(json.dumps(dict(checkpoint=workflow.MEMORY_BOUNDARY_CHECKPOINT)))
+        installed.write_text(json.dumps(dict(checkpoint=None)))
         cann = self.root / 'cann-env.sh'
         cann.write_text('# CANN environment fixture\n')
         for mode, override, arguments, expected, run_mode in (
-                ('production', None, [], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=0'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
-                ('production', None, ['dedup=auto'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
-                ('production', None, ['dedup=1'], workflow.COMBINE_M5_CHECKPOINT, 'functional'),
-                ('production', None, ['breakdown=1', 'dedup=0'], workflow.COMBINE_M5_CHECKPOINT, 'breakdown'),
-                ('production', workflow.CHECKPOINT, [], workflow.CHECKPOINT, 'functional'),
+                ('production', None, [], None, 'functional'),
+                ('production', None, ['breakdown=0'], None, 'functional'),
+                ('production', None, ['dedup=auto'], None, 'functional'),
+                ('production', None, ['dedup=1'], None, 'functional'),
+                ('production', None, ['breakdown=1', 'dedup=0'], None, 'breakdown'),
+                ('production', None, [], None, 'functional'),
                 ('host', None, [], None, 'functional')):
             with self.subTest(mode=mode, override=override, arguments=arguments):
                 environment = dict(self.env, TILEXR_VALIDATION_BUILD_MODE=mode,
@@ -611,13 +540,13 @@ write_result(root, report, root/'summary.json')
     def test_normal_config_ignores_stale_install_checkpoint_and_explicit_override_wins(self):
         target = self.root / "install/validation/manifest.json"
         target.parent.mkdir(parents=True)
-        target.write_text(json.dumps({"checkpoint": workflow.DRY_RUN_CHECKPOINT}))
+        target.write_text(json.dumps({"checkpoint": None}))
         (self.root / "hostfile").write_text("192.0.2.1\n192.0.2.2\n")
         with mock.patch.dict(os.environ, {"TILEXR_VALIDATION_ROOT": str(self.root)}, clear=True):
             os.environ["TILEXR_VALIDATION_CHECKPOINT"] = "obsolete"
             self.assertIsNone(workflow.Config("build").checkpoint)
-            os.environ["TILEXR_INTERNAL_ACCEPTANCE_STAGE"] = workflow.CHECKPOINT
-            self.assertEqual(workflow.Config("build").checkpoint, workflow.CHECKPOINT)
+
+            self.assertEqual(workflow.Config("build").checkpoint, None)
 
     def test_normal_sync_ignores_obsolete_split_package_receipt(self):
         (self.root / "hostfile").write_text("192.0.2.1\n192.0.2.2\n")
@@ -628,7 +557,7 @@ write_result(root, report, root/'summary.json')
                 config = workflow.Config("sync")
                 self.assertEqual(config.install.name, "server-dedup")
                 command = workflow.remote_argv(config, "192.0.2.2", "verify")[-1]
-                self.assertIn("export TILEXR_INTERNAL_ACCEPTANCE_STAGE=''", shlex.split(command)[0])
+                self.assertNotIn("TILEXR_INTERNAL_ACCEPTANCE_STAGE", shlex.split(command)[0])
             workflow.write_json(receipt, dict(status="BUILDING"))
             self.assertEqual(workflow.Config("sync").install.name, "server-dedup")
 
@@ -788,7 +717,7 @@ write_result(root, report, root/'summary.json')
         before = self.local.read_bytes()
         with mock.patch.dict(os.environ, dict(self.env, TILEXR_VALIDATION_ROOT=str(self.root),
                              TILEXR_VALIDATION_BUILD_MODE="production",
-                             TILEXR_INTERNAL_ACCEPTANCE_STAGE=workflow.DISPATCH_CHECKPOINT,
+
                              TILEXR_VALIDATION_RUN_MODE="breakdown", TILEXR_VALIDATION_BLOCK_DIM="64",
                              TILEXR_COMM_ID="192.0.2.1:10177"), clear=True):
             config = workflow.Config()
@@ -799,7 +728,7 @@ write_result(root, report, root/'summary.json')
         values = json.loads(result.stdout.splitlines()[-1])
         self.assertNotIn("TILEXR_VALIDATION_RUN_MODE", values)
         self.assertNotIn("TILEXR_VALIDATION_BLOCK_DIM", values)
-        self.assertEqual(values["TILEXR_INTERNAL_ACCEPTANCE_STAGE"], workflow.DISPATCH_CHECKPOINT)
+        self.assertNotIn("TILEXR_INTERNAL_ACCEPTANCE_STAGE", values)
         self.assertEqual(self.local.read_bytes(), before)
 
 
