@@ -7,7 +7,7 @@ small transfers, while UDMA generally performs better for large transfers.
 
 All EP Dispatch and Combine variants are supported only on A5-class SoCs
 (`Ascend950`, `Ascend910_9`, or `A5`). The build produces the four existing A5
-AICore objects plus the Server Dedup count object, and never produces 910B EP kernels. The public API symbols remain
+AICore objects plus the Server Dedup Dispatch/Combine objects, and never produces 910B EP kernels. The public API symbols remain
 available in the same Host library on non-A5 systems and return
 `TILEXR_ERROR_NOT_SUPPORT` before loading a kernel or consuming launch state.
 
@@ -16,71 +16,49 @@ are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
 ## Host Tests
 
-服务器验证统一使用[EP 验证指南](../../docs/EP_VALIDATION_GUIDE.md)：PC 固定提交并同步后，
-依次手动执行根目录 `bash build_all.sh`、`bash sync.sh`、`bash run.sh`，每步通过后再执行下一步。
-当前支持 `abi-host`、`empty-kernel`、`dry-run` 和 `chain-single`；沿用现有配置，脚本自动汇总各主机结果。
-检查点状态与通过提交见[调试进度](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md)。
+Server Dedup 的当前设计见[Dispatch/Combine 规格](../../docs/specs/ep-memory-server-dedup-dispatch-combine-design.md)，
+构建部署、随机专家输入、测试矩阵和结果判据见[EP 验证指南](../../docs/EP_VALIDATION_GUIDE.md)。
 
-From `tests/ep`:
-
-```bash
-source ../../scripts/common_env.sh
-bash build.sh source-only
-./install/bin/test_tilexr_ep_layout
-./install/bin/test_tilexr_ep_host_validation
-```
-
-`source-only` mode builds and installs host layout and validation tests without
-building the hardware demo. CCE compilation and hardware correctness must still
-be validated separately.
-
-## Server Dedup count/cumsum checkpoint
-
-The current increment implements count send/receive, cumulative sums, complete prefix
-publication/consumption/cleanup, and both expert count output modes. Token data transfer,
-metadata generation, and Combine remain unimplemented. The public entry still requires
-its caller-owned data/metadata placeholders and non-null FP32 route weights.
-
-Use the [current validation guide](../../docs/EP_VALIDATION_GUIDE.md) for deployment and
-pass criteria. On the configured first server, run each command manually and continue
-only after that command succeeds:
-
-```bash
-bash build_all.sh
-bash sync.sh
-bash run.sh run_mode=functional loops=3 warmup=0
-```
-
-Using the same installation, manually run `bash run.sh run_mode=functional loops=4 warmup=0`
-for cumulative expert counts, then `bash run.sh run_mode=performance loops=50 warmup=50`
-for profiling. All three cases use the fixed
-16P / E=96 / BS=96 / K=6 / balance_shift baseline, with a 4 GiB domain per rank.
-Build, sync, and run report `BUILD_PASS`, `SYNC_PASS`, and `VALIDATION_PASS` respectively.
-Errors and absolute log paths remain visible in the terminal; run output is also saved
-in `run/case-*/workflow.log`, with the actual summary at `run/case-*/<run_id>/summary.json`.
-The retired `run_commit_validation.sh` only prints migration instructions. The existing
-`ep-sdedup-p1-chain-multi` identifier now launches the count kernel. Real execution needs
-at least two eight-card A5 servers, with 64 AIVs per device. The kernel always launches
-64 AIVs in a 48/16 split; the old block dimension override and empty-kernel profiling
-implementation have been removed.
-
-From the repository root, local tests without NPU hardware are:
+From the repository root, run the EP Host and Python regression without NPU hardware:
 
 ```bash
 cmake -S tests/ep -B build/server-dedup-host
-cmake --build build/server-dedup-host -j8
+cmake --build build/server-dedup-host -j2
 ctest --test-dir build/server-dedup-host --output-on-failure
-python3 tests/ep/integration/test_server_dedup_chain.py -v
+python3 -m unittest discover -s tools/validation -p 'test_*.py'
 ```
 
-The count unit test executes production kernel methods through synchronous CPU API
-substitutes and compares them with an independent route histogram. It checks uneven
-partitions, zero counts, E=1024, L=1/64, both prefix outputs, cleanup, and round reuse.
-The launch test checks the actual 20-argument ABI, fixed 64-AIV launch, and runtime failures.
-The integration test exercises the real C++ consumer using runtime substitutes and TCP
-barriers, including corrupted-output rejection. These tests do not prove CANN compilation
-or device MTE ordering; real hardware results belong in the
-[progress document](../../docs/EP_MEMORY_SERVER_DEDUP_PROGRESS.md).
+From `tests/ep`, `bash build.sh source-only` builds and installs Host layout and
+parameter tests without the hardware demo. For an existing Server Dedup installation,
+`bash run_host_validation.sh` from the repository root validates the installed package
+and executes its registered Host/Python tests.
+
+## Server Dedup functional coverage
+
+The complete implementation covers route counts and prefixes, Dispatch data and five-table
+outputs, and Combine staging, direct/partial returns and final weighted output. Tests retain
+independent routing and numerical references, FP16/BF16 and MXFP8 Dispatch inputs, forced
+and automatic dedup policies, multiple rounds, result-Flag cleanup and profiling isolation.
+Random MoE expert IDs are generated by `demo/tilexr_ep_expert_ids.h`; each token selects K
+distinct experts. The `random`, `balance` and `balance_shift` modes remain test inputs.
+
+Local kernel tests use synchronous CPU substitutes for Ascend C APIs. Consumer tests use
+runtime substitutes and controlled barriers, including rejected/corrupted results. They
+prove the tested contracts, not real MTE ordering, remote progress or NPU performance.
+Use matched CANN builds and the actual required A5 topology for device validation.
+
+On the configured first server, build and synchronize before running the complete path:
+
+```bash
+bash build_all.sh dedup=auto breakdown=0
+bash sync.sh
+bash run.sh -n 2 -e 96 -m 0 -l 3 0 operator_mode=both
+```
+
+Both operators launch 64 AIVs, with independently configurable send/receive splits.
+Both-mode uses real Dispatch metadata with a deterministic expert-output fixture; it does
+not execute a full MoE model. All selected ranks must complete numerical checks, protocol
+cleanup and resource release before the workflow reports `VALIDATION_PASS`.
 
 ## Full Hardware Demo
 

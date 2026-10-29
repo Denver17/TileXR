@@ -2,46 +2,28 @@
 
 This directory contains utility scripts for building, testing, and managing the TileXR project.
 
-EP 服务器验证的统一入口与配置见[EP 七步验证](../docs/EP_VALIDATION_GUIDE.md)。根目录提供
-`set_env.sh`、`build_all.sh`、`sync.sh`、`run.sh`、`run_host_validation.sh`、`clean_run.sh`。
-`bash build_all.sh` 默认开启去重、关闭设备打点；`dedup=0|1` 固定去重模式，可与 `breakdown=0|1` 组合。
-`bash build_all.sh dedup=0` 编译三字段直发/M6路径，切换后需整体同步配套产物；`bash build_all.sh breakdown=1` 编译 Dispatch/Combine 模块 breakdown 产物。
-随后手动执行 `bash sync.sh`，再执行 `bash run.sh -n 2 -e 96 -m 2 -l 3 2`；同步无需设置运行模式、服务器数或专家数。hostfile 每行一个 IP；sync 分发全部机器，run 的 `-n` 选择前 N 台，每台固定 8 卡。
-这些入口负责构建、分发和结果汇总；下列模块脚本保留为内部实现及单独开发入口。
+EP Server Dedup 的构建、同步、运行与回归使用根目录 `set_env.sh`、`build_all.sh`、
+`sync.sh`、`run.sh` 和 `run_host_validation.sh`，完整参数与判据见
+[EP 验证指南](../docs/EP_VALIDATION_GUIDE.md)。
 
-`run.sh` 支持 `route_mode=random|balance|balance_shift` 和 `seed=0..4294967295`，默认
-`balance_shift` / `2026`；总专家数仍须被卡数整除。首次升级重建并同步测试程序后，
-切换模式和 seed 无需重编译。详见 [EP 验证指南](../docs/EP_VALIDATION_GUIDE.md)。
+```bash
+bash build_all.sh dedup=auto breakdown=0
+bash sync.sh
+bash run.sh -n 2 -e 96 -m 0 -l 3 0 operator_mode=both
+bash run_host_validation.sh
+```
 
-`run.sh` 可传 `case_analysis=1`（默认 0），在全部节点 NPU 运行结束并收集输入后，
-按实际专家列表计算每 rank 的跨 server token 去重率 `(A-B)/A`，终端输出 min/max/avg 百分数。
-A 为跨 server 专家路由数，B 为逐 token 按目标 server 合并后的数量；avg 为 rank 算术平均，
-A=0 按 0% 计入。逐 rank 明细保存在 `summary.json.case_analysis`，分析不进入设备计时阶段。
+构建默认 auto 去重策略：原始每 rank BS≤32 直发，BS>32 去重；`dedup=0/1` 可强制模式。
+`breakdown=0` 用于功能/性能，`breakdown=1` 配合 `run.sh -m 2` 观察内部打点。
+策略、核数和打点改变后重新构建并同步全部产物。安装包固定为 `install/server-dedup`；
+sync 分发完整 hostfile，run 的 `-n` 选择前 N 台，每台固定 8 卡。
 
-`bash clean_run.sh` 清空 hostfile 全部节点上当前部署路径的 `run/` 内容（包括隐藏文件、
-日志、trace 和同步回执），保留目录本身。可先执行 `bash clean_run.sh --dry-run` 预览，
-或用 `hostfile=PATH` 指定仓库内的其他清单。使用前停止测试；发现节点任务锁会拒绝该节点的清理。
-不加载 CANN、不访问 NPU；拒绝符号链接形式的 `run/`，其内部链接只删除链接本身。
-清理后需要重新 `bash sync.sh`，因为 `run/validation/sync.json` 也已删除。
+run 支持 `operator_mode=dispatch|combine|both`、`route_mode=random|balance|balance_shift`
+及 uint32 seed；默认 `balance_shift` / `2026`。Combine 仅支持非量化，Dispatch 量化独立。
+`dry_run=1` 只检查安装包 consumer 的配置/rank 映射。Host 回归按需独立执行，或通过
+`host_validation=1` 在首节点先执行，默认设备运行不会自动重复完整 Host 回归。
 
-`bash run_host_validation.sh` 按需在当前机器执行已安装的 Host/Python 回归，
-不通过 SSH 分发执行，也不加载 CANN 或访问 NPU。先用 `build_all.sh` 构建安装；
-Host 回归不会在 build 后自动执行；`run.sh` 默认 `host_validation=0`，跳过回归。
-传入 `host_validation=1` 时先在主节点调用同一独立入口，通过后再执行 NPU 工作流，失败则直接返回。
-报告保存在 `run/validation/host-<id>/summary.json`，每项测试的原始日志放在同一目录。
-修改 Host/ABI/布局、Planner 或 Python 分析工具后，以及完整交付验收时，建议手动执行此入口。
-
-普通入口已弃用 `TILEXR_VALIDATION_CHECKPOINT`，旧导出和旧部署配置不影响执行。
-普通包固定为 `install/server-dedup`，每次构建覆盖；`-m 0/1` 要求关闭打点，`-m 2` 要求开启打点。
-`sync.sh` 同步当前唯一安装包，不必在新 shell 再指定 breakdown；模式不匹配须重新构建同步。
-`operator_mode=dispatch|combine|both` 和 `-l 正式轮数 预热轮数` 可自由组合；Combine 仅支持非量化。
-`dry_run=1` 使用普通包内的 Host consumer，不需要历史 C3 安装包。
-
-`bash run_commit_validation.sh` 内部选择当前提交的验收矩阵，无需设置 checkpoint。
-当前为 Combine P2.4/M5：前两台各 8 卡，共 24 例，包含单轮、双轮、多轮功能、性能、
-模块 trace、Dispatch 回归和量化 Dispatch 接线。验收包独立位于
-`install/validation-combine-p24`，不替代日常构建和同步。
-检查历史提交时切换到目标提交后执行该脚本，详细范围见 [EP 验证指南](../docs/EP_VALIDATION_GUIDE.md)。
+以下模块脚本为各模块的构建测试入口。
 
 ## Environment Setup
 
