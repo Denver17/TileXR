@@ -13,7 +13,7 @@ from unittest import mock
 
 import workflow
 from current_run_fixture import CurrentRunFixture
-from test_profiling_fixture import combine_loop_events, write_capture
+from profiling_fixture import combine_loop_events, write_capture
 
 
 class CurrentCombineTests(CurrentRunFixture):
@@ -26,7 +26,7 @@ class CurrentCombineTests(CurrentRunFixture):
         for operator in ("dispatch", "combine", "both"):
             for mode in ("functional", "performance", "breakdown"):
                 with self.subTest(operator=operator, mode=mode):
-                    config, mappings, records = self.m5_records(operator, mode)
+                    config, mappings, records = self.full_records(operator, mode)
                     self.assertIsNone(config.checkpoint)
                     self.assertEqual(config.install.name, "server-dedup")
                     workflow.validate_rank_records(records, mappings, "run", self.manifest,
@@ -39,7 +39,7 @@ class CurrentCombineTests(CurrentRunFixture):
 
     def test_dispatch_and_combined_records_reject_corrupted_execution_evidence(self):
         for operator in ("dispatch", "combine", "both"):
-            config, mappings, records = self.m5_records(operator)
+            config, mappings, records = self.full_records(operator)
             mutations = [(None, "pid", 999), (None, "completed", 0),
                          (None, "cleanup", "failed"), (None, "warmup_completed", True),
                          (None, "stream_synchronizations", 2), ("chain", "peer_count", 1)]
@@ -72,14 +72,14 @@ class CurrentCombineTests(CurrentRunFixture):
         for operator in ("dispatch", "combine", "both"):
             for loops, warmup in ((1, 0), (2, 0), (5, 2)):
                 with self.subTest(operator=operator, loops=loops, warmup=warmup):
-                    config, mappings, records = self.m5_records(operator, loops=loops, warmup=warmup)
+                    config, mappings, records = self.full_records(operator, loops=loops, warmup=warmup)
                     workflow.validate_rank_records(records, mappings, "run", self.manifest, config.chain)
                     if operator != "dispatch":
                         self.assertEqual(records[0]["combine_window_mask"], 1 if operator == "both" else 2 if loops == 1 else 3)
 
     def test_real_m5_contract_and_invalid_identity(self):
         for operator in ("dispatch", "combine", "both"):
-            config, mappings, records = self.m5_records(operator)
+            config, mappings, records = self.full_records(operator)
             workflow.validate_rank_records(records, mappings, "run", self.manifest, config.chain)
             if operator == "dispatch":
                 continue
@@ -113,7 +113,7 @@ class CurrentCombineTests(CurrentRunFixture):
         self.manifest.update(checkpoint=None, server_dedup_enabled=False)
         for world, rank in ((16, 0), (64, 23)):
             with self.subTest(world=world, rank=rank):
-                config, _, records = self.m5_records("combine", "breakdown")
+                config, _, records = self.full_records("combine", "breakdown")
                 config.chain.update(server_dedup_enabled=False, moe_expert_num=128)
                 self.assertNotIn("rank_size", config.chain)
                 before = copy.deepcopy(config.chain)
@@ -165,7 +165,7 @@ class CurrentCombineTests(CurrentRunFixture):
                 self.assertTrue(Path(evidence["summary_path"]).is_file())
 
     def test_numeric_invalid_keeps_both_captures_without_cancelling_peers(self):
-        config, mappings, records = self.m5_records("both", "performance")
+        config, mappings, records = self.full_records("both", "performance")
         config.chain["msprof"] = "msprof"
         def execute(argv, log, **kwargs):
             row = copy.deepcopy(records[0]); chain = row.pop("chain"); dispatch = row.pop("dispatch")

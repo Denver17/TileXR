@@ -2,15 +2,19 @@
 from pathlib import Path
 import unittest
 
-import test_server_dedup_combine as chain
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools"))
+from server_dedup_consumer_fixture import ConsumerFixture, COMBINE_MARKER, run_tests
 from profiling.records import load_record_files
 
 
-class AutoDedupConsumerTests(chain.CombineTests):
+class AutoDedupConsumerTests(ConsumerFixture, unittest.TestCase):
     compile_definitions = ["-DTILEXR_EP_SERVER_DEDUP_ENABLE=1", "-DTILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=1"]
 
     def setUp(self):
         super().setUp()
+        self.configure_combine()
         self.environment.update(TILEXR_VALIDATION_H="17", TILEXR_VALIDATION_TOPK="6",
                                 TEST_FORBID_UNUSED_METADATA_READ="1")
 
@@ -22,7 +26,7 @@ class AutoDedupConsumerTests(chain.CombineTests):
                     for rank, process in enumerate(self.run_ranks(env)):
                         output, errors = process.communicate(timeout=60)
                         self.assertEqual(process.returncode, 0, output + errors)
-                        record, = self.records(output, chain.MARKER)
+                        record, = self.records(output, COMBINE_MARKER)
                         self.assertIs(record["server_dedup_enabled"], bs > 32)
                         self.assertEqual(record["combine_receive_module"], "M5" if bs > 32 else "M6")
                         self.assertTrue(record["combine_y_out_validated"])
@@ -46,7 +50,7 @@ class AutoDedupConsumerTests(chain.CombineTests):
                 for process in self.run_ranks(env):
                     output, errors = process.communicate(timeout=60)
                     self.assertEqual(process.returncode, 0, output + errors)
-                    record, = self.records(output, chain.MARKER)
+                    record, = self.records(output, COMBINE_MARKER)
                     self.assertFalse(record["server_dedup_enabled"])
                     self.assertEqual(record["combine_receive_module"], "M6")
                     self.assertEqual(record["combine_direct_received_rows"], 32)
@@ -67,7 +71,7 @@ class AutoDedupConsumerTests(chain.CombineTests):
                 for process in processes:
                     output, errors = process.communicate(timeout=60)
                     self.assertEqual(process.returncode, 0, output + errors)
-                    record, = self.records(output, chain.MARKER)
+                    record, = self.records(output, COMBINE_MARKER)
                     self.assertFalse(record["server_dedup_enabled"])
                     self.assertEqual(record["combine_receive_module"], "M6")
                     self.assertTrue(record["combine_y_out_validated"])
@@ -83,10 +87,5 @@ class AutoDedupConsumerTests(chain.CombineTests):
                 self.reset_case()
 
 
-def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(AutoDedupConsumerTests(name) for name in sorted(AutoDedupConsumerTests.__dict__)
-                              if name.startswith("test_"))
-
-
 if __name__ == "__main__":
-    unittest.main()
+    run_tests(AutoDedupConsumerTests)

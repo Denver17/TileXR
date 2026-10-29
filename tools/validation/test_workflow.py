@@ -11,12 +11,12 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from unittest import mock
 
 import workflow
+from validation_fixture import TemporaryRoot
 
 
 class PhaseTimerTests(unittest.TestCase):
@@ -50,29 +50,7 @@ class PhaseTimerTests(unittest.TestCase):
         self.assertEqual(sum(final["stages"].values()), final["total"])
 
 
-class TemporaryRoot(unittest.TestCase):
-    def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="tilexr-validation-test-")
-        self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name) / "coordinator"
-        self.root.mkdir()
-        self.hostfile = self.root / "hostfile"
-        self.hostfile.write_text("127.0.0.1\n", encoding="utf-8")
-        environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith("TILEXR_VALIDATION_")}
-        environment.update(TILEXR_VALIDATION_ROOT=str(self.root),
-                           TILEXR_VALIDATION_HOSTFILE=str(self.hostfile),
-                           TILEXR_VALIDATION_BUILD_MODE="host",
-                           TILEXR_VALIDATION_TIMEOUT="30")
-        patch = mock.patch.dict(os.environ, environment, clear=True)
-        patch.start()
-        self.addCleanup(patch.stop)
-
-    def config(self, action="sync"):
-        return workflow.Config(action)
-
-
-class SyncDebugTests(TemporaryRoot):
+class SyncPathsTests(TemporaryRoot):
     def test_runtime_paths_keep_profiling_and_host_compile_dependencies(self):
         config = workflow.Config("sync")
         files = ["set_env.sh", "scripts/common_env.sh", "scripts/common_util.sh",
@@ -86,60 +64,6 @@ class SyncDebugTests(TemporaryRoot):
             argv=["@python", "tests/ep/python/test_server_dedup_address_space.py"])])
         paths = workflow.sync_paths(config, {"files": files}, manifest)
         self.assertEqual(paths, set(files[:5]))
-        manifest["checkpoint"] = None
-        paths = workflow.sync_paths(config, {"files": files}, manifest)
-        self.assertEqual(paths, set(files[:5]))
-
-    def test_failed_endpoint_does_not_stop_remaining_checks_or_change_receipts(self):
-        self.hostfile.write_text("192.0.2.1\n192.0.2.2\n192.0.2.3\n")
-        config = workflow.Config("sync")
-        config.logs.mkdir(parents=True)
-        receipt = config.logs / "sync.json"
-        receipt.write_text("retained receipt")
-        source = self.root / ".tilexr-source.json"
-        source.write_text("retained source")
-        calls = []
-
-        def execute(argv, log, **kwargs):
-            calls.append(argv)
-            if argv[0] == "rsync":
-                self.assertIn("--dry-run", argv)
-                self.assertIn("--checksum", argv)
-                self.assertIn("-vvv", argv[argv.index("-e") + 1])
-                if "192.0.2.2:" in argv[-1]:
-                    raise workflow.Failure("SYNC_FAILED", "Broken pipe", returncode=255, log=str(log))
-            else:
-                self.assertEqual(argv[-1], "hostname && command -v rsync && rsync --version")
-            return ""
-
-        with mock.patch.object(workflow, "require_tools"), \
-                mock.patch.object(workflow, "inventory", return_value={"files": {"hostfile": "hash"}}), \
-                mock.patch.object(workflow, "execute", side_effect=execute):
-            self.assertEqual(workflow.sync_debug(config), workflow.FAILURE_CODES["SYNC_FAILED"])
-        self.assertEqual(len(calls), 6)
-        report = workflow.read_json(next(config.logs.glob("sync-debug-*/summary.json")))
-        self.assertEqual(report["failed_hosts"], ["192.0.2.2"])
-        self.assertEqual(report["nodes"][2]["status"], "PASS")
-        self.assertEqual(report["nodes"][1]["checks"][1]["error"]["returncode"], 255)
-        self.assertEqual(receipt.read_text(), "retained receipt")
-        self.assertEqual(source.read_text(), "retained source")
-
-    def test_cli_debug_success_without_build_and_ssh_failure(self):
-        for failed in (False, True):
-            with self.subTest(ssh_failed=failed):
-                def execute(argv, *args, **kwargs):
-                    if failed and argv[0] == "ssh":
-                        raise workflow.Failure("SYNC_FAILED", "Permission denied", returncode=255)
-                    return ""
-
-                with mock.patch.object(sys, "argv", ["workflow.py", "sync", "--debug"]), \
-                        mock.patch.object(workflow, "require_tools"), \
-                        mock.patch.object(workflow, "inventory", return_value={"files": {}}), \
-                        mock.patch.object(workflow, "execute", side_effect=execute) as commands, \
-                        mock.patch.object(workflow, "sync") as normal_sync:
-                    self.assertEqual(workflow.main(), workflow.FAILURE_CODES["SYNC_FAILED"] if failed else 0)
-                    normal_sync.assert_not_called()
-                    self.assertEqual(commands.call_count, 2)
 
 
 class HostfileTests(TemporaryRoot):
@@ -562,7 +486,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         self.hostfile.write_text("127.0.0.1\n192.0.2.2\n", encoding="utf-8")
         tool_root = self.root / "tools/validation"
         tool_root.mkdir(parents=True)
-        for name in ("workflow.py", "source.py", "measurements.py", "operator_measurements.py", "run_summary.py", "case_analysis.py"):
+        for name in ("workflow.py", "source.py", "measurements.py", "operator_measurements.py", "run_summary.py"):
             shutil.copy2(Path(workflow.__file__).with_name(name), tool_root / name)
         profiler_source = Path(workflow.__file__).resolve().parents[1] / "ep/msprof_kernel_stats.py"
         profiler_target = self.root / "tools/ep/msprof_kernel_stats.py"
@@ -571,7 +495,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
         profiling_source = Path(workflow.__file__).resolve().parents[1] / "profiling"
         profiling_target = self.root / "tools/profiling"
         shutil.copytree(profiling_source, profiling_target, ignore=shutil.ignore_patterns("__pycache__"))
-        shutil.copy2(Path(workflow.__file__).with_name("test_profiling_fixture.py"), tool_root)
+        shutil.copy2(Path(workflow.__file__).with_name("profiling_fixture.py"), tool_root)
         self.script = tool_root / "workflow.py"
         (self.root / "set_env.sh").write_text(
             'export TILEXR_VALIDATION_ROOT="$PWD"\n'
@@ -595,7 +519,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
                             for path in (self.script, tool_root / "source.py", tool_root / "measurements.py", tool_root / "operator_measurements.py", tool_root / "run_summary.py",
                                          profiler_target, self.root / "set_env.sh", helper)]}
         source["files"].extend(str(path.relative_to(self.root)) for path in profiling_target.rglob("*") if path.is_file())
-        source["files"].append("tools/validation/test_profiling_fixture.py")
+        source["files"].append("tools/validation/profiling_fixture.py")
         workflow.write_json(self.root / ".tilexr-source.json", source)
         self.config_instance = self.config()
         self.config_instance.install.mkdir(parents=True)
@@ -607,6 +531,7 @@ class WorkflowIntegrationTests(TemporaryRoot):
             artifacts=workflow.artifact_files(self.config_instance.install), tests=[])
         suffixes = {
             "combine_consumer": ("COMBINE_CONSUMER", " test=lifecycle"),
+            "dispatch_consumer": ("DISPATCH_CONSUMER", " test=lifecycle"),
             "combine_dry_run": ("COMBINE_DRYRUN", " test=configuration"),
             "combine_config": ("COMBINE_CONFIG", ""),
             "combine_profile_kernel": ("COMBINE_PROFILE_KERNEL", ""),
@@ -782,7 +707,7 @@ if behavior == 'wrong-route-mode':
 if behavior == 'wrong-seed':
     record['seed'] += 1
 # Leave another node in flight when rank 8 reports an invalid output.
-if os.environ.get('CHAIN_TEST_BEHAVIOR') in ('invalid-output', 'late-analysis-input') and rank == 0:
+if os.environ.get('CHAIN_TEST_BEHAVIOR') == 'invalid-output' and rank == 0:
     import time
     time.sleep(1)
 if behavior == 'wrong-member-address':
@@ -804,7 +729,7 @@ if run_mode != 'functional':
 if run_mode == 'breakdown':
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parents[3] / 'tools/validation'))
-    from test_profiling_fixture import write_capture
+    from profiling_fixture import write_capture
     path = os.environ['TILEXR_PROFILING_RECORDS_PATH']
     capture_id = os.environ['TILEXR_PROFILING_CAPTURE_ID']
     assert int(os.environ['TILEXR_PROFILING_RECORDS_PER_CORE']) == 65536
@@ -833,15 +758,13 @@ if behavior.startswith('invalid-output') or behavior == 'wrong-member-address':
                   validation_error='RelayReadIndex mismatch row=0')
     if behavior == 'invalid-output-stale':
         record['run_id'] = 'old-run'
-if os.environ.get('TILEXR_VALIDATION_CASE_ANALYSIS') == '1' and behavior != 'missing-analysis-input':
-    from pathlib import Path
-    import struct
-    # Save at the end to exercise collection before coordinator analysis,
-    # including a rank that is deliberately slower than the others.
-    base = 0 if rank == 0 else (1 - rank // 8) * (record['moe_expert_num'] // 2)
-    ids = list(range(base, base + record['topk'])) * record['bs']
-    path = Path(os.environ['TILEXR_VALIDATION_INPUT_DIR']) / f'rank-{rank}-ids.bin'
-    path.write_bytes(struct.pack(f'<{len(ids)}i', *ids))
+from pathlib import Path
+import struct
+# Save actual rank inputs at completion so collection covers completed remote files.
+base = 0 if rank == 0 else (1 - rank // 8) * (record['moe_expert_num'] // 2)
+ids = list(range(base, base + record['topk'])) * record['bs']
+path = Path(os.environ['TILEXR_VALIDATION_INPUT_DIR']) / f'rank-{rank}-ids.bin'
+path.write_bytes(struct.pack(f'<{len(ids)}i', *ids))
 print(prefix + json.dumps(dict(record, submitted=loops,
       completed=loops - 1 if behavior in ('incomplete-round', 'invalid-output-incomplete') else loops,
       warmup_submitted=warmup, warmup_completed=warmup, cleanup='complete')))
@@ -862,9 +785,17 @@ print(prefix + json.dumps(dict(record, submitted=loops,
         self.assertEqual((summary["rank_size"], summary["completed_ranks"]), (16, 16))
         self.assertEqual(summary["chain_configuration"]["loops"], 1)
         self.assertEqual(summary["chain_configuration"]["dtype"], "bf16")
-        self.assertNotIn("case_analysis", summary)
         self.assertTrue(summary["dispatch_five_tables_validated"])
         self.assertNotIn("未执行 NPU launch", summary["scope"])
+        run_log = self.config_instance.logs / summary["run_id"]
+        remote_log = self.remote / run_log.relative_to(self.root)
+        for rank in range(16):
+            collected = run_log / ("inputs" if rank < 8 else "nodes/1/inputs") / f"rank-{rank}-ids.bin"
+            self.assertEqual(collected.stat().st_size,
+                             4 * summary["chain_configuration"]["bs"] * summary["chain_configuration"]["topk"])
+            if rank >= 8:
+                self.assertEqual(collected.read_bytes(),
+                                 (remote_log / "inputs" / collected.name).read_bytes())
         for node in summary["nodes"]:
             self.assertEqual(node["tests"], 0)
             self.assertEqual(node["reported_result"]["tests"], [])
@@ -927,37 +858,6 @@ print(prefix + json.dumps(dict(record, submitted=loops,
                 self.assertFalse(rank["server_dedup_enabled"])
                 self.assertEqual(rank["first_hop_packets"], 0)
                 self.assertEqual(rank["direct_packets"], 576)
-
-    def test_case_analysis_after_all_nodes_and_remote_input_collection(self):
-        self.enable_chain()
-        self.prepare_sync()
-        result = self.invoke("run", environment={"TILEXR_VALIDATION_CASE_ANALYSIS": "1",
-                                                "CHAIN_TEST_BEHAVIOR": "late-analysis-input"})
-        self.assert_success(result)
-        summary = self.summary()
-        self.assertEqual(summary["completed_ranks"], 16)
-        analysis = summary["case_analysis"]
-        self.assertEqual(analysis["status"], "complete")
-        self.assertEqual(analysis["rank_count"], 16)
-        self.assertEqual(analysis["min"], 0)
-        self.assertAlmostEqual(analysis["max"], 100 * 5 / 6)
-        self.assertAlmostEqual(analysis["avg"], 100 * 5 / 6 * 15 / 16)
-        self.assertEqual(analysis["ranks"][8]["before_tokens"], 96 * 6)
-        self.assertEqual(analysis["ranks"][8]["after_tokens"], 96)
-        self.assertIn("dedup(%) min/max/avg=0.00/83.33/78.12",
-                      (self.config_instance.logs / "result.txt").read_text())
-
-    def test_case_analysis_missing_remote_input_fails_without_partial_aggregate(self):
-        self.enable_chain()
-        self.prepare_sync()
-        result = self.invoke("run", environment={"TILEXR_VALIDATION_CASE_ANALYSIS": "1",
-                                                "CHAIN_TEST_BEHAVIOR": "missing-analysis-input"})
-        self.assertNotEqual(result.returncode, 0)
-        summary = self.summary()
-        self.assertEqual(summary["completed_ranks"], 16)
-        self.assertEqual(summary["case_analysis"]["status"], "failed")
-        self.assertNotIn("min", summary["case_analysis"])
-        self.assertIn("rank-8-ids.bin", summary["case_analysis"]["error"])
 
 
     def test_chain_single_missing_stale_or_incomplete_evidence_fails(self):

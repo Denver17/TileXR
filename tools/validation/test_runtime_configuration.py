@@ -610,10 +610,6 @@ write_result(root, report, root/'summary.json')
                      ['-n', '2', '-e', '96', 'host_validation=2'],
                      ['-n', '2', '-e', '96', 'host_validation=01'],
                      ['-n', '2', '-e', '96', 'host_validation=0', 'host_validation=1'],
-                     ['-n', '2', '-e', '96', 'case_analysis='],
-                     ['-n', '2', '-e', '96', 'case_analysis=2'],
-                     ['-n', '2', '-e', '96', 'case_analysis=01'],
-                     ['-n', '2', '-e', '96', 'case_analysis=0', 'case_analysis=1'],
                      ['-n', '2', '-e', '96', 'route_mode='],
                      ['-n', '2', '-e', '96', 'route_mode=uniform'],
                      ['-n', '2', '-e', '96', 'route_mode=balance shift'],
@@ -669,22 +665,6 @@ write_result(root, report, root/'summary.json')
         self.assertNotIn('unexpected-toolchain-load', result.stdout + result.stderr)
         self.assertEqual(result.stdout.splitlines()[-1], 'host-validate')
 
-    def test_case_analysis_cli_overrides_stale_environment_and_local_config(self):
-        with self.local.open('a') as config:
-            config.write('TILEXR_VALIDATION_CASE_ANALYSIS=1\n')
-        (self.root / 'tools/validation/workflow.py').write_text(
-            "import os\nfrom pathlib import Path\nfrom run_summary import write_result\n"
-            "root=Path(os.environ['TILEXR_VALIDATION_RESULT_ROOT'])\n"
-            "(root/'analysis.txt').write_text(os.environ['TILEXR_VALIDATION_CASE_ANALYSIS'])\n"
-            "write_result(root, dict(status='PASS'), root/'summary.json')\n")
-        for value in (None, '0', '1'):
-            output = self.root / 'run' / str(value)
-            result = subprocess.run([str(self.bash), 'run.sh', '-n', '2', '-e', '96',
-                                     *([] if value is None else ['case_analysis=' + value])], cwd=self.root,
-                env=dict(self.env, TILEXR_VALIDATION_CASE_ANALYSIS='1', TILEXR_VALIDATION_RESULT_ROOT=str(output)),
-                text=True, capture_output=True, timeout=10)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertEqual((output / 'analysis.txt').read_text(), value or '0')
 
     def test_routing_cli_defaults_and_overrides_ignore_stale_configuration(self):
         with self.local.open('a') as config:

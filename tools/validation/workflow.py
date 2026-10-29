@@ -31,6 +31,7 @@ from source import inventory
 COMBINE_DRY_RUN_TEST = "test_tilexr_ep_server_dedup_combine_dry_run"
 COMBINE_DRY_RUN_PROGRAM = "test_tilexr_ep_server_dedup_chain_dry_run"
 COMBINE_DRY_RUN_MARKER = "EP_SERVER_DEDUP_COMBINE_DRYRUN_PASS "
+DISPATCH_CONSUMER_TEST = "test_tilexr_ep_server_dedup_dispatch_consumer"
 COMBINE_CONSUMER_TEST = "test_tilexr_ep_server_dedup_combine_consumer"
 COMBINE_CONFIG_TEST = "test_tilexr_ep_server_dedup_combine_config"
 COMBINE_PROFILE_KERNEL_TEST = "test_tilexr_ep_server_dedup_combine_profile_kernel"
@@ -43,12 +44,12 @@ DISPATCH_ABI_TESTS = {"test_tilexr_ep_server_dedup_" + name
                       for name in ("protocol", "layout", "host_validation", "public_abi")}
 COMBINE_TESTS = COMBINE_ABI_HOST_TESTS | DISPATCH_ABI_TESTS | {
     "test_tilexr_ep_layout", "test_tilexr_ep_expert_ids",
-    COMBINE_DRY_RUN_TEST, COMBINE_CONSUMER_TEST, COMBINE_CONFIG_TEST,
+    COMBINE_DRY_RUN_TEST, COMBINE_CONSUMER_TEST, DISPATCH_CONSUMER_TEST, COMBINE_CONFIG_TEST,
     COMBINE_PROFILE_KERNEL_TEST, COMBINE_PROFILE_REGIONS_TEST,
     "test_tilexr_ep_kernel_launch", "test_tilexr_ep_kernel_launch_profile",
     "test_tilexr_ep_server_dedup_combine_m5",
 }
-CONSUMER_TESTS = {COMBINE_DRY_RUN_TEST, COMBINE_CONSUMER_TEST}
+CONSUMER_TESTS = {COMBINE_DRY_RUN_TEST, COMBINE_CONSUMER_TEST, DISPATCH_CONSUMER_TEST}
 COMBINE_INVALID_MARKER = "EP_SERVER_DEDUP_COMBINE_CHAIN_INVALID "
 COMBINE_CHAIN_MARKER = "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS "
 DISPATCH_MARKER = "EP_SERVER_DEDUP_DISPATCH_PASS "
@@ -386,11 +387,6 @@ def chain_configuration(default_host=None, *, dry_run=False):
     seed = os.environ.get("TILEXR_VALIDATION_SEED", "2026")
     if not re.fullmatch(r"0|[1-9][0-9]{0,9}", seed) or int(seed) > (1 << 32) - 1:
         raise ValueError("seed 必须为 0..4294967295 的整数")
-    case_analysis = os.environ.get("TILEXR_VALIDATION_CASE_ANALYSIS", "0")
-    if case_analysis not in ("0", "1"):
-        raise ValueError("case_analysis 必须为 0 或 1")
-    if case_analysis == '1' and os.environ.get('TILEXR_VALIDATION_OPERATOR_MODE', 'dispatch') == 'combine':
-        raise ValueError("case_analysis 只支持完整 Dispatch 用例")
     shape = {name: int(os.environ.get("TILEXR_VALIDATION_" + name.upper(), default))
              for name, default in (("bs", "96"), ("h", "7168"), ("topk", "6"), ("moe_expert_num", "96"))}
     if any(not 1 <= value <= (1 << 63) - 1 for value in shape.values()) or shape["topk"] > 32:
@@ -442,7 +438,7 @@ def chain_configuration(default_host=None, *, dry_run=False):
     chain = dict(shape, dtype=dtype, operator_mode=operator_mode,
                  quant_mode=int(quant_mode), dispatch_quant_mode=int(quant_mode), combine_quant_mode=0,
                  fp8_format=fp8_format, block_dim=block_dim, run_mode=run_mode, loops=loops, warmup=warmup,
-                 route_mode=route_mode, seed=int(seed), case_analysis=int(case_analysis))
+                 route_mode=route_mode, seed=int(seed))
     chain.update(implemented_through="M5", scope="full", combine_send_core_num=32)
     if dry_run:
         return chain
@@ -713,9 +709,7 @@ def build(config):
     if config.mode == "production":
         command(["cmake", "-S", config.root, "-B", work / "production", *common,
                  "-DTILEXR_BUILD_EP=ON", "-DBUILD_TESTING=OFF", "-DTILEXR_BUILD_TESTS=OFF",
-                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if config.profiling else 'OFF'}",
-                 "-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST=OFF",
-                 "-DTILEXR_EP_BUILD_COMBINE_MEMORY_BOUNDARY_TEST=OFF"],
+                 f"-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING={'ON' if config.profiling else 'OFF'}"],
                 log / "production-configure.log", timeout=600)
         command(["cmake", "--build", work / "production", "-j", config.jobs,
                  "--target", "tilexr-ep"],
@@ -731,8 +725,6 @@ def build(config):
     command(["cmake", "-S", config.root / "tests/ep", "-B", host_build, *common,
              "-DBUILD_TILEXR_EP_DEMO=OFF", "-DBUILD_TILEXR_EP_PLAN_MULTIRANK_TEST=OFF",
              f"-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST={'ON' if chain else 'OFF'}",
-             "-DBUILD_TILEXR_EP_MEMORY_BOUNDARY_TEST=OFF",
-             "-DBUILD_TILEXR_EP_COMBINE_MEMORY_BOUNDARY_TEST=OFF",
              f"-DTILEXR_INSTALL_PREFIX={stage}",
              f"-DPython3_EXECUTABLE={sys.executable}"], log / "host-configure.log", timeout=600)
     build_targets = (combine_tests - CONSUMER_TESTS - {COMBINE_CONFIG_TEST}) | {COMBINE_DRY_RUN_PROGRAM}
@@ -839,7 +831,7 @@ def remote_argv(config, host, action, *arguments):
                           TILEXR_DIRECT_HOSTS_JSON=json.dumps(config.hosts(), separators=(",", ":")))
             if config.chain:
                 for key in ("bs", "h", "topk", "moe_expert_num", "dtype", "quant_mode", "operator_mode", "dispatch_quant_mode", "combine_quant_mode", "fp8_format",
-                            "block_dim", "loops", "warmup", "run_mode", "msprof", "case_analysis", "route_mode", "seed"):
+                            "block_dim", "loops", "warmup", "run_mode", "msprof", "route_mode", "seed"):
                     values["TILEXR_VALIDATION_" + key.upper()] = config.chain.get(key)
                 values["TILEXR_COMM_ID"] = config.chain["comm_id"]
                 values["TILEXR_DEMO_BARRIER_ADDR"] = config.chain["barrier_addr"]
@@ -868,50 +860,6 @@ def sync_paths(config, source, manifest):
         if (config.root / name).exists():
             paths.add(name)
     return paths
-
-
-def sync_debug(config):
-    """Probe every configured endpoint without preparing or changing deployment files."""
-    hosts = config.hosts()
-    require_tools(["ssh", "rsync"])
-    log = config.logs / ("sync-debug-" + uuid.uuid4().hex)
-    source = inventory(config.root, exclude=(config.hostfile.relative_to(config.root).as_posix(),))
-    manifest_path = config.install / "manifest.json"
-    paths = sync_paths(config, source, read_json(manifest_path) if manifest_path.exists() else None)
-    file_list = log / "files.txt"
-    file_list.parent.mkdir(parents=True, exist_ok=True)
-    file_list.write_text("\n".join(sorted(paths)) + "\n", encoding="utf-8")
-    ssh = ["ssh", "-vvv", *SSH_OPTIONS]
-    nodes = []
-    for index, host in enumerate(hosts):
-        target = config.target(host["host"])
-        node_log = log / str(index)
-        result = dict(index=index, host=host["host"], target=target, status="PASS", checks=[])
-        checks = [
-            ("ssh_probe", [*ssh, target, "hostname && command -v rsync && rsync --version"], 30),
-            ("rsync_dry_run", ["rsync", "-a", "-r", "--dry-run", "--verbose", "--itemize-changes",
-                               "--checksum", "--protect-args", "--timeout=30",
-                               "--files-from=" + str(file_list), "-e", shlex.join(ssh),
-                               str(config.root) + "/", target + ":" + str(config.root) + "/"], 180),
-        ]
-        for stage, argv, timeout in checks:
-            check = dict(stage=stage, log=str(node_log / (stage + ".log")), status="PASS")
-            try:
-                execute(argv, check["log"], timeout=timeout,
-                        start_failure="SYNC_FAILED", exit_failure="SYNC_FAILED")
-            except Exception as error:
-                check.update(status="FAIL", error=failure_record(error, "SYNC_FAILED"))
-                result["status"] = "FAIL"
-            result["checks"].append(check)
-            print(f"SYNC_DEBUG_{check['status']} host={target} stage={stage} log={check['log']}", flush=True)
-        nodes.append(result)
-    failed = [node["target"] for node in nodes if node["status"] == "FAIL"]
-    write_json(log / "summary.json", dict(status="FAIL" if failed else "PASS", dry_run=True,
-                                         nodes=nodes, failed_hosts=failed))
-    print(f"SYNC_DEBUG_SUMMARY checked={len(nodes)} failed={len(failed)} "
-          f"failed_hosts={','.join(failed) or '-'}\n结果：{log / 'summary.json'}\n"
-          "dry-run 不写入远端部署文件；通过不代表实际数据传输或并发同步稳定。", flush=True)
-    return FAILURE_CODES["SYNC_FAILED"] if failed else 0
 
 
 def sync(config):
@@ -1512,6 +1460,7 @@ def run_validation_test(config, test, log, timeout, *, device=None, cancelled=No
         COMBINE_PROFILE_KERNEL_TEST: ("EP_SERVER_DEDUP_COMBINE_PROFILE_KERNEL_", ""),
         COMBINE_PROFILE_REGIONS_TEST: ("EP_SERVER_DEDUP_COMBINE_PROFILE_REGIONS_", ""),
         "test_tilexr_ep_server_dedup_combine_m5": ("EP_SERVER_DEDUP_COMBINE_M5_", ""),
+        DISPATCH_CONSUMER_TEST: ("EP_SERVER_DEDUP_DISPATCH_CONSUMER_", " test=lifecycle"),
         COMBINE_CONSUMER_TEST: ("EP_SERVER_DEDUP_COMBINE_CONSUMER_", " test=lifecycle"),
         COMBINE_CONFIG_TEST: ("EP_SERVER_DEDUP_COMBINE_CONFIG_", ""),
         COMBINE_DRY_RUN_TEST: ("EP_SERVER_DEDUP_COMBINE_DRYRUN_", " test=configuration"),
@@ -2074,21 +2023,6 @@ def run(config):
                     primary_error = primary_error or errors[0]
                     report.update(status="FAIL", primary_error=primary_error)
         rank_summary = f"ranks={completed}/{len(mappings)} "
-    # All launch futures and log collection have completed above. Read the
-    # retained real inputs only here, never while another rank is on the NPU.
-    if config.chain and config.chain.get("case_analysis"):
-        try:
-            if config.cleanup_failed:
-                raise ValueError("NPU process cleanup is unconfirmed; case analysis skipped")
-            from case_analysis import analyze_case
-            report["case_analysis"] = analyze_case(log, dict(config.chain, rank_size=len(mappings)),
-                records)
-        except (ValueError, TypeError, KeyError, OSError) as error:
-            failure = Failure("RESULT_FAILED", f"case 分析失败：{error}").record()
-            errors.append(failure)
-            primary_error = primary_error or failure
-            report.update(status="FAIL", primary_error=primary_error,
-                          case_analysis=dict(status="failed", error=str(error)))
     report["wall_time"] = timer.snapshot()
     config.last_summary_path = log / "summary.json"
     write_json(config.last_summary_path, report)
@@ -2119,10 +2053,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("env", "build", "sync", "run", "host-validate", "case-dry-run", "node", "verify", "cancel"))
     parser.add_argument("arguments", nargs="*")
-    parser.add_argument("--debug", action="store_true", help="仅用于 sync：逐主机 SSH 和 rsync dry-run 检查")
     args = parser.parse_args()
-    if args.debug and args.action != "sync":
-        parser.error("--debug 仅支持 sync")
     try:
         if sys.version_info < (3, 9):
             raise ValueError("验证工具要求 Python 3.9 或更新版本")
@@ -2142,10 +2073,8 @@ def main():
                 build(config)
         elif args.action == "sync":
             if args.arguments:
-                raise ValueError("sync 仅接受 --debug 选项")
+                raise ValueError("sync 不接受额外参数")
             with operation_lock(config, ".operation.lock"):
-                if args.debug:
-                    return sync_debug(config)
                 sync(config)
         elif args.action == "case-dry-run":
             if args.arguments:

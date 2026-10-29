@@ -93,7 +93,7 @@ class CoreConfigTests(unittest.TestCase):
         fixture = m5.CurrentRunFixture()
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
-        config, mappings, records = fixture.m5_records("combine", "performance", 100, 50)
+        config, mappings, records = fixture.full_records("combine", "performance", 100, 50)
         record = records[0]
         record["combine_control_publish_bytes"] = 26624
         with self.assertRaisesRegex(workflow.Failure, "control_publish_bytes"):

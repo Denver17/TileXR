@@ -25,7 +25,7 @@ class ChainTests(CurrentRunFixture):
         self.assertEqual(config.chain, dict(bs=96, h=7168, topk=6, moe_expert_num=96, dtype="bf16", quant_mode=0, operator_mode="dispatch", dispatch_quant_mode=0, combine_quant_mode=0, fp8_format="e4m3",
                                            block_dim="auto", comm_id="192.0.2.1:10177", barrier_addr="192.0.2.1:10274",
                                            run_mode="functional", loops=1, warmup=0,
-                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch", case_analysis=0, implemented_through="M5", scope="full", combine_send_core_num=32))
+                                           route_mode="balance_shift", seed=2026, kernel_scope="dispatch", implemented_through="M5", scope="full", combine_send_core_num=32))
         original = config.chain.copy()
         for key, value in (("TILEXR_VALIDATION_BS", "1"), ("TILEXR_VALIDATION_DTYPE", "fp16"),
                            ("TILEXR_VALIDATION_BLOCK_DIM", "64"), ("TILEXR_COMM_ID", "192.0.2.1:20000"),
@@ -51,7 +51,6 @@ class ChainTests(CurrentRunFixture):
             "TILEXR_VALIDATION_QUANT_MODE": ["3", "1"],
             "TILEXR_VALIDATION_FP8_FORMAT": ["bad"],
             "TILEXR_VALIDATION_BLOCK_DIM": ["4", "0", "-1", "1.5", str(1 << 32)],
-            "TILEXR_VALIDATION_CASE_ANALYSIS": ["", "2", "01", "true"],
             "TILEXR_VALIDATION_ROUTE_MODE": ["", "uniform", "balance shift"],
             "TILEXR_VALIDATION_SEED": ["", "-1", "4294967296", "1.5", "+1", "01", " 1", "١"],
         }.items():
@@ -100,7 +99,7 @@ class ChainTests(CurrentRunFixture):
                 self.assertEqual(config.chain["moe_expert_num"], experts)
 
     def test_requires_both_current_markers_and_one_completed_launch(self):
-        config, mappings, records = self.m5_records("dispatch", loops=1, warmup=0)
+        config, mappings, records = self.full_records("dispatch", loops=1, warmup=0)
         manifest = self.manifest
         workflow.validate_rank_records(records, mappings, "run", manifest, config.chain)
         for marker, key, value in ((None, "completed", 0), (None, "submitted", 2),
@@ -145,7 +144,7 @@ class ChainTests(CurrentRunFixture):
 
     def test_multi_requires_all_configured_rounds_and_batch_identity(self):
 
-        config, mappings, records = self.m5_records("dispatch", loops=1, warmup=0)
+        config, mappings, records = self.full_records("dispatch", loops=1, warmup=0)
         manifest, mapping, record = self.manifest, mappings[0], records[0]
         workflow.validate_rank_records([record], [mapping], "run", manifest, config.chain)
         for key, value in (("first_hop_validated", False), ("token_stride", 8192), ("first_hop_bytes", 1),
@@ -185,7 +184,6 @@ class ChainTests(CurrentRunFixture):
             if fault == "routes": changed[0]["direct_packets"] -= 1
             with self.subTest(fault=fault), self.assertRaises(ValueError):
                 workflow.validate_dispatch_tables(changed, config)
-
 
 
 if __name__ == "__main__":

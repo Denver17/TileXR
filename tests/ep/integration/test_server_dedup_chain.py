@@ -1,12 +1,10 @@
 """真实 C++ consumer 的 Host 行为测试；替身不证明 CANN 编译或 NPU 执行。"""
 import json
-import os
 from pathlib import Path
 import shutil
 import socket
 import struct
 import subprocess
-import tempfile
 import time
 import unittest
 import sys
@@ -15,125 +13,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/validation")
 import measurements
 import operator_measurements
 import workflow
-from uuid import NAMESPACE_URL, uuid5
-
-CAPTURE_ID = str(uuid5(NAMESPACE_URL, "tilexr-validation:run-identity"))
+from server_dedup_consumer_fixture import ConsumerFixture, CAPTURE_ID, run_tests
 from profiling.records import load_record_files
 
 
-ROOT = Path(__file__).resolve().parents[3]
-SOURCE = Path(__file__).resolve().parent
-ACL_HEADER = """
-#pragma once
-#include <stddef.h>
-#include <stdint.h>
-#include "acl_base.h"
-#define ACL_SUCCESS 0
-typedef enum { ACL_MEM_MALLOC_HUGE_FIRST = 0 } aclrtMemMallocPolicy;
-typedef enum { ACL_MEMCPY_HOST_TO_DEVICE = 1, ACL_MEMCPY_DEVICE_TO_HOST = 2 } aclrtMemcpyKind;
-typedef enum { ACL_DEV_ATTR_VECTOR_CORE_NUM = 1 } aclrtDevAttr;
-extern "C" {
-aclError aclInit(const char *);
-aclError aclFinalize();
-aclError aclrtSetDevice(int32_t);
-aclError aclrtResetDevice(int32_t);
-aclError aclrtGetDevice(int32_t *);
-aclError aclrtGetDeviceInfo(uint32_t, aclrtDevAttr, int64_t *);
-const char *aclrtGetSocName();
-aclError aclrtCreateStream(aclrtStream *);
-aclError aclrtDestroyStream(aclrtStream);
-aclError aclrtSynchronizeStream(aclrtStream);
-aclError aclrtMalloc(void **, size_t, aclrtMemMallocPolicy);
-aclError aclrtFree(void *);
-aclError aclrtMemset(void *, size_t, int32_t, size_t);
-aclError aclrtMemcpy(void *, size_t, const void *, size_t, aclrtMemcpyKind);
-}
-"""
-
-
-def free_port():
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return sock.getsockname()[1]
-
-
-class ChainConsumerTests(unittest.TestCase):
-    compile_definitions = ["-DTILEXR_EP_SERVER_DEDUP_ENABLE=1", "-DTILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=0"]
-
-    @classmethod
-    def setUpClass(cls):
-        compiler = shutil.which("g++")
-        if compiler is None or os.name != "posix":
-            raise unittest.SkipTest("POSIX C++14 compiler required")
-        cls.temp = tempfile.TemporaryDirectory(prefix="tilexr-chain-consumer-")
-        cls.folder = Path(cls.temp.name)
-        include = cls.folder / "include" / "acl"
-        include.mkdir(parents=True)
-        (include / "acl_base.h").write_text("#pragma once\ntypedef int aclError;\ntypedef void *aclrtStream;\n")
-        (include / "acl.h").write_text(ACL_HEADER)
-        cls.executable = cls.folder / "consumer"
-        result = subprocess.run([
-            compiler, "-std=c++14", "-O2", "-fno-fast-math", "-ffp-contract=off",
-            "-Wall", "-Wextra", "-Werror", "-pthread", *cls.compile_definitions,
-            "-I", str(include.parent), "-I", str(ROOT / "src/include"),
-            "-I", str(ROOT / "src/comm"), "-I", str(ROOT / "src/ep/host"), "-I", str(ROOT / "src/ep/common"),
-            str(SOURCE / "test_tilexr_ep_server_dedup_chain.cpp"),
-            str(SOURCE / "server_dedup_chain_stub.cpp"),
-            str(ROOT / "src/comm/tilexr_profiling_runtime.cpp"),
-            str(ROOT / "src/ep/host/ep_memory_server_dedup_layout.cpp"),
-            str(ROOT / "src/ep/host/ep_memory_server_dedup_combine_layout.cpp"),
-            str(ROOT / "src/ep/host/ep_memory_layout.cpp"),
-            str(ROOT / "src/ep/host/ep_layout.cpp"),
-            "-o", str(cls.executable),
-        ], capture_output=True, text=True, timeout=60)
-        if result.returncode:
-            raise RuntimeError(result.stdout + result.stderr)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.temp.cleanup()
-
-    def setUp(self):
-        self.trace = tempfile.TemporaryDirectory(dir=self.folder)
-        self.addCleanup(self.trace.cleanup)
-        self.processes = []
-        self.addCleanup(self.stop)
-        comm, barrier = free_port(), free_port()
-        while barrier == comm:
-            barrier = free_port()
-        self.endpoint = ("127.0.0.1", barrier)
-        self.environment = dict(os.environ, TILEXR_VALIDATION_BS="2", TILEXR_VALIDATION_H="16",
-            TILEXR_VALIDATION_TOPK="3", TILEXR_VALIDATION_MOE_EXPERT_NUM="32", TILEXR_VALIDATION_DTYPE="bf16",
-            TILEXR_COMM_ID=f"127.0.0.1:{comm}", TILEXR_DEMO_BARRIER_ADDR=f"127.0.0.1:{barrier}",
-            TEST_TRACE_DIR=self.trace.name)
-        for key in ("OPERATOR_MODE", "DISPATCH_QUANT_MODE", "COMBINE_QUANT_MODE", "QUANT_MODE", "FP8_FORMAT"):
-            self.environment.pop("TILEXR_VALIDATION_" + key, None)
-        self.environment.pop("TILEXR_VALIDATION_ROUTE_MODE", None)
-        self.environment.pop("TILEXR_VALIDATION_SEED", None)
-        self.environment.pop("TILEXR_VALIDATION_LOOPS", None)
-        self.environment.pop("TILEXR_VALIDATION_WARMUP", None)
-        self.environment.pop("TILEXR_VALIDATION_RUN_MODE", None)
-        self.environment.pop("TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_BLOCK_DIM", None)
-
-    def stop(self):
-        for process in self.processes:
-            if process.poll() is None:
-                process.kill()
-            process.communicate(timeout=5)
-
-    def start(self, rank, *, environment=None, run="run-identity", stderr=subprocess.PIPE):
-        env = dict(self.environment, TEST_RANK=str(rank))
-        env.update(environment or {})
-        if env.get("TILEXR_VALIDATION_RUN_MODE") == "breakdown":
-            env.setdefault("TILEXR_PROFILING_CAPTURE_ID", CAPTURE_ID)
-            env.setdefault("TILEXR_PROFILING_COMBINE_RECORDS_PATH", str(Path(self.trace.name) / f"rank-{rank}.combine.records.v1"))
-            env.setdefault("TILEXR_PROFILING_RECORDS_PATH", str(Path(self.trace.name) / f"rank-{rank}.records.v1"))
-        process = subprocess.Popen([str(self.executable), run, "build-identity", "unknown", f"node-{rank // 8}",
-            str(rank // 8), str(rank % 8), str(rank % 8), str(rank), "16"],
-            env=env, stdout=subprocess.PIPE, stderr=stderr, text=True)
-        self.processes.append(process)
-        return process
-
+class ChainConsumerTests(ConsumerFixture, unittest.TestCase):
     def test_256p_consumer_rank_boundaries_without_device_launch(self):
         env = dict(self.environment,
                    TILEXR_VALIDATION_MOE_EXPERT_NUM="256", TILEXR_VALIDATION_BS="96")
@@ -151,12 +35,6 @@ class ChainConsumerTests(unittest.TestCase):
             self.assertIn("rank/device identity out of range", result.stderr)
         self.assertFalse(list(Path(self.trace.name).iterdir()), "dry-run must not call ACL or communicator")
 
-    def trace_lines(self, rank):
-        path = Path(self.trace.name) / str(rank)
-        return path.read_text().splitlines() if path.exists() else []
-
-    def records(self, output, prefix):
-        return [json.loads(line[len(prefix) + 1:]) for line in output.splitlines() if line.startswith(prefix + " ")]
 
     def check_five_tables(self, records):
         self.assertEqual({record["rank"] for record in records}, set(range(16)))
@@ -244,8 +122,6 @@ class ChainConsumerTests(unittest.TestCase):
                 self.assertIn("stage=config", errors)
                 self.assertNotIn("_PASS", output)
                 self.assertEqual(self.trace_lines(0), [])
-
-
 
 
     def test_single_dispatch_lifecycle_for_six_type_combinations(self):
@@ -721,4 +597,5 @@ class ChainConsumerTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    run_tests(ChainConsumerTests)
+    print("EP_SERVER_DEDUP_DISPATCH_CONSUMER_PASS test=lifecycle", flush=True)

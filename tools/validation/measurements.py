@@ -33,9 +33,6 @@ RANKS_PER_SERVER = 8
 
 def render_case_description(report):
     """Describe the effective case from its result, rather than guessed CLI defaults."""
-    if report.get("checkpoint") == "ep-sdedup-p1-memory-boundary":
-        return (f"MemoryDomain mode=functional cards={report.get('rank_size', 'unknown')} capacity/rank=4 GiB\n"
-                "Local boundary DataCopy offset=4294967264 bytes=32 pattern=0xFF")
     config = report.get("chain_configuration")
     if not config:
         return "checkpoint=" + report.get("checkpoint", "unknown")

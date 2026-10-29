@@ -19,13 +19,11 @@ Optional overrides: bs=96 h=7168 topk=6 dtype=bf16 fp8_format=e4m3
                     seed=UINT32 (default: 2026)
                     block_dim=auto comm_id=IP:PORT barrier_addr=IP:PORT
                     msprof=PATH hostfile=PATH host_validation=0|1 (default: 0)
-                    case_analysis=0|1 (default: 0)
   dry_run=1 reads hostfile and validates ranks locally using the installed consumer; no SSH/CANN/NPU.
   Dry-run uses the current package without CANN, SSH or device operations.
   Supports repeated calls; rebuild without profiling for functional/performance, with profiling for breakdown.
   The current production package is selected automatically.
   host_validation=1 runs local Host/Python tests before the NPU workflow.
-  case_analysis=1 reports rank deduplication min/max/avg after all NPU work finishes.
   Endpoints default to hostfile's first (local coordinator) IPv4, ports 10177/10274.
 HELP
 }
@@ -59,7 +57,7 @@ while (( $# )); do
             host_validation=${key#*=}
             [[ $host_validation == 0 || $host_validation == 1 ]] || fail 'host_validation must be 0 or 1'
             seen[host_validation]=1; shift;;
-        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|case_analysis=*|route_mode=*|seed=*)
+        bs=*|h=*|topk=*|dtype=*|quant_mode=*|dispatch_quant_mode=*|combine_quant_mode=*|operator_mode=*|dry_run=*|fp8_format=*|block_dim=*|comm_id=*|barrier_addr=*|msprof=*|hostfile=*|route_mode=*|seed=*)
             name=${key%%=*}; value=${key#*=}
             [[ -n $value ]] || fail "missing value for $name"
             [[ -z ${seen[$name]+set} ]] || fail "duplicate argument: $name"
@@ -71,9 +69,6 @@ while (( $# )); do
                     if [[ $name == quant_mode ]]; then legacy_quant=$value; else dispatch_quant=$value; fi;;
                 combine_quant_mode) [[ $value == 0 ]] || fail 'combine_quant_mode currently supports only 0'; combine_quant=$value;;
             esac
-            if [[ $name == case_analysis ]]; then
-                [[ $value == 0 || $value == 1 ]] || fail 'case_analysis must be 0 or 1'
-            fi
             if [[ $name == route_mode ]]; then
                 case "$value" in random|balance|balance_shift) ;; *) fail 'route_mode must be random, balance or balance_shift';; esac
             fi
@@ -101,7 +96,6 @@ export TILEXR_VALIDATION_DTYPE=bf16 TILEXR_VALIDATION_QUANT_MODE="$dispatch_quan
 export TILEXR_VALIDATION_DISPATCH_QUANT_MODE="$dispatch_quant" TILEXR_VALIDATION_COMBINE_QUANT_MODE="$combine_quant"
 export TILEXR_VALIDATION_OPERATOR_MODE="$operator_mode" TILEXR_VALIDATION_DRY_RUN="$dry_run"
 export TILEXR_VALIDATION_BLOCK_DIM=auto TILEXR_VALIDATION_ACTION=run
-export TILEXR_VALIDATION_CASE_ANALYSIS=0
 export TILEXR_VALIDATION_ROUTE_MODE=balance_shift TILEXR_VALIDATION_SEED=2026
 unset TILEXR_DIRECT_HOSTS_JSON TILEXR_DIRECT_RUN
 unset TILEXR_COMM_ID TILEXR_DEMO_BARRIER_ADDR

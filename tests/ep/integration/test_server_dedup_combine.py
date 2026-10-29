@@ -1,44 +1,24 @@
 """Complete Combine consumer contracts with Host substitutes, not NPU proof."""
-import argparse
-import os
 from pathlib import Path
-import tempfile
-import shutil
 from uuid import NAMESPACE_URL, uuid5
 import unittest
 
-import test_server_dedup_chain as dispatch_tests
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "tools/validation"))
+from server_dedup_consumer_fixture import ConsumerFixture, COMBINE_MARKER, run_tests
 import operator_measurements
 
-MARKER = "EP_SERVER_DEDUP_COMBINE_CHAIN_PASS"
+MARKER = COMBINE_MARKER
 PROFILE_MARKER = "EP_SERVER_DEDUP_OPERATOR_BREAKDOWN_PASS"
 RUN_ID = "run-identity"
 CAPTURE = str(uuid5(NAMESPACE_URL, "tilexr-validation:" + RUN_ID))
-CONSUMER = None
 
 
-class CombineTests(dispatch_tests.ChainConsumerTests):
-    @classmethod
-    def setUpClass(cls):
-        if CONSUMER is None:
-            super().setUpClass()
-        else:
-            cls.executable = Path(CONSUMER).resolve()
-            if not cls.executable.is_file() or not os.access(cls.executable, os.X_OK):
-                raise RuntimeError(f"Combine consumer is not executable: {cls.executable}")
-            cls.temp = tempfile.TemporaryDirectory(prefix="tilexr-combine-")
-            cls.folder = Path(cls.temp.name)
-
+class CombineTests(ConsumerFixture, unittest.TestCase):
     def setUp(self):
         super().setUp()
-        self.environment.update(TILEXR_VALIDATION_OPERATOR_MODE="both",
-            TILEXR_VALIDATION_RUN_MODE="functional", TILEXR_VALIDATION_LOOPS="1",
-            TILEXR_VALIDATION_WARMUP="0", TILEXR_VALIDATION_COMBINE_QUANT_MODE="0",
-            TILEXR_VALIDATION_BS="16", TILEXR_VALIDATION_H="257", TILEXR_VALIDATION_TOPK="6")
-        for key in tuple(self.environment):
-            if key.startswith("TEST_") and key != "TEST_TRACE_DIR":
-                self.environment.pop(key)
-
+        self.configure_combine()
 
     def check_success(self, rank, process, mode, loops=1, warmup=0):
         output, errors = process.communicate(timeout=30)
@@ -187,16 +167,6 @@ class CombineTests(dispatch_tests.ChainConsumerTests):
                     self.assertNotEqual(process.returncode, 0, output + errors)
                     self.assertIn("stage=config", errors)
                     self.assertEqual(self.trace_lines(0), [])
-
-    def reset_case(self):
-        self.stop()
-        self.processes.clear()
-        shutil.rmtree(self.trace.name)
-        Path(self.trace.name).mkdir()
-
-
-    def run_ranks(self, environment):
-        return [self.start(rank, environment=environment) for rank in range(16)]
 
 
     def start_profile(self, rank, mode, run_mode, **extra):
@@ -348,18 +318,6 @@ class CombineTests(dispatch_tests.ChainConsumerTests):
                 self.reset_case()
 
 
-def load_tests(loader, tests, pattern):
-    return unittest.TestSuite(CombineTests(name) for name in sorted(CombineTests.__dict__)
-                              if name.startswith("test_"))
-
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--consumer")
-    options, unittest_args = parser.parse_known_args()
-    CONSUMER = options.consumer
-    program = unittest.main(argv=[__file__] + unittest_args, exit=False)
-    if program.result.wasSuccessful() and not program.result.skipped:
-        print("EP_SERVER_DEDUP_COMBINE_CONSUMER_PASS test=lifecycle", flush=True)
-    else:
-        raise SystemExit(1)
+    run_tests(CombineTests)
+    print("EP_SERVER_DEDUP_COMBINE_CONSUMER_PASS test=lifecycle", flush=True)

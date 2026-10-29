@@ -9,7 +9,7 @@ import sys
 import unittest
 from unittest import mock
 import measurements
-from test_profiling_fixture import CAPTURE_ID, write_capture
+from profiling_fixture import CAPTURE_ID, write_capture
 
 
 class TraceTests(unittest.TestCase):

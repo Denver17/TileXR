@@ -102,11 +102,6 @@ def render_result(report, summary_path):
                 parts.append(f"{operator}_cores(send/recv)={cores}/{64 - cores}")
     if "rank_size" in report:
         parts.append(f"ranks={report.get('completed_ranks', 0)}/{report['rank_size']}")
-    analysis = report.get("case_analysis")
-    if analysis and analysis.get("status") == "complete":
-        parts.append("dedup(%) min/max/avg=" + "/".join(f"{analysis[key]:.2f}" for key in ("min", "max", "avg")))
-    elif analysis:
-        parts.append("case_analysis=failed")
     parts.append(f"result={summary_path}")
     lines = [_terminal_line(parts)]
     summaries = dict(report.get("operator_measurements", {}))

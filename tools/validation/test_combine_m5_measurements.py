@@ -8,7 +8,7 @@ import unittest
 
 import measurements as measure
 import operator_measurements as operators
-from test_profiling_fixture import CAPTURE_ID, write_capture
+from profiling_fixture import CAPTURE_ID, write_capture
 
 
 class M5MeasurementTests(unittest.TestCase):

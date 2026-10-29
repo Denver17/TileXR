@@ -387,6 +387,12 @@ endif()
 
 # Complete functional, lifecycle and profiling regression against Host substitutes.
 if(Python3_Interpreter_FOUND)
+    add_test(NAME test_tilexr_ep_server_dedup_dispatch_consumer
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_chain.py"
+            --consumer $<TARGET_FILE:test_tilexr_ep_server_dedup_chain_dry_run>)
+    set_tests_properties(test_tilexr_ep_server_dedup_dispatch_consumer PROPERTIES
+        LABELS ep-sdedup-dispatch TIMEOUT 240)
     add_test(NAME test_tilexr_ep_server_dedup_combine_consumer
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/integration/test_server_dedup_combine.py"
@@ -394,23 +400,6 @@ if(Python3_Interpreter_FOUND)
     set_tests_properties(test_tilexr_ep_server_dedup_combine_consumer PROPERTIES
         LABELS ep-sdedup-combine TIMEOUT 480)
 endif()
-add_executable(test_tilexr_ep_server_dedup_combine_boundary_launch
-    unit/test_tilexr_ep_server_dedup_combine_boundary_launch.cpp
-    integration/combine_memory_boundary_launch.cpp)
-target_include_directories(test_tilexr_ep_server_dedup_combine_boundary_launch PRIVATE
-    ${TILEXR_EP_FAKE_RUNTIME_INCLUDE_DIR} ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/common)
-target_link_libraries(test_tilexr_ep_server_dedup_combine_boundary_launch PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
-add_executable(test_tilexr_ep_server_dedup_combine_boundary_kernel
-    unit/test_tilexr_ep_server_dedup_combine_boundary_kernel.cpp)
-target_include_directories(test_tilexr_ep_server_dedup_combine_boundary_kernel BEFORE PRIVATE
-    "${CMAKE_CURRENT_SOURCE_DIR}/unit/combine_memory_boundary_fake"
-    ${TILEXR_ROOT}/src/include ${TILEXR_ROOT}/src/ep/common)
-foreach(test_name IN ITEMS launch kernel)
-    set(test_target test_tilexr_ep_server_dedup_combine_boundary_${test_name})
-    add_test(NAME ${test_target} COMMAND ${test_target})
-    set_tests_properties(${test_target} PROPERTIES LABELS ep-sdedup-combine-memory-boundary TIMEOUT 30)
-    install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-endforeach()
 add_executable(test_tilexr_ep_server_dedup_combine_delay
     unit/test_tilexr_ep_server_dedup_combine_delay.cpp
     ${TILEXR_ROOT}/src/ep/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp)
@@ -867,8 +856,8 @@ if(BUILD_TILEXR_EP_PLAN_MULTIRANK_TEST)
         RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 
-# Historical M1/M2/M4 handoff fixtures require forwarding. Keep their baseline
-# explicit; the shared source-aggregate fixture exercises full M3/M6 in mode 0.
+# Forwarding-unit and full consumer fixtures explicitly exercise dedup mode.
+# Direct and automatic paths have separate source-aggregate and policy fixtures.
 set_target_properties(test_tilexr_ep_server_dedup_combine_m12
     test_tilexr_ep_server_dedup_combine_m3 test_tilexr_ep_server_dedup_combine_m4
     test_tilexr_ep_server_dedup_chain_dry_run test_tilexr_ep_server_dedup_combine_delay

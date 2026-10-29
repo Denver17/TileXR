@@ -15,7 +15,7 @@ import workflow
 
 class CombineDryRunConfigurationTests(unittest.TestCase):
     def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="combine-c3-")
+        self.temp = tempfile.TemporaryDirectory(prefix="combine-dry-run-")
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         environment = {key: value for key, value in os.environ.items() if not key.startswith("TILEXR_")}

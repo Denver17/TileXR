@@ -80,20 +80,20 @@ std::vector<CombineTensorSnapshot> CaptureCombineTensors(const Config &c,
     bool dispatchBatch = false)
 {
     const bool aliasDispatch = c.operatorMode == "both" && c.quantMode == 0;
-    const size_t indices[] = {aliasDispatch ? 2U : 12U, 6U, 4U, 10U, 5U, 7U, 8U, 13U};
+    const size_t indices[] = {aliasDispatch ? 2U : 12U, 6U, 4U, 10U, 5U, 7U, 8U};
     const uint64_t sizes[] = {layout.expertOutBytes, layout.assistInfoBytes, layout.sendCountsBytes,
         layout.expertScalesBytes, layout.tokenTypeBytes, layout.relayReadIndexBytes,
-        layout.sourceMaskBytes, layout.yOutBytes};
+        layout.sourceMaskBytes};
     const char *names[] = {"expertOut", "assistInfo", "sendCounts", "expertScales", "tokenType",
-        "relayReadIndex", "sourceMask", "yOut"};
+        "relayReadIndex", "sourceMask"};
     std::vector<CombineTensorSnapshot> snapshots;
-    for (size_t i = 0; i < 8U; ++i) {
-        if (sizes[i] == 0U || indices[i] == 13U) continue;
+    for (size_t i = 0; i < 7U; ++i) {
+        if (sizes[i] == 0U) continue;
         if (!TileXREp::EpServerDedupEnabled(c.bs) &&
             (indices[i] == 5U || indices[i] == 7U || indices[i] == 8U)) continue;
         // A continuous Dispatch batch legitimately rewrites its output tensors.
         // Independent expertOut is invariant; yOut is validated numerically.
-        if (dispatchBatch && indices[i] != 12U && indices[i] != 13U) continue;
+        if (dispatchBatch && indices[i] != 12U) continue;
         snapshots.push_back({names[i], buffers[indices[i]], std::vector<uint8_t>(sizes[i])});
         auto &snapshot = snapshots.back();
         Check(aclrtMemcpy(snapshot.bytes.data(), sizes[i], snapshot.device, sizes[i],

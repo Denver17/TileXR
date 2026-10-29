@@ -121,9 +121,6 @@ class BuildTests(unittest.TestCase):
                 files = ["lib/libtilexr-ep.so", "lib/libtile-comm.so"]
                 files += [f"lib/tilexr/kernels/tilexr_ep_{name}_kernel.o"
                           for name in ("dispatch", "combine", "dispatch_memory", "combine_memory", "dispatch_memory_server_dedup", "combine_memory_server_dedup")]
-                if any("-DTILEXR_EP_BUILD_MEMORY_BOUNDARY_TEST=ON" in command for command, _, _ in self.commands):
-                    files += ["lib/libtilexr-ep-memory-boundary-test.so",
-                              "lib/tilexr/kernels/tilexr_ep_memory_boundary_test_kernel.o"]
             else:
                 files = ["bin/" + name for name in self.names]
                 if any("-DBUILD_TILEXR_EP_SERVER_DEDUP_CHAIN_TEST=ON" in command
@@ -136,7 +133,7 @@ class BuildTests(unittest.TestCase):
         if args[0] == "ctest":
             host_build = Path(args[args.index("--test-dir") + 1])
             output = json.dumps({"tests": [{"name": name,
-                                           "command": ([sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_combine.py")), "--consumer", str(host_build / workflow.COMBINE_DRY_RUN_PROGRAM)] if name in workflow.CONSUMER_TESTS else [sys.executable, str(self.root / "tests/ep/unit/test_server_dedup_combine_config.py")] if name == workflow.COMBINE_CONFIG_TEST else [str(host_build / name)])}
+                                           "command": ([sys.executable, str(self.root / "tests/ep/integration" / ("test_server_dedup_combine_dry_run.py" if name == workflow.COMBINE_DRY_RUN_TEST else "test_server_dedup_chain.py" if name == workflow.DISPATCH_CONSUMER_TEST else "test_server_dedup_combine.py")), "--consumer", str(host_build / workflow.COMBINE_DRY_RUN_PROGRAM)] if name in workflow.CONSUMER_TESTS else [sys.executable, str(self.root / "tests/ep/unit/test_server_dedup_combine_config.py")] if name == workflow.COMBINE_CONFIG_TEST else [str(host_build / name)])}
                                           for name in self.names]})
         else:
             output = "fixture command completed\n"

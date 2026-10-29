@@ -12,7 +12,7 @@ from unittest import mock
 import measurements as measure
 import operator_measurements as operators
 from current_run_fixture import combine_traffic, combine_events
-from test_profiling_fixture import CAPTURE_ID, combine_loop_events, write_capture
+from profiling_fixture import CAPTURE_ID, combine_loop_events, write_capture
 
 
 class OperatorMeasurementTests(unittest.TestCase):
