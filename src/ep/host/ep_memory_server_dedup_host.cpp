@@ -15,28 +15,29 @@ bool IsAligned(const void *pointer, uint32_t alignment)
 int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams &params)
 {
     const auto &p = params.dispatch;
-    if (p.comm == nullptr || p.stream == nullptr || p.bs <= 0 || p.h <= 0 ||
-        p.topK <= 0 || p.topK > kEpServerDedupMaxTopK || p.moeExpertNum <= 0 ||
-        !IsAligned(p.x, 2U) || !IsAligned(p.expertIds, 4U) || !IsAligned(p.expandXOut, 2U) ||
-        !IsAligned(p.expertTokenNumsOut, 8U) || !IsAligned(p.epRecvCountsOut, 4U) ||
+    if (p.comm == nullptr || p.stream == nullptr || p.bs <= 0 || p.h <= 0 || p.topK <= 0 ||
+        p.topK > kEpServerDedupMaxTopK || p.moeExpertNum <= 0 || !IsAligned(p.x, 2U) || !IsAligned(p.expertIds, 4U) ||
+        !IsAligned(p.expandXOut, 2U) || !IsAligned(p.expertTokenNumsOut, 8U) || !IsAligned(p.epRecvCountsOut, 4U) ||
         !IsAligned(params.destinationIndexOut, 4U) ||
-        (kEpServerDedupEnable && (!IsAligned(params.tokenTypeOut, 4U) ||
-        !IsAligned(params.relayReadIndexOut, 4U) || !IsAligned(params.sourceMaskOut, 4U))) ||
+        (kEpServerDedupEnable &&
+            (!IsAligned(params.tokenTypeOut, 4U) || !IsAligned(params.relayReadIndexOut, 4U) ||
+                !IsAligned(params.sourceMaskOut, 4U))) ||
         !IsAligned(p.expertScales, 4U) || !IsAligned(params.expertScalesOut, 4U)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if ((p.dtype != TileXR::TILEXR_DATA_TYPE_FP16 && p.dtype != TileXR::TILEXR_DATA_TYPE_BFP16) ||
-        (p.quantMode != 0 && p.quantMode != 4) || p.activeMaskType != TILEXR_EP_ACTIVE_MASK_NONE || p.xActiveMask != nullptr ||
-        p.sharedExpertNum != 0 || p.sharedExpertRankNum != 0 ||
+        (p.quantMode != 0 && p.quantMode != 4) || p.activeMaskType != TILEXR_EP_ACTIVE_MASK_NONE ||
+        p.xActiveMask != nullptr || p.sharedExpertNum != 0 || p.sharedExpertRankNum != 0 ||
         (p.tpWorldSize != 0 && p.tpWorldSize != 1) || p.tpRankId != 0 || p.expertShardType != 0 ||
-        p.scales != nullptr || p.tpRecvCountsOut != nullptr ||
-        p.expandScalesOut != nullptr) {
+        p.scales != nullptr || p.tpRecvCountsOut != nullptr || p.expandScalesOut != nullptr) {
         return TileXR::TILEXR_ERROR_NOT_SUPPORT;
     }
     const bool validOutput = p.quantMode == 4 ?
-        ((p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3 || p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E5M2) &&
-         p.dynamicScalesOut != nullptr) :
-        ((p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED || p.expandXOutDtype == p.dtype) && p.dynamicScalesOut == nullptr);
+        ((p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E4M3 ||
+             p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_FP8E5M2) &&
+            p.dynamicScalesOut != nullptr) :
+        ((p.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED || p.expandXOutDtype == p.dtype) &&
+            p.dynamicScalesOut == nullptr);
     if (!validOutput || p.expertTokenNumsType < kEpExpertTokenNumsTypePrefixSum ||
         p.expertTokenNumsType > kEpExpertTokenNumsTypeCount) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -44,8 +45,8 @@ int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams
     return TileXR::TILEXR_SUCCESS;
 }
 
-int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &params,
-    const TileXR::CommArgs &commArgs, EpMemoryServerDedupLayout *layout)
+int TileXREpValidateMemoryServerDedupConfig(
+    const EpMemoryServerDedupParams &params, const TileXR::CommArgs &commArgs, EpMemoryServerDedupLayout *layout)
 {
     if (layout == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
@@ -58,8 +59,8 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     EpMemoryServerDedupLayout next {};
-    const int ret = TileXREpBuildMemoryServerDedupLayout(commArgs.rankSize, p.bs, p.h,
-        p.topK, p.moeExpertNum, &next, p.quantMode == 4);
+    const int ret = TileXREpBuildMemoryServerDedupLayout(
+        commArgs.rankSize, p.bs, p.h, p.topK, p.moeExpertNum, &next, p.quantMode == 4);
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
@@ -92,10 +93,14 @@ int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &par
     if (!EpServerDedupEnabled(uint32_t(p.bs))) {
         const uint32_t owned = (uint32_t(p.bs) + kEpServerDedupSendCoreNum - 1U) / kEpServerDedupSendCoreNum;
         const uint32_t records = p.bs < kEpServerDedupAllCoreCountBsThreshold ?
-            uint32_t(TileXREpDedupAlign((uint32_t(p.moeExpertNum) + 63U) / 64U, 8U)) * 32U : 0U;
+            uint32_t(TileXREpDedupAlign((uint32_t(p.moeExpertNum) + 63U) / 64U, 8U)) * 32U :
+            0U;
         if (TileXREpServerDedupSendFixedUbBytes(uint32_t(p.bs), uint32_t(p.topK), uint32_t(commArgs.rankSize), owned,
-            records, p.quantMode == 4, next.data) + next.data.tokenStride > kEpServerDedupCountUbBytes)
+                records, p.quantMode == 4, next.data) +
+                next.data.tokenStride >
+            kEpServerDedupCountUbBytes) {
             return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+        }
     }
     *layout = next;
     return TileXR::TILEXR_SUCCESS;

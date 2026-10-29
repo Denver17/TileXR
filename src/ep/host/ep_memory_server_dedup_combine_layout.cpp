@@ -9,20 +9,26 @@ namespace TileXREp {
 namespace {
 bool Multiply(uint64_t a, uint64_t b, uint64_t &out)
 {
-    if (a != 0 && b > std::numeric_limits<size_t>::max() / a) { return false; }
+    if (a != 0 && b > std::numeric_limits<size_t>::max() / a) {
+        return false;
+    }
     out = a * b;
     return true;
 }
 bool Add(uint64_t a, uint64_t b, uint64_t &out)
 {
-    if (b > std::numeric_limits<size_t>::max() - a) { return false; }
+    if (b > std::numeric_limits<size_t>::max() - a) {
+        return false;
+    }
     out = a + b;
     return true;
 }
-bool BuildDataLayout(uint64_t bs, uint64_t h, uint64_t topK, uint64_t experts,
-    uint64_t resultSlotBytes, EpServerDedupCombineDataLayout &next)
+bool BuildDataLayout(uint64_t bs, uint64_t h, uint64_t topK, uint64_t experts, uint64_t resultSlotBytes,
+    EpServerDedupCombineDataLayout &next)
 {
-    if (resultSlotBytes == 0 || resultSlotBytes % 512U != 0) { return false; }
+    if (resultSlotBytes == 0 || resultSlotBytes % 512U != 0) {
+        return false;
+    }
     next.resultOffset = TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET;
     next.stageRowBytes = (h * 2U + 511U) / 512U * 512U;
     next.stageRows = kEpServerDedupEnable ? experts * bs : 0U;
@@ -33,15 +39,16 @@ bool BuildDataLayout(uint64_t bs, uint64_t h, uint64_t topK, uint64_t experts,
 }
 } // namespace
 
-int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64_t h,
-    int64_t topK, int64_t experts, EpMemoryServerDedupCombineLayout *out)
+int TileXREpBuildMemoryServerDedupCombineLayout(
+    int64_t ranks, int64_t bs, int64_t h, int64_t topK, int64_t experts, EpMemoryServerDedupCombineLayout *out)
 {
-    if (out == nullptr) { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
+    if (out == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     *out = {};
-    if (ranks < 16 || ranks > TileXR::TILEXR_MAX_RANK_SIZE || ranks % kEpServerDedupRanksPerServer != 0 ||
-        bs <= 0 || h <= 0 || h > UINT32_MAX || topK <= 0 || topK > kEpServerDedupMaxTopK ||
-        experts <= 0 || experts > kEpServerDedupMaxExperts || experts % ranks != 0 ||
-        topK > experts || bs > UINT32_MAX / topK) {
+    if (ranks < 16 || ranks > TileXR::TILEXR_MAX_RANK_SIZE || ranks % kEpServerDedupRanksPerServer != 0 || bs <= 0 ||
+        h <= 0 || h > UINT32_MAX || topK <= 0 || topK > kEpServerDedupMaxTopK || experts <= 0 ||
+        experts > kEpServerDedupMaxExperts || experts % ranks != 0 || topK > experts || bs > UINT32_MAX / topK) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     EpMemoryServerDedupCombineLayout next {};
@@ -50,8 +57,7 @@ int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64
     const uint64_t rowBytes = uint64_t(h) * 2U;
     if (!Multiply(next.globalBs, std::min(topK, experts / ranks), next.capacityRows) ||
         !Multiply(next.capacityRows, rowBytes, next.expertOutBytes) ||
-        !Multiply(next.capacityRows, 12U, next.assistInfoBytes) ||
-        !Multiply(experts, 4U, next.sendCountsBytes) ||
+        !Multiply(next.capacityRows, 12U, next.assistInfoBytes) || !Multiply(experts, 4U, next.sendCountsBytes) ||
         !Multiply(uint64_t(bs) * topK, 4U, next.expertScalesBytes) ||
         !Multiply(next.capacityRows, 4U, next.tokenTypeBytes) ||
         !Multiply(next.capacityRows, next.relayReadIndexRowStrideBytes, next.relayReadIndexBytes) ||
@@ -71,14 +77,18 @@ int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64
     return TileXR::TILEXR_SUCCESS;
 }
 
-int TileXREpBuildServerDedupCombineDataLayout(int64_t ranks, int64_t bs, int64_t h,
-    int64_t topK, int64_t experts, uint64_t resultSlotBytes, EpServerDedupCombineDataLayout *out)
+int TileXREpBuildServerDedupCombineDataLayout(int64_t ranks, int64_t bs, int64_t h, int64_t topK, int64_t experts,
+    uint64_t resultSlotBytes, EpServerDedupCombineDataLayout *out)
 {
-    if (out == nullptr) { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
+    if (out == nullptr) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     *out = {};
     EpMemoryServerDedupCombineLayout tensors {};
     int ret = TileXREpBuildMemoryServerDedupCombineLayout(ranks, bs, h, topK, experts, &tensors);
-    if (ret != TileXR::TILEXR_SUCCESS) { return ret; }
+    if (ret != TileXR::TILEXR_SUCCESS) {
+        return ret;
+    }
     EpServerDedupCombineDataLayout next {};
     if (!BuildDataLayout(bs, h, topK, experts, resultSlotBytes, next)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;

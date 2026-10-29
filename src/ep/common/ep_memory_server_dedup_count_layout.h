@@ -18,28 +18,29 @@ constexpr uint32_t kEpServerDedupCoreNum = 64U;
 #define TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 32U
 #endif
 constexpr uint32_t kEpServerDedupSendCoreNum = TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM;
-static_assert(kEpServerDedupSendCoreNum >= 16U && kEpServerDedupSendCoreNum <= 48U &&
-    kEpServerDedupSendCoreNum % 4U == 0U,
+static_assert(
+    kEpServerDedupSendCoreNum >= 16U && kEpServerDedupSendCoreNum <= 48U && kEpServerDedupSendCoreNum % 4U == 0U,
     "TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM must be 16..48 in steps of 4");
 constexpr uint32_t kEpServerDedupRecvCoreNum = kEpServerDedupCoreNum - kEpServerDedupSendCoreNum;
 // BS below this threshold uses all 64 cores for Count; otherwise only receivers.
-constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold =
-    TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD;
+constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold = TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD;
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountGmStride = 512U;
 constexpr uint32_t kEpServerDedupCountUbBytes = 190U * 1024U;
 static_assert(kEpServerDedupCountGmStride % kEpServerDedupCountRecordBytes == 0U &&
-    TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET % kEpServerDedupCountGmStride == 0U,
+        TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET % kEpServerDedupCountGmStride == 0U,
     "GM count slots must be aligned whole records");
-static_assert(uint64_t(kEpServerDedupMaxExperts) * kEpServerDedupCountGmStride <=
-    TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_BYTES, "Count records exceed their fixed region");
+static_assert(
+    uint64_t(kEpServerDedupMaxExperts) * kEpServerDedupCountGmStride <= TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_BYTES,
+    "Count records exceed their fixed region");
 static_assert(uint64_t(kEpServerDedupRecvCoreNum) * kEpServerDedupRecvCoreNum * kEpServerDedupCountRecordBytes <=
-    TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES &&
-    TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES <= TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_BYTES,
+            TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES &&
+        TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_BYTES <= TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_BYTES,
     "Receiver matrices exceed their fixed regions");
 static_assert(uint64_t(kEpServerDedupMaxExperts) * sizeof(int32_t) * kEpServerDedupRecvCoreNum * 2U <=
-    TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_BYTES, "Prefix region must include one full spare footprint");
+        TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_BYTES,
+    "Prefix region must include one full spare footprint");
 
 #if TILEXR_ASCENDC_AICORE_COMPILE
 #define TILEXR_EP_DEDUP_INLINE FORCE_INLINE_AICORE
@@ -74,8 +75,10 @@ TILEXR_EP_DEDUP_INLINE EpServerDedupCountLayout TileXREpServerDedupCountLayout(u
     layout.cumsumOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CUMSUM_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
     layout.prefixOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_PREFIX_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
     layout.prefixStride = (uint64_t(experts) * sizeof(int32_t) + 31U) / 32U * 32U;
-    layout.cumsumFlagOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
-    layout.counterOffset = TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET + TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_OFFSET;
+    layout.cumsumFlagOffset =
+        TILEXR_EP_SERVER_DEDUP_DISPATCH_READY_OFFSET - TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNT_OFFSET;
+    layout.counterOffset =
+        TILEXR_EP_SERVER_DEDUP_DISPATCH_CONTROL_OFFSET + TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_OFFSET;
     layout.stateBytes = layout.counterOffset + TILEXR_EP_SERVER_DEDUP_DISPATCH_COUNTER_BYTES;
     return layout;
 }

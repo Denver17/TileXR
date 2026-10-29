@@ -15,9 +15,11 @@ enum class State { Pending, Compact, KeepFlags };
 #if defined(__CCE__) && defined(__CCE_IS_AICORE__)
 __aicore__ inline
 #endif
-constexpr State Decode(float sum, uint32_t blocks)
+    constexpr State
+    Decode(float sum, uint32_t blocks)
 {
-    return sum == float(blocks * 8U) ? State::Compact :
+    return sum == float(blocks * 8U) ?
+        State::Compact :
         (sum == float(blocks * 8U) + (kKeepFlags - kCompact) ? State::KeepFlags : State::Pending);
 }
 } // namespace PacketReceiveLayout

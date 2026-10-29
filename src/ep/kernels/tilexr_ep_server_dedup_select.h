@@ -8,8 +8,8 @@ namespace TileXREp {
 // Rotate each half from the next relative position. Dedup at 16+ servers
 // alternates own/other half; smaller worlds and direct mode finish own half first.
 // This mapping is independent of ownership and pipeline cursors.
-__aicore__ inline uint32_t ServerDedupHalfOrder(uint32_t servers, uint32_t ownServer,
-    uint32_t ordinal, bool dedup = true)
+__aicore__ inline uint32_t ServerDedupHalfOrder(
+    uint32_t servers, uint32_t ownServer, uint32_t ordinal, bool dedup = true)
 {
     const uint32_t split = servers / 2U;
     const bool lower = ownServer < split;
@@ -19,12 +19,15 @@ __aicore__ inline uint32_t ServerDedupHalfOrder(uint32_t servers, uint32_t ownSe
     if (dedup && servers >= 16U) { // Eight ranks per server: 128P and above.
         // Map alternating visits back to the contiguous half-order index.
         // For odd worlds, visit the larger half's unmatched last entry at the end.
-        if (ordinal < 2U * split)
+        if (ordinal < 2U * split) {
             ordinal = ordinal / 2U + (ordinal % 2U == 0U ? 0U : ownLength);
-        else
+        } else {
             ordinal = ownLength > split ? split : servers - 1U;
+        }
     }
-    if (ordinal < ownLength) return ownBase + (relative + ordinal + 1U) % ownLength;
+    if (ordinal < ownLength) {
+        return ownBase + (relative + ordinal + 1U) % ownLength;
+    }
     const uint32_t otherBase = lower ? split : 0U;
     const uint32_t otherLength = servers - ownLength;
     return otherBase + (relative + ordinal - ownLength + 1U) % otherLength;
@@ -32,9 +35,8 @@ __aicore__ inline uint32_t ServerDedupHalfOrder(uint32_t servers, uint32_t ownSe
 
 // Table2 carries source ranks. Two comparisons select one eight-rank server
 // without scalar division or a per-candidate GetValue loop.
-__aicore__ inline void ServerDedupRankMask(AscendC::LocalTensor<uint8_t> mask,
-    AscendC::LocalTensor<uint8_t> upper, AscendC::LocalTensor<int32_t> ranks,
-    int32_t first, int32_t end, uint32_t count)
+__aicore__ inline void ServerDedupRankMask(AscendC::LocalTensor<uint8_t> mask, AscendC::LocalTensor<uint8_t> upper,
+    AscendC::LocalTensor<int32_t> ranks, int32_t first, int32_t end, uint32_t count)
 {
     using namespace AscendC;
     // CANN's public debug contract requires 256B of comparison input. All
@@ -43,8 +45,8 @@ __aicore__ inline void ServerDedupRankMask(AscendC::LocalTensor<uint8_t> mask,
     Compares(mask, ranks, first, CMPMODE::GE, compareCount);
     Compares(upper, ranks, end, CMPMODE::LT, compareCount);
     PipeBarrier<PIPE_V>();
-    And(mask.ReinterpretCast<uint16_t>(), mask.ReinterpretCast<uint16_t>(),
-        upper.ReinterpretCast<uint16_t>(), int32_t((count + 15U) / 16U));
+    And(mask.ReinterpretCast<uint16_t>(), mask.ReinterpretCast<uint16_t>(), upper.ReinterpretCast<uint16_t>(),
+        int32_t((count + 15U) / 16U));
     PipeBarrier<PIPE_V>();
 }
 // The compact stream is striped across cores, continuing from prior servers

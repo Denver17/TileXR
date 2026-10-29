@@ -36,8 +36,8 @@ static_assert(offsetof(EpServerDedupCombineKernelArgs, magic) == 80, "magic offs
 
 int TileXREpRegisterCombineMemoryServerDedupKernel();
 // Caller has registered the binary and owns argument lifetimes until stream completion.
-int TileXREpSubmitCombineMemoryServerDedupKernel(EpServerDedupCombineKernelArgs &args,
-    uint32_t blockDim, aclrtStream stream);
+int TileXREpSubmitCombineMemoryServerDedupKernel(
+    EpServerDedupCombineKernelArgs &args, uint32_t blockDim, aclrtStream stream);
 
 int TileXREpLaunchCombineMemoryServerDedupKernel(const EpMemoryServerDedupCombineParams &params,
     const EpHostLaunchContext &context, const EpMemoryServerDedupCombineLayout &layout);

@@ -12,8 +12,7 @@ class ServerDedupProfile {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, uint32_t launchSlot)
     {
-        writer_.InitializeLatest(commArgs, AscendC::GetBlockIdx(), launchSlot,
-            kEpServerDedupProfilingRecordsPerLaunch);
+        writer_.InitializeLatest(commArgs, AscendC::GetBlockIdx(), launchSlot, kEpServerDedupProfilingRecordsPerLaunch);
     }
     __aicore__ inline void Mark(uint32_t point)
     {
@@ -31,8 +30,15 @@ public:
     {
         writer_.Record(kEpServerDedupOperationEventBase + 2U * uint32_t(operation) + 1U);
     }
-    __aicore__ inline void PacketIssue() { writer_.Record(kEpServerDedupPacketIssueEvent); }
-    __aicore__ inline void Publish() { writer_.Publish(); }
+    __aicore__ inline void PacketIssue()
+    {
+        writer_.Record(kEpServerDedupPacketIssueEvent);
+    }
+    __aicore__ inline void Publish()
+    {
+        writer_.Publish();
+    }
+
 private:
     TileXR::DirectProfilingWriter writer_;
 };

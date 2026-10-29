@@ -12,15 +12,17 @@ using namespace AscendC;
 // Both tables remain in UB until this core has finished clearing its slots.
 class ServerDedupReceiveTasks {
 public:
-    __aicore__ inline void Build(LocalTensor<int32_t> prefix, uint32_t rank, uint32_t ranks,
-        uint32_t experts, uint32_t bs, uint32_t receiver, TPipe *pipe)
+    __aicore__ inline void Build(LocalTensor<int32_t> prefix, uint32_t rank, uint32_t ranks, uint32_t experts,
+        uint32_t bs, uint32_t receiver, TPipe *pipe)
     {
         const uint32_t total = uint32_t(prefix.GetValue(experts - 1U));
         begin_ = uint32_t(uint64_t(receiver) * total / kEpServerDedupRecvCoreNum);
         const uint32_t end = uint32_t(uint64_t(receiver + 1U) * total / kEpServerDedupRecvCoreNum);
         count_ = end - begin_;
         pendingCount_ = count_;
-        if (count_ == 0U) return;
+        if (count_ == 0U) {
+            return;
+        }
 
         const uint32_t bytes = uint32_t(TileXREpDedupAlign(uint64_t(count_) * sizeof(uint32_t), 32U));
         pipe->InitBuffer(tokenPosBuf_, bytes);
@@ -34,8 +36,11 @@ public:
         uint32_t record = 0U, limit = experts;
         while (record < limit) {
             const uint32_t middle = record + (limit - record) / 2U;
-            if (uint32_t(prefix.GetValue(middle)) <= begin_) record = middle + 1U;
-            else limit = middle;
+            if (uint32_t(prefix.GetValue(middle)) <= begin_) {
+                record = middle + 1U;
+            } else {
+                limit = middle;
+            }
         }
         // Keep the original record start: begin_ may split its q range.
         uint32_t previous = record == 0U ? 0U : uint32_t(prefix.GetValue(record - 1U));
@@ -55,11 +60,26 @@ public:
         }
     }
 
-    __aicore__ inline uint32_t Begin() const { return begin_; }
-    __aicore__ inline uint32_t Count() const { return count_; }
-    __aicore__ inline uint32_t PendingCount() const { return pendingCount_; }
-    __aicore__ inline uint32_t Position(uint32_t j) { return tokenPos_.GetValue(j); }
-    __aicore__ inline uint32_t PendingIndex(uint32_t p) { return pendingIdx_.GetValue(p); }
+    __aicore__ inline uint32_t Begin() const
+    {
+        return begin_;
+    }
+    __aicore__ inline uint32_t Count() const
+    {
+        return count_;
+    }
+    __aicore__ inline uint32_t PendingCount() const
+    {
+        return pendingCount_;
+    }
+    __aicore__ inline uint32_t Position(uint32_t j)
+    {
+        return tokenPos_.GetValue(j);
+    }
+    __aicore__ inline uint32_t PendingIndex(uint32_t p)
+    {
+        return pendingIdx_.GetValue(p);
+    }
 
     // Call only after every required write for PendingIndex(p) has been issued.
     // Recheck p after removal; output row and cleanup ownership still use j.

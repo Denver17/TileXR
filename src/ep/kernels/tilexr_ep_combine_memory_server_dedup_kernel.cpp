@@ -2,12 +2,13 @@
 #include "ep_memory_server_dedup_combine_tiling.h"
 
 // P2.4 implements M1/M2/M3/M4/M5; the public launch signature remains unchanged.
-extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_server_dedup_kernel(
-    GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR sendCounts,
-    GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex, GM_ADDR sourceMask,
-    GM_ADDR yOut, GM_ADDR tilingData, int64_t magic)
+extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_server_dedup_kernel(GM_ADDR commArgs,
+    GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR sendCounts, GM_ADDR expertScales, GM_ADDR tokenType,
+    GM_ADDR relayReadIndex, GM_ADDR sourceMask, GM_ADDR yOut, GM_ADDR tilingData, int64_t magic)
 {
-    if (tilingData == nullptr) { return; }
+    if (tilingData == nullptr) {
+        return;
+    }
     // Read the independent scalar configuration once per core.
     const volatile __gm__ TileXREp::EpServerDedupCombineTilingData *tiling =
         reinterpret_cast<const volatile __gm__ TileXREp::EpServerDedupCombineTilingData *>(tilingData);
@@ -22,8 +23,7 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_ser
     profilingEnabled = tiling->profilingEnabled;
 #endif
     TileXREp::CombineMemoryServerDedupKernel kernel;
-    kernel.Init(commArgs, expertOut, assistInfoForCombine, sendCounts, expertScales,
-        tokenType, relayReadIndex, sourceMask, yOut, bs, h, topK, experts, dtype, quantMode,
-        magic, profilingEnabled);
+    kernel.Init(commArgs, expertOut, assistInfoForCombine, sendCounts, expertScales, tokenType, relayReadIndex,
+        sourceMask, yOut, bs, h, topK, experts, dtype, quantMode, magic, profilingEnabled);
     kernel.Process();
 }

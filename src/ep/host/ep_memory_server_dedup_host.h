@@ -16,8 +16,8 @@ struct EpMemoryServerDedupParams {
 };
 
 int TileXREpValidateBasicMemoryServerDedupParams(const EpMemoryServerDedupParams &params);
-int TileXREpValidateMemoryServerDedupConfig(const EpMemoryServerDedupParams &params,
-    const TileXR::CommArgs &commArgs, EpMemoryServerDedupLayout *layout);
+int TileXREpValidateMemoryServerDedupConfig(
+    const EpMemoryServerDedupParams &params, const TileXR::CommArgs &commArgs, EpMemoryServerDedupLayout *layout);
 
 } // namespace TileXREp
 

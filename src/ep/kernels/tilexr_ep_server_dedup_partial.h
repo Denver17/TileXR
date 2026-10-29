@@ -20,15 +20,24 @@ using namespace AscendC;
 class ServerDedupPartial {
 public:
 #if defined(TILEXR_ENABLE_PROFILING)
-    __aicore__ inline void SetProfiling(TileXR::DirectProfilingWriter *writer) { profile_ = writer; }
-#endif
-    __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, TPipe *pipe,
-        LocalTensor<uint8_t> scratch, GM_ADDR expert, GM_ADDR table2, GM_ADDR table3, GM_ADDR types,
-        uint32_t tokens, uint32_t bs, uint32_t h, uint32_t k,
-        uint32_t experts, uint8_t dtype, uint64_t window, const EpCombineM45WorkspaceLayout &layout)
+    __aicore__ inline void SetProfiling(TileXR::DirectProfilingWriter *writer)
     {
-        args_ = args; pipe_ = pipe; scratch_ = scratch[layout.phaseOffset]; tokens_ = tokens;
-        bs_ = bs; h_ = h; k_ = k; localExperts_ = experts / uint32_t(args->rankSize); dtype_ = dtype;
+        profile_ = writer;
+    }
+#endif
+    __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, TPipe *pipe, LocalTensor<uint8_t> scratch,
+        GM_ADDR expert, GM_ADDR table2, GM_ADDR table3, GM_ADDR types, uint32_t tokens, uint32_t bs, uint32_t h,
+        uint32_t k, uint32_t experts, uint8_t dtype, uint64_t window, const EpCombineM45WorkspaceLayout &layout)
+    {
+        args_ = args;
+        pipe_ = pipe;
+        scratch_ = scratch[layout.phaseOffset];
+        tokens_ = tokens;
+        bs_ = bs;
+        h_ = h;
+        k_ = k;
+        localExperts_ = experts / uint32_t(args->rankSize);
+        dtype_ = dtype;
         window_ = window;
         blocks_ = (h * 2U + 479U) / 480U;
         packetBytes_ = blocks_ * 512U;
@@ -37,7 +46,10 @@ public:
         stageBase_ = window + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + uint64_t(bs) * k * packetBytes_;
         inputLanes_ = layout.inputLanes;
         outputLanes_ = layout.outputLanes;
-        if (inputLanes_ == 0U || outputLanes_ == 0U) { Trap(); return; }
+        if (inputLanes_ == 0U || outputLanes_ == 0U) {
+            Trap();
+            return;
+        }
         rows_ = Allocate<int32_t>(EpCombineM4TaskBytes(tokens));
         scan_ = scratch_[used_];
         scanRows_ = EpCombineM4ScanRows(h, k);
@@ -57,11 +69,13 @@ public:
 
     __aicore__ inline uint32_t Process()
     {
-        for (uint32_t lane = 0; lane < inputLanes_; ++lane) SetFlag<HardEvent::V_MTE2>(lane);
+        for (uint32_t lane = 0; lane < inputLanes_; ++lane) {
+            SetFlag<HardEvent::V_MTE2>(lane);
+        }
         uint64_t flagMask[2] = {0xffU, 0U};
         for (uint32_t lane = 0; lane < outputLanes_; ++lane) {
-            Duplicate<float>(outputs_[lane * packetBytes_].ReinterpretCast<float>()[120U],
-                1.0f, flagMask, uint8_t(blocks_), 1U, 16U);
+            Duplicate<float>(outputs_[lane * packetBytes_].ReinterpretCast<float>()[120U], 1.0f, flagMask,
+                uint8_t(blocks_), 1U, 16U);
         }
         PipeBarrier<PIPE_V>();
         const uint32_t servers = uint32_t(args_->rankSize) / 8U;
@@ -77,16 +91,24 @@ public:
                 const uint32_t token = uint32_t(table2Ub_.GetValue(1U));
                 const uint32_t topk = uint32_t(table2Ub_.GetValue(2U));
                 const uint32_t members = table3Ub_.GetValue(0U); // full uint32 N, not uint16
-                if (members == 0U || members >= k_) { Trap(); return completed; }
-                if (dtype_ == TileXR::TILEXR_DATA_TYPE_FP16) Aggregate<half>(row, source, members + 1U);
-                else Aggregate<bfloat16_t>(row, source, members + 1U);
+                if (members == 0U || members >= k_) {
+                    Trap();
+                    return completed;
+                }
+                if (dtype_ == TileXR::TILEXR_DATA_TYPE_FP16) {
+                    Aggregate<half>(row, source, members + 1U);
+                } else {
+                    Aggregate<bfloat16_t>(row, source, members + 1U);
+                }
                 Send(completed % outputLanes_, source, token, topk);
                 ++completed;
                 Mark(kEpServerDedupCombineProfilePartialTokenEnd);
             }
             // Reuse phase scratch with its Vector dependency, not an MTE3 drain.
         }
-        for (uint32_t lane = 0; lane < inputLanes_; ++lane) WaitFlag<HardEvent::V_MTE2>(lane);
+        for (uint32_t lane = 0; lane < inputLanes_; ++lane) {
+            WaitFlag<HardEvent::V_MTE2>(lane);
+        }
         // Output events and their UB sources remain owned by the shared ring.
         // The caller hands off only MTE2/Vector before M5 reuses phase metadata.
         return completed;
@@ -96,7 +118,9 @@ private:
     __aicore__ inline void Mark(uint32_t event)
     {
 #if defined(TILEXR_ENABLE_PROFILING)
-        if (profile_ != nullptr) profile_->Record(event);
+        if (profile_ != nullptr) {
+            profile_->Record(event);
+        }
 #else
         (void)event;
 #endif
@@ -104,16 +128,19 @@ private:
 #if defined(TILEXR_ENABLE_PROFILING)
     TileXR::DirectProfilingWriter *profile_ = nullptr;
 #endif
-    template<class T> __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)
+    template <class T>
+    __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)
     {
         auto tensor = scratch_[used_].template ReinterpretCast<T>();
         used_ += bytes;
         return tensor;
     }
-    template<HardEvent E> __aicore__ inline void Sync()
+    template <HardEvent E>
+    __aicore__ inline void Sync()
     {
         const TEventID id = pipe_->FetchEventID(E);
-        SetFlag<E>(id); WaitFlag<E>(id);
+        SetFlag<E>(id);
+        WaitFlag<E>(id);
     }
     __aicore__ inline uint32_t SelectServer(uint32_t server, uint32_t &owner, bool validateRanks)
     {
@@ -135,8 +162,7 @@ private:
             SetFlag<HardEvent::V_MTE2>(7U);
             WaitFlag<HardEvent::V_MTE2>(7U);
             DataCopyPad(ranks, types_[begin], {1U, span * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
-            DataCopyPad(table, table2_[uint64_t(begin) * 3U],
-                {1U, span * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+            DataCopyPad(table, table2_[uint64_t(begin) * 3U], {1U, span * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
             SetFlag<HardEvent::MTE2_V>(7U);
             WaitFlag<HardEvent::MTE2_V>(7U);
             Compares(typeMask, ranks, int32_t(2), CMPMODE::EQ, (span + 63U) / 64U * 64U);
@@ -150,29 +176,30 @@ private:
             PipeBarrier<PIPE_V>();
             if (validateRanks) {
                 uint64_t typed = 0U, valid = 0U;
-                GatherMask(table, indices, typeMask.ReinterpretCast<uint32_t>(), true,
-                    span, {1U, 1U, 0U, 0U}, typed);
+                GatherMask(table, indices, typeMask.ReinterpretCast<uint32_t>(), true, span, {1U, 1U, 0U, 0U}, typed);
                 ServerDedupRankMask(mask, upper, ranks, 0, int32_t(args_->rankSize), span);
                 And(mask.ReinterpretCast<uint16_t>(), mask.ReinterpretCast<uint16_t>(),
                     typeMask.ReinterpretCast<uint16_t>(), int32_t((span + 15U) / 16U));
                 PipeBarrier<PIPE_V>();
-                GatherMask(table, indices, mask.ReinterpretCast<uint32_t>(), true,
-                    span, {1U, 1U, 0U, 0U}, valid);
+                GatherMask(table, indices, mask.ReinterpretCast<uint32_t>(), true, span, {1U, 1U, 0U, 0U}, valid);
                 Sync<HardEvent::V_S>();
-                if (valid != typed) { Trap(); return 0U; }
+                if (valid != typed) {
+                    Trap();
+                    return 0U;
+                }
             }
             ServerDedupRankMask(mask, upper, ranks, int32_t(server * 8U), int32_t((server + 1U) * 8U), span);
             And(mask.ReinterpretCast<uint16_t>(), mask.ReinterpretCast<uint16_t>(),
                 typeMask.ReinterpretCast<uint16_t>(), int32_t((span + 15U) / 16U));
             PipeBarrier<PIPE_V>();
             uint64_t selected = 0U;
-            GatherMask(table, indices, mask.ReinterpretCast<uint32_t>(), true,
-                span, {1U, 1U, 0U, 0U}, selected);
+            GatherMask(table, indices, mask.ReinterpretCast<uint32_t>(), true, span, {1U, 1U, 0U, 0U}, selected);
             Sync<HardEvent::V_S>();
             const uint32_t first = ServerDedupFirstOwned(localCore, owner, kEpServerDedupCombineRecvCoreNum);
             owner = (owner + uint32_t(selected)) % kEpServerDedupCombineRecvCoreNum;
-            for (uint32_t task = first; task < uint32_t(selected); task += kEpServerDedupCombineRecvCoreNum)
+            for (uint32_t task = first; task < uint32_t(selected); task += kEpServerDedupCombineRecvCoreNum) {
                 rows_.SetValue(count++, table.GetValue(task));
+            }
         }
         return count;
     }
@@ -180,10 +207,8 @@ private:
     {
         // Route is reloaded by original row so the list needs only 4B/task.
         // Table3 is exactly one K*8B row, fetched only for an owned type2 task.
-        DataCopyPad(table2Ub_, table2_[uint64_t(row) * 3U],
-            {1U, 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
-        DataCopyPad(table3Ub_, table3_[uint64_t(row) * k_ * 2U],
-            {1U, k_ * 8U, 0U, 0U, 0U}, {false, 0U, 0U, 0U});
+        DataCopyPad(table2Ub_, table2_[uint64_t(row) * 3U], {1U, 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+        DataCopyPad(table3Ub_, table3_[uint64_t(row) * k_ * 2U], {1U, k_ * 8U, 0U, 0U, 0U}, {false, 0U, 0U, 0U});
         Sync<HardEvent::MTE2_S>();
     }
     __aicore__ inline void Load(uint32_t row, uint32_t source, uint32_t member)
@@ -191,25 +216,27 @@ private:
         const uint32_t lane = (inputSequence_ + member) % inputLanes_;
         WaitFlag<HardEvent::V_MTE2>(lane);
         GlobalTensor<uint16_t> data;
-        if (member == 0U) data = expert_[uint64_t(row) * h_];
-        else {
+        if (member == 0U) {
+            data = expert_[uint64_t(row) * h_];
+        } else {
             const uint32_t packed = table3Ub_.GetValue(member * 2U);
             const uint32_t expert = packed & 0xffffU, q = packed >> 16U;
             const uint32_t memberRank = expert / localExperts_, localExpert = expert % localExperts_;
-            const uint64_t slot = (((uint64_t(source) + memberRank) % uint32_t(args_->rankSize)) *
-                localExperts_ + localExpert) * bs_ + q;
-            data.SetGlobalBuffer(reinterpret_cast<__gm__ uint16_t *>(args_->peerMems[memberRank] +
-                stageBase_ + slot * stageStride_));
+            const uint64_t slot =
+                (((uint64_t(source) + memberRank) % uint32_t(args_->rankSize)) * localExperts_ + localExpert) * bs_ + q;
+            data.SetGlobalBuffer(
+                reinterpret_cast<__gm__ uint16_t *>(args_->peerMems[memberRank] + stageBase_ + slot * stageStride_));
         }
-        DataCopyPad(inputs_[lane * inputBytes_ / 2U], data,
-            {1U, h_ * 2U, 0U, 0U, 0U}, {false, 0U, 0U, uint16_t(0)});
+        DataCopyPad(inputs_[lane * inputBytes_ / 2U], data, {1U, h_ * 2U, 0U, 0U, 0U}, {false, 0U, 0U, uint16_t(0)});
         SetFlag<HardEvent::MTE2_V>(lane);
     }
-    template<class T> __aicore__ inline void Aggregate(uint32_t row, uint32_t source,
-        uint32_t contributions)
+    template <class T>
+    __aicore__ inline void Aggregate(uint32_t row, uint32_t source, uint32_t contributions)
     {
         const uint32_t preload = contributions < inputLanes_ ? contributions : inputLanes_;
-        for (uint32_t member = 0; member < preload; ++member) Load(row, source, member);
+        for (uint32_t member = 0; member < preload; ++member) {
+            Load(row, source, member);
+        }
         const auto weights = table3Ub_.ReinterpretCast<float>();
         for (uint32_t member = 0; member < contributions; ++member) {
             const uint32_t lane = (inputSequence_ + member) % inputLanes_;
@@ -219,10 +246,13 @@ private:
             SetFlag<HardEvent::V_MTE2>(lane);
             // Prefetch may reuse this input after Cast, independent of weighted
             // accumulation and the previous token's outstanding partial send.
-            if (member + inputLanes_ < contributions) Load(row, source, member + inputLanes_);
+            if (member + inputLanes_ < contributions) {
+                Load(row, source, member + inputLanes_);
+            }
             PipeBarrier<PIPE_V>();
-            if (member == 0U) Muls(sum_, cast_, weight, h_);
-            else {
+            if (member == 0U) {
+                Muls(sum_, cast_, weight, h_);
+            } else {
                 Muls(product_, cast_, weight, h_);
                 PipeBarrier<PIPE_V>();
                 Add(sum_, sum_, product_, h_);
@@ -242,7 +272,8 @@ private:
         auto src = low_.ReinterpretCast<int32_t>();
         Copy(dst, src, uint64_t(64U), uint8_t(blocks_), {1U, 1U, 16U, 15U});
         Copy(dst[64U], src[64U], uint64_t(56U), uint8_t(blocks_), {1U, 1U, 16U, 15U});
-        SetFlag<HardEvent::V_MTE3>(lane); WaitFlag<HardEvent::V_MTE3>(lane);
+        SetFlag<HardEvent::V_MTE3>(lane);
+        WaitFlag<HardEvent::V_MTE3>(lane);
         GlobalTensor<uint8_t> target;
         target.SetGlobalBuffer(args_->peerMems[source] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET +
             (uint64_t(token) * k_ + topk) * packetBytes_);

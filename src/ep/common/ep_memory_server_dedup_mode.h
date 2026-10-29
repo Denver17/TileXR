@@ -21,7 +21,8 @@ constexpr uint32_t kEpServerDedupAutoThreshold = 32U;
 #if defined(__CCE__) && defined(__CCE_IS_AICORE__)
 __aicore__ inline
 #endif
-constexpr bool EpServerDedupEnabled(uint32_t bs)
+    constexpr bool
+    EpServerDedupEnabled(uint32_t bs)
 {
     return kEpServerDedupAutoEnable ? bs > kEpServerDedupAutoThreshold : kEpServerDedupEnable;
 }

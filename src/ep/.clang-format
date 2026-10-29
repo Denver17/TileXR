@@ -1,0 +1,43 @@
+# EP C++ style; clang-format 19.1.7. Keep include and expression order.
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++14
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+AccessModifierOffset: -4
+NamespaceIndentation: None
+BreakBeforeBraces: Custom
+BraceWrapping:
+  AfterFunction: true
+  AfterClass: false
+  AfterStruct: false
+  AfterNamespace: false
+  AfterControlStatement: Never
+  BeforeElse: false
+  SplitEmptyFunction: true
+AllowShortBlocksOnASingleLine: Never
+AllowShortFunctionsOnASingleLine: None
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortLambdasOnASingleLine: None
+InsertBraces: true
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: false
+FixNamespaceComments: false
+AlignAfterOpenBracket: DontAlign
+AlignOperands: DontAlign
+BinPackArguments: true
+BinPackParameters: true
+PointerAlignment: Right
+DerivePointerAlignment: false
+SpaceBeforeCpp11BracedList: true
+BreakBeforeBinaryOperators: None
+AttributeMacros: [__aicore__, __global__, __gm__, __ubuf__]
+BreakBeforeTernaryOperators: false
+BreakTemplateDeclarations: Yes
+BreakStringLiterals: false
+AlignEscapedNewlines: DontAlign

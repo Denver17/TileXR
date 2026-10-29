@@ -12,14 +12,39 @@ constexpr uint32_t kEpServerDedupOperationEventBase = 0x53000200U;
 constexpr uint32_t kEpServerDedupPacketIssueEvent = 0x53000300U;
 
 enum class EpDedupDetailPoint : uint32_t {
-    RecvBegin, PrefixEnd, TasksEnd, PrepareEnd, LoopEnd, DrainEnd, ClearIssueEnd, ClearEnd,
-    FinishBegin, LocalEnd, SyncEnd, CounterEnd, PublishEnd, WaitEnd // SyncEnd/CounterEnd retired; keep IDs.
+    RecvBegin,
+    PrefixEnd,
+    TasksEnd,
+    PrepareEnd,
+    LoopEnd,
+    DrainEnd,
+    ClearIssueEnd,
+    ClearEnd,
+    FinishBegin,
+    LocalEnd,
+    SyncEnd,
+    CounterEnd,
+    PublishEnd,
+    WaitEnd // SyncEnd/CounterEnd retired; keep IDs.
 };
 enum class EpDedupDetailMetric : uint32_t {
-    Probe, AcquireLoad, Metadata, Atomic, OutputIssue, RelayIssue, RoundPeerWait, // Atomic retired; keep ID.
+    Probe,
+    AcquireLoad,
+    Metadata,
+    Atomic,
+    OutputIssue,
+    RelayIssue,
+    RoundPeerWait, // Atomic retired; keep ID.
     // Append only: older captures retain their existing event identities.
-    LoadIssue, LoadWait, ProbeLoadFlag, ProbeCalSum, SendCntFilter, SendCntSend,
-    SendFirstHop, SendDirect, RecvToken,
+    LoadIssue,
+    LoadWait,
+    ProbeLoadFlag,
+    ProbeCalSum,
+    SendCntFilter,
+    SendCntSend,
+    SendFirstHop,
+    SendDirect,
+    RecvToken,
     SendCntIssue // SendCntSend retains the historical wait-inclusive interval.
 };
 } // namespace TileXREp

@@ -12,15 +12,19 @@
 namespace TileXREp {
 using namespace AscendC;
 
-template<class XType, bool Quantized, bool E4M3>
+template <class XType, bool Quantized, bool E4M3>
 class ServerDedupReceiver {
 public:
-    __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args,
-        GM_ADDR expandX, GM_ADDR dynamicScales, GM_ADDR tokenType, GM_ADDR destinationIndex, GM_ADDR relayReadIndex,
-        uint32_t bs, uint32_t h, uint32_t k, uint32_t experts, TPipe *pipe, int64_t magic = 0)
+    __aicore__ inline void Init(const __gm__ TileXR::CommArgs *args, GM_ADDR expandX, GM_ADDR dynamicScales,
+        GM_ADDR tokenType, GM_ADDR destinationIndex, GM_ADDR relayReadIndex, uint32_t bs, uint32_t h, uint32_t k,
+        uint32_t experts, TPipe *pipe, int64_t magic = 0)
     {
         enableDedup_ = EpServerDedupEnabled(bs);
-        args_ = args; pipe_ = pipe; bs_ = bs; k_ = k; experts_ = experts;
+        args_ = args;
+        pipe_ = pipe;
+        bs_ = bs;
+        k_ = k;
+        experts_ = experts;
         localExperts_ = experts / uint32_t(args_->rankSize);
         receiver_ = GetBlockIdx() - kEpServerDedupSendCoreNum;
         hiddenBytes_ = Quantized ? h : h * uint32_t(sizeof(XType));
@@ -29,9 +33,13 @@ public:
         data_.dispatchOffset += windowOffset_;
         expandX_.SetGlobalBuffer(expandX);
         dynamicScales_.SetGlobalBuffer(dynamicScales);
-        if (kEpServerDedupEnable) tokenType_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(tokenType));
+        if (kEpServerDedupEnable) {
+            tokenType_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(tokenType));
+        }
         destinationIndex_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(destinationIndex));
-        if (kEpServerDedupEnable) relayReadIndex_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(relayReadIndex));
+        if (kEpServerDedupEnable) {
+            relayReadIndex_.SetGlobalBuffer(reinterpret_cast<__gm__ uint32_t *>(relayReadIndex));
+        }
     }
 
     __aicore__ inline void Process(ServerDedupProfile &profile)
@@ -44,9 +52,8 @@ public:
         pipe_->InitBuffer(prefixBuf_, prefixBytes);
         GlobalTensor<int32_t> prefixGlobal;
         const auto counts = TileXREpServerDedupCountLayout(experts_);
-        prefixGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(
-            args_->peerMems[args_->rank] + windowOffset_ + counts.cntOffset + counts.prefixOffset +
-            uint64_t(receiver_) * counts.prefixStride));
+        prefixGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(args_->peerMems[args_->rank] + windowOffset_ +
+            counts.cntOffset + counts.prefixOffset + uint64_t(receiver_) * counts.prefixStride));
         auto prefix = prefixBuf_.Get<int32_t>();
         DataCopyPad(prefix, prefixGlobal, {1U, prefixBytes, 0U, 0U, 0U}, {false, 0U, 0U, 0});
         ServerDedupReceiveSync<HardEvent::MTE2_S>();
@@ -76,7 +83,9 @@ public:
         const uint32_t available = (kEpServerDedupCountUbBytes - fixed) / laneStride_;
         lanes_ = available < 8U ? available : 8U; // Safe inputs guarantee at least one lane.
         pipe_->InitBuffer(lanesBuf_, lanes_ * laneStride_);
-        for (uint32_t lane = 0; lane < lanes_; ++lane) SetFlag<HardEvent::MTE3_MTE2>(lane);
+        for (uint32_t lane = 0; lane < lanes_; ++lane) {
+            SetFlag<HardEvent::MTE3_MTE2>(lane);
+        }
         profile.Mark(EpDedupDetailPoint::PrepareEnd);
 
         auto snapshot = probeIdxBuf_.Get<uint32_t>();
@@ -90,11 +99,15 @@ public:
             uint32_t count;
             ProbeResult probe;
             do {
-                if (scan >= tasks_.PendingCount()) scan = 0U;
+                if (scan >= tasks_.PendingCount()) {
+                    scan = 0U;
+                }
                 const uint32_t remaining = tasks_.PendingCount() - scan;
                 count = remaining < kProbeBatch ? remaining : kProbeBatch;
                 probe = Probe(scan, count);
-                if (probe.readyMask == 0U) scan += count;
+                if (probe.readyMask == 0U) {
+                    scan += count;
+                }
             } while (probe.readyMask == 0U);
             profile.End(EpDedupDetailMetric::Probe);
             // Load and consume the immutable snapshot in the same descending
@@ -102,10 +115,14 @@ public:
             uint32_t nextLoad = count;
             for (uint32_t i = count; i > 0U; --i) {
                 const uint32_t index = i - 1U;
-                if ((probe.readyMask & (uint32_t(1) << index)) == 0U) continue;
+                if ((probe.readyMask & (uint32_t(1) << index)) == 0U) {
+                    continue;
+                }
                 while (issued - consumed < depth && nextLoad != 0U) {
                     --nextLoad;
-                    if ((probe.readyMask & (uint32_t(1) << nextLoad)) == 0U) continue;
+                    if ((probe.readyMask & (uint32_t(1) << nextLoad)) == 0U) {
+                        continue;
+                    }
                     IssueLoad(snapshot.GetValue(nextLoad), issued % lanes_,
                         (probe.keepFlagsMask & (uint32_t(1) << nextLoad)) != 0U);
                     ++issued;
@@ -117,7 +134,9 @@ public:
             }
         }
         profile.Mark(EpDedupDetailPoint::LoopEnd);
-        for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_MTE2>(lane);
+        for (uint32_t lane = 0; lane < lanes_; ++lane) {
+            WaitFlag<HardEvent::MTE3_MTE2>(lane);
+        }
         // This is the end of wait instruction submission, not a new Scalar
         // completion barrier. The existing final PIPE_ALL establishes completion.
         profile.Mark(EpDedupDetailPoint::DrainEnd);
@@ -151,13 +170,17 @@ private:
             ReadServerDedupFlags(Slot(j), blocks, flags[i * blocks * 8U]);
         }
         ServerDedupReceiveSync<HardEvent::MTE2_V>();
-        Sum<float>(sums, flags, work, SumParams{count, blocks * 8U, blocks * 8U});
+        Sum<float>(sums, flags, work, SumParams {count, blocks * 8U, blocks * 8U});
         ServerDedupReceiveSync<HardEvent::V_S>();
         ProbeResult result;
         for (uint32_t i = 0; i < count; ++i) {
             const auto layout = PacketReceiveLayout::Decode(sums.GetValue(i), blocks);
-            if (layout != PacketReceiveLayout::State::Pending) result.readyMask |= uint32_t(1) << i;
-            if (layout == PacketReceiveLayout::State::KeepFlags) result.keepFlagsMask |= uint32_t(1) << i;
+            if (layout != PacketReceiveLayout::State::Pending) {
+                result.readyMask |= uint32_t(1) << i;
+            }
+            if (layout == PacketReceiveLayout::State::KeepFlags) {
+                result.keepFlagsMask |= uint32_t(1) << i;
+            }
         }
         return result;
     }
@@ -173,8 +196,7 @@ private:
         } else {
             // GM keeps 480B payload + 32B Flag blocks; this lane consumes a
             // contiguous payload in UB. GM source stride is measured in bytes.
-            DataCopyPad(wire, source, {uint16_t(data_.blockCount), 480U, 32U, 0U, 0U},
-                {false, 0U, 0U, 0});
+            DataCopyPad(wire, source, {uint16_t(data_.blockCount), 480U, 32U, 0U, 0U}, {false, 0U, 0U, 0});
         }
         SetFlag<HardEvent::MTE2_MTE3>(lane);
         // Publish immediately after this load, before queuing later loads.
@@ -193,11 +215,11 @@ private:
             // IssueLoad removed the Flags, so every source offset is logical.
             // Retain lane ownership until all output reads have completed.
             WaitFlag<HardEvent::MTE2_MTE3>(lane);
-            DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], wire,
-                {1U, hiddenBytes_, 0U, 0U, 0U});
-            if constexpr (Quantized)
+            DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], wire, {1U, hiddenBytes_, 0U, 0U, 0U});
+            if constexpr (Quantized) {
                 DataCopyPad(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire[uint32_t(data_.quantCount)],
                     {1U, uint32_t(data_.scaleBytes), 0U, 0U, 0U});
+            }
             auto header = wire[uint32_t(data_.headerPayloadOffset)].template ReinterpretCast<uint32_t>();
             DataCopyPad(destinationIndex_[uint64_t(row) * 3U], header, {1U, 12U, 0U, 0U, 0U});
             SetFlag<HardEvent::MTE3_MTE2>(lane);
@@ -205,12 +227,18 @@ private:
             return;
         }
         auto type = wire[uint32_t(data_.tokenStride)].template ReinterpretCast<uint32_t>();
-        auto destination = wire[uint32_t(data_.tokenStride) + (kEpServerDedupEnable ? 32U : 0U)].template ReinterpretCast<uint32_t>();
-        ServerDedupPacketTail tail(wire, headerOffset,
-            uint32_t(keepFlags ? data_.relayReadIndexWireOffset : data_.readIndexPayloadOffset));
+        auto destination =
+            wire[uint32_t(data_.tokenStride) + (kEpServerDedupEnable ? 32U : 0U)].template ReinterpretCast<uint32_t>();
+        ServerDedupPacketTail tail(
+            wire, headerOffset, uint32_t(keepFlags ? data_.relayReadIndexWireOffset : data_.readIndexPayloadOffset));
         const bool firstHop = enableDedup_ && tail.Header().GetValue(3U) == uint32_t(EpServerDedupTokenType::FirstHop);
-        if (enableDedup_) BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
-        else for (uint32_t i = 0U; i < 3U; ++i) destination.SetValue(i, tail.Header().GetValue(i));
+        if (enableDedup_) {
+            BuildServerDedupMetadata(type, destination, tail, tasks_.Position(j));
+        } else {
+            for (uint32_t i = 0U; i < 3U; ++i) {
+                destination.SetValue(i, tail.Header().GetValue(i));
+            }
+        }
         if (firstHop) {
             PrepareServerDedupForward(tail);
             // The next receiver needs only the payload. This layout hint is
@@ -222,20 +250,23 @@ private:
         WaitFlag<HardEvent::MTE2_MTE3>(lane);
         if (keepFlags) {
             WriteServerDedupPayloadRange(expandX_[uint64_t(row) * hiddenBytes_], wire, 0U, hiddenBytes_);
-            if constexpr (Quantized)
+            if constexpr (Quantized) {
                 WriteServerDedupPayloadRange(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire,
                     uint32_t(data_.quantCount), uint32_t(data_.scaleBytes));
+            }
         } else {
             DataCopyPad(expandX_[uint64_t(row) * hiddenBytes_], wire, {1U, hiddenBytes_, 0U, 0U, 0U});
-            if constexpr (Quantized)
+            if constexpr (Quantized) {
                 DataCopyPad(dynamicScales_[uint64_t(row) * data_.scaleBytes], wire[uint32_t(data_.quantCount)],
                     {1U, uint32_t(data_.scaleBytes), 0U, 0U, 0U});
+            }
         }
-        if (enableDedup_) DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
+        if (enableDedup_) {
+            DataCopyPad(tokenType_[row], type, {1U, 4U, 0U, 0U, 0U});
+        }
         DataCopyPad(destinationIndex_[uint64_t(row) * 3U], destination, {1U, 12U, 0U, 0U, 0U});
         if (firstHop) {
-            DataCopyPad(relayReadIndex_[uint64_t(row) * k_ * 2U], tail.ReadIndex(),
-                {1U, k_ * 8U, 0U, 0U, 0U});
+            DataCopyPad(relayReadIndex_[uint64_t(row) * k_ * 2U], tail.ReadIndex(), {1U, k_ * 8U, 0U, 0U, 0U});
             const uint32_t sourceRank = tail.Header().GetValue(0U);
             const uint32_t ranks = uint32_t(args_->rankSize);
             const uint32_t members = tail.ReadIndex().GetValue(0U);
@@ -245,9 +276,9 @@ private:
                 const uint32_t q = index >> 16U;
                 const uint32_t destinationRank = expertId / localExperts_;
                 GlobalTensor<uint8_t> output;
-                output.SetGlobalBuffer(args_->peerMems[destinationRank] + TileXREpServerDedupDispatchOffset(
-                    data_, sourceRank, destinationRank, expertId % localExperts_, q,
-                    ranks, localExperts_, bs_));
+                output.SetGlobalBuffer(args_->peerMems[destinationRank] +
+                    TileXREpServerDedupDispatchOffset(
+                        data_, sourceRank, destinationRank, expertId % localExperts_, q, ranks, localExperts_, bs_));
                 DataCopy(output, wire, uint32_t(data_.tokenStride));
             }
         }

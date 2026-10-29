@@ -41,12 +41,12 @@ struct EpMemoryServerDedupCombineLayout {
     uint64_t requiredWindowBytes = 0;
 };
 
-int TileXREpBuildMemoryServerDedupCombineLayout(int64_t ranks, int64_t bs, int64_t h,
-    int64_t topK, int64_t experts, EpMemoryServerDedupCombineLayout *out);
+int TileXREpBuildMemoryServerDedupCombineLayout(
+    int64_t ranks, int64_t bs, int64_t h, int64_t topK, int64_t experts, EpMemoryServerDedupCombineLayout *out);
 // Address arithmetic only: caller supplies a complete, 512B-aligned result slot.
 // This does not choose a payload dtype, wire format or DataAsFlag protocol.
-int TileXREpBuildServerDedupCombineDataLayout(int64_t ranks, int64_t bs, int64_t h,
-    int64_t topK, int64_t experts, uint64_t resultSlotBytes, EpServerDedupCombineDataLayout *out);
+int TileXREpBuildServerDedupCombineDataLayout(int64_t ranks, int64_t bs, int64_t h, int64_t topK, int64_t experts,
+    uint64_t resultSlotBytes, EpServerDedupCombineDataLayout *out);
 int TileXREpValidateBasicMemoryServerDedupCombineParams(const EpMemoryServerDedupCombineParams &params);
 int TileXREpValidateMemoryServerDedupCombineConfig(const EpMemoryServerDedupCombineParams &params,
     const TileXR::CommArgs &args, EpMemoryServerDedupCombineLayout *layout);

@@ -37,10 +37,10 @@ struct EpServerDedupAllocation {
 };
 
 // Host-only layout validation; the device entry uses the compile-time core split.
-int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h,
-    int64_t topK, int64_t moeExpertNum, EpMemoryServerDedupLayout *out, bool quantized = false);
-int TileXREpValidateServerDedupAllocations(const EpServerDedupAllocation *allocations,
-    std::size_t count, int32_t deviceId);
+int TileXREpBuildMemoryServerDedupLayout(int64_t rankSize, int64_t bs, int64_t h, int64_t topK, int64_t moeExpertNum,
+    EpMemoryServerDedupLayout *out, bool quantized = false);
+int TileXREpValidateServerDedupAllocations(
+    const EpServerDedupAllocation *allocations, std::size_t count, int32_t deviceId);
 
 } // namespace TileXREp
 

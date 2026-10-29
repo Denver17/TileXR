@@ -19,30 +19,43 @@ using namespace AscendC;
 // Local stage, readiness, DIRECT/partial return and source-token aggregation.
 class CombineMemoryServerDedupKernel {
     friend struct CombineModuleTestAccess;
+
 public:
-    __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine,
-        GM_ADDR sendCounts, GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex,
-        GM_ADDR sourceMask, GM_ADDR yOut, uint32_t bs, uint32_t h, uint32_t topK,
-        uint32_t experts, uint8_t dtype, uint8_t quantMode, int64_t magic, uint8_t profilingEnabled)
+    __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR sendCounts,
+        GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex, GM_ADDR sourceMask, GM_ADDR yOut, uint32_t bs,
+        uint32_t h, uint32_t topK, uint32_t experts, uint8_t dtype, uint8_t quantMode, int64_t magic,
+        uint8_t profilingEnabled)
     {
-        (void)quantMode; (void)profilingEnabled;
+        (void)quantMode;
+        (void)profilingEnabled;
         core_ = GetBlockIdx();
 #if defined(TILEXR_ENABLE_PROFILING)
-        if (profilingEnabled != 0U) profile_.InitializeLatestCombine(commArgs, core_, 0U,
-            EpCombineProfilingRecordsPerLaunch(bs, topK));
+        if (profilingEnabled != 0U) {
+            profile_.InitializeLatestCombine(commArgs, core_, 0U, EpCombineProfilingRecordsPerLaunch(bs, topK));
+        }
 #endif
         Mark(kEpServerDedupCombineProfileStart);
         Mark(kEpServerDedupCombineProfileInitBegin);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         enableDedup_ = EpServerDedupEnabled(bs);
-        h_ = h; topK_ = topK; bs_ = bs; experts_ = experts; dtype_ = dtype;
-        expertAddr_ = expertOut; tableAddr_ = assistInfoForCombine; relayAddr_ = relayReadIndex; typesAddr_ = tokenType;
-        weightsAddr_ = expertScales; masksAddr_ = sourceMask; outputAddr_ = yOut;
+        h_ = h;
+        topK_ = topK;
+        bs_ = bs;
+        experts_ = experts;
+        dtype_ = dtype;
+        expertAddr_ = expertOut;
+        tableAddr_ = assistInfoForCombine;
+        relayAddr_ = relayReadIndex;
+        typesAddr_ = tokenType;
+        weightsAddr_ = expertScales;
+        masksAddr_ = sourceMask;
+        outputAddr_ = yOut;
         // Load the device-produced prefix through MTE2 rather than caching a
         // mutable GM scalar across launches. This 32B temporary becomes the
         // independent M2 prepare sum only after the scalar count is consumed.
-        pipe_.InitBuffer(arena_, core_ >= kEpServerDedupCombineSendCoreNum ?
-            kEpServerDedupCombineRecvUbBytes : kEpServerDedupCombineUbBytes);
+        pipe_.InitBuffer(arena_,
+            core_ >= kEpServerDedupCombineSendCoreNum ? kEpServerDedupCombineRecvUbBytes :
+                                                        kEpServerDedupCombineUbBytes);
         prepareSum_ = Allocate<float>(32U);
         GlobalTensor<int32_t> prefix;
         prefix.SetGlobalBuffer(reinterpret_cast<__gm__ int32_t *>(sendCounts));
@@ -59,9 +72,15 @@ public:
         }
         tokens_ = uint32_t(tokens);
         lanes_ = EpCombinePayloadLaneCount(tokens_, h_);
-        if (kEpServerDedupEnable) workspace_ = EpCombineM45Layout(tokens_, bs_, h_, topK_);
-        else m6Workspace_ = EpCombineM6Layout(bs_, h_, topK_);
-        if (lanes_ == 0U || (kEpServerDedupEnable ? workspace_.inputLanes : m6Workspace_.inputLanes) == 0U) { Trap(); return; }
+        if (kEpServerDedupEnable) {
+            workspace_ = EpCombineM45Layout(tokens_, bs_, h_, topK_);
+        } else {
+            m6Workspace_ = EpCombineM6Layout(bs_, h_, topK_);
+        }
+        if (lanes_ == 0U || (kEpServerDedupEnable ? workspace_.inputLanes : m6Workspace_.inputLanes) == 0U) {
+            Trap();
+            return;
+        }
 
         blocks_ = (h_ * 2U + 479U) / 480U;
         laneBytes_ = blocks_ * 480U;
@@ -162,14 +181,14 @@ private:
         Mark(kEpServerDedupCombineProfileM6PrepareBegin);
         if (kEpServerDedupEnable) {
             aggregate.InitDirectShared(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
-                args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
-                weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
-                core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum, workspace_);
+                args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, weightsAddr_,
+                outputAddr_, bs_, h_, topK_, dtype_, core_ - kEpServerDedupCombineSendCoreNum,
+                kEpServerDedupCombineRecvCoreNum, workspace_);
         } else {
             aggregate.InitM6(arena_.Get<uint8_t>(),
-                args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
-                weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
-                core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum, m6Workspace_);
+                args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, weightsAddr_,
+                outputAddr_, bs_, h_, topK_, dtype_, core_ - kEpServerDedupCombineSendCoreNum,
+                kEpServerDedupCombineRecvCoreNum, m6Workspace_);
         }
         Mark(kEpServerDedupCombineProfileM6PrepareEnd);
         aggregate.Process();
@@ -184,18 +203,20 @@ private:
         aggregate.SetProfiling(&profile_);
 #endif
         aggregate.Init(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
-            args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET,
-            masksAddr_, weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_,
-            core_ - kEpServerDedupCombineSendCoreNum, kEpServerDedupCombineRecvCoreNum,
-            workspace_, partialTasks_);
+            args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, masksAddr_,
+            weightsAddr_, outputAddr_, bs_, h_, topK_, dtype_, core_ - kEpServerDedupCombineSendCoreNum,
+            kEpServerDedupCombineRecvCoreNum, workspace_, partialTasks_);
         return aggregate.Process();
     }
     __aicore__ inline void DrainSharedOutputs(uint32_t retiredOutputs = 0U)
     {
         // M5 already consumed slots repurposed as inputs. Retire the remaining
         // physical slots exactly once, including unused seeds and M5 outputs.
-        for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane)
-            if (((retiredOutputs >> lane) & 1U) == 0U) WaitFlag<HardEvent::MTE3_V>(lane);
+        for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane) {
+            if (((retiredOutputs >> lane) & 1U) == 0U) {
+                WaitFlag<HardEvent::MTE3_V>(lane);
+            }
+        }
     }
     __aicore__ inline void Mark(uint32_t event)
     {
@@ -205,16 +226,19 @@ private:
         (void)event;
 #endif
     }
-    template<class T> __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)
+    template <class T>
+    __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)
     {
         auto result = arena_.Get<uint8_t>()[usedBytes_].template ReinterpretCast<T>();
         usedBytes_ += bytes;
         return result;
     }
-    template<HardEvent E> __aicore__ inline void Sync()
+    template <HardEvent E>
+    __aicore__ inline void Sync()
     {
         const TEventID id = pipe_.FetchEventID(E);
-        SetFlag<E>(id); WaitFlag<E>(id);
+        SetFlag<E>(id);
+        WaitFlag<E>(id);
     }
     __aicore__ inline GlobalTensor<float> Control(uint32_t rank, uint64_t offset)
     {
@@ -231,8 +255,8 @@ private:
             Compares(maskUb_, typeUb_, type, CMPMODE::EQ, tokens_);
             CreateVecIndex(indexUb_, int32_t(0), tokens_);
             PipeBarrier<PIPE_V>();
-            GatherMask(packedUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
-                tokens_, {1U, 1U, 0U, 0U}, selected_);
+            GatherMask(
+                packedUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true, tokens_, {1U, 1U, 0U, 0U}, selected_);
             Sync<HardEvent::V_S>();
         }
     }
@@ -242,7 +266,9 @@ private:
         const uint32_t base = uint32_t(selected_) / 64U, extra = uint32_t(selected_) % 64U;
         const uint32_t count = base + (core_ < extra ? 1U : 0U);
         const uint32_t start = core_ * base + (core_ < extra ? core_ : extra);
-        for (uint32_t lane = 0; lane < lanes_; ++lane) SetFlag<HardEvent::MTE3_MTE2>(lane);
+        for (uint32_t lane = 0; lane < lanes_; ++lane) {
+            SetFlag<HardEvent::MTE3_MTE2>(lane);
+        }
         uint32_t cacheBegin = 0U, cacheEnd = 0U;
         for (uint32_t task = 0; task < count; ++task) {
             const uint32_t row = uint32_t(packedUb_.GetValue(start + task));
@@ -251,8 +277,7 @@ private:
             const uint32_t lane = task % lanes_;
             WaitFlag<HardEvent::MTE3_MTE2>(lane);
             auto payload = payloadUb_[lane * laneBytes_ / 2U];
-            DataCopyPad(payload, expert_[uint64_t(row) * h_], {1U, h_ * 2U, 0U, 0U, 0U},
-                {false, 0U, 0U, uint16_t(0)});
+            DataCopyPad(payload, expert_[uint64_t(row) * h_], {1U, h_ * 2U, 0U, 0U, 0U}, {false, 0U, 0U, uint16_t(0)});
             SetFlag<HardEvent::MTE2_MTE3>(lane);
             WaitFlag<HardEvent::MTE2_MTE3>(lane);
             DataCopyPad(stage_[uint64_t(slot) * stageStride_ / 2U], payload, {1U, h_ * 2U, 0U, 0U, 0U});
@@ -260,52 +285,62 @@ private:
         }
         // Also consumes seeded, unused lane events. All stage stores complete
         // before publication; individual tokens never wait immediately after store.
-        for (uint32_t lane = 0; lane < lanes_; ++lane) WaitFlag<HardEvent::MTE3_MTE2>(lane);
+        for (uint32_t lane = 0; lane < lanes_; ++lane) {
+            WaitFlag<HardEvent::MTE3_MTE2>(lane);
+        }
         Duplicate<float>(preparePublish_, 0.0f, 64U);
         Sync<HardEvent::V_S>();
-        for (uint32_t j = 0; j < 8U; ++j) preparePublish_.SetValue(j * 8U, 1.0f);
+        for (uint32_t j = 0; j < 8U; ++j) {
+            preparePublish_.SetValue(j * 8U, 1.0f);
+        }
         Sync<HardEvent::S_MTE3>();
         auto done = Control(args_->rank, TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_OFFSET);
         DataCopyPad(done[core_ * 8U], preparePublish_, {8U, 32U, 0U, 2016U, 0U});
     }
-    __aicore__ inline void CacheTableRows(uint32_t row, uint32_t start, uint32_t task,
-        uint32_t count, uint32_t &cacheBegin, uint32_t &cacheEnd)
+    __aicore__ inline void CacheTableRows(
+        uint32_t row, uint32_t start, uint32_t task, uint32_t count, uint32_t &cacheBegin, uint32_t &cacheEnd)
     {
         if (row >= cacheEnd) {
             cacheBegin = row;
             cacheEnd = row + 1U;
             for (uint32_t next = task + 1U; next < count; ++next) {
                 const uint32_t nextRow = uint32_t(packedUb_.GetValue(start + next));
-                if (nextRow - cacheBegin >= kEpServerDedupCombineTableRows) break;
+                if (nextRow - cacheBegin >= kEpServerDedupCombineTableRows) {
+                    break;
+                }
                 cacheEnd = nextRow + 1U;
             }
             // The old metadata has no users after its scalar offset is read.
             // Payload DMA owns separate lanes, so changing this cache needs
             // no payload drain and preserves the lane sequence across batches.
-            DataCopyPad(tableUb_, table_[uint64_t(cacheBegin) * 3U],
-                {1U, (cacheEnd - cacheBegin) * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+            DataCopyPad(tableUb_, table_[uint64_t(cacheBegin) * 3U], {1U, (cacheEnd - cacheBegin) * 12U, 0U, 0U, 0U},
+                {false, 0U, 0U, 0});
             Sync<HardEvent::MTE2_S>();
         }
     }
     __aicore__ inline void PrepareDirectRows()
     {
         selected_ = 0U;
-        if (tokens_ == 0U) return;
+        if (tokens_ == 0U) {
+            return;
+        }
         if (enableDedup_) {
             DataCopyPad(typeUb_, types_, {1U, tokens_ * 4U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
             Sync<HardEvent::MTE2_V>();
             Compares(maskUb_, typeUb_, int32_t(1), CMPMODE::EQ, (tokens_ + 63U) / 64U * 64U);
             CreateVecIndex(indexUb_, int32_t(0), tokens_);
             PipeBarrier<PIPE_V>();
-            GatherMask(packedUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
-                tokens_, {1U, 1U, 0U, 0U}, selected_);
+            GatherMask(
+                packedUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true, tokens_, {1U, 1U, 0U, 0U}, selected_);
             Sync<HardEvent::V_S>();
         } else {
             CreateVecIndex(packedUb_, int32_t(0), tokens_);
             selected_ = tokens_;
             Sync<HardEvent::V_S>();
         }
-        if (selected_ == 0U) return; // no routing reads for a type2/type3-only rank
+        if (selected_ == 0U) {
+            return; // no routing reads for a type2/type3-only rank
+        }
         const uint32_t chunk = tokens_ < kEpServerDedupCombineTableRows ? tokens_ : kEpServerDedupCombineTableRows;
         CreateVecIndex(typeUb_, int32_t(0), chunk);
         PipeBarrier<PIPE_V>();
@@ -313,8 +348,7 @@ private:
         for (uint32_t begin = 0U; begin < tokens_; begin += chunk) {
             const uint32_t span = tokens_ - begin < chunk ? tokens_ - begin : chunk;
             Sync<HardEvent::V_MTE2>(); // table cache is no longer a Gather source
-            DataCopyPad(tableUb_, table_[uint64_t(begin) * 3U],
-                {1U, span * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+            DataCopyPad(tableUb_, table_[uint64_t(begin) * 3U], {1U, span * 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
             Sync<HardEvent::MTE2_V>();
             Gather(indexUb_[begin], tableUb_, typeUb_.ReinterpretCast<uint32_t>(), 0U, span);
         }
@@ -322,36 +356,42 @@ private:
         // Keep two persistent compact arrays: ranks in typeUb_, original rows
         // in packedUb_. indexUb_ becomes the per-server compact output list.
         if (enableDedup_) {
-            GatherMask(typeUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
-                tokens_, {1U, 1U, 0U, 0U}, selected_);
+            GatherMask(
+                typeUb_, indexUb_, maskUb_.ReinterpretCast<uint32_t>(), true, tokens_, {1U, 1U, 0U, 0U}, selected_);
         } else {
             Muls(typeUb_, indexUb_, int32_t(1), tokens_);
         }
         Sync<HardEvent::V_S>();
-        ServerDedupRankMask(maskUb_, tableUb_.ReinterpretCast<uint8_t>(), typeUb_,
-            0, int32_t(args_->rankSize), uint32_t(selected_));
+        ServerDedupRankMask(
+            maskUb_, tableUb_.ReinterpretCast<uint8_t>(), typeUb_, 0, int32_t(args_->rankSize), uint32_t(selected_));
         uint64_t valid = 0U;
-        GatherMask(indexUb_, packedUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
-            uint32_t(selected_), {1U, 1U, 0U, 0U}, valid);
+        GatherMask(indexUb_, packedUb_, maskUb_.ReinterpretCast<uint32_t>(), true, uint32_t(selected_),
+            {1U, 1U, 0U, 0U}, valid);
         Sync<HardEvent::V_S>();
-        if (valid != selected_) Trap();
+        if (valid != selected_) {
+            Trap();
+        }
     }
     __aicore__ inline uint32_t SelectDirectServer(uint32_t server)
     {
-        ServerDedupRankMask(maskUb_, tableUb_.ReinterpretCast<uint8_t>(), typeUb_,
-            int32_t(server * 8U), int32_t((server + 1U) * 8U), uint32_t(selected_));
+        ServerDedupRankMask(maskUb_, tableUb_.ReinterpretCast<uint8_t>(), typeUb_, int32_t(server * 8U),
+            int32_t((server + 1U) * 8U), uint32_t(selected_));
         uint64_t count = 0U;
-        GatherMask(indexUb_, packedUb_, maskUb_.ReinterpretCast<uint32_t>(), true,
-            uint32_t(selected_), {1U, 1U, 0U, 0U}, count);
+        GatherMask(indexUb_, packedUb_, maskUb_.ReinterpretCast<uint32_t>(), true, uint32_t(selected_),
+            {1U, 1U, 0U, 0U}, count);
         Sync<HardEvent::V_S>();
         return uint32_t(count);
     }
     __aicore__ inline void ReturnDirectTokens()
     {
-        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareBegin);
+        if (!enableDedup_) {
+            Mark(kEpServerDedupCombineProfileDirectPrepareBegin);
+        }
         PrepareDirectRows();
         if (selected_ == 0U) {
-            if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
+            if (!enableDedup_) {
+                Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
+            }
             return;
         }
         const uint32_t servers = uint32_t(args_->rankSize) / 8U;
@@ -360,26 +400,34 @@ private:
         uint64_t flagMask[2] = {0xffU, 0U};
         for (uint32_t lane = 0; lane < lanes_; ++lane) {
             // The entire 32B Flag is initialized once and is not touched by Copy.
-            Duplicate<float>(resultUb_[lane * resultStride_].ReinterpretCast<float>()[120U],
-                1.0f, flagMask, uint8_t(blocks_), 1U, 16U);
+            Duplicate<float>(resultUb_[lane * resultStride_].ReinterpretCast<float>()[120U], 1.0f, flagMask,
+                uint8_t(blocks_), 1U, 16U);
             SetFlag<HardEvent::V_MTE2>(lane);
             SetFlag<HardEvent::MTE3_V>(lane);
         }
         PipeBarrier<PIPE_V>();
-        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
+        if (!enableDedup_) {
+            Mark(kEpServerDedupCombineProfileDirectPrepareEnd);
+        }
         for (uint32_t step = 1U; step <= servers; ++step) {
-            if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSelectBegin);
-            const uint32_t count = SelectDirectServer(ServerDedupHalfOrder(servers, ownServer, step - 1U, enableDedup_));
+            if (!enableDedup_) {
+                Mark(kEpServerDedupCombineProfileDirectSelectBegin);
+            }
+            const uint32_t count =
+                SelectDirectServer(ServerDedupHalfOrder(servers, ownServer, step - 1U, enableDedup_));
             const uint32_t first = ServerDedupFirstOwned(core_, owner, kEpServerDedupCombineSendCoreNum);
             owner = (owner + count) % kEpServerDedupCombineSendCoreNum;
-            if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSelectEnd);
+            if (!enableDedup_) {
+                Mark(kEpServerDedupCombineProfileDirectSelectEnd);
+            }
             for (uint32_t task = first; task < count; task += kEpServerDedupCombineSendCoreNum) {
-                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectReadBegin);
+                if (!enableDedup_) {
+                    Mark(kEpServerDedupCombineProfileDirectReadBegin);
+                }
                 const uint32_t row = uint32_t(indexUb_.GetValue(task));
                 // Only owned rows reload a routing triple. The persistent rank
                 // and original-row arrays are untouched between server rounds.
-                DataCopyPad(tableUb_, table_[uint64_t(row) * 3U],
-                    {1U, 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
+                DataCopyPad(tableUb_, table_[uint64_t(row) * 3U], {1U, 12U, 0U, 0U, 0U}, {false, 0U, 0U, 0});
                 Sync<HardEvent::MTE2_S>();
                 const uint32_t source = uint32_t(tableUb_.GetValue(0U));
                 const uint32_t token = uint32_t(tableUb_.GetValue(1U));
@@ -388,11 +436,16 @@ private:
                 // Input lifetime ends after Vector has consumed its last block.
                 WaitFlag<HardEvent::V_MTE2>(lane);
                 auto input = payloadUb_[lane * laneBytes_ / 2U];
-                DataCopyPad(input, expert_[uint64_t(row) * h_], {1U, h_ * 2U, 0U, 0U, 0U},
-                    {false, 0U, 0U, uint16_t(0)});
-                SetFlag<HardEvent::MTE2_V>(lane); WaitFlag<HardEvent::MTE2_V>(lane);
-                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectReadEnd);
-                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSendBegin);
+                DataCopyPad(
+                    input, expert_[uint64_t(row) * h_], {1U, h_ * 2U, 0U, 0U, 0U}, {false, 0U, 0U, uint16_t(0)});
+                SetFlag<HardEvent::MTE2_V>(lane);
+                WaitFlag<HardEvent::MTE2_V>(lane);
+                if (!enableDedup_) {
+                    Mark(kEpServerDedupCombineProfileDirectReadEnd);
+                }
+                if (!enableDedup_) {
+                    Mark(kEpServerDedupCombineProfileDirectSendBegin);
+                }
                 // Output lifetime ends only after the previous send has read it.
                 WaitFlag<HardEvent::MTE3_V>(lane);
                 auto output = resultUb_[lane * resultStride_];
@@ -403,23 +456,30 @@ private:
                 Copy(dstWords, srcWords, uint64_t(64U), uint8_t(blocks_), {1U, 1U, 16U, 15U});
                 Copy(dstWords[64U], srcWords[64U], uint64_t(56U), uint8_t(blocks_), {1U, 1U, 16U, 15U});
                 SetFlag<HardEvent::V_MTE2>(lane);
-                SetFlag<HardEvent::V_MTE3>(lane); WaitFlag<HardEvent::V_MTE3>(lane);
+                SetFlag<HardEvent::V_MTE3>(lane);
+                WaitFlag<HardEvent::V_MTE3>(lane);
                 GlobalTensor<uint8_t> destination;
                 destination.SetGlobalBuffer(args_->peerMems[source] + window_ +
                     TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET + (uint64_t(token) * topK_ + topk) * resultStride_);
                 DataCopy(destination, output, resultStride_);
                 SetFlag<HardEvent::MTE3_V>(lane);
-                if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectSendEnd);
+                if (!enableDedup_) {
+                    Mark(kEpServerDedupCombineProfileDirectSendEnd);
+                }
             }
             // No server fence: the next scan can overlap pending output DMA.
         }
-        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectDrainBegin);
+        if (!enableDedup_) {
+            Mark(kEpServerDedupCombineProfileDirectDrainBegin);
+        }
         // Final retirement includes unused seeded lanes, never a per-token drain.
         for (uint32_t lane = 0; lane < lanes_; ++lane) {
             WaitFlag<HardEvent::V_MTE2>(lane);
             WaitFlag<HardEvent::MTE3_V>(lane);
         }
-        if (!enableDedup_) Mark(kEpServerDedupCombineProfileDirectDrainEnd);
+        if (!enableDedup_) {
+            Mark(kEpServerDedupCombineProfileDirectDrainEnd);
+        }
     }
     __aicore__ inline void ReturnPartialTokens()
     {
@@ -427,22 +487,23 @@ private:
         // before reusing scratch. Independent control buffers remain resident.
         PipeBarrier<PIPE_ALL>();
         // Seed exactly once, including empty M4. M5 inherits these events.
-        for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane)
+        for (uint32_t lane = 0; lane < workspace_.outputLanes; ++lane) {
             SetFlag<HardEvent::MTE3_V>(lane);
+        }
         ServerDedupPartial partial;
 #if defined(TILEXR_ENABLE_PROFILING)
         partial.SetProfiling(&profile_);
 #endif
-        partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
-            expertAddr_, tableAddr_, relayAddr_, typesAddr_, tokens_, bs_, h_, topK_, experts_, dtype_, window_, workspace_);
+        partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes], expertAddr_,
+            tableAddr_, relayAddr_, typesAddr_, tokens_, bs_, h_, topK_, experts_, dtype_, window_, workspace_);
         partialTasks_ = partial.Process();
         // Retire only input and Vector users before scalar metadata reuse.
         // M4 output slots and MTE3_V events stay live for M5's per-slot waits.
         Sync<HardEvent::MTE2_S>();
         Sync<HardEvent::V_S>();
     }
-    __aicore__ inline void WaitFlags(GlobalTensor<float> gm, LocalTensor<float> input,
-        LocalTensor<float> work, LocalTensor<float> sum, uint32_t flags)
+    __aicore__ inline void WaitFlags(GlobalTensor<float> gm, LocalTensor<float> input, LocalTensor<float> work,
+        LocalTensor<float> sum, uint32_t flags)
     {
         while (true) {
             // The previous reduction has completed before MTE2 overwrites input.
@@ -451,18 +512,22 @@ private:
             Sync<HardEvent::MTE2_V>();
             ReduceSum<float>(sum, input, work, 1U, flags, 1U);
             Sync<HardEvent::V_S>();
-            if (sum.GetValue(0U) == float(flags)) return;
+            if (sum.GetValue(0U) == float(flags)) {
+                return;
+            }
         }
     }
     __aicore__ inline void NotifyServerCard()
     {
-        auto done = Control(args_->rank, TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_OFFSET +
-            uint64_t(core_ - 56U) * 2048U);
+        auto done =
+            Control(args_->rank, TILEXR_EP_SERVER_DEDUP_COMBINE_PREPARE_DONE_OFFSET + uint64_t(core_ - 56U) * 2048U);
         WaitFlags(done, prepareInput_, prepareWork_, prepareSum_, 64U);
         Duplicate<float>(prepareZero_, 0.0f, 512U);
         Duplicate<float>(notifyUb_, 0.0f, kEpServerDedupCombineRecvCoreNum * 8U);
         Sync<HardEvent::V_S>();
-        for (uint32_t r = 0; r < kEpServerDedupCombineRecvCoreNum; ++r) notifyUb_.SetValue(r * 8U, 1.0f);
+        for (uint32_t r = 0; r < kEpServerDedupCombineRecvCoreNum; ++r) {
+            notifyUb_.SetValue(r * 8U, 1.0f);
+        }
         Sync<HardEvent::V_MTE3>();
         Sync<HardEvent::S_MTE3>();
         DataCopyPad(done, prepareZero_, {1U, 2048U, 0U, 0U, 0U});
@@ -473,8 +538,9 @@ private:
     }
     __aicore__ inline void WaitServerReady()
     {
-        auto ready = Control(args_->rank, TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET +
-            uint64_t(core_ - kEpServerDedupCombineSendCoreNum) * 512U);
+        auto ready = Control(args_->rank,
+            TILEXR_EP_SERVER_DEDUP_COMBINE_SERVER_READY_OFFSET +
+                uint64_t(core_ - kEpServerDedupCombineSendCoreNum) * 512U);
         WaitFlags(ready, readyInput_, readyWork_, readySum_, 8U);
         Duplicate<float>(readyZero_, 0.0f, 128U);
         Sync<HardEvent::V_MTE3>();
@@ -497,7 +563,8 @@ private:
     bool enableDedup_ = false;
     uint32_t bs_ = 0, experts_ = 0;
     uint8_t dtype_ = 0;
-    uint32_t core_ = 0, h_ = 0, topK_ = 0, blocks_ = 0, resultStride_ = 0, tokens_ = 0, lanes_ = 0, laneBytes_ = 0, usedBytes_ = 0;
+    uint32_t core_ = 0, h_ = 0, topK_ = 0, blocks_ = 0, resultStride_ = 0, tokens_ = 0, lanes_ = 0, laneBytes_ = 0,
+             usedBytes_ = 0;
     uint64_t selected_ = 0, window_ = 0, control_ = 0, stageBase_ = 0, stageStride_ = 0;
     GlobalTensor<uint16_t> expert_, stage_;
     GlobalTensor<int32_t> table_, types_;

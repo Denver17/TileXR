@@ -10,12 +10,13 @@ constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 65536U;
 #if defined(__CCE__) && defined(__CCE_IS_AICORE__)
 __aicore__ inline
 #endif
-constexpr uint32_t EpCombineProfilingRecordsPerLaunch(uint32_t bs, uint32_t k)
+    constexpr uint32_t
+    EpCombineProfilingRecordsPerLaunch(uint32_t bs, uint32_t k)
 {
-    const uint32_t required = EpServerDedupEnabled(bs) ? 0U :
-        EpCombineAlign(EpCombineM5TokenCount(bs) * (8U + 4U * k) + 128U, 16U);
+    const uint32_t required =
+        EpServerDedupEnabled(bs) ? 0U : EpCombineAlign(EpCombineM5TokenCount(bs) * (8U + 4U * k) + 128U, 16U);
     return required > kEpServerDedupCombineProfilingRecordsPerLaunch ? required :
-        kEpServerDedupCombineProfilingRecordsPerLaunch;
+                                                                       kEpServerDedupCombineProfilingRecordsPerLaunch;
 }
 constexpr uint32_t kEpServerDedupCombineProfileStart = 0x3001U;
 constexpr uint32_t kEpServerDedupCombineProfileEnd = 0x3002U;
