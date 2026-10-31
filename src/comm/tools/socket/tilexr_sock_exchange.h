@@ -60,12 +60,16 @@ public:
      * @note recvBuf's space must larger than sendSize * rankSize_
      * @return TILEXR_SUCCESS for success, other for failed
      */
-    template <typename T> int AllGather(const T *sendBuf, size_t sendCount, T *recvBuf)
+    template <typename T> int AllGather(const T *sendBuf, size_t sendCount, T *recvBuf,
+                                       uint32_t timeoutMs = 0)
     {
         if (!isInit_ && Prepare() != TILEXR_SUCCESS) {
             return TILEXR_ERROR_INTERNAL;
         }
         isInit_ = true;
+        if (ConfigureIoTimeout(timeoutMs) != TILEXR_SUCCESS) {
+            return TILEXR_ERROR_INTERNAL;
+        }
 
         if (!IsServer()) {
             return ClientSendRecv(sendBuf, sendCount, recvBuf);
@@ -88,6 +92,7 @@ private:
     int Prepare();
     int Listen();
     int Accept();
+    int ConfigureIoTimeout(uint32_t timeoutMs) const;
     void Close(int &fd) const;
     int Connect();
     int AcceptConnection(int fd, sockaddr_in &clientAddr, socklen_t *sinSize) const;
@@ -95,7 +100,7 @@ private:
     bool IsServer() const;
     static bool CheckErrno(int ioErrno)
     {
-        return ((ioErrno == EAGAIN) || (ioErrno == EWOULDBLOCK) || (ioErrno == EINTR));
+        return ioErrno == EINTR;
     }
 
     template <typename T> ssize_t Send(int fd, const T *sendBuf, size_t sendSize, int flag) const

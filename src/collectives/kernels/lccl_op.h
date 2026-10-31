@@ -54,6 +54,8 @@
 extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR"))) void TileXRDescriptor() {}
 
 #define TILEXR_COARSE_PERF_BEGIN(tokenName) \
+    TileXR::TileXRStragglerTimingToken tokenName##Straggler = TileXR::TileXRStragglerTimingBegin( \
+        stragglerRecord); \
     TileXR::Profiling::Recorder<2U> tokenName; \
     const bool tokenName##Enabled = profilingGM != nullptr; \
     if (tokenName##Enabled) { \
@@ -61,6 +63,7 @@ extern "C" __global__ __aicore__ __attribute__((section("Attr_Section_TileXR")))
     }
 
 #define TILEXR_COARSE_PERF_END(tokenName) \
+    TileXR::TileXRStragglerTimingEnd(tokenName##Straggler, stragglerRecord); \
     if (tokenName##Enabled) { \
         tokenName.RecordMarker<1U, 2U>(); \
         tokenName.Flush(profilingGM, static_cast<uint32_t>(AscendC::GetBlockIdx())); \
@@ -145,7 +148,7 @@ extern "C" __global__ __aicore__ void TileXRAllReduce_##type##suffix(KERNELS_ARG
     constexpr int32_t scaleCountMax = 12 * 1024 * 1024; \
     __gm__ type * shareAddrs[TILEXR_MAX_RANK_SIZE]; \
     GET_IPC_MEM_ARGS(type); \
-    if ((extraFlag & ExtraFlag::TOPO_PCIE) != 0) { \
+    if ((extraFlag & ExtraFlag::TOPO_PCIE) != 0 && rankSize == quickOneshotRankSize) { \
         if (len * sizeof(type) < SIZE_OF_8M) { \
             TileXRAllReduce2npuWrite<type>(ALLREDUCE_ARGS_CALL_16P(type)); \
         } else { \

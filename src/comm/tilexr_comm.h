@@ -63,6 +63,7 @@ public:
     GM_ADDR GetCommArgsPtr();
     CommArgs* GetCommArgs();
     int64_t NextMagic();
+    int HostAllGather(const void *sendBuf, size_t sendBytes, void *recvBuf, uint32_t timeoutMs = 0);
     int RegisterUDMAMemory(GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle);
     int UnregisterUDMAMemory(TileXRUDMAMemHandle handle);
     int RegisterUDMAProfile(const TileXRUDMAProfileDesc &desc, TileXRUDMAProfileHandle *handle);

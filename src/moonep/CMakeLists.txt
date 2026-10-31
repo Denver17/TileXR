@@ -50,6 +50,7 @@ target_link_libraries(tilexr-moonep PRIVATE
     tilexr-moonep-combine-v2
     tilexr-moonep-prefetch-weight
     tilexr-moonep-reduce-grad
+    tilexr-diagnostics
     tile-comm
     ascendcl
     runtime

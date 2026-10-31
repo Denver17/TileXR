@@ -252,9 +252,13 @@ install(FILES
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(CODE "string(CONCAT _tilexr_collective_header \"tilexr_\" \"collectives.h\")
 string(CONCAT _tilexr_collective_perf_header \"tilexr_\" \"collectives\" \"_perf.h\")
+string(CONCAT _tilexr_collective_straggler_header \"tilexr_\" \"collective\" \"_straggler.h\")
+string(CONCAT _tilexr_straggler_layout_header \"tilexr_\" \"straggler\" \"_layout.h\")
 set(_tilexr_optional_headers
     \"\${_tilexr_collective_header}\"
     \"\${_tilexr_collective_perf_header}\"
+    \"\${_tilexr_collective_straggler_header}\"
+    \"\${_tilexr_straggler_layout_header}\"
 )
 foreach(_tilexr_optional_header IN LISTS _tilexr_optional_headers)
     if(IS_ABSOLUTE \"${CMAKE_INSTALL_INCLUDEDIR}\")

@@ -640,6 +640,12 @@ int TileXRComm::InitCommon()
     if (GetChipName() > ChipName::CHIP_910_9362) {
         commArgs_.extraFlag |= ExtraFlag::TOPO_910A5;
     }
+    if (GetChipName() == ChipName::CHIP_910A5) {
+        commArgs_.extraFlag |= ExtraFlag::PERF_CYCLE_A5;
+    }
+    if (GetChipName() == ChipName::CHIP_950 || GetChipName() == ChipName::CHIP_950PR) {
+        commArgs_.extraFlag |= ExtraFlag::PERF_CYCLE_1GHZ;
+    }
     constexpr uint32_t AI_CORE_NUM_20 = 20;
     if (GetCoreNum(GetChipName()) > AI_CORE_NUM_20) {
         commArgs_.extraFlag |= ExtraFlag::IS_GREATER_THAN_40_AIV;
@@ -1444,6 +1450,15 @@ CommArgs* TileXRComm::GetCommArgs()
 int64_t TileXRComm::NextMagic()
 {
     return magic_.fetch_add(1);
+}
+
+int TileXRComm::HostAllGather(const void *sendBuf, size_t sendBytes, void *recvBuf, uint32_t timeoutMs)
+{
+    if (!inited_ || socketExchange_ == nullptr || sendBuf == nullptr || recvBuf == nullptr || sendBytes == 0) {
+        return TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    return socketExchange_->AllGather(
+        static_cast<const uint8_t *>(sendBuf), sendBytes, static_cast<uint8_t *>(recvBuf), timeoutMs);
 }
 
 int TileXRComm::GetInternalResource(void **resource) const

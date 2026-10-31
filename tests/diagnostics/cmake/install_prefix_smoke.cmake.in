@@ -1,0 +1,98 @@
+set(TILEXR_ROOT_BINARY_DIR "@CMAKE_BINARY_DIR@")
+set(TILEXR_DIAGNOSTICS_CONSUMER_SOURCE_DIR
+    "@CMAKE_SOURCE_DIR@/tests/diagnostics/cmake/install_consumer")
+set(TILEXR_SMOKE_INSTALL_PREFIX "@CMAKE_BINARY_DIR@/tilexr_diagnostics_ctest_install")
+set(TILEXR_SMOKE_BUILD_DIR "@CMAKE_BINARY_DIR@/diagnostics_install_smoke_build")
+set(TILEXR_SMOKE_INSTALL_LIBDIR "@CMAKE_INSTALL_LIBDIR@")
+set(TILEXR_SMOKE_INSTALL_INCLUDEDIR "@CMAKE_INSTALL_INCLUDEDIR@")
+set(TILEXR_SMOKE_ASCEND_HOME_PATH "@ASCEND_HOME_PATH@")
+set(TILEXR_SMOKE_ASCEND_DRIVER_PATH "@ASCEND_DRIVER_PATH@")
+set(TILEXR_SMOKE_ARCH "@ARCH@")
+
+if(IS_ABSOLUTE "${TILEXR_SMOKE_INSTALL_LIBDIR}")
+    set(TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR "${TILEXR_SMOKE_INSTALL_LIBDIR}")
+else()
+    set(TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR
+        "${TILEXR_SMOKE_INSTALL_PREFIX}/${TILEXR_SMOKE_INSTALL_LIBDIR}")
+endif()
+
+file(REMOVE_RECURSE "${TILEXR_SMOKE_INSTALL_PREFIX}" "${TILEXR_SMOKE_BUILD_DIR}")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${TILEXR_ROOT_BINARY_DIR}" --target tilexr-diagnostics
+    RESULT_VARIABLE tilexr_smoke_result)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to build tilexr-diagnostics for install-prefix smoke")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --install "${TILEXR_ROOT_BINARY_DIR}"
+        --prefix "${TILEXR_SMOKE_INSTALL_PREFIX}"
+    RESULT_VARIABLE tilexr_smoke_result)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to install tilexr-diagnostics smoke prefix")
+endif()
+
+find_library(TILEXR_SMOKE_DIAGNOSTICS_LIB tilexr-diagnostics
+    HINTS "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}" NO_DEFAULT_PATH)
+if(NOT TILEXR_SMOKE_DIAGNOSTICS_LIB)
+    message(FATAL_ERROR "Installed libtilexr-diagnostics.so was not found")
+endif()
+
+if(NOT EXISTS "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}/tilexr/kernels/tilexr_diagnostics_op.o")
+    message(FATAL_ERROR "Installed diagnostics AICore binary was not found")
+endif()
+
+find_program(TILEXR_READELF readelf)
+if(TILEXR_READELF)
+    execute_process(
+        COMMAND "${TILEXR_READELF}" -d "${TILEXR_SMOKE_DIAGNOSTICS_LIB}"
+        RESULT_VARIABLE tilexr_smoke_result
+        OUTPUT_VARIABLE tilexr_smoke_readelf_output
+        ERROR_VARIABLE tilexr_smoke_readelf_error)
+    if(NOT tilexr_smoke_result EQUAL 0)
+        message(FATAL_ERROR "readelf failed: ${tilexr_smoke_readelf_error}")
+    endif()
+    if(NOT tilexr_smoke_readelf_output MATCHES "Shared library: \\[libtile-comm\\.so\\]")
+        message(FATAL_ERROR "libtilexr-diagnostics.so is missing libtile-comm.so DT_NEEDED")
+    endif()
+    if(tilexr_smoke_readelf_output MATCHES "libtilexr-collectives")
+        message(FATAL_ERROR "libtilexr-diagnostics.so must not depend on Collectives")
+    endif()
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}"
+        -S "${TILEXR_DIAGNOSTICS_CONSUMER_SOURCE_DIR}"
+        -B "${TILEXR_SMOKE_BUILD_DIR}"
+        "-DTILEXR_INSTALL_PREFIX=${TILEXR_SMOKE_INSTALL_PREFIX}"
+        "-DTILEXR_INSTALL_LIBDIR=${TILEXR_SMOKE_INSTALL_LIBDIR}"
+        "-DTILEXR_INSTALL_INCLUDEDIR=${TILEXR_SMOKE_INSTALL_INCLUDEDIR}"
+        "-DASCEND_HOME_PATH=${TILEXR_SMOKE_ASCEND_HOME_PATH}"
+        "-DASCEND_DRIVER_PATH=${TILEXR_SMOKE_ASCEND_DRIVER_PATH}"
+        "-DARCH=${TILEXR_SMOKE_ARCH}"
+    RESULT_VARIABLE tilexr_smoke_result)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to configure diagnostics install-prefix consumer")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --build "${TILEXR_SMOKE_BUILD_DIR}"
+    RESULT_VARIABLE tilexr_smoke_result)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Failed to build diagnostics install-prefix consumer")
+endif()
+
+set(TILEXR_SMOKE_LD_LIBRARY_PATH "${TILEXR_SMOKE_INSTALL_LIB_SEARCH_DIR}")
+if(DEFINED ENV{LD_LIBRARY_PATH} AND NOT "$ENV{LD_LIBRARY_PATH}" STREQUAL "")
+    set(TILEXR_SMOKE_LD_LIBRARY_PATH
+        "${TILEXR_SMOKE_LD_LIBRARY_PATH}:$ENV{LD_LIBRARY_PATH}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "LD_LIBRARY_PATH=${TILEXR_SMOKE_LD_LIBRARY_PATH}"
+        "${TILEXR_SMOKE_BUILD_DIR}/tilexr_diagnostics_install_consumer"
+    RESULT_VARIABLE tilexr_smoke_result)
+if(NOT tilexr_smoke_result EQUAL 0)
+    message(FATAL_ERROR "Diagnostics install-prefix consumer failed")
+endif()

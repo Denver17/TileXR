@@ -118,6 +118,26 @@ int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType)
     return count * typeSize;
 }
 
+int64_t ComputeCollectiveMessageBytes(TileXR::TileXRType type,
+                                      TileXR::TileXRDataType dataType,
+                                      int64_t count,
+                                      int rankSize)
+{
+    if (type == TileXR::TileXRType::BROADCAST) {
+        return count;
+    }
+
+    int64_t elementCount = count;
+    if (type == TileXR::TileXRType::REDUCE_SCATTER) {
+        if (rankSize <= 0 || count < 0 ||
+            count > std::numeric_limits<int64_t>::max() / static_cast<int64_t>(rankSize)) {
+            return TileXR::TILEXR_INVALID_VALUE;
+        }
+        elementCount = count * static_cast<int64_t>(rankSize);
+    }
+    return CountToBytes(elementCount, dataType);
+}
+
 uint32_t GetAllGatherBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize)
 {
     const uint32_t rankSize = RankSizeOrZero(commArgs);
@@ -169,7 +189,7 @@ uint32_t GetAllReduceBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize
     }
 
     const uint32_t extraFlag = commArgs.extraFlag;
-    if ((extraFlag & TileXR::ExtraFlag::TOPO_PCIE) != 0) {
+    if ((extraFlag & TileXR::ExtraFlag::TOPO_PCIE) != 0 && rankSize == TileXR::RANK_SIZE_TWO) {
         return rankSize * TWO_BLOCK_NUM;
     }
     if ((extraFlag & TileXR::ExtraFlag::TOPO_910B2C) != 0 && rankSize > SMALL_RANK_SIZE) {

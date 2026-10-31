@@ -11,12 +11,14 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(GNUInstallDirs)
 enable_testing()
 find_package(Python3 COMPONENTS Interpreter)
+find_package(Threads REQUIRED)
 
 set(TILEXR_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../..")
 set(TILEXR_INSTALL_PREFIX "${TILEXR_ROOT}/install" CACHE PATH "TileXR install prefix for installed collectives headers")
 set(TILEXR_INSTALL_LIBDIR "${CMAKE_INSTALL_LIBDIR}" CACHE STRING "TileXR install library directory relative to TILEXR_INSTALL_PREFIX")
 set(TILEXR_INSTALL_INCLUDEDIR "${CMAKE_INSTALL_INCLUDEDIR}" CACHE STRING "TileXR install include directory relative to TILEXR_INSTALL_PREFIX")
 set(TILEXR_COLLECTIVES_LIB "" CACHE FILEPATH "Path to libtilexr-collectives.so")
+set(TILEXR_DIAGNOSTICS_LIB "" CACHE FILEPATH "Path to libtilexr-diagnostics.so")
 set(TILEXR_LIB "" CACHE FILEPATH "Path to libtile-comm.so")
 if(IS_ABSOLUTE "${TILEXR_INSTALL_LIBDIR}")
     set(TILEXR_INSTALL_LIB_SEARCH_DIR "${TILEXR_INSTALL_LIBDIR}")
@@ -82,6 +84,14 @@ add_executable(test_tilexr_collectives_correctness
     integration/test_tilexr_collectives_correctness.cpp
 )
 
+add_executable(test_collective_straggler_e2e
+    integration/test_collective_straggler_e2e.cpp
+)
+
+target_include_directories(test_collective_straggler_e2e PRIVATE
+    ${TILEXR_ROOT}/src/diagnostics/host
+)
+
 add_executable(tilexr_collective_perf
     tilexr-tests/tilexr_collective_perf.cpp
 )
@@ -126,6 +136,7 @@ target_include_directories(test_prepare_host_launch_context PRIVATE
 
 if(TILEXR_COLLECTIVES_IN_TREE)
     set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives)
+    set(TILEXR_DIAGNOSTICS_TEST_TARGET tilexr-diagnostics)
     set(TILEXR_COMM_TEST_TARGET tile-comm)
 else()
     if(NOT EXISTS "${TILEXR_INSTALL_INCLUDE_SEARCH_DIR}/tilexr_collectives.h")
@@ -144,6 +155,19 @@ else()
         if(TILEXR_COLLECTIVES_LIB_FOUND)
             set(TILEXR_COLLECTIVES_LIB "${TILEXR_COLLECTIVES_LIB_FOUND}")
         endif()
+    endif()
+
+    if(NOT TILEXR_DIAGNOSTICS_LIB)
+        find_library(TILEXR_DIAGNOSTICS_LIB_FOUND tilexr-diagnostics
+            HINTS "${TILEXR_INSTALL_LIB_SEARCH_DIR}" NO_DEFAULT_PATH)
+        if(TILEXR_DIAGNOSTICS_LIB_FOUND)
+            set(TILEXR_DIAGNOSTICS_LIB "${TILEXR_DIAGNOSTICS_LIB_FOUND}")
+        endif()
+    endif()
+    if(NOT TILEXR_DIAGNOSTICS_LIB)
+        message(FATAL_ERROR
+            "libtilexr-diagnostics.so not found under ${TILEXR_INSTALL_LIB_SEARCH_DIR}. "
+            "Build/install TileXR with diagnostics enabled or pass TILEXR_DIAGNOSTICS_LIB.")
     endif()
 
     if(NOT TILEXR_COLLECTIVES_LIB)
@@ -200,7 +224,14 @@ else()
         INTERFACE_LINK_LIBRARIES tilexr-comm-installed
     )
 
+    add_library(tilexr-diagnostics-installed SHARED IMPORTED)
+    set_target_properties(tilexr-diagnostics-installed PROPERTIES
+        IMPORTED_LOCATION "${TILEXR_DIAGNOSTICS_LIB}"
+        INTERFACE_INCLUDE_DIRECTORIES "${TILEXR_INSTALLED_INCLUDE_DIRS}"
+        INTERFACE_LINK_LIBRARIES tilexr-comm-installed)
+
     set(TILEXR_COLLECTIVES_TEST_TARGET tilexr-collectives-installed)
+    set(TILEXR_DIAGNOSTICS_TEST_TARGET tilexr-diagnostics-installed)
     set(TILEXR_COMM_TEST_TARGET tilexr-comm-installed)
 endif()
 
@@ -230,6 +261,16 @@ target_link_directories(test_tilexr_collectives_correctness PRIVATE
 
 target_link_libraries(test_tilexr_collectives_correctness
     ${TILEXR_COLLECTIVES_TEST_TARGET}
+    ascendcl
+)
+
+target_link_directories(test_collective_straggler_e2e PRIVATE
+    ${TILEXR_COLLECTIVES_TEST_LINK_DIRS}
+)
+
+target_link_libraries(test_collective_straggler_e2e
+    ${TILEXR_COLLECTIVES_TEST_TARGET}
+    ${TILEXR_DIAGNOSTICS_TEST_TARGET}
     ascendcl
 )
 
@@ -273,6 +314,7 @@ foreach(_tilexr_collectives_link_target
         test_tilexr_collectives_header_compile
         test_tilexr_collective_backend_options
         test_tilexr_collectives_correctness
+        test_collective_straggler_e2e
         tilexr_collective_perf
         test_tilexr_collectives_stub_behavior
         test_tilexr_collectives_uninitialized_comm
@@ -313,6 +355,7 @@ install(TARGETS
     test_tilexr_int32_pattern
     test_tilexr_collective_backend_options
     test_tilexr_collectives_correctness
+    test_collective_straggler_e2e
     tilexr_collective_perf
     test_tilexr_collectives_stub_behavior
     test_tilexr_collectives_uninitialized_comm
@@ -325,6 +368,7 @@ install(TARGETS
 
 install(PROGRAMS
     run_collectives_correctness.sh
+    run_collective_straggler_e2e.sh
     ${CMAKE_CURRENT_SOURCE_DIR}/../../tools/collectives/run_collective_perf.sh
     DESTINATION ${CMAKE_INSTALL_BINDIR}
 )

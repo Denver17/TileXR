@@ -3,7 +3,7 @@
 # CMakeLists.txt for collectives-owned CCE kernels
 #
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cce")
 enable_language(CCE)
 
 set(TILEXR_COLLECTIVES_1OP_BIN_SIZE 10485760 CACHE STRING "Padded size for TileXR collectives CCE binary")
@@ -36,7 +36,8 @@ set(CCE_COMPILE_OPTION
         "SHELL:-mllvm --cce-aicore-jump-expand=true"
 )
 
-if(TILEXR_COLLECTIVES_SOC_TYPE MATCHES "^Ascend950")
+string(TOLOWER "${TILEXR_COLLECTIVES_SOC_TYPE}" TILEXR_COLLECTIVES_SOC_TYPE_NORMALIZED)
+if(TILEXR_COLLECTIVES_SOC_TYPE_NORMALIZED MATCHES "^ascend950")
     set(TILEXR_COLLECTIVES_AICORE_ARCH dav-c310-vec)
 else()
     set(TILEXR_COLLECTIVES_AICORE_ARCH dav-c220-vec)
@@ -78,10 +79,11 @@ set(TILEXR_COLLECTIVES_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_collectives_op.o")
 add_custom_command(
         OUTPUT "${TILEXR_COLLECTIVES_OP}"
         COMMAND ${CMAKE_CCE_LINKER} -m aicorelinux -Ttext=0
-                "CMakeFiles/tilexr_collectives_op_tmp.dir/tilexr_lccl_op.cpp.o"
+                $<TARGET_OBJECTS:tilexr_collectives_op_tmp>
                 --static -o "${TILEXR_COLLECTIVES_OP}" --allow-multiple-definition
         COMMAND truncate -c -s ${TILEXR_COLLECTIVES_1OP_BIN_SIZE} "${TILEXR_COLLECTIVES_OP}"
-        DEPENDS tilexr_collectives_op_tmp
+        DEPENDS tilexr_collectives_op_tmp $<TARGET_OBJECTS:tilexr_collectives_op_tmp>
+        COMMAND_EXPAND_LISTS
         VERBATIM
 )
 

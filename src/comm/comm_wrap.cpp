@@ -182,6 +182,25 @@ int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic)
     return TILEXR_SUCCESS;
 }
 
+int TileXRCommHostAllGather(TileXRCommPtr comm, const void *sendBuf, size_t sendBytes, void *recvBuf)
+{
+    if (comm == nullptr || sendBuf == nullptr || recvBuf == nullptr || sendBytes == 0) {
+        TILEXR_LOG(ERROR) << "TileXRCommHostAllGather invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return static_cast<TileXRComm *>(comm)->HostAllGather(sendBuf, sendBytes, recvBuf);
+}
+
+int TileXRCommHostAllGatherTimeout(TileXRCommPtr comm, const void *sendBuf, size_t sendBytes,
+                                   void *recvBuf, uint32_t timeoutMs)
+{
+    if (comm == nullptr || sendBuf == nullptr || recvBuf == nullptr || sendBytes == 0 || timeoutMs == 0) {
+        TILEXR_LOG(ERROR) << "TileXRCommHostAllGatherTimeout invalid input";
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    return static_cast<TileXRComm *>(comm)->HostAllGather(sendBuf, sendBytes, recvBuf, timeoutMs);
+}
+
 int TileXRUDMARegister(TileXRCommPtr comm, GM_ADDR localPtr, size_t bytes, TileXRUDMAMemHandle *handle)
 {
     if (comm == nullptr || localPtr == nullptr || handle == nullptr || bytes == 0) {

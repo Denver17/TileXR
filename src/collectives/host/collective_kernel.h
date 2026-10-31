@@ -10,6 +10,7 @@
 #ifndef TILEXR_COLLECTIVES_HOST_COLLECTIVE_KERNEL_H
 #define TILEXR_COLLECTIVES_HOST_COLLECTIVE_KERNEL_H
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
 
@@ -34,7 +35,15 @@ struct AscendCCLKernelArgs {
     int64_t scaleCount = 0;
     const void *offset = nullptr;
     const void *profilingGM = nullptr;
+    void *stragglerRecord = nullptr;
 };
+
+static_assert(offsetof(AscendCCLKernelArgs, profilingGM) == 80,
+              "collective profiling ABI changed");
+static_assert(offsetof(AscendCCLKernelArgs, stragglerRecord) == 88,
+              "collective straggler-record ABI changed");
+static_assert(sizeof(AscendCCLKernelArgs) == 96,
+              "collective argument ABI changed");
 
 struct CollectiveLaunchAttrs {
     int op = 0;

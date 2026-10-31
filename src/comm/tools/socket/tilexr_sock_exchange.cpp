@@ -20,6 +20,7 @@
 #include <sstream>
 
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <ifaddrs.h>
 #include <netdb.h>
 #include <arpa/inet.h>
@@ -79,6 +80,29 @@ TileXRSockExchange::TileXRSockExchange(int rank, int rankSize, TileXRUniqueId ti
     port_ = ntohs(tilexrCommId_.handle.addr.sin.sin_port);
     TILEXR_LOG(INFO) << "TileXRSockExchange using UniqueId mode "
         << ip_ << ":" << port_ << " ";
+}
+
+int TileXRSockExchange::ConfigureIoTimeout(uint32_t timeoutMs) const
+{
+    timeval timeout {};
+    timeout.tv_sec = static_cast<time_t>(timeoutMs / 1000u);
+    timeout.tv_usec = static_cast<suseconds_t>((timeoutMs % 1000u) * 1000u);
+    const auto configure = [&](int fd) {
+        return fd < 0 ||
+            (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) == 0 &&
+             setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout)) == 0);
+    };
+    if (!configure(fd_)) {
+        TILEXR_LOG(ERROR) << "Failed to set socket I/O timeout: " << strerror(errno);
+        return TILEXR_ERROR_INTERNAL;
+    }
+    for (int clientFd : clientFds_) {
+        if (!configure(clientFd)) {
+            TILEXR_LOG(ERROR) << "Failed to set client socket I/O timeout: " << strerror(errno);
+            return TILEXR_ERROR_INTERNAL;
+        }
+    }
+    return TILEXR_SUCCESS;
 }
 
 string GetUUID()

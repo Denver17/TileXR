@@ -7,6 +7,23 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+/*
+ * Host-side loading and launch entry points for Collective AICore kernels.
+ * AllGather, AllToAll, AllReduce, ReduceScatter, and Broadcast use this layer to
+ * submit device work. The communication algorithms, data movement, synchronization,
+ * and reductions are implemented in src/collectives/kernels/.
+ *
+ * This file loads external kernel binaries relative to the owning Host library,
+ * registers them with rtDevBinaryRegister and rtFunctionRegister, prepares launch
+ * arguments (buffers, counts, communicator state, round magic, and block count),
+ * and submits work to the caller's stream through rtKernelLaunchWithFlagV2.
+ * The A5 AllToAll path also selects the rank-size-specific kernel and configures UB.
+ *
+ * Launch arguments carry profiling buffers and optional straggler timing records.
+ * Diagnostics uses those records with calibrated clocks to compare rank progress.
+ * Clock calibration itself is launched separately by
+ * src/diagnostics/host/clock_kernel.cpp.
+ */
 #include "collective_kernel.h"
 
 #include <cstddef>
@@ -17,6 +34,7 @@
 
 #include "acl/acl_rt.h"
 #include "collective_utils.h"
+#include "tilexr_straggler.h"
 #include "runtime/kernel.h"
 #include "tilexr_kernel_binary_loader.h"
 #include "tilexr_internal.h"
@@ -254,6 +272,22 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
     if (!resourceLock.locked) return TileXR::TILEXR_ERROR_INTERNAL;
     args.profilingGM = AcquireCollectiveProfiling(comm, context, stream, blockDim);
 
+    TileXRStragglerObservation observation {};
+    if (type != TileXR::TileXRType::PROFILE_PROBE) {
+        const int64_t computedBytes = ComputeCollectiveMessageBytes(
+            type, dataType, kernelCount, context.hostArgs->rankSize);
+        if (computedBytes >= 0) {
+            TileXRStragglerOperation operation {};
+            operation.componentKind = TILEXR_STRAGGLER_COMPONENT_COLLECTIVES;
+            operation.operationKind = static_cast<uint32_t>(type);
+            operation.messageBytes = static_cast<uint64_t>(computedBytes);
+            if (TileXRStragglerObservationBeginForComm(
+                    comm, &operation, stream, &observation) == TileXR::TILEXR_SUCCESS) {
+                args.stragglerRecord = observation.deviceRecord;
+            }
+        }
+    }
+
     rtTaskCfgInfo_t cfgInfo {};
     cfgInfo.schemMode = 1;
 
@@ -263,6 +297,10 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
 
     const rtError_t ret = rtKernelLaunchWithFlagV2(GetFunSig(type, dataType), blockDim, &argsInfo, nullptr,
         static_cast<rtStream_t>(stream), 0, &cfgInfo);
+    if (args.stragglerRecord != nullptr) {
+        TileXRStragglerObservationEnd(observation.detector, &observation, stream,
+            ret == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT);
+    }
     if (ret != RT_ERROR_NONE) {
         std::cerr << "TileXR collectives rtKernelLaunchWithFlagV2 failed, ret=" << ret
                   << ", type=" << static_cast<int>(type)

@@ -1,7 +1,7 @@
 include(GNUInstallDirs)
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/src/collectives/kernels/cmake")
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cce")
 enable_language(CCE)
 
 option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
@@ -182,6 +182,7 @@ target_link_directories(tilexr-ep PRIVATE
     ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64)
 
 target_link_libraries(tilexr-ep PRIVATE
+    tilexr-diagnostics
     tile-comm
     ascendcl
     runtime

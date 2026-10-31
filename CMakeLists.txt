@@ -15,6 +15,7 @@ cmake_minimum_required(VERSION 3.16)
 project(tilexr LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 14)
 option(TILEXR_BUILD_COLLECTIVES "Build optional TileXR collectives library" OFF)
+option(TILEXR_BUILD_DIAGNOSTICS "Build common TileXR clock and straggler diagnostics" OFF)
 option(TILEXR_BUILD_RELAY "Build optional generic TileRelay runtime" OFF)
 option(TILEXR_BUILD_EP "Build TileXR EP communication library" OFF)
 option(TILEXR_BUILD_MOONEP_PLANNER "Build A5-only MoonEP Planner library" OFF)
@@ -74,6 +75,19 @@ if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
 endif()
 add_subdirectory(src/profiling)
 add_subdirectory(src/comm)
+if(TILEXR_BUILD_DIAGNOSTICS OR TILEXR_BUILD_COLLECTIVES OR TILEXR_BUILD_EP OR TILEXR_BUILD_MOONEP)
+    add_subdirectory(src/diagnostics)
+    if(BUILD_TESTING OR TILEXR_BUILD_TESTS)
+        add_subdirectory(tests/diagnostics)
+        configure_file(
+            tests/diagnostics/cmake/install_prefix_smoke.cmake.in
+            ${CMAKE_BINARY_DIR}/tilexr_diagnostics_install_smoke.cmake
+            @ONLY
+        )
+        add_test(NAME tilexr_diagnostics_install_smoke
+            COMMAND ${CMAKE_COMMAND} -P ${CMAKE_BINARY_DIR}/tilexr_diagnostics_install_smoke.cmake)
+    endif()
+endif()
 if(TILEXR_BUILD_RELAY)
     add_subdirectory(src/relay)
     if(BUILD_TESTING OR TILEXR_BUILD_TESTS)

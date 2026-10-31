@@ -63,6 +63,7 @@ target_link_libraries(tilexr-collectives
         PUBLIC
         tile-comm
         PRIVATE
+        tilexr-diagnostics
         TileXR::profiling
         ascendcl
         runtime

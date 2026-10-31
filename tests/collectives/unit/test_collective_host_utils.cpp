@@ -157,8 +157,11 @@ void TestAllReduceBlockNum()
     CheckUint32("rank4 large allreduce uses two blocks per rank",
                 GetAllReduceBlockNum(Args(4, 0), 2 * 1024 * 1024),
                 8);
-    CheckUint32("pcie allreduce uses two blocks per rank",
+    CheckUint32("pcie rank4 small allreduce uses generic one block per rank",
                 GetAllReduceBlockNum(Args(4, TileXR::ExtraFlag::TOPO_PCIE), 1024),
+                4);
+    CheckUint32("pcie rank4 large allreduce uses generic two blocks per rank",
+                GetAllReduceBlockNum(Args(4, TileXR::ExtraFlag::TOPO_PCIE), 2 * 1024 * 1024),
                 8);
     CheckUint32("910B2C rank16 small allreduce follows lcal split",
                 GetAllReduceBlockNum(Args(16, TileXR::ExtraFlag::TOPO_910B2C), 1024),

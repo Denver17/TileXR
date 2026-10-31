@@ -342,6 +342,186 @@ export LD_LIBRARY_PATH="$PWD/install/lib:../../install/lib:${LD_LIBRARY_PATH:-}"
 RANK=0 RANK_SIZE=1 ./install/bin/test_tilexr_udma
 ```
 
+## Verify Common Straggler Diagnostics
+
+Build the independent diagnostics component, its install-prefix consumer, the
+Collectives producer adapter, and the four-rank acceptance binary:
+
+```bash
+source scripts/common_env.sh
+cmake -S . -B build \
+  -DTILEXR_BUILD_COLLECTIVES=ON -DTILEXR_BUILD_TESTS=ON -DBUILD_TESTING=ON
+cmake --build build -j"$(nproc)"
+ctest --test-dir build --output-on-failure \
+  -R 'straggler|diagnostics|collectives_(api|header_compile|kernel_ownership)'
+```
+
+Before diagnosing TileXR on hardware, search the retained HCCL Test qualification for
+the same host/container, NPU subset, topology, mode, CANN, driver, firmware, and test
+build. Reuse a matching result. Only when no matching record exists, run the installed
+official HCCL Test once on the same data path and retain per-rank correctness output;
+exit code alone is insufficient.
+
+Then run the final four-NPU acceptance test:
+
+```bash
+export LD_LIBRARY_PATH="$PWD/build/src/collectives:$PWD/build/src/diagnostics:$PWD/build/src/comm:${LD_LIBRARY_PATH:-}"
+bash tests/collectives/run_collective_straggler_e2e.sh \
+  build/tests/collectives run/collective-straggler-final 0
+```
+
+Require correct small and large AllReduce output, complete normal reports with all
+ranks `NORMAL`, and three measured reports each for injected rank 1 and rank 2 with
+only the selected rank `SLOW`. Retain `summary.json` and all rank logs. Report clock
+precision as the p50, p95, and maximum `precision_ns` across at least 20 calibration
+rounds of at least 32 samples. This value is the maximum selected half-RTT error bound
+across ranks and applies only to the tested communication domain and software stack.
+
+### Reported clock synchronization hardware acceptance
+
+The following results were supplied by the validation owner for source commit
+`7da31af`, based on `origin/main` `121541a`. CANN 9.1 incremental compilation
+succeeded and the focused tests passed **8/8**. These are retained prior-run results,
+not a hardware rerun of subsequent conflict-resolution commits.
+
+| Domain | Error bound p50 / p95 / max (ns) |
+| --- | --- |
+| 2P | 331 / 333 / 333 |
+| 8P | 587 / 588 / 588 |
+| 64P | 587 / 590 / 590 |
+
+The formal 64P run completed **64/64 ranks over 20 rounds**, with **32 warmup
+samples and 128 measured samples per round**. The maximum synchronization error
+bound was **590 ns (0.590 us)**. The post-test three-way checks confirmed that all
+eight machines returned to **8/8 idle devices**.
+
+Supplied patch SHA-256:
+`02A064BA37860C40BE9F9913DA045AE94D3F63C72A08609371AA309C983129FA`.
+The patch and raw per-rank logs were not supplied with this report, so this record
+does not independently verify that digest or establish binary equivalence between
+`7da31af` and the PR branch. Driver/firmware identity and retained artifact paths
+were also not supplied; preserve them with the original run evidence when available.
+
+Conflict integration against `origin/main` `b31c6c6a` was checked separately in a
+Host-only environment: the existing analysis, runtime-hook session, public-header,
+kernel-ownership, and external-binary-loader checks passed. The first three used
+temporary minimal ACL declarations and fail-closed runtime stubs, not CANN libraries.
+Collectives Host utility sources passed C++14 syntax compilation; the full test was
+not linked because its communicator/kernel runtime dependencies were unavailable.
+Shell syntax, Python compilation/CLI help, and an isolated CMake artifact staging and
+installation smoke check also passed. Full CANN build, diagnostics install-prefix
+consumer execution, and NPU precision/Collectives acceptance were not rerun here.
+
+For the eight-node clock-only acceptance test, synchronize the same source and install
+prefix to the same absolute path on every host, and put the hosts in rank order in a
+one-host-per-line file. Launch from the controlling machine; it invokes only the fixed
+worker script on each remote host and copies every rank artifact back for validation:
+
+```bash
+python tests/diagnostics/run_clock_sync_e2e_multihost.py \
+  --host-file /path/to/hosts_64p.txt \
+  --remote-root /tmp/tilexr-diagnostics \
+  --remote-install-prefix /tmp/tilexr-diagnostics/install \
+  --output-dir run/clock-sync-64p-final \
+  --ranks-per-host 8 --rounds 20 --soc-name Ascend950 \
+  --max-precision-ns 1000
+```
+
+Require `64/64 ranks`, identical SHA-256 values for the test binary,
+`libtilexr-diagnostics.so`, `libtile-comm.so`, and the external
+`tilexr/kernels/tilexr_diagnostics_op.o` on every node, and one consistent
+communication-domain p50/p95/maximum precision tuple across all ranks. Checking only
+the executable is insufficient because its dynamic libraries can differ by node. The
+coordinator requires all three precision statistics to be strictly below the supplied
+ceiling and rejects an existing output directory so stale rank JSON cannot make an
+incomplete run look complete. Each node writes to its own local filesystem; always
+collect and verify the exact global rank set rather than counting files on only the
+root node. If the
+deployment uses multiple bidirectional synchronization sessions from one source tree,
+pause them during the run or exclude `run/`: propagating rank artifacts between hosts
+creates duplicate results and adds unrelated filesystem traffic to the measurement.
+
+Inspect the final shared library rather than an intermediate object:
+
+```bash
+readelf -d build/src/collectives/libtilexr-collectives.so | grep -E 'RPATH|RUNPATH'
+ldd build/src/collectives/libtilexr-collectives.so | grep -E 'libascend_hal|libnnopbase'
+```
+
+The RPATH/RUNPATH must not contain `${ASCEND_HOME_PATH}/${ARCH}-linux/devlib`, and
+`libascend_hal.so` must resolve from the installed driver directory. For CCE source or
+header changes, the build log must show regeneration of `tilexr_collectives_op.o` and
+the staged `tilexr/kernels/tilexr_collectives_op.o`; otherwise the loader may still
+read a stale operator binary. Diagnostics likewise installs
+`tilexr/kernels/tilexr_diagnostics_op.o` beside its owning Host library. When merging
+changes across kernel packaging revisions, preserve the external loader and stage/install
+the final linked binary; rebuilding a temporary CCE object alone is insufficient.
+Host checks cannot establish device precision after such an integration change.
+
+On PCIe communication domains, the specialized `2npu` AllReduce path is valid only
+for two ranks. Multi-rank domains must use the generic peer-memory AllReduce path;
+selecting the two-rank path can silently reduce only a subset of ranks even though the
+kernel launch succeeds. Cover both small and large messages with low-magnitude integer
+inputs so the expected sum does not depend on signed-overflow behavior.
+
+For synchronized collectives, do not classify only from each rank's local duration.
+A rank that starts late may spend less time inside the collective because its peers
+already waited, yet still finish last. Use the calibrated aligned completion time as a
+second robust signal and retain separate start, duration, and completion reason flags.
+Also retain a communication-ready timestamp inside the same real collective kernel.
+An injected or real rank-local stall before communication makes peers wait inside the
+collective, so start/end alone can make all ranks finish together and cannot identify
+the initiator. Classify a positive `start -> ready` outlier separately with the
+pre-communication reason only when it meets the absolute, relative-to-median-duration,
+and MAD gates. A separate marker launch is not equivalent evidence.
+
+Clock synchronization and report collection are collective control-plane operations.
+Every rank must enter the same bounded Host exchange even when a local preflight or
+runtime step fails; returning early on one rank can otherwise strand its peers in the
+socket exchange. Clock calibration rejects terminal operator failures and requires at
+least 75 percent and at least four valid samples. Multi-stream observation must retain
+the producer stream for each ring slot, synchronize that stream before copying the
+record, and synchronize every outstanding producer stream before freeing detector
+device memory. The control exchange is a fixed 64-byte envelope and must converge the
+operation, sequence, launch ID, generation, configuration hash, rank, and status before
+reading device results. After asynchronous clock-buffer initialization, retain the
+clock stream until synchronization succeeds; on a synchronization failure, retry that
+same stream on the next calibration or destroy call instead of clearing unrelated
+record-stream ownership. A terminal clock sample fails the complete round with timeout;
+only non-terminal invalid timing samples participate in the 75-percent validity rule.
+Acquire the reusable device magic only after clock preflight converges successfully;
+otherwise healthy ranks can consume a round while a rank with an unrecovered stream
+does not, and the next calibration will use inconsistent magic values.
+
+For multi-rank clock calibration, publish a per-peer READY state before starting the
+four-timestamp interval; otherwise rank 0 service queueing grows the measured RTT with
+rank count. Have the requester push REQUEST to rank 0 instead of making rank 0 pull
+remote state, and timestamp the midpoint of each measured MTE operation window to avoid
+assigning the full transfer latency to one endpoint. REQUEST and ACK must use distinct
+per-rank 64-byte slots: adjacent state transitions in the same remotely updated cache
+line can remain stale to the polling receiver and cause a timeout even when the MTE
+operation completed.
+The RESPONSE MTE3 midpoint cannot be embedded in the same payload because it is known
+only after that publication completes. Publish it through a third per-rank TIMESTAMP
+slot after the peer has already captured `t3`; this follow-up transfer stays outside
+the corrected RTT while making all four timestamps use symmetric MTE window midpoints.
+If collection cannot synchronize a producer stream, retain that launch in its ring
+slot and retry the same stream on the next collective collect call. Do not advance the
+launch ID or permit slot reuse while any producer remains outstanding; ranks that
+already synchronized the slot may reuse the copied device record during the collective
+retry. Once every producer is synchronized, an incomplete observation report is safe
+to consume even though collection still returns its classification error.
+
+Observation collection is FIFO. Every communication launched after a detector owns
+the communicator reserves a ring entry, including warmups. Tests must collect or drain
+each such communication before asserting a later injected launch; otherwise a valid
+older record can be mistaken for missing instrumentation in the newer launch.
+
+Mock Host all-gather implementations must identify control protocols by a type tag or
+discriminator as well as payload size. `TileXRClockRankResult` and the current timing
+record are both 80 bytes; dispatching only on `sendBytes` silently treats one as the
+other and corrupts fields such as `readyCycle` while leaving the mock call successful.
+
 Expected:
 
 - `TileXR UDMA transport layout checks passed`
@@ -463,7 +643,7 @@ The final grep should print nothing for a clean run.
 | Symptom | Likely Cause | Action |
 | --- | --- | --- |
 | Missing CANN headers | `common_env.sh` not sourced or CANN path mismatch | Source the environment and confirm CANN 9.1.0 layout |
-| Cannot find `ascend_hal` | `devlib` path missing | Use the current top-level CMake configuration |
+| Cannot find `ascend_hal` | Driver HAL path is absent or loader paths select the toolkit stub | Source the supported environment and require `libascend_hal.so` to resolve from `${ASCEND_DRIVER_PATH}/lib64/driver`; never add toolkit `devlib` to runtime RPATH |
 | Demo target skipped | `bisheng` unavailable | Install/compiler configure `bisheng`, or run host-only tests |
 | UDMA disabled in demo | Unsupported hardware or HCCP/RA runtime unavailable | Use A5 / Ascend950 / 950 and check CANN driver/runtime libraries |
 | shmem appears in `ldd libtile-comm.so` | Unexpected dependency regression | Inspect `src/comm/CMakeLists.txt` and source includes |

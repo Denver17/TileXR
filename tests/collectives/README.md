@@ -92,6 +92,90 @@ The `bytes` column is the actual send bytes per rank for that operation and size
 the measured message size. `busbw(GB/s)` is `algbw * (rank_size - 1) / rank_size` for the measured operation.
 CSV output uses the same fields.
 
+## Collective Straggler Detection and Clock Synchronization
+
+`tilexr_straggler.h` exposes the common diagnostics component used by Collectives,
+EP, MoonEP, and future communication producers. Clock calibration is a separate
+diagnostics-owned AICore operator. Each standalone collective kernel records its own
+start, communication-ready, and completion cycles inside the existing launch; there
+are no separate begin/end marker launches and Collectives does not own detector state.
+
+The application lifecycle is:
+
+1. Create one detector per communicator with `TileXRStragglerCreate`.
+2. Call `TileXRClockSynchronize` collectively on every rank and retain the accuracy
+   evidence.
+3. Call supported communication operations. Producers resolve the detector from the
+   communicator and reserve observations through `TileXRStragglerObservationBeginForComm`.
+4. Call `TileXRStragglerCollect` collectively once for every observed communication,
+   in submission order.
+5. Recalibrate before `maxCalibrationAgeMs` and call `TileXRStragglerDestroy` after
+   all producer streams and observations are drained.
+
+Collection is FIFO, not "collect the most recent launch". Warmups issued after detector
+creation are observations too; a test or application that skips their collection will
+receive those earlier reports before a later measured launch.
+
+The clock operator collects NTP-style device timestamps (`t0` through `t3`) using
+`GetSystemCycle`, requires at least 75 percent and at least four valid samples, selects
+the valid sample with minimum round-trip delay, and reports
+the synchronization error bound as half of that delay. `precisionNs` is the maximum
+per-rank error bound in the communication domain, not a wall-clock accuracy claim. A
+terminal operator sample fails the whole calibration round; only non-terminal invalid
+timing samples may be rejected under the validity threshold. Clock and collection calls
+use a fixed control envelope so operation, sequence, launch ID, generation,
+configuration, rank, and error status converge across the full communicator.
+
+Build and run the complete four-NPU AllReduce acceptance test from the repository root:
+
+```bash
+source scripts/common_env.sh
+cmake -S . -B build \
+  -DTILEXR_BUILD_COLLECTIVES=ON -DTILEXR_BUILD_TESTS=ON -DBUILD_TESTING=ON
+cmake --build build --target test_collective_straggler_e2e -j"$(nproc)"
+export LD_LIBRARY_PATH="$PWD/build/src/collectives:$PWD/build/src/diagnostics:$PWD/build/src/comm:${LD_LIBRARY_PATH:-}"
+bash tests/collectives/run_collective_straggler_e2e.sh \
+  build/tests/collectives run/collective-straggler 0
+```
+
+The optional third script argument is the first physical NPU ID; four consecutive
+NPUs are used. The test performs 20 clock rounds with 32 samples per rank, validates
+small and large INT32 AllReduce output, requires no fast/slow false positives in the
+normal runs, then injects a device-side delay into rank 1 and rank 2 in turn. The
+hardware acceptance config uses a 1 ms absolute noise floor for the 5 ms injected
+delay; this does not change the public 5 us default. Every
+measured injected launch must classify only the injected rank as `SLOW` while
+preserving correct AllReduce output.
+
+The retained `summary.json` contains NPU IDs, p50/p95/max domain precision, last-round
+offset/RTT/error bounds, and all scenario classifications. Per-rank clock and launch
+JSON files plus `rank0.log` through `rank3.log` remain under the output directory.
+Clock precision claims must name the exact hardware subset, CANN/driver versions,
+sample count, and retained summary; Host tests or target compilation are not device
+precision evidence.
+
+Implementation pitfalls: keep every 64-bit direct-launch ABI field naturally aligned
+and guard offsets with `static_assert`; an unaligned legacy device ABI can fail at the
+kernel entry with a vector-core scalar-instruction exception. Changes to a CCE object
+must also make the final AICore link and external-artifact staging rerun; a rebuilt
+temporary object alone does not update the staged kernel artifact. Validate both conditions by a
+clean target build and a repeated hardware clock run. The timing record must be
+published after a device pipeline completion boundary, because a Host stream launch
+return does not prove that collective MTE work or the record write has finished. Host
+collection must synchronize the stream that produced each ring slot, not merely the
+stream passed to the collection API. A failed clock-stream synchronization remains
+owned by the detector and is retried by the next calibration or destroy call; do not
+discard it or clear unrelated producer streams.
+Likewise, a failed collection synchronization keeps the launch in its ring slot and
+prevents reuse until a later collective collect call completes successfully.
+
+For a synchronized collective, aligned completion and local duration alone may show
+that the domain waited without identifying the rank that initiated the wait. The
+in-kernel ready timestamp separates rank-local pre-communication time from the real
+collective body. Reports retain `pre_communication_ns`, its robust score, and the
+`PRE_COMMUNICATION` reason so a positive stall can be attributed without an auxiliary
+marker operator.
+
 The process exits nonzero if communicator destruction or subsequent ACL cleanup
 fails, even when collective correctness and timing completed successfully.
 

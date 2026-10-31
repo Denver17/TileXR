@@ -26,6 +26,11 @@ bool IsSupportedReduceOp(TileXR::TileXRReduceOp reduceOp);
 
 int64_t CountToBytes(int64_t count, TileXR::TileXRDataType dataType);
 
+int64_t ComputeCollectiveMessageBytes(TileXR::TileXRType type,
+                                      TileXR::TileXRDataType dataType,
+                                      int64_t count,
+                                      int rankSize);
+
 uint32_t GetAllGatherBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
 
 uint32_t GetAllToAllBlockNum(const TileXR::CommArgs &commArgs, int64_t dataSize);
