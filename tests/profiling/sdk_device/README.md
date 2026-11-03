@@ -20,9 +20,9 @@ c++ -std=c++14 -Wall -Wextra -pedantic -D__CCE__ -D__CCE_IS_AICORE__ \
 /tmp/tilexr-device-protocol
 ```
 
-`test_switch.cpp` also compiles with the same substitute for undefined, `0`, and
-`1` switch values, and as a normal Host translation unit. Values outside `0/1`
-must fail compilation. The independent SDK CMake registers these Host tests.
+The standalone SDK CMake registers only the device protocol check alongside
+three critical Host/ACL/queue checks. There is no switch-value test matrix or
+profiling CI job; enable the manual suite with `TILEXR_PROFILING_BUILD_TESTS=ON`.
 
 The substitute provides CPU pointers and a controllable cycle intrinsic only.
 It proves no device instruction ordering, scalar store visibility, physical

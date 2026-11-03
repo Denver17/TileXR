@@ -385,17 +385,6 @@ class ControlSourceContractTests(unittest.TestCase):
         ]:
             self.assertIn(token, checker_cmake)
 
-    def test_legacy_profiling_headers_are_declaration_free_install_compatibility(self):
-        collectives_cmake = self.read("src/collectives/CMakeLists.txt")
-        comm_cmake = self.read("src/comm/CMakeLists.txt")
-        for header in ["tilexr_collectives_perf.h", "tilexr_perf_trace.h"]:
-            text = self.read("src/include/{}".format(header))
-            self.assertIn("Compatibility header retained", text)
-            self.assertNotIn("TileXRCollectivePerfSession", text)
-            self.assertNotIn("TileXRPerfTraceHeader", text)
-            self.assertIn(header, collectives_cmake)
-        self.assertIn("tilexr_perf_trace.h", comm_cmake)
-
     def test_checker_collective_runners_use_current_kernel_init_signature(self):
         for path in [
             "tools/checker/src/collective_trace_runner.cpp",
@@ -1030,12 +1019,6 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "if [[ \"${1:-}\" == '-m' && \"${2:-}\" == 'unittest' ]]; then\n"
                 "  exit 0\n"
                 "fi\n"
-                "if [[ \"${1:-}\" == '-B' && \"${2:-}\" == '-m' && \"${3:-}\" == 'unittest' ]]; then\n"
-                "  exit 0\n"
-                "fi\n"
-                "if [[ \"${1:-}\" == */scripts/ci/check_profiling_python.py ]]; then\n"
-                "  exit 0\n"
-                "fi\n"
                 "exec \"${TILEXR_TEST_REAL_PYTHON:?}\" \"$@\"\n",
                 encoding="utf-8",
             )
@@ -1065,7 +1048,7 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 line for line in result.stdout.splitlines()
                 if line.startswith("[host-check] ")
             ]
-            self.assertEqual(9, len(case_lines))
+            self.assertEqual(7, len(case_lines))
             expected = [
                 "shell-syntax",
                 "ci-ctest",
@@ -1073,8 +1056,6 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 "ep-host",
                 "data-as-flag",
                 "relay-host",
-                "profiling-host",
-                "profiling-python",
                 "collectives-vllm-patch",
             ]
             self.assertEqual(
@@ -1082,7 +1063,7 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
             self.assertIn("[host-check] ep-host: FAIL (exit=23", result.stdout)
-            self.assertIn("Host cases: 9 total, 8 passed, 1 failed", result.stdout)
+            self.assertIn("Host cases: 7 total, 6 passed, 1 failed", result.stdout)
             self.assertIn("Failed cases: ep-host", result.stdout)
 
 

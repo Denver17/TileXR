@@ -2,7 +2,7 @@
 
 See the [current design](../../../docs/specs/profiling.md) and
 [testing guide](../../../tools/profiling/TESTING.md) for lifecycle invariants,
-the full test matrix, platform gaps, and evidence handoff.
+the manual checks, platform gaps, and evidence handoff.
 
 Run without CANN, the root TileXR project, or submodules:
 
@@ -28,22 +28,12 @@ synchronization failure must retain workspace; freeing it would allow in-flight
 work to access released GM. Explicit `Close` permits a retry and reports the
 failure while the destructor can only diagnose and conservatively retain GM.
 
-`profiling_sdk_installed_consumer` copies only release SDK files into a staging
-tree, installs them, removes that tree, then compiles and executes an external
-C++14 executable plus shared library and multiple translation units using only
-the installation prefix. No source-tree includes or profiling binary library
-are available to that consumer. The device protocol and switch tests use CPU
-substitutes, as documented in [the device test README](../sdk_device/README.md).
+`profiling_capture_queue_mock` protects bounded capture allocation, asynchronous
+business execution and common cleanup/retry phases. The remaining device protocol
+check uses CPU substitutes as described in the
+[device README](../sdk_device/README.md).
 
-With Python >=3.9 available, `profiling_sdk_python_roundtrip` compiles separate
-Host and stubbed-device translation units. Real Recorder/DirectWriter output
-passes through mocked ACL D2H, BuildSnapshot, EncodeV1, and the canonical Python
-reader/report API. It checks conditional slots, timestamp-zero backfill and
-stable ties, a dropped prefix, committed empty and unsubmitted lanes, plus the
-resulting incomplete report. This cross-language test catches producer/encoder/
-reader drift that independent fixtures cannot; it proves no NPU visibility.
-
-For actual ACL compile/link coverage, set `TILEXR_PROFILING_WITH_ACL=ON` in a
-CANN environment and run label `profiling_cann`. That group checks headers and
-linkage only. No NPU test is registered here; NPU execution requires the example's
-explicit device configuration and remains a separate validation boundary.
+These four checks are explicit local opt-ins, independent of root test switches
+and CI. Packaging, installed consumers, SDK/Python round trips, ACL compile-only
+checks and switch matrices have been removed. Use the Add4 example manually for
+real CANN compilation or NPU execution; Host mocks do not establish either.

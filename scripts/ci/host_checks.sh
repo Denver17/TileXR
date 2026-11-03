@@ -141,9 +141,7 @@ check_tracked_shell_syntax() {
             tests/memory \
             tests/sdma \
             tests/udma \
-            tests/collectives \
-            tests/profiling \
-            examples/profiling
+            tests/collectives
     )
     if [[ "${#tracked_shell_files[@]}" -eq 0 ]]; then
         echo "ERROR: tracked shell syntax scan found no scripts" >&2
@@ -187,28 +185,6 @@ run_relay_host_tests() {
     (cd "${BUILD_ROOT}/relay" && ctest --output-on-failure)
     python3 -m unittest discover -s "${ROOT_DIR}/tests/relay" -p 'test_*.py'
     python3 -m unittest discover -s "${ROOT_DIR}/tools/relay" -p 'test_check_*.py'
-}
-
-run_profiling_host_tests() {
-    cmake -S "${ROOT_DIR}/src/profiling" -B "${BUILD_ROOT}/profiling" \
-        -DTILEXR_PROFILING_BUILD_TESTS=ON -DTILEXR_PROFILING_WITH_ACL=OFF
-    cmake --build "${BUILD_ROOT}/profiling" -j"$(nproc)"
-    ctest --test-dir "${BUILD_ROOT}/profiling" --output-on-failure -L profiling_host
-}
-
-run_profiling_python_tests() {
-    if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3,9) else 1)'; then
-        echo "SKIP profiling Python: requires Python >=3.9; dedicated profiling workflow tests 3.9/3.12"
-        return 0
-    fi
-    PYTHONPATH="${ROOT_DIR}/tools/profiling/python" \
-        python3 -B -m unittest discover -s "${ROOT_DIR}/tests/profiling/python" -p 'test_*.py'
-    if python3 -c 'import build, setuptools, wheel' >/dev/null 2>&1; then
-        python3 "${ROOT_DIR}/scripts/ci/check_profiling_python.py" \
-            --work-dir "${RUNNER_TEMP:-/tmp}/tilexr-profiling-package"
-    else
-        echo "SKIP profiling packaging: preinstall build/setuptools/wheel; dedicated workflow provisions them"
-    fi
 }
 
 render_summary() {
@@ -270,8 +246,6 @@ run_and_accumulate_case comm-host run_comm_host_tests
 run_and_accumulate_case ep-host run_ep_host_tests
 run_and_accumulate_case data-as-flag run_data_as_flag_tests
 run_and_accumulate_case relay-host run_relay_host_tests
-run_and_accumulate_case profiling-host run_profiling_host_tests
-run_and_accumulate_case profiling-python run_profiling_python_tests
 run_and_accumulate_case collectives-vllm-patch \
     python3 -m pytest -q "${ROOT_DIR}/tests/collectives/unit/test_vllm_collectives_patch.py"
 

@@ -154,29 +154,22 @@ marker 不会替业务插入流水屏障，mapping 的 timer 换算没有通用�
 
 ## 4. 按环境能力验证
 
-先准备构建工具；以下为源码行为与 Host 验证入口：
+Profiling 按需手动验证，不设专用 CI workflow 或 Host CI 检查，也不随根项目
+普通测试开关启用。只保留资源生命周期、记录完整性、发布及关键计时回归；
+元数据、报表样式、打包和文档修改不要求新增测试。
 
 ```bash
-python3 -m pip install --no-build-isolation --no-deps -e tools/profiling
-python3 -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
-python3 scripts/ci/check_profiling_python.py
+PYTHONPATH=tools/profiling/python python3 -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
 cmake -S src/profiling -B build/profiling-host -DTILEXR_PROFILING_BUILD_TESTS=ON
 cmake --build build/profiling-host
-ctest --test-dir build/profiling-host --output-on-failure -L profiling_host
+ctest --test-dir build/profiling-host --output-on-failure
 ```
 
-发行检查额外要求预装 `build`、`setuptools>=61`、`wheel` 和可用的 venv/ensurepip。
-默认在临时仓外目录验证 wheel/sdist；需要保留证据时，用 `--work-dir` 指定**仓外目录**。
-CI 配置覆盖 Python 3.9/3.12 不代表对应版本已运行通过，必须检查实际结果。
-
-CTest 标签为 `profiling_host`、`profiling_python`，配置真实 CANN 后另有
-`profiling_cann`。目前即使启用 Add4 也不会自动注册 NPU 测试；
-`profiling_npu` 选择结果为空不能算通过。Host/mock 测试不能证明设备可见性、
-真实设备编译兼容性、marker 开销、寄存器 spill 或 UDMA 数据传输。
-
-有 CANN 9.1、无 NPU 时按 [测试指南第 5 节](TESTING.md) 构建和验证，
-不要运行 Add4 的 `run_demo.sh`。Windows 挂载到 WSL 的脚本应采用 LF 换行；
-CRLF 语法错误不属于 kernel 或编译器失败。
+可选 CMake 配置只注册四项带 `profiling_host` 标签的 C++14 Host/CPU/mock 检查，
+不依赖 Python，也不再维护安装 consumer、往返或开关矩阵。它们不能证明设备
+可见性、真实设备编译兼容性、marker 开销、寄存器 spill 或 UDMA 数据传输。
+CANN 编译和 Add4 显式硬件运行见[手动验证指南](TESTING.md#3-cann-和显式硬件验证)。
+Windows 挂载到 WSL 的脚本应采用 LF 换行；CRLF 语法错误不属于 kernel 或编译器失败。
 
 ## 5. 常见问题与人类 / AI 交接
 

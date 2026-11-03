@@ -170,31 +170,23 @@ required files to the analyzer. The SDK does not coordinate ranks.
 
 ## 4. Validate at the available environment layer
 
-Build and validate using preinstalled build tools:
-
-Distribution checks additionally need `build`, `setuptools>=61`, `wheel` and
-working venv/ensurepip support. With no `--work-dir`, the runner uses a temporary
-directory outside the repository.
+Profiling is validated manually when needed and has no dedicated CI workflow or
+Host CI cases. Root test switches do not enable the profiling suite. Keep only
+critical resource-lifetime, record-integrity and publication regressions; ordinary
+metadata, reporting, packaging and documentation changes do not require tests.
 
 ```bash
-python3 -m pip install --no-build-isolation --no-deps -e tools/profiling
-python3 -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
-python3 scripts/ci/check_profiling_python.py
+PYTHONPATH=tools/profiling/python python3 -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
 cmake -S src/profiling -B build/profiling-host -DTILEXR_PROFILING_BUILD_TESTS=ON
 cmake --build build/profiling-host
-ctest --test-dir build/profiling-host --output-on-failure -L profiling_host
+ctest --test-dir build/profiling-host --output-on-failure
 ```
 
-The CI workflow targets Python 3.9 and 3.12; check its run results before claiming
-minimum-version validation. Registered CTest labels are
-`profiling_host`, `profiling_python` and, when configured, `profiling_cann`.
-There is currently no registered NPU test, even with Add4 enabled;
-an empty `profiling_npu` selection is not a pass. Host/mocked device tests do not establish NPU visibility,
-device compiler compatibility, marker overhead, register spill, or UDMA transfer.
-
-For CANN 9.1 compilation without device execution, use testing-guide section 5;
-do not run Add4's `run_demo.sh`. For persistent package evidence, pass a
-**directory outside the repository** to `check_profiling_python.py --work-dir`.
+The optional CMake configuration registers four C++14 Host/CPU/mock checks with
+the `profiling_host` label, without Python, package-consumer or switch matrices.
+They do not establish NPU visibility, device compiler compatibility, marker
+overhead, register spill or UDMA transfer. For real CANN compilation and explicit
+Add4 execution, follow the [manual guide](TESTING.md#3-cann-和显式硬件验证).
 On Windows-mounted WSL checkouts, Bash scripts must have LF line endings;
 CRLF syntax failures are not kernel/compiler failures.
 

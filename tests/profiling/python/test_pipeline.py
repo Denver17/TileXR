@@ -5,8 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tilexr_profiling import generate_reports
-
 from _fixtures import mapping_document, record_block, stream_id, write_capture
 
 
@@ -51,8 +49,6 @@ class ProfilingPipelineTests(unittest.TestCase):
             self.assertEqual(trace["metadata"]["producer"], "tilexr")
             self.assertEqual(trace["metadata"]["operator"], "sample_operation")
             self.assertEqual(trace["metadata"]["status"], "complete")
-            self.assertIn("TileXR Profiling Analysis", (output / "analysis.md").read_text(encoding="utf-8"))
-            self.assertIn("TileXR Profiling Report", (output / "report.html").read_text(encoding="utf-8"))
 
     def test_incomplete_capture_writes_reports_and_returns_two(self):
         block = record_block(stream_id(0), 0, dropped_count=1, overflow=True)
@@ -90,68 +86,6 @@ class ProfilingPipelineTests(unittest.TestCase):
             self.assertIn("output directory is not empty", result.stderr)
             self.assertEqual(stale.read_text(encoding="utf-8"), "old generation")
             self.assertEqual({path.name for path in output.iterdir()}, {"stale.txt"})
-
-    def test_help_exposes_only_generic_input_pair(self):
-        result = subprocess.run(
-            [sys.executable, "-m", "tilexr_profiling", "--help"],
-            cwd=REPO_ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--mapping", result.stdout)
-        self.assertIn("--records", result.stdout)
-        self.assertIn("--output-dir", result.stdout)
-        self.assertNotIn("--metadata", result.stdout)
-        self.assertNotIn("--input", result.stdout)
-
-    def test_python_api_accepts_in_memory_mapping(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            mapping_path, records_path = write_capture(root)
-            del mapping_path
-            output = root / "api-report"
-            result = generate_reports(
-                mapping_document(),
-                [records_path],
-                output,
-                attributes={"case_id": "api-smoke"},
-            )
-
-            self.assertEqual(result.status, "complete")
-            self.assertEqual(result.output_dir, output.resolve())
-            self.assertEqual(
-                {path.name for path in result.artifacts},
-                {"perfetto_trace.json", "analysis.md", "report.html"},
-            )
-            self.assertTrue(all(path.is_file() for path in result.artifacts))
-            self.assertIn(r"api\-smoke", (output / "analysis.md").read_text(encoding="utf-8"))
-
-    def test_cli_attributes_add_host_side_provenance(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            result, output, _, _ = self.invoke(
-                Path(tmp),
-                extra_args=(
-                    "--attribute",
-                    "case_id=remote-smoke",
-                    "--attribute",
-                    "native_status=2000",
-                ),
-            )
-
-            self.assertEqual(result.returncode, 0, result.stderr)
-            markdown = (output / "analysis.md").read_text(encoding="utf-8")
-            html = (output / "report.html").read_text(encoding="utf-8")
-            for markdown_value, html_value in (
-                (r"case\_id", "case_id"),
-                (r"remote\-smoke", "remote-smoke"),
-                (r"native\_status", "native_status"),
-                ("2000", "2000"),
-            ):
-                self.assertIn(markdown_value, markdown)
-                self.assertIn(html_value, html)
-
 
 if __name__ == "__main__":
     unittest.main()

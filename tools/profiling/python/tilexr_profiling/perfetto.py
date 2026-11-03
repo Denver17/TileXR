@@ -1,6 +1,6 @@
 """Perfetto/Chrome Trace Event rendering."""
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .analysis import AnalysisResult
 from .model import ProfileRun
@@ -49,34 +49,35 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
 
     instance_tids: Dict[tuple, int] = {}
     grouped_tids: Dict[tuple, int] = {}
-    track_sort_indices: Dict[tuple, int] = {}
     next_sort_index: Dict[int, int] = {}
-    for launch_id, lane in lane_groups:
-        device = lane.device or "unknown"
-        pid = pids[(launch_id, lane.rank, device)]
-        main_track_key = ("stream", pid, lane.stream_id)
-        track_sort_indices[main_track_key] = next_sort_index.get(pid, 0)
-        next_sort_index[pid] = track_sort_indices[main_track_key] + 1
+
+    def add_track(pid: int, name: str, tid: Optional[int] = None) -> int:
+        if tid is None:
+            tid = 0
+            while tid in used_tids[pid]:
+                tid += 1
+            used_tids[pid].add(tid)
+        sort_index = next_sort_index.get(pid, 0)
+        next_sort_index[pid] = sort_index + 1
         events.extend(
             [
                 {
-                    "name": "thread_name",
-                    "ph": "M",
-                    "pid": pid,
-                    "tid": lane.stream_id,
-                    "args": {
-                        "name": f"rank{lane.rank}/device{device}/core{lane.core}/stream{lane.stream_id}"
-                    },
+                    "name": "thread_name", "ph": "M", "pid": pid, "tid": tid,
+                    "args": {"name": name},
                 },
                 {
-                    "name": "thread_sort_index",
-                    "ph": "M",
-                    "pid": pid,
-                    "tid": lane.stream_id,
-                    "args": {"sort_index": track_sort_indices[main_track_key]},
+                    "name": "thread_sort_index", "ph": "M", "pid": pid, "tid": tid,
+                    "args": {"sort_index": sort_index},
                 },
             ]
         )
+        return tid
+
+    for launch_id, lane in lane_groups:
+        device = lane.device or "unknown"
+        pid = pids[(launch_id, lane.rank, device)]
+        track_prefix = f"rank{lane.rank}/device{device}/core{lane.core}"
+        add_track(pid, f"{track_prefix}/stream{lane.stream_id}", lane.stream_id)
 
         grouped_tracks = sorted(
             {
@@ -87,37 +88,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
         )
         for track_name in grouped_tracks:
             grouped_key = (pid, lane.stream_id, track_name)
-            candidate_tid = 0
-            while candidate_tid in used_tids[pid]:
-                candidate_tid += 1
-            used_tids[pid].add(candidate_tid)
-            grouped_tids[grouped_key] = candidate_tid
-            track_key = ("grouped",) + grouped_key
-            track_sort_indices[track_key] = next_sort_index[pid]
-            next_sort_index[pid] += 1
-            events.extend(
-                [
-                    {
-                        "name": "thread_name",
-                        "ph": "M",
-                        "pid": pid,
-                        "tid": candidate_tid,
-                        "args": {
-                            "name": (
-                                f"rank{lane.rank}/device{device}/core{lane.core}/"
-                                f"{track_name}"
-                            )
-                        },
-                    },
-                    {
-                        "name": "thread_sort_index",
-                        "ph": "M",
-                        "pid": pid,
-                        "tid": candidate_tid,
-                        "args": {"sort_index": track_sort_indices[track_key]},
-                    },
-                ]
-            )
+            grouped_tids[grouped_key] = add_track(pid, f"{track_prefix}/{track_name}")
 
         instance_tracks = sorted(
             {
@@ -129,36 +100,8 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
         )
         for stage_id, instance_id, stage_name in instance_tracks:
             instance_key = (pid, lane.stream_id, stage_id, instance_id)
-            candidate_tid = 0
-            while candidate_tid in used_tids[pid]:
-                candidate_tid += 1
-            used_tids[pid].add(candidate_tid)
-            instance_tids[instance_key] = candidate_tid
-            track_key = ("instance",) + instance_key
-            track_sort_indices[track_key] = next_sort_index[pid]
-            next_sort_index[pid] += 1
-            events.extend(
-                [
-                    {
-                        "name": "thread_name",
-                        "ph": "M",
-                        "pid": pid,
-                        "tid": candidate_tid,
-                        "args": {
-                            "name": (
-                                f"rank{lane.rank}/device{device}/core{lane.core}/"
-                                f"{stage_name}[{instance_id}]"
-                            )
-                        },
-                    },
-                    {
-                        "name": "thread_sort_index",
-                        "ph": "M",
-                        "pid": pid,
-                        "tid": candidate_tid,
-                        "args": {"sort_index": track_sort_indices[track_key]},
-                    },
-                ]
+            instance_tids[instance_key] = add_track(
+                pid, f"{track_prefix}/{stage_name}[{instance_id}]"
             )
 
     for launch_id, lane in lane_groups:
@@ -211,32 +154,20 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
                 "byte_scope": metric.scope if metric is not None else None,
                 "metric_attributes": metric.attributes if metric is not None else {},
             }
+            event = {
+                "name": event_name,
+                "cat": sample.category,
+                "ph": "i" if sample.kind == "instant" else "X",
+                "pid": pid,
+                "tid": event_tid,
+                "ts": sample.start_us,
+                "args": args,
+            }
             if sample.kind == "instant":
-                events.append(
-                    {
-                        "name": event_name,
-                        "cat": sample.category,
-                        "ph": "i",
-                        "s": "t",
-                        "pid": pid,
-                        "tid": event_tid,
-                        "ts": sample.start_us,
-                        "args": args,
-                    }
-                )
+                event["s"] = "t"
             else:
-                events.append(
-                    {
-                        "name": event_name,
-                        "cat": sample.category,
-                        "ph": "X",
-                        "pid": pid,
-                        "tid": event_tid,
-                        "ts": sample.start_us,
-                        "dur": sample.duration_us,
-                        "args": args,
-                    }
-                )
+                event["dur"] = sample.duration_us
+            events.append(event)
 
     diagnostic_pid = 0
     diagnostic_tid = 0

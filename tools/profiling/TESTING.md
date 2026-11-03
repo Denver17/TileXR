@@ -1,230 +1,70 @@
-# Profiling 测试与接续指南
+# Profiling 手动验证
 
-面向人工操作和 AI 接续。架构与不变量见 [当前设计](../../docs/specs/profiling.md)，API 见 [API_REFERENCE.md](API_REFERENCE.md)，协议/统计见 [FORMAT.md](FORMAT.md)。本文命令默认从仓库根目录执行；临时构建、venv、报告和日志留在忽略的 build 目录或外部 evidence 目录，不提交生成物。
+Profiling 不进入专用 CI，也不随根项目的 `BUILD_TESTING` 或
+`TILEXR_BUILD_TESTS` 开关启用。普通元数据、报表样式、打包、文档修改不要求
+新增测试。按变更风险手动运行相关关键检查，不把测试数量当作验收目标。
 
-## 1. 开始前先确认什么
+当前设计见 [profiling.md](../../docs/specs/profiling.md)，公共接口见
+[API_REFERENCE.md](API_REFERENCE.md)，设备示例见 [Add4](../../examples/profiling/README.md)。
+历史环境证据保留在[原整改记录](../../docs/plans/PROFILING_CLEANUP.md#9-2026-10-20-实现接续与本地验收)；
+历史通过结果不能代替当前源码、二进制和目标硬件的验证。
 
-1. 阅读仓库 `AGENTS.md`、当前设计及本次变更对应合同；若在排错，先读 [调试经验](../../docs/moonep/MINDSPEED_DEBUGGING_EXPERIENCE.md)。
-2. 记录 `git rev-parse HEAD`、`git status --short`；保留已有修改，不自动 checkout/reset。源码、Host library、外置 kernel 必须能追溯到实际构建来源。
-3. 根据下表选择测试层。无 NPU 环境时先完成离线/Host 测试，将目标设备层记为未运行；不要自动连接集群或把替身当硬件。
-4. 检查 tools 版本、Python 解释器和实际导入路径。安装成功、`--help` 成功、CTest 枚举成功都不等于行为测试通过。
+## 1. SDK 与资源生命周期
 
-| 层级 | 所需环境 | 能证明 | 不能证明 |
-|---|---|---|---|
-| P：离线包 | Python ≥3.9；打包另需 build/setuptools/wheel | 解析、配对、统计、报告、独立发行消费 | ACL、设备行为、真实 timer 换算 |
-| H：独立 SDK | CMake ≥3.16、C++14 工具链；round-trip 另需 Python | ABI/布局、CPU writer、mock 生命周期、安装消费；Linux 上另含文件分支 | CANN 地址空间/指令、NPU 可见性与性能 |
-| C：CANN 编译 | Linux、实际 CANN 9.1、目标编译工具 | 真实 ACL 头/链接；Add4 构建另覆盖其实际设备编译 | 成功编译不证明已运行、数值或低开销 |
-| N：Add4 硬件 | 明确选定的 Ascend950/Linux、真实 CANN/driver、已确认 timer 换算 | 独立单 kernel 数值、4 lane 记录、报告和搬迁消费 | 多 rank、其他 SoC、A5 UDMA、生产异步保持 |
-| I：生产集成 | 配套 Host/Kernel、多 rank 设备和业务环境 | collectives 数值、资源/重试、rank 阶段、异步和采样边界 | 未使用的数据面、设备或模式 |
-
-## 2. 当前已有证据与未关闭边界
-
-以下是 **2026-10-20、实现提交 `73e4c9d7`** 的历史本地结果，不自动适用于后续代码、别的机器或未执行的 CI。完整命令及接续修复见 [整改计划第 9 节](../../docs/plans/PROFILING_CLEANUP.md#9-2026-10-20-实现接续与本地验收)。
-
-| 检查 | 已记录结果 |
-|---|---|
-| Python 3.12.14 | 81 项通过；A5 mapping 另 3 项通过 |
-| 独立 SDK/CPU stub/mock | 编译通过；排除下述系统阻止项后，全 CTest 12/12 通过，含 Python suite 和往返测试 |
-| 安装与发行 | SDK 仓外 C++14 executable/shared library/多 TU consumer 通过；wheel 与 sdist 重建 wheel 各自在独立 venv、仓外 cwd、清 PYTHONPATH、`-I` 下通过 CLI 0/1/2 与 API 三报告 |
-| A5 参数与开关 | C++14 layout/192-byte KernelArgs ABI 通过；非法宏值 2 被编译器按预期拒绝 |
-| 默认测试发现 | 有 Python 时枚举 13 项，无 NPU 测试；枚举本身不代表执行 |
-| shell | 两个入口分别 Bash `-n` 通过；不等于整套 Linux CI 通过 |
-| Windows 阻止项 | `profiling_switch_host_1` 编译成功，但在 main 前被应用控制策略禁止启动；完整 Host CTest 为 11/12，不能称全绿 |
-
-仍需单独取证：Linux hard-link/O_EXCL 并发/故障分支、Python 3.9、真实 CANN/设备编译开关、NPU GM 可见性、Add4 数值及搬迁、生产多 rank/48 lane/异步保持、marker/flush 开销与 spill。GitHub workflow 已配置，不表示已执行通过。
-
-### 2.1 2026-10-21 WSL / CANN 9.1 无 NPU 验证
-
-本次来源为 `54d8757ba3a3f6efa65273908c66aa3d8a5d191d` 加
-`examples/profiling/CMakeLists.txt` 的头文件搜索路径修复。开始时 Windows Git
-工作区干净；WSL Git 未启用对应 CRLF 转换，会把同一工作区误报为大量修改，
-使用 Windows Git 或单次 `git -c core.autocrlf=true status --short` 核对，未改全局配置。
-
-环境：WSL2 Ubuntu 22.04.5 / x86_64，GCC 11.4.0、CMake 3.22.1、Python 3.10.12；
-source `/usr/local/Ascend/cann-9.1.0/set_env.sh`，compiler/runtime/OPP 元数据为
-9.1.0，bisheng 基于 clang 15.0.5。无 `/dev/davinci*`、无 npu-smi；asys
-报告缺少 `libdrvdsmi.so`，driver/firmware/真实 SoC 未知。Ascend950 是编译目标，
-不是探测到的设备。环境检查使用 `ascendc-env-check` 的只读脚本。
-
-| 检查 | 本次结果与边界 |
-|---|---|
-| 全部已注册 CTest | **14/14 通过**；Host 标签 12 项、Python 标签 2 项、CANN 标签 1 项，round-trip 标签重叠，不能相加 |
-| Python / A5 mapping | Python 3.10.12 的 81 项通过；A5 mapping 另 3 项通过；未验证 Python 3.9/3.12 |
-| Linux 文件行为 | `profiling_sdk_host` 通过，执行 hard-link 发布、O_EXCL 冲突、write/fsync/close/link/unlink 故障及 6 进程单赢家断言；文件位于 WSL 挂载的 Windows 工作区，不外推其他文件系统 |
-| SDK 生命周期及消费 | ACL/queue mock、CPU writer、六种开关、真实 writer→mock ACL→v1→Python 三报告往返、安装后 executable/shared library/多 TU consumer 均通过 |
-| 真实 ACL | C++14 真实 CANN 头/ascendcl 编译、链接及 `profiling_acl_compile` 通过；该测试只关闭未初始化 capture，不执行设备分配或 kernel |
-| 独立 CANN 消费 | 将中英文主指南中的 CMake 原样复制到仓外，仅提供已安装 SDK prefix 与 CANN，构建并运行关闭未初始化 capture 的 smoke 成功；ELF NEEDED 为 ascendcl 和标准库，无 TileXR 动态库；未初始化设备，不是采集运行证据。日志：`independent-cann-consumer.log` |
-| Add4 | 源树构建及从安装 SDK 复制到仓外后的独立构建/安装通过；Host C++14，设备 `dav-c310-vec` / `gnu++17`；外置 AICore ELF 单独安装，Host 无 TileXR 动态库依赖，安装 ELF 无 devlib RPATH |
-| 真实设备编译宏 | 使用同一 Add4 kernel 和实际 bisheng 参数，宏未定义/0/1 各自编译成功；2 因 `TILEXR_ENABLE_PROFILING must be 0 or 1` 拒绝。CPU Host/device 的 2 也按该断言拒绝 |
-| Python 发行 | 独立 venv 补齐 build/setuptools/wheel；wheel 及 sdist 重建 wheel 各在仓外独立安装，通过 `-I` CLI 0/1/2、导入来源和 API 三报告检查 |
-| shell | 当前工作区 `host_checks.sh` 含 CRLF，直接 `bash -n` 失败；两个入口分别经 `tr -d '\r' < SCRIPT \| bash -n` 通过，仅检查归一化输入，未改脚本或运行整套 CI |
-
-构建、CTest、安装命令使用第 5 节开关，构建根为
-`build/profiling-wsl-20261021/cann`。证据目录为 `build/profiling-wsl-20261021/`：
-`environment.log`、`cann-env.log`、`cann-state.json`、`npu-info.log`、
-`configure.log`、`build.log`、`ctest.log`、`cann/Testing/Temporary/LastTest.log`、
-`a5-mapping.log`、`package.log`、`external-configure.log`、`external-build.log`、
-`external-install.log`、`switch-matrix.log`（完整编译命令）、`artifacts.log`（ELF/ldd/hash）、
-`final-checks.log`。仓外消费根路径记录在对应日志中；这些生成物均不提交。
-
-尚未覆盖：真实 ACL 初始化/错误恢复、NPU GM 可见性、Add4 数值/记录/搬迁运行、
-生产 collectives 配套全构建及多 rank/48 lane/异步、timer 校准、开销/spill、设备 C++14。
-本机 `ldd` 中 HAL 解析到 toolkit devlib stub（由环境提供），不是生产 driver。
-不能从这次通过推断 N/I 层验收或任何 UDMA 数据面结果；未运行 HCCL Test。
-
-复用教训：CANN 9.1 的 `runtime/kernel.h` 可能位于
-`<arch>-linux/pkg_inc/runtime/runtime/`，其依赖的 `profiling/prof_api.h` 又要求
-`<arch>-linux/pkg_inc`。Add4 必须同时搜索 runtime 头目录并提供 pkg_inc，
-通过真实 Host 编译和仓外已安装 SDK 构建验证，不能以设备 kernel 单独编译成功替代。
-
-## 3. P：离线 Python 与独立发行
-
-已有构建依赖时，从源码安装并运行行为测试：
-
-```bash
-python3 -m pip install --no-build-isolation --no-deps -e tools/profiling
-python3 -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
-python3 -B tests/collectives/unit/test_alltoall_a5_profiling_mapping.py
-```
-
-只做源码测试且不安装包时，可对每条命令设置 `PYTHONPATH=tools/profiling/python`。不要依赖旧 `tools.profiling` 导入或恰好处于仓库 cwd；单独运行 CTest 时也要核对它启动的解释器/导入环境。
-
-Windows PowerShell 的无安装测试入口（`python` 指向待验证解释器）：
-
-```powershell
-$profilingPreviousPath = $env:PYTHONPATH
-$env:PYTHONPATH = Join-Path (Get-Location) 'tools/profiling/python'
-try {
-    python -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
-    if ($LASTEXITCODE -ne 0) { throw 'profiling Python tests failed' }
-    python -B tests/collectives/unit/test_alltoall_a5_profiling_mapping.py
-    if ($LASTEXITCODE -ne 0) { throw 'A5 mapping tests failed' }
-} finally {
-    $env:PYTHONPATH = $profilingPreviousPath
-}
-```
-
-发行验证前准备 `build`、`setuptools>=61`、`wheel`。runner 使用本地构建产物，不从公网安装待测包；传一个可写 evidence 根目录，每次运行在其下创建独立工作目录：
-
-```bash
-python3 scripts/ci/check_profiling_python.py --work-dir /path/outside-repository/profiling-package-evidence
-```
-
-通过标准是结尾 `PASS: wheel and sdist install independently; isolated CLI 0/1/2 and API reports verified.`，并保存完整日志。runner 实际生成完整、不完整、损坏 fixture，检查安装来源与三报告；只检查 wheel 存在或 CLI help 不足。最低 Python 3.9 与 Python 3.12 要分别跑，参见 [workflow](../../.github/workflows/profiling.yml)。
-
-## 4. H：无 CANN 的 SDK 行为与安装消费
-
-此入口不需要初始化 TileXR 子模块或配置整个根项目：
+使用 C++14 工具链，不需要 CANN、NPU、Python 或 TileXR 子模块：
 
 ```bash
 cmake -S src/profiling -B build/profiling-host \
   -DTILEXR_PROFILING_BUILD_TESTS=ON -DTILEXR_PROFILING_WITH_ACL=OFF
 cmake --build build/profiling-host --parallel 2
-ctest --test-dir build/profiling-host -N
-ctest --test-dir build/profiling-host --output-on-failure -L profiling_host
-ctest --test-dir build/profiling-host --output-on-failure -L profiling_python
+ctest --test-dir build/profiling-host --output-on-failure
 ```
 
-多配置 generator 在 build/ctest 命令中分别补 `--config Debug` / `-C Debug`。CMake 未发现 Python ≥3.9 时会明确跳过 Python suite 与 round-trip；不能用变少的通过数量声称它们已验证。
+仅保留四项带 `profiling_host` 标签的关键回归：
 
-| CTest 名称 / 入口 | 核心断言 | 源码证据 |
-|---|---|---|
-| `profiling_sdk_host` | 预算/边界、对齐、非对齐有效 count、完成状态、timestamp=0、stable ties、v1 编码；Linux 文件故障和多进程单赢家发布 | [test_host.cpp](../../tests/profiling/sdk_host/test_host.cpp) |
-| `profiling_sdk_acl_mock` | context/stream 归属、初始化清理、同步/D2H/free 重试、disabled、移动、snapshot 和分配字节数生命周期 | [test_acl.cpp](../../tests/profiling/sdk_host/test_acl.cpp) |
-| `profiling_capture_queue_mock` | 有界队列、耗尽不阻塞业务、后续 acquire 无采集/释放、Drain 重试；共同清理阶段与可选 owner 分离 | [test_capture_queue.cpp](../../tests/profiling/sdk_host/test_capture_queue.cpp) |
-| `profiling_device_protocol` | 真实 writer 头 + CPU stub；稀疏/空槽、复写槽、溢出、零/最大时间戳、非法/复用 lane 和 ABI 边界 | [test_device.cpp](../../tests/profiling/sdk_device/test_device.cpp) |
-| `profiling_switch_host_{undefined,0,1}`、`profiling_switch_device_{undefined,0,1}` | 六种配置编译并运行；device 组仍是 CPU stub | [test_switch.cpp](../../tests/profiling/sdk_device/test_switch.cpp) |
-| `profiling_sdk_installed_consumer` | 复制发布文件→安装→移除 staging 源树→仓外 executable/shared library/多 TU 构建运行，只提供 prefix | [installed_consumer.cmake](../../tests/profiling/sdk_host/installed_consumer.cmake) |
-| `profiling_sdk_python_roundtrip` | 实际 Recorder/DirectWriter→mock ACL D2H→snapshot/v1→Python reader/三报告；含稀疏槽、ties、overflow、空提交及未提交 | [check_roundtrip.py](../../tests/profiling/sdk_host/check_roundtrip.py) |
-| `profiling_python` | P 层 unittest suite；主要覆盖协议、配对、统计、provenance、输出和文档 mapping 示例 | [python tests](../../tests/profiling/python) |
+| 目标 | 保护的合同 |
+|---|---|
+| `profiling_sdk_host` | 布局与字节预算、快照完整性、编码；Linux 文件故障、不覆盖和并发单赢家发布 |
+| `profiling_sdk_acl_mock` | context/stream 归属、部分初始化清理、同步/D2H/free 重试及移动后的所有权 |
+| `profiling_capture_queue_mock` | 有界队列、业务路径不插入等待、共同清理阶段和失败重试 |
+| `profiling_device_protocol` | CPU stub 下的记录槽、完成状态、地址/容量边界及 ABI |
 
-round-trip 同时属于 `profiling_host` 和 `profiling_python`，按两个标签运行会重复它。需要一次运行所有已注册检查时，可直接 `ctest --test-dir build/profiling-host --output-on-failure`。
+同步失败时必须保留 workspace，等待成功后才能释放；CPU mock 不能证明设备
+可见性或真实 ACL 行为。真实设备写入顺序仍须由目标 CANN 和硬件证据确认。
 
-非法宏值为编译失败合同，当前不单独注册 CTest。按 [device README](../../tests/profiling/sdk_device/README.md) 的编译方式将宏设为 `2`，要求失败原因是 0/1 static_assert；缺编译器/头文件导致失败不算通过。
+## 2. 离线输入与输出完整性
 
-Windows 应用控制策略若拒绝启动，记录具体 exe、错误与发生阶段，标为环境不可运行；不得改名或关闭策略绕过。为继续检查其他项可显式排除，但最终结论必须同时保留原失败项。Linux 文件分支在 Windows 不执行，即使 `profiling_sdk_host` 通过也不能关闭它们。
+仅修改解析、配对、发布或 Perfetto 轨道逻辑时，运行相关手动检查：
 
-## 5. C/N：真实 CANN 编译及 Add4
+```bash
+PYTHONPATH=tools/profiling/python \
+  python3 -B -m unittest discover -s tests/profiling/python -p 'test_*.py'
+```
 
-仅在明确支持的 Linux/CANN 环境执行。先 source 实际 CANN 9.1 环境，配置真实 SoC；保留 compiler、CANN、driver、firmware 和实际设备身份：
+剩余测试保护损坏输入拒绝、capture UUID 一致、缺失/溢出不伪造完整结果、
+大绝对时间戳的小间隔、CLI 状态、文件不覆盖、HTML 转义和轨道身份。
+不维护报表标题、统计展示、包导出或文档示例的测试矩阵。
+
+Perfetto 子轨道与主 stream 共用同一进程的 tid 空间，必须先预留全部主
+stream ID，再分配分组和实例轨道。轨道元数据统一生成，排序计数按进程递增；
+简化这段代码时对照原输出核对事件顺序、tid 和 sort index，不能只检查文件生成。
+
+## 3. CANN 和显式硬件验证
+
+先 source 实际 CANN 9.1 环境，显式选择目标 SoC。以下命令只编译 Add4：
 
 ```bash
 cmake -S src/profiling -B build/profiling-cann \
-  -DTILEXR_PROFILING_BUILD_TESTS=ON \
   -DTILEXR_PROFILING_WITH_ACL=ON \
-  -DTILEXR_PROFILING_BUILD_EXAMPLES=ON \
-  -DTILEXR_PROFILING_SOC=Ascend950
+  -DTILEXR_PROFILING_BUILD_EXAMPLES=ON -DTILEXR_PROFILING_SOC=Ascend950
 cmake --build build/profiling-cann --parallel 2
-ctest --test-dir build/profiling-cann --output-on-failure -L profiling_cann
-cmake --install build/profiling-cann --prefix "$PWD/build/profiling-prefix"
 ```
 
-`profiling_cann` 当前只注册 `profiling_acl_compile`，证明 ACL 编译/链接；Add4 的设备编译来自 build 阶段，不是这个标签本身。只需 ACL 编译时省略 BUILD_EXAMPLES/SOC。**当前无自动注册的 NPU 测试**，包括启用 Add4 后；`ctest -L profiling_npu` 找不到测试不能当作通过。
+硬件运行按 [Add4 英文](../../examples/profiling/README.md) /
+[中文](../../examples/profiling/README.zh-CN.md) 显式操作，确认选定设备和实际
+timer 换算依据。没有注册 NPU CTest；测试列表为空不是硬件通过。
 
-随后按 [Add4 README](../../examples/profiling/README.md) 将安装示例复制到仓外，以安装 prefix 构建。设置其必需环境变量，尤其是真实 `TILEXR_PROFILING_CYCLES_PER_US` 和 `TILEXR_PROFILING_CLOCK_BASIS`，再从复制的目录执行：
-
-```bash
-bash run_demo.sh /path/to/new-evidence-directory
-```
-
-runner 要求输出路径不存在，不能重复覆盖。它自行构建并执行；它的 build 路径与上面的 CMake 构建不是同一个证据。保存 runner 实际使用的 binary 和编译参数。验收检查：
-
-- `operator.log` 有数值校验成功，4 个 COMMITTED lane × 20 records，dropped=0；只出现“文件已写出”不足。
-- records 与 mapping 被 canonical 包读入，报告 complete、三产物均存在，UUID/时钟来源/环境信息一致。
-- `environment.txt`、实际外置 kernel 路径及构建日志可追溯；主机程序未嵌入 binary，runtime 解析真实 driver 库。
-- 按 README 手动安装例子、移动整个安装 prefix 后，在新位置再运行并核对实际加载路径。runner 本身不证明安装后搬迁。
-- 对目标设备另行验证 profiling 宏未定义/0/1 的编译；当前 Add4 构建固定为 1，不能用它代替完整开关矩阵。
-
-开销/spill 需在同一设备、输入和同步边界下比较“编译禁用”“仅本地 marker”“marker+flush”三组，保存原始时长、样本分布和编译资源/spill 证据。当前没有自动性能 runner；没有这些证据时不下“低开销/无 spill”结论。
-
-## 6. I：collectives 生产接入验收
-
-根项目依赖按 [BUILD_VERIFICATION.md](../../docs/BUILD_VERIFICATION.md) 准备；业务命令、支持拓扑和正确性工具见 [collectives README](../../tests/collectives/README.md)。此处列必须保留的测试合同，避免复制可能漂移的完整启动参数。
-
-| 场景 | 应核对的证据 |
-|---|---|
-| profiling OFF / ON | 同输入业务数值一致，Host/Kernel 来自成对构建；记录实际开关和 binary |
-| warmup 与采样 | warmup 无 capture；开启后每次 capture 对应一次 kernel，不按事件次序猜 iteration |
-| 预算/形状变化 | 超过最多 4 captures/64 MiB 或无匹配 stream/lane 时，有跳过诊断且业务继续；不要求每次调用都有文件 |
-| 普通/A5 lane | 普通为实际参与 AIV 数；A5 为 48 lane，不能套 blockDim=33；同时核对业务数值及 required ranks |
-| 异步保持 | 分开记录首次准备和后续 Acquire；后续 launch 不因采集插入同步/D2H/export/free；在原安全清理点才等待 |
-| 清理与故障 | 发布/Close 失败可重试，成功项不重复；rank 可选 owner 不同仍进入同一共同阶段，context/stream 最后销毁 |
-| rank 文件 | 同组分发 fresh seed，匹配启动次序/采样配置；逐个 capture 目录对照外部 required-rank 清单，禁止混 UUID |
-
-分析命令可参考 [根 README](../../README.md)，重复 `--records` 仅用于同一次 capture 的不同 rank。现有离线格式没有参与者 manifest；提供部分 rank 仍可能退出 0，必须由测试方额外检查所需 rank 是否齐全。A5 layout 与 mapping 回归只能证明参数/事件合同，不能代替真实 launcher、通信或异步运行。
-
-仓中 collectives mapping 当前写有 `cycles_per_us=1000.0`，这只是输入文件的值，不是 timer 自动探测或跨 SoC 保证。目标换算不同则在 evidence 目录生成对应 mapping 并保留换算依据，再进行分析；不得直接用默认文件制造看似合理的时延结论。
-
-通信路径排错前先查同环境已留存的 HCCL Test 一次性资格记录，严格按 AGENTS 的环境定义复用，不为本任务重复跑。纯离线/Host/Add4 不需要通信资格。若扩到 MoonEP，保持其公开 API、group_credit 默认模式、框架 profiler 和 stage barrier，并满足跨 rank min/median/max 等性能报告要求；不要引入 legacy 路径。
-
-## 7. 变更后该选哪些回归
-
-| 修改范围 | 最小相关集合 | 上层仍需补的证据 |
-|---|---|---|
-| types/layout/writer/encoder | H 的 host/device/switch/round-trip；P 的 records/protocol | C/N 开关、可见性及必要开销/spill |
-| AclCapture/文件发布 | H 的 host/acl_mock/queue/round-trip，Linux 文件分支 | 真实 ACL、context/stream 错误恢复 |
-| collectives launcher/kernel/清理 | queue mock、A5 layout/mapping、相关 H 测试 | 成对 CANN 构建、多 rank 数值/异步/重试 |
-| mapping/pairing/analysis/provenance/renderers | P 全 suite；相关 round-trip | 真实记录回放、三报告人工核对 |
-| 包/CMake/安装依赖 | SDK installed consumer + wheel/sdist runner | 干净环境、最低 Python、Linux/目标安装消费 |
-| Add4/runner | shell 语法、mapping parser、相关 SDK 测试 | N 层数值/记录/报告、安装搬迁 |
-
-不要新增匹配生产源码 token 的守卫；用编译、链接、导入、协议 fixture 和行为验证。shell 多文件语法扫描要逐文件调用，`bash -n file1 file2` 只解析第一个。API 的 None/空非法值、有效 count/对齐、空提交/未提交、发布警告/失败应分别覆盖。
-
-## 8. 交接证据模板与 AI 接续约束
-
-每次验收至少记录下表，结果使用“通过 / 失败 / 未运行”，不把未运行写成通过。日志与 binary 放 evidence 目录，维护文档保留索引和结论即可。
-
-| 字段 | 填写内容 |
-|---|---|
-| 变更来源 | commit、dirty diff、源码路径；Host/kernel/package 实际来源和版本 |
-| 环境 | OS/架构、编译器/标准、Python/导入路径、CANN/driver/firmware；硬件运行加设备子集/模式/拓扑 |
-| 合同与命令 | 本次要证明的合同、完整命令、开关、cwd、起止时间与退出状态 |
-| 产物与断言 | 日志路径、数值正确性、lane/rank/UUID、完整性诊断、三报告；文件/故障测试的具体断言 |
-| 未覆盖 | 替身范围、缺失解释器/硬件/权限、跳过或阻止的测试、仍待关闭门槛 |
-| 后续 | 第一处失败边界、最小下一步；如做性能比较，记录同配置与统计口径 |
-
-AI 接续时可直接采用以下任务描述，并补充实际环境：
-
-> 阅读 AGENTS.md、docs/specs/profiling.md、tools/profiling/TESTING.md 及对应源码。先检查当前 Git 状态和可用环境，按本次改动选择相关测试。区分 P/H/C/N/I 证据，不把历史 73e4c9d7 的结果当作本次运行。保留已有修改和业务合同；不绕过系统策略，不自动连接未授权环境，不猜 timer 换算或缺失 rank。报告实际命令、断言、产物及未覆盖项。需要调试时先定位第一处失败边界，再修改实现与对应维护文档。
-
-计划 ID 的全量关闭标准继续由 [整改计划](../../docs/plans/PROFILING_CLEANUP.md) 维护；一次局部测试通过不自动关闭 I01–I06 或延期 E 项。
+保留实际源码/二进制、CANN/driver/firmware、设备、命令、数值和记录结果。
+编译和 Host mock 不能证明多 rank 通信、UDMA 数据面、marker 开销或 spill。
+通信排错前复用同环境已留存的 HCCL Test 一次性资格记录，按 AGENTS 执行；
+纯离线/Host/Add4 不需要通信资格。MoonEP 的 profiler 和阶段 barrier 约束不变。

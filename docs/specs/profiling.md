@@ -1,6 +1,6 @@
 # Profiling 当前实现设计
 
-本文说明已实现的独立采集 SDK、离线分析器及 TileXR 接入边界。面向接手代码和编写测试的人与 AI；测试命令、验收矩阵及证据模板见 [TESTING.md](../../tools/profiling/TESTING.md)。代码变化时同步维护本文，测试结果另记，不把设计合同当作运行证据。
+本文说明已实现的独立采集 SDK、离线分析器及 TileXR 接入边界。面向接手代码的人与 AI；按需手动验证及关键回归见 [TESTING.md](../../tools/profiling/TESTING.md)。代码变化时同步维护本文，验证结果另记，不把设计合同当作运行证据。
 
 ## 1. 阅读入口与范围
 
@@ -162,7 +162,7 @@ CLI 退出：0=提供输入 complete，1=致命输入/输出失败，2=incomplet
 
 ## 7. 维护与测试边界
 
-改 writer/ABI 时同时检查 Host snapshot 和 Python reader；改 launcher 时同时检查 kernel 参数布局与资源清理阶段；改统计时同时检查三种 renderer 的 provenance。具体回归选择见 TESTING 的矩阵。
+Profiling 不设专用 CI，也不随根项目测试开关启用。改 writer/ABI 时按需检查 Host snapshot 和 Python reader；改 launcher 时检查 kernel 参数布局与资源清理阶段；改统计时人工核对相关报告。仅保留业务安全、输入/输出完整性及关键计时回归，命令见 TESTING。
 
 可复用的检查规则：对齐空间不等于有效 count；空提交不等于未运行；运行时 null 不等于编译无插桩；文件已发布的清理警告不等于发布失败；本地可选资源缺失不能改变 rank 共同清理阶段；两端各自合成 fixture 不能替代真实 writer→encoder→reader 往返。
 

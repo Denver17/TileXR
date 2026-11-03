@@ -92,7 +92,7 @@ cleanup.
 
 ## Test matrix
 
-[`host_checks.sh`](../scripts/ci/host_checks.sh) runs these eight recorded cases:
+[`host_checks.sh`](../scripts/ci/host_checks.sh) runs these seven recorded cases:
 
 - shell syntax for tracked CI and affected test scripts;
 - the complete standalone `tests/ci` CTest suite;
@@ -101,20 +101,14 @@ cleanup.
 - the data-as-flag header compile test;
 - Relay Host mocks, Python contracts, and offline benchmark trace checkers in
   `tools/relay`;
-- standalone profiling C++14 layout, writer, mocked ACL/queue, installed consumer,
-  and SDK-to-Python round-trip tests;
-- canonical profiling Python behavior tests and offline distribution consumers
-  when the preinstalled interpreter/build tools are available;
 - collectives vLLM patch tests.
 
-[`profiling.yml`](../.github/workflows/profiling.yml) separately provisions Python
-3.9/3.12 packaging tools and checks wheel/sdist installation from outside the
-checkout with `-I`, actual CLI status 0/1/2, and API report generation. Its Host
-job runs without CANN or submodules. CTest labels are `profiling_host`,
-`profiling_python`, and optional `profiling_cann`; NPU work is never registered
-by the default standalone configuration. The explicit Add4 runner requires a
-chosen device and confirmed timer conversion. A configured CI matrix is not
-evidence that either Python version or real CANN/NPU execution has passed.
+Profiling has no dedicated workflow, Host CI cases, packaging runner or automatic
+CTest registration through root test switches. Its remaining critical checks are
+manual opt-ins for resource ownership, device record boundaries, invalid input,
+file publication and trace identity. Ordinary profiling metadata, formatting and
+documentation changes do not require new tests. See the
+[manual guide](../tools/profiling/TESTING.md) for commands and hardware boundaries.
 
 On `blue`, [`build_blue.sh`](../scripts/ci/control/build_blue.sh) performs a
 clean CANN 9.1 top-level configure, build, install, and CTest run; builds the
