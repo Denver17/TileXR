@@ -1,0 +1,210 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "tilexr_ep_combine_memory_server_dedup",
+  "cycles_per_us": 1000,
+  "stages": [
+    {
+      "name": "kernel_total",
+      "category": "total",
+      "critical": true,
+      "begin": 12289,
+      "end": 12290
+    },
+    {
+      "name": "m1_init",
+      "category": "setup",
+      "critical": false,
+      "begin": 12291,
+      "end": 12292
+    },
+    {
+      "name": "m1_stage",
+      "category": "copy",
+      "critical": false,
+      "begin": 12311,
+      "end": 12312
+    },
+    {
+      "name": "m2_control",
+      "category": "wait",
+      "critical": false,
+      "begin": 12313,
+      "end": 12314
+    },
+    {
+      "name": "m2_prepare_notify",
+      "category": "wait",
+      "parent": "m2_control",
+      "begin": 12326,
+      "end": 12327
+    },
+    {
+      "name": "m2_server_wait",
+      "category": "wait",
+      "parent": "m2_control",
+      "begin": 12328,
+      "end": 12329
+    },
+    {
+      "name": "m3_direct",
+      "category": "issue",
+      "critical": false,
+      "begin": 12315,
+      "end": 12316
+    },
+    {
+      "name": "m4_partial",
+      "category": "compute",
+      "critical": false,
+      "begin": 12317,
+      "end": 12318
+    },
+    {
+      "name": "m5_final",
+      "category": "compute",
+      "critical": false,
+      "begin": 12319,
+      "end": 12320
+    },
+    {
+      "name": "m6_drain",
+      "category": "finalize",
+      "critical": false,
+      "begin": 12307,
+      "end": 12308
+    },
+    {
+      "name": "m3_mte3_complete",
+      "category": "diagnostic",
+      "parent": "m3_direct",
+      "instant": 12321
+    },
+    {
+      "name": "m4_token_issue",
+      "category": "issue",
+      "parent": "m4_partial",
+      "track": "token_issue",
+      "begin": 12322,
+      "end": 12323
+    },
+    {
+      "name": "m5_token_issue",
+      "category": "issue",
+      "parent": "m5_final",
+      "track": "token_issue",
+      "begin": 12324,
+      "end": 12325
+    },
+    {
+      "name": "m6_final",
+      "category": "compute",
+      "critical": false,
+      "begin": 12330,
+      "end": 12331
+    },
+    {
+      "name": "m6_token_issue",
+      "category": "issue",
+      "parent": "m6_final",
+      "track": "token_issue",
+      "begin": 12332,
+      "end": 12333
+    },
+    {
+      "name": "m3_prepare",
+      "category": "setup",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12334,
+      "end": 12335
+    },
+    {
+      "name": "m3_server_select",
+      "category": "setup",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12336,
+      "end": 12337
+    },
+    {
+      "name": "m3_loop_read",
+      "category": "copy",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12338,
+      "end": 12339
+    },
+    {
+      "name": "m3_loop_pack_send",
+      "category": "issue",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12340,
+      "end": 12341
+    },
+    {
+      "name": "m3_retire",
+      "category": "wait",
+      "parent": "m3_direct",
+      "track": "loop_detail",
+      "begin": 12342,
+      "end": 12343
+    },
+    {
+      "name": "m6_prepare",
+      "category": "setup",
+      "parent": "m6_final",
+      "track": "loop_detail",
+      "begin": 12344,
+      "end": 12345
+    },
+    {
+      "name": "m6_ready_wait",
+      "category": "wait",
+      "parent": "m6_final",
+      "track": "loop_detail",
+      "begin": 12346,
+      "end": 12347
+    },
+    {
+      "name": "m6_token_prepare",
+      "category": "setup",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12348,
+      "end": 12349
+    },
+    {
+      "name": "m6_loop_input_wait",
+      "category": "wait",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12350,
+      "end": 12351
+    },
+    {
+      "name": "m6_loop_compute_prefetch",
+      "category": "compute",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12352,
+      "end": 12353
+    },
+    {
+      "name": "m6_output",
+      "category": "issue",
+      "parent": "m6_token_issue",
+      "track": "loop_detail",
+      "begin": 12354,
+      "end": 12355
+    },
+    {
+      "name": "m6_retire",
+      "category": "wait",
+      "parent": "m6_final",
+      "track": "loop_detail",
+      "begin": 12356,
+      "end": 12357
+    }
+  ]
+}

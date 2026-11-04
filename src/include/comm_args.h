@@ -34,7 +34,7 @@ using GM_ADDR = uint8_t*;
 
 namespace TileXR {
 
-constexpr int TILEXR_MAX_RANK_SIZE = 128; // 最大支持的npu卡数
+constexpr int TILEXR_MAX_RANK_SIZE = 256; // 最大支持的npu卡数
 constexpr int RANK_SIZE_TWO = 2;  // 可用SIO的规模，以及是否需要跨卡搬运数据核的分界规模
 constexpr int64_t IPC_BUFF_MAX_SIZE = 1022LL * 1024 * 1024;
 constexpr int64_t CREDIT_IPC_STRIDE = 512;
@@ -146,13 +146,21 @@ struct CommArgs {
     uint64_t peerMemBytes = 0U;
     int32_t commDomain = 0;
     uint32_t reserved0 = 0U;
-    // Reserved ABI slots; profiling uses an independent DeviceView.
+    // EP compatibility capture only. The standalone profiling SDK uses its
+    // independent DeviceView and does not allocate or read these ABI slots.
     GM_ADDR tilexrProfilingTimestampsGM = nullptr;
     GM_ADDR tilexrProfilingEventIdsGM = nullptr;
     GM_ADDR tilexrProfilingRecordCountsGM = nullptr;
     GM_ADDR tilexrProfilingDroppedCountsGM = nullptr;
     uint32_t tilexrProfilingRecordsPerCore = 0U;
     uint32_t tilexrProfilingCoreCapacity = 0U;
+    // Independent EP Combine compatibility capture; appended to preserve offsets.
+    GM_ADDR tilexrCombineProfilingTimestampsGM = nullptr;
+    GM_ADDR tilexrCombineProfilingEventIdsGM = nullptr;
+    GM_ADDR tilexrCombineProfilingRecordCountsGM = nullptr;
+    GM_ADDR tilexrCombineProfilingDroppedCountsGM = nullptr;
+    uint32_t tilexrCombineProfilingRecordsPerCore = 0U;
+    uint32_t tilexrCombineProfilingCoreCapacity = 0U;
 };
 
 struct LcclDumpBlockInfo {

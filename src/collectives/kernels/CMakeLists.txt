@@ -24,13 +24,16 @@ file(GLOB_RECURSE TILEXR_COLLECTIVES_KERNEL_DEPENDS CONFIGURE_DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/*.cce"
 )
 
+# Rank-sized AllGather state exceeds the former 16,000-byte function limit
+# with the 256-rank ABI. Keep function and total stack budgets at 32 KiB.
 set(CCE_COMPILE_OPTION
         -O2
         -std=gnu++17
         --cce-aicore-only
         -Wno-deprecated-declarations
         "SHELL:-mllvm -cce-aicore-long-call"
-        "SHELL:-mllvm -cce-aicore-function-stack-size=16000"
+        "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
+        "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
         "SHELL:-mllvm -cce-aicore-record-overflow=false"
         "SHELL:-mllvm -cce-aicore-addr-transform"
         "SHELL:-mllvm --cce-aicore-jump-expand=true"

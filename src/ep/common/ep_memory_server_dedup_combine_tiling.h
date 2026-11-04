@@ -1,0 +1,35 @@
+#ifndef TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_TILING_H
+#define TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_TILING_H
+
+#include <cstddef>
+#include <cstdint>
+#include <type_traits>
+
+namespace TileXREp {
+constexpr uint32_t kEpServerDedupCombineCoreNum = 64;
+
+// Independent Host/AICore wire contract. Host validates before narrowing.
+// C6 uses a separate latest-record region; byte 13 enables its fixed slot 0.
+struct EpServerDedupCombineTilingData {
+    uint32_t bs;
+    uint32_t h;
+    uint16_t moeExpertNum;
+    uint8_t topK;
+    uint8_t dtype;
+    uint8_t quantMode;
+    uint8_t profilingEnabled;
+    uint8_t reserved[2];
+};
+static_assert(std::is_standard_layout<EpServerDedupCombineTilingData>::value, "standard layout tiling");
+static_assert(sizeof(EpServerDedupCombineTilingData) == 16, "Combine tiling is 16 bytes");
+static_assert(alignof(EpServerDedupCombineTilingData) == 4, "scalar GM alignment");
+static_assert(offsetof(EpServerDedupCombineTilingData, bs) == 0, "BS offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, h) == 4, "H offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, moeExpertNum) == 8, "E offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, topK) == 10, "K offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, dtype) == 11, "dtype offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, quantMode) == 12, "quantMode offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, profilingEnabled) == 13, "profiling enabled offset");
+static_assert(offsetof(EpServerDedupCombineTilingData, reserved) == 14, "reserved zeros offset");
+} // namespace TileXREp
+#endif

@@ -1,0 +1,22 @@
+# Empty overrides preserve the defaults in the shared Host/kernel headers.
+set(TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM "" CACHE STRING "Dispatch send cores (16..48, step 4)")
+set(TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM "" CACHE STRING "Combine send cores (16..56, step 4)")
+set(TILEXR_EP_CORE_DEFINITIONS)
+foreach(operator IN ITEMS DISPATCH COMBINE)
+    if(operator STREQUAL "DISPATCH")
+        set(variable TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM)
+        set(allowed 16 20 24 28 32 36 40 44 48)
+    else()
+        set(variable TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM)
+        set(allowed 16 20 24 28 32 36 40 44 48 52 56)
+    endif()
+    if(NOT "${${variable}}" STREQUAL "")
+        if(NOT "${${variable}}" IN_LIST allowed)
+            message(FATAL_ERROR "Invalid ${variable}=${${variable}}; expected one of ${allowed}")
+        endif()
+        # Module tests can exercise a split independently of the package default.
+        set(test_property TILEXR_TEST_${operator}_SEND_CORES)
+        list(APPEND TILEXR_EP_CORE_DEFINITIONS
+            "${variable}=$<IF:$<BOOL:$<TARGET_PROPERTY:${test_property}>>,$<TARGET_PROPERTY:${test_property}>,${${variable}}>")
+    endif()
+endforeach()

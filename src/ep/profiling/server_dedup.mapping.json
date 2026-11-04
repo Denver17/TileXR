@@ -1,0 +1,265 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "tilexr_ep_dispatch_memory_server_dedup",
+  "cycles_per_us": 1000,
+  "stages": [
+    {
+      "name": "kernel_total",
+      "category": "total",
+      "critical": true,
+      "begin": 1392508929,
+      "end": 1392508937
+    },
+    {
+      "name": "init_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508930
+    },
+    {
+      "name": "send_cnt_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508931
+    },
+    {
+      "name": "send_data_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508932
+    },
+    {
+      "name": "recv_cnt_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508933
+    },
+    {
+      "name": "cumsum_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508934
+    },
+    {
+      "name": "prefix_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508935
+    },
+    {
+      "name": "recv_data_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392508936
+    },
+    {
+      "name": "recv_begin",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509184
+    },
+    {
+      "name": "recv_prefix_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509185
+    },
+    {
+      "name": "recv_tasks_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509186
+    },
+    {
+      "name": "recv_prepare_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509187
+    },
+    {
+      "name": "recv_loop_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509188
+    },
+    {
+      "name": "recv_drain_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509189
+    },
+    {
+      "name": "recv_clear_issue_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509190
+    },
+    {
+      "name": "recv_clear_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509191
+    },
+    {
+      "name": "finish_begin",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509192
+    },
+    {
+      "name": "finish_local_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509193
+    },
+    {
+      "name": "finish_sync_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509194
+    },
+    {
+      "name": "finish_counter_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509195
+    },
+    {
+      "name": "finish_publish_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509196
+    },
+    {
+      "name": "finish_wait_end",
+      "category": "diagnostic",
+      "parent": "kernel_total",
+      "instant": 1392509197
+    },
+    {
+      "name": "probe",
+      "category": "wait",
+      "parent": "kernel_total",
+      "begin": 1392509440,
+      "end": 1392509441
+    },
+    {
+      "name": "acquire_load",
+      "category": "copy",
+      "parent": "kernel_total",
+      "begin": 1392509442,
+      "end": 1392509443
+    },
+    {
+      "name": "metadata",
+      "category": "compute",
+      "parent": "kernel_total",
+      "begin": 1392509444,
+      "end": 1392509445
+    },
+    {
+      "name": "atomic",
+      "category": "compute",
+      "parent": "metadata",
+      "begin": 1392509446,
+      "end": 1392509447
+    },
+    {
+      "name": "output_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509448,
+      "end": 1392509449
+    },
+    {
+      "name": "relay_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509450,
+      "end": 1392509451
+    },
+    {
+      "name": "round_peer_wait",
+      "category": "wait",
+      "parent": "kernel_total",
+      "begin": 1392509452,
+      "end": 1392509453
+    },
+    {
+      "name": "load_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509454,
+      "end": 1392509455
+    },
+    {
+      "name": "load_wait",
+      "category": "wait",
+      "parent": "kernel_total",
+      "begin": 1392509456,
+      "end": 1392509457
+    },
+    {
+      "name": "Probe_load_flag",
+      "category": "issue",
+      "parent": "probe",
+      "begin": 1392509458,
+      "end": 1392509459
+    },
+    {
+      "name": "Probe_cal_sum",
+      "category": "compute",
+      "parent": "probe",
+      "begin": 1392509460,
+      "end": 1392509461
+    },
+    {
+      "name": "packet_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "instant": 1392509696
+    },
+    {
+      "name": "send_cnt_filter",
+      "category": "compute",
+      "parent": "kernel_total",
+      "begin": 1392509462,
+      "end": 1392509463
+    },
+    {
+      "name": "send_cnt_send",
+      "category": "copy",
+      "parent": "kernel_total",
+      "begin": 1392509464,
+      "end": 1392509465
+    },
+    {
+      "name": "send_first_hop",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509466,
+      "end": 1392509467
+    },
+    {
+      "name": "send_direct",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509468,
+      "end": 1392509469
+    },
+    {
+      "name": "recv_token",
+      "category": "copy",
+      "parent": "kernel_total",
+      "begin": 1392509470,
+      "end": 1392509471
+    },
+    {
+      "name": "send_cnt_issue",
+      "category": "issue",
+      "parent": "kernel_total",
+      "begin": 1392509472,
+      "end": 1392509473
+    }
+  ]
+}

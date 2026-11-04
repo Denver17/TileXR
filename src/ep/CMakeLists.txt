@@ -1,4 +1,17 @@
 include(GNUInstallDirs)
+include(${CMAKE_SOURCE_DIR}/src/cmake/TileXREpCoreConfig.cmake)
+set(TILEXR_EP_SERVER_DEDUP_ENABLE "auto" CACHE STRING "Server dedup policy (auto, 0 or 1)")
+set_property(CACHE TILEXR_EP_SERVER_DEDUP_ENABLE PROPERTY STRINGS auto 0 1)
+if(TILEXR_EP_SERVER_DEDUP_ENABLE STREQUAL "auto")
+    set(TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE 1)
+    set(TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE 1)
+elseif(TILEXR_EP_SERVER_DEDUP_ENABLE MATCHES "^[01]$")
+    set(TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE ${TILEXR_EP_SERVER_DEDUP_ENABLE})
+    set(TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE 0)
+else()
+    message(FATAL_ERROR "TILEXR_EP_SERVER_DEDUP_ENABLE must be auto, 0 or 1")
+endif()
+
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cce")
@@ -8,8 +21,10 @@ option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Combine Memory kernel" OFF)
 option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
+option(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
+    "Enable standard GM event capture in the Server Dedup kernel" OFF)
 
-# EP is distributed as one package. All four kernels are A5-only binaries;
+# EP is distributed as one package. All kernels are A5-only binaries;
 # unsupported devices are rejected by libtilexr-ep.so at runtime.
 set(TILEXR_EP_AICORE_ARCH "--cce-aicore-arch=dav-c310-vec")
 set(TILEXR_EP_CATLASS_ARCH "3510")
@@ -31,10 +46,15 @@ set(TILEXR_EP_KERNEL_INCLUDES
     -I${CMAKE_SOURCE_DIR}/3rdparty
     -I${CMAKE_SOURCE_DIR}/src/include
     -I${CMAKE_CURRENT_SOURCE_DIR}/common
+    -I${CMAKE_CURRENT_SOURCE_DIR}/kernels
 )
 
 function(tilexr_add_ep_aicore_kernel target source output)
-    cmake_parse_arguments(ARG "" "" "DEPENDS;DEFINITIONS" ${ARGN})
+    cmake_parse_arguments(ARG "DISABLE_OVERFLOW_RECORDING" "" "DEPENDS;DEFINITIONS" ${ARGN})
+    set(record_overflow true)
+    if(ARG_DISABLE_OVERFLOW_RECORDING)
+        set(record_overflow false)
+    endif()
     set_source_files_properties("${source}" PROPERTIES
         LANGUAGE CCE
         OBJECT_DEPENDS "${ARG_DEPENDS}")
@@ -47,13 +67,14 @@ function(tilexr_add_ep_aicore_kernel target source output)
         -Wno-deprecated-declarations
         "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
         "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000"
-        "SHELL:-mllvm -cce-aicore-record-overflow=true"
+        "SHELL:-mllvm -cce-aicore-record-overflow=${record_overflow}"
         "SHELL:-mllvm -cce-aicore-addr-transform"
         "SHELL:-mllvm -cce-aicore-dcci-insert-for-scalar=false"
         ${TILEXR_EP_AICORE_ARCH}
         ${TILEXR_EP_KERNEL_INCLUDES})
     target_compile_definitions(${target}_tmp PRIVATE
         CATLASS_ARCH=${TILEXR_EP_CATLASS_ARCH}
+        ${TILEXR_EP_CORE_DEFINITIONS}
         ${ARG_DEFINITIONS})
 
     add_custom_command(
@@ -62,7 +83,8 @@ function(tilexr_add_ep_aicore_kernel target source output)
             $<TARGET_OBJECTS:${target}_tmp>
             --static -o "${output}" --allow-multiple-definition
         COMMAND truncate -c -s 10485760 "${output}"
-        DEPENDS ${target}_tmp ${ARG_DEPENDS}
+        # OBJECT targets impose build order; the object files trigger relinking.
+        DEPENDS ${target}_tmp $<TARGET_OBJECTS:${target}_tmp> ${ARG_DEPENDS}
         COMMAND_EXPAND_LISTS
         VERBATIM
         COMMENT "Linking ${target} A5 AICore binary")
@@ -138,12 +160,67 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_kernel
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 
+set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP
+    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_dispatch_memory_server_dedup_kernel.o")
+tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp"
+    "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
+    DISABLE_OVERFLOW_RECORDING
+    DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
+        TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
+        $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
+    DEPENDS
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_counts.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_send.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_select.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_recv.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_packet_receive_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_receive_tasks.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_receive_packet.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_profile.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_profiling_compat.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_mode.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_data_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_profile.h"
+        "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
+
+set(TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP
+    "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_combine_memory_server_dedup_kernel.o")
+tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
+    "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.cpp"
+    "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
+    DISABLE_OVERFLOW_RECORDING
+    DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
+        TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
+        $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_select.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_partial.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_source_aggregate.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_mode.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_config.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_buffer_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_tiling.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_profile.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_profiling_compat.h"
+        "${CMAKE_SOURCE_DIR}/src/include/comm_args.h")
+
 set(TILEXR_EP_KERNEL_TARGETS
+    tilexr_ep_combine_memory_server_dedup_kernel
+    tilexr_ep_dispatch_memory_server_dedup_kernel
     tilexr_ep_dispatch_kernel
     tilexr_ep_combine_kernel
     tilexr_ep_dispatch_memory_kernel
     tilexr_ep_combine_memory_kernel)
 set(TILEXR_EP_KERNEL_OBJECTS
+    "${TILEXR_EP_COMBINE_SERVER_DEDUP_KERNEL_OP}"
+    "${TILEXR_EP_SERVER_DEDUP_KERNEL_OP}"
     "${TILEXR_EP_DISPATCH_KERNEL_OP}"
     "${TILEXR_EP_COMBINE_KERNEL_OP}"
     "${TILEXR_EP_DISPATCH_MEMORY_OP}"
@@ -160,10 +237,24 @@ add_library(tilexr-ep SHARED
     host/tilexr_ep_dispatch.cpp
     host/tilexr_ep_memory_dispatch.cpp
     host/tilexr_ep_memory_combine.cpp
+    host/ep_memory_server_dedup_layout.cpp
+    host/ep_memory_server_dedup_host.cpp
+    host/ep_memory_server_dedup_launch.cpp
+    host/tilexr_ep_memory_server_dedup_dispatch.cpp
+    host/ep_memory_server_dedup_combine_layout.cpp
+    host/ep_memory_server_dedup_combine_host.cpp
+    host/ep_memory_server_dedup_combine_launch.cpp
+    host/tilexr_ep_memory_server_dedup_combine.cpp
     ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp
 )
 
 add_dependencies(tilexr-ep ${TILEXR_EP_KERNEL_TARGETS})
+target_compile_definitions(tilexr-ep PUBLIC
+    ${TILEXR_EP_CORE_DEFINITIONS}
+    TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
+    TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
+    PRIVATE
+    TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>)
 tilexr_attach_kernel_artifacts(tilexr-ep
     FILES ${TILEXR_EP_KERNEL_OBJECTS}
     TARGETS ${TILEXR_EP_KERNEL_TARGETS})
@@ -194,3 +285,6 @@ set_target_properties(tilexr-ep PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(TARGETS tilexr-ep LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_ep.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(FILES profiling/server_dedup.mapping.json profiling/server_dedup_combine.mapping.json
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/profiling)

@@ -54,6 +54,13 @@ Expected:
 - CANN runtime libraries are resolved.
 - The shmem grep prints nothing for the current TileXR UDMA implementation.
 
+SDK tests that mock ACL must prepend their mock headers with
+`target_include_directories(... BEFORE PRIVATE ...)` so inherited CANN headers
+cannot select incompatible declarations and cause unresolved `aclrtMalloc` or
+`aclrtMemcpy` symbols. When validating these targets, include the CANN header
+search paths used by the root build; a standalone mock-only build does not
+exercise this include-order boundary.
+
 ## Build UDMA Tests
 
 ```bash
@@ -92,6 +99,9 @@ runtime does not remove unresolved symbols from the linker input.
 
 ## Build Expert Parallelism Package
 
+EP Memory Server Dedup 的接口与布局见
+[Dispatch/Combine 设计](specs/ep-memory-server-dedup-dispatch-combine-design.md)。
+
 EP uses one installation layout for every deployment environment. Do not pass
 `TILEXR_SOC_NAME` or an EP SoC CMake option when configuring:
 
@@ -103,7 +113,7 @@ cmake --build /tmp/tilexr-ep-build --target tilexr-ep -j"$(nproc)"
 cmake --install /tmp/tilexr-ep-build
 ```
 
-The four EP kernels are A5-only objects even when the compiler runs on a 910B
+The six EP kernels are A5-only objects even when the compiler runs on a 910B
 host. The package must contain exactly these EP artifacts and no EP kernel
 shared libraries or 910B variants:
 
@@ -115,13 +125,22 @@ for object in \
   tilexr_ep_dispatch_kernel.o \
   tilexr_ep_combine_kernel.o \
   tilexr_ep_dispatch_memory_kernel.o \
-  tilexr_ep_combine_memory_kernel.o; do
+  tilexr_ep_combine_memory_kernel.o \
+  tilexr_ep_dispatch_memory_server_dedup_kernel.o \
+  tilexr_ep_combine_memory_server_dedup_kernel.o; do
   test -f "${ep_lib_dir}/tilexr/kernels/${object}"
 done
 ! find "${ep_lib_dir}" -maxdepth 1 -type f \
   \( -name 'libtilexr_ep_dispatch_kernel.so' -o \
      -name 'libtilexr_ep_combine_kernel.so' \) | grep -q .
 ```
+
+Server Dedup profiling compatibility changes require separate OFF and ON build
+directories, using `-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=OFF` or `ON` at
+configuration. Build `tilexr-ep` to include the communicator compatibility owner,
+Host launch code and all six kernels. `TILEXR_EP_SERVER_DEDUP_ENABLE=auto|0|1`
+selects the dedup policy; the default is `auto`. Keep Host and device artifacts
+from the same build, including every consumer of the expanded `CommArgs` ABI.
 
 Building on 910B proves cross-compilation and packaging only. Host tests must
 also verify that every public EP entry returns `TILEXR_ERROR_NOT_SUPPORT` there
@@ -562,6 +581,16 @@ generic collective binary and every grouped A5 binary from a clean directory.
 Compiling only a grouped binary can miss shared-header API drift in the generic
 kernel, including profiling recorder signature changes, because all embedded
 binaries are required inputs of the same Host library.
+
+The shared 256-rank ABI also enlarges rank-sized local state in the generic
+AllGather kernels. CANN 9.1 targeting `dav-c220-vec` reports a 20,160-byte
+frame, above the former 16,000-byte function limit. Set both `-cce-aicore-function-stack-size` and
+`-cce-aicore-stack-size` to `0x8000` (32 KiB), retaining the compiler's stack
+limit check. Rebuild the generic `tilexr_collectives_op` target for both
+`Ascend950` (`dav-c310-vec`) and `Ascend910B` (`dav-c220-vec`) after rank-limit
+changes; an EP-only build does not compile these consumers of the shared ABI.
+A successful cross-build does not establish 256-rank runtime correctness or
+performance.
 
 Expected artifact and removed-surface checks:
 

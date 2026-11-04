@@ -145,8 +145,15 @@ int TileXRCommInitRankWithSharedQpDomain(
 int TileXRCommInitRankMemoryDomain(
     int commDomain, int rankSize, int rank, TileXRCommPtr *comm)
 {
+    return TileXRCommInitRankMemoryDomainWithSize(
+        commDomain, TILEXR_MEMORY_DOMAIN_BUFFER_SIZE, rankSize, rank, comm);
+}
+
+int TileXRCommInitRankMemoryDomainWithSize(
+    int commDomain, int bufferSize, int rankSize, int rank, TileXRCommPtr *comm)
+{
     return CommInitRankWithDomainConfig(commDomain,
-        TILEXR_MEMORY_DOMAIN_BUFFER_SIZE, rankSize, rank, false, true, comm);
+        bufferSize, rankSize, rank, false, true, comm);
 }
 
 int TileXRGetCommArgsDev(TileXRCommPtr comm, GM_ADDR &commArgsPtr)
@@ -180,6 +187,45 @@ int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic)
     auto* c = static_cast<TileXRComm *>(comm);
     *magic = c->NextMagic();
     return TILEXR_SUCCESS;
+}
+
+int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot)
+{
+    if (launchSlot != nullptr) {
+        *launchSlot = static_cast<uint32_t>(-1);
+    }
+    if (comm == nullptr || launchSlot == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto *c = static_cast<TileXRComm *>(comm);
+    return c->ReserveProfilingLaunch(recordsPerLaunch, launchSlot);
+}
+
+int TileXRProfilingReserveLatestLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot)
+{
+    if (launchSlot != nullptr) {
+        *launchSlot = static_cast<uint32_t>(-1);
+    }
+    if (comm == nullptr || launchSlot == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto *c = static_cast<TileXRComm *>(comm);
+    return c->ReserveLatestProfilingLaunch(recordsPerLaunch, launchSlot);
+}
+
+int TileXRProfilingReserveLatestCombineLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
+    uint32_t *launchSlot)
+{
+    if (launchSlot != nullptr) {
+        *launchSlot = static_cast<uint32_t>(-1);
+    }
+    if (comm == nullptr || launchSlot == nullptr) {
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    auto *c = static_cast<TileXRComm *>(comm);
+    return c->ReserveLatestCombineProfilingLaunch(recordsPerLaunch, launchSlot);
 }
 
 int TileXRCommHostAllGather(TileXRCommPtr comm, const void *sendBuf, size_t sendBytes, void *recvBuf)
@@ -451,12 +497,30 @@ int TileXRCommDestroy(TileXRCommPtr comm)
     if (resourceRet != TILEXR_SUCCESS) {
         return resourceRet;
     }
+    int finalizeRet = c->FinalizeProfiling();
+    if (finalizeRet == TILEXR_SUCCESS) {
+        finalizeRet = c->FinalizeKernelTilings();
+    }
+    // Reuse the existing rank agreement so a failed tiling release cannot leave
+    // one rank retrying destruction after its peers have deleted their comms.
+    finalizeRet = c->AgreeInternalStatus(finalizeRet);
+    if (finalizeRet != TILEXR_SUCCESS) {
+        return finalizeRet;
+    }
     const int udmaRet = c->FinalizeUDMA();
     if (udmaRet != TILEXR_SUCCESS) {
         return udmaRet;
     }
     delete c;
     return TILEXR_SUCCESS;
+}
+
+int TileXRCommGetKernelTiling(TileXRCommPtr comm, const void *data,
+    uint32_t bytes, GM_ADDR *deviceData)
+{
+    if (deviceData != nullptr) *deviceData = nullptr;
+    if (comm == nullptr) return TILEXR_ERROR_PARA_CHECK_FAIL;
+    return static_cast<TileXRComm *>(comm)->GetKernelTiling(data, bytes, deviceData);
 }
 
 int TileXRCommGetInternalResource(TileXRCommPtr comm, void **resource)

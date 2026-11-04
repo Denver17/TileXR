@@ -101,6 +101,8 @@ configure_file(
         @ONLY)
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
+        ep_profiling_compat/runtime.cpp
+        ep_profiling_compat/capture.cpp
         comm_wrap.cpp
         tilexr_internal.cpp
         tilexr_internal.h

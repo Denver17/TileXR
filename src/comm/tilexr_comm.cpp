@@ -8,6 +8,8 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 #include "tilexr_comm.h"
+#include "tilexr_kernel_tiling_cache.h"
+#include "ep_profiling_compat/capture.h"
 #include "tilexr_internal.h"
 #include "ccu/tilexr_ccu_backend.h"
 #include "sdma/tilexr_sdma_transport.h"
@@ -727,6 +729,11 @@ int TileXRComm::Init()
         return TILEXR_ERROR_INTERNAL;
     }
 
+    ret = epProfiling_->Init(rank_, devId_, commDomain_);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
+
     const int32_t localIpcEnabled = memoryOnlyDomain_ ? 1 :
         (IsEnvEnabled("TILEXR_ENABLE_IPC", true) ? 1 : 0);
     std::vector<int32_t> allIpcEnabled(rankSize_, -1);
@@ -870,7 +877,10 @@ int TileXRComm::InitThread(const std::string &uid)
         TILEXR_LOG(ERROR) << "init common failed!";
         return TILEXR_ERROR_INTERNAL;
     }
-    int ret = TILEXR_SUCCESS;
+    int ret = epProfiling_->Init(rank_, devId_, commDomain_);
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
     {
         lock_guard<mutex> lock(g_mtx);
         if (g_localPeerMemAllocationMap.find(uid) == g_localPeerMemAllocationMap.end()) {
@@ -1389,6 +1399,7 @@ TileXRComm::~TileXRComm()
         socketExchange_ = nullptr;
     }
     FreePeerMem(commArgs_.dumpAddr);
+    epProfiling_.reset();
     FreePeerMem(peerMemAllocation_[rank_]);
     peerMem_[rank_] = nullptr;
     FreePeerMem(creditIpcMem_[rank_]);
@@ -1400,7 +1411,8 @@ TileXRComm::~TileXRComm()
     ResetSDMAState();
 }
 
-TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize)
+TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize),
+    epProfiling_(new EpProfilingCapture(commArgs_)), kernelTilings_(new KernelTilingCache())
 {
 }
 
@@ -1408,12 +1420,14 @@ TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize,
     bool sharedQpDomain, bool memoryOnlyDomain)
     : rank_(rank), rankSize_(rankSize), commDomain_(commDomain),
       bufferSize_(bufferSize), sharedQpDomain_(sharedQpDomain),
-      memoryOnlyDomain_(memoryOnlyDomain)
+      memoryOnlyDomain_(memoryOnlyDomain), epProfiling_(new EpProfilingCapture(commArgs_)),
+      kernelTilings_(new KernelTilingCache())
 {
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize, TileXRUniqueId commId)
-    : rank_(rank), rankSize_(rankSize), commId_(commId)
+    : rank_(rank), rankSize_(rankSize), commId_(commId),
+      epProfiling_(new EpProfilingCapture(commArgs_)), kernelTilings_(new KernelTilingCache())
 {
 }
 
@@ -1450,6 +1464,36 @@ CommArgs* TileXRComm::GetCommArgs()
 int64_t TileXRComm::NextMagic()
 {
     return magic_.fetch_add(1);
+}
+
+int TileXRComm::FinalizeProfiling()
+{
+    return epProfiling_->Finalize();
+}
+
+int TileXRComm::ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot)
+{
+    return epProfiling_->ReserveLaunch(recordsPerLaunch, launchSlot);
+}
+
+int TileXRComm::ReserveLatestProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot)
+{
+    return epProfiling_->ReserveLatestLaunch(recordsPerLaunch, launchSlot);
+}
+
+int TileXRComm::ReserveLatestCombineProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot)
+{
+    return epProfiling_->ReserveLatestCombineLaunch(recordsPerLaunch, launchSlot);
+}
+
+int TileXRComm::GetKernelTiling(const void *data, uint32_t bytes, GM_ADDR *deviceData)
+{
+    return kernelTilings_->Get(data, bytes, deviceData);
+}
+
+int TileXRComm::FinalizeKernelTilings()
+{
+    return kernelTilings_->Clear();
 }
 
 int TileXRComm::HostAllGather(const void *sendBuf, size_t sendBytes, void *recvBuf, uint32_t timeoutMs)

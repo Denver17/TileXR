@@ -1,4 +1,6 @@
 #include "ep_kernel_launch.h"
+#include "ep_memory_server_dedup_launch.h"
+#include "ep_memory_server_dedup_combine_launch.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -32,6 +34,11 @@ constexpr char kDispatchMemoryKernelFile[] = "tilexr_ep_dispatch_memory_kernel.o
 constexpr char kDispatchMemoryKernelName[] = "tilexr_ep_dispatch_memory_kernel";
 constexpr char kCombineMemoryKernelFile[] = "tilexr_ep_combine_memory_kernel.o";
 constexpr char kCombineMemoryKernelName[] = "tilexr_ep_combine_memory_kernel";
+constexpr char kServerDedupKernelFile[] = "tilexr_ep_dispatch_memory_server_dedup_kernel.o";
+constexpr char kServerDedupKernelName[] = "tilexr_ep_dispatch_memory_server_dedup_kernel";
+
+constexpr char kCombineServerDedupKernelFile[] = "tilexr_ep_combine_memory_server_dedup_kernel.o";
+constexpr char kCombineServerDedupKernelName[] = "tilexr_ep_combine_memory_server_dedup_kernel";
 
 struct KernelRegistrationState {
     std::mutex mutex;
@@ -58,6 +65,10 @@ uint8_t gDispatchMemoryKernelStub = 0;
 
 KernelRegistrationState gCombineMemoryRegistration;
 uint8_t gCombineMemoryKernelStub = 0;
+KernelRegistrationState gServerDedupRegistration;
+uint8_t gServerDedupKernelStub = 0;
+KernelRegistrationState gCombineServerDedupRegistration;
+uint8_t gCombineServerDedupKernelStub = 0;
 
 bool HasPrefix(const char *value, const char *prefix)
 {
@@ -67,8 +78,8 @@ bool HasPrefix(const char *value, const char *prefix)
     return std::strncmp(value, prefix, std::strlen(prefix)) == 0;
 }
 
-int EnsureKernelRegistered(KernelRegistrationState &state, const char *binaryFileName,
-    const KernelEntry *entries, std::size_t entryCount, const void *anchor)
+int EnsureKernelRegistered(KernelRegistrationState &state, const char *binaryFileName, const KernelEntry *entries,
+    std::size_t entryCount, const void *anchor)
 {
     std::lock_guard<std::mutex> guard(state.mutex);
     if (state.registered) {
@@ -93,16 +104,15 @@ int EnsureKernelRegistered(KernelRegistrationState &state, const char *binaryFil
     rtError_t rtRet = rtDevBinaryRegister(&binary, &binaryHandle);
     if (rtRet == RT_ERROR_NONE) {
         for (std::size_t index = 0; index < entryCount; ++index) {
-            rtRet = rtFunctionRegister(binaryHandle, entries[index].stub,
-                entries[index].name, entries[index].name, 0U);
+            rtRet = rtFunctionRegister(binaryHandle, entries[index].stub, entries[index].name, entries[index].name, 0U);
             if (rtRet != RT_ERROR_NONE) {
                 break;
             }
         }
     }
     if (rtRet != RT_ERROR_NONE) {
-        std::cerr << "TileXR EP kernel registration failed, ret=" << rtRet
-                  << ", binary=" << binaryFileName << std::endl;
+        std::cerr << "TileXR EP kernel registration failed, ret=" << rtRet << ", binary=" << binaryFileName
+                  << std::endl;
         if (binaryHandle != nullptr) {
             (void)rtDevBinaryUnRegister(binaryHandle);
         }
@@ -120,9 +130,8 @@ int EnsureDispatchKernelsRegistered()
         {kDispatchKernelName, &gDispatchKernelStub},
         {kDispatchCrossNodeKernelName, &gDispatchCrossNodeKernelStub},
     };
-    return EnsureKernelRegistered(gDispatchRegistration, kDispatchKernelFile,
-        entries, sizeof(entries) / sizeof(entries[0]),
-        reinterpret_cast<const void *>(&EnsureDispatchKernelsRegistered));
+    return EnsureKernelRegistered(gDispatchRegistration, kDispatchKernelFile, entries,
+        sizeof(entries) / sizeof(entries[0]), reinterpret_cast<const void *>(&EnsureDispatchKernelsRegistered));
 }
 
 int EnsureCombineKernelsRegistered()
@@ -132,37 +141,35 @@ int EnsureCombineKernelsRegistered()
         {kCombineCrossNodeKernelName, &gCombineCrossNodeKernelStub},
         {kCombineCrossNodeDrainKernelName, &gCombineCrossNodeDrainKernelStub},
     };
-    return EnsureKernelRegistered(gCombineRegistration, kCombineKernelFile,
-        entries, sizeof(entries) / sizeof(entries[0]),
-        reinterpret_cast<const void *>(&EnsureCombineKernelsRegistered));
+    return EnsureKernelRegistered(gCombineRegistration, kCombineKernelFile, entries,
+        sizeof(entries) / sizeof(entries[0]), reinterpret_cast<const void *>(&EnsureCombineKernelsRegistered));
 }
 
 int EnsureDispatchMemoryKernelRegistered()
 {
     const KernelEntry entry {kDispatchMemoryKernelName, &gDispatchMemoryKernelStub};
-    return EnsureKernelRegistered(gDispatchMemoryRegistration, kDispatchMemoryKernelFile,
-        &entry, 1U, reinterpret_cast<const void *>(&EnsureDispatchMemoryKernelRegistered));
+    return EnsureKernelRegistered(gDispatchMemoryRegistration, kDispatchMemoryKernelFile, &entry, 1U,
+        reinterpret_cast<const void *>(&EnsureDispatchMemoryKernelRegistered));
 }
 
 int EnsureCombineMemoryKernelRegistered()
 {
     const KernelEntry entry {kCombineMemoryKernelName, &gCombineMemoryKernelStub};
-    return EnsureKernelRegistered(gCombineMemoryRegistration, kCombineMemoryKernelFile,
-        &entry, 1U, reinterpret_cast<const void *>(&EnsureCombineMemoryKernelRegistered));
+    return EnsureKernelRegistered(gCombineMemoryRegistration, kCombineMemoryKernelFile, &entry, 1U,
+        reinterpret_cast<const void *>(&EnsureCombineMemoryKernelRegistered));
 }
 
-int LaunchRegisteredKernel(const void *stub, uint32_t blockDim, aclrtStream stream,
-    void *args, std::size_t argsSize, const char *kernelName)
+int LaunchRegisteredKernel(
+    const void *stub, uint32_t blockDim, aclrtStream stream, void *args, std::size_t argsSize, const char *kernelName)
 {
     rtArgsEx_t argsInfo {};
     argsInfo.args = args;
-    argsInfo.argsSize = argsSize;
+    argsInfo.argsSize = static_cast<uint32_t>(argsSize);
     rtTaskCfgInfo_t cfgInfo {};
-    const rtError_t rtRet = rtKernelLaunchWithFlagV2(stub, blockDim, &argsInfo, nullptr,
-        static_cast<rtStream_t>(stream), 0U, &cfgInfo);
+    const rtError_t rtRet =
+        rtKernelLaunchWithFlagV2(stub, blockDim, &argsInfo, nullptr, static_cast<rtStream_t>(stream), 0U, &cfgInfo);
     if (rtRet != RT_ERROR_NONE) {
-        std::cerr << "TileXR EP kernel launch failed, ret=" << rtRet
-                  << ", kernel=" << kernelName << std::endl;
+        std::cerr << "TileXR EP kernel launch failed, ret=" << rtRet << ", kernel=" << kernelName << std::endl;
         return TileXR::TILEXR_ERROR_MKIRT;
     }
     return TileXR::TILEXR_SUCCESS;
@@ -202,8 +209,7 @@ struct DispatchKernelArgs {
     int64_t magic;
 };
 
-static_assert(sizeof(DispatchKernelArgs) == 31U * sizeof(uint64_t),
-    "dispatch kernel argument ABI changed");
+static_assert(sizeof(DispatchKernelArgs) == 31U * sizeof(uint64_t), "dispatch kernel argument ABI changed");
 
 struct CombineKernelArgs {
     GM_ADDR commArgs;
@@ -226,8 +232,7 @@ struct CombineKernelArgs {
     int64_t magic;
 };
 
-static_assert(sizeof(CombineKernelArgs) == 18U * sizeof(uint64_t),
-    "combine kernel argument ABI changed");
+static_assert(sizeof(CombineKernelArgs) == 18U * sizeof(uint64_t), "combine kernel argument ABI changed");
 
 struct CombineCrossNodeKernelArgs {
     GM_ADDR commArgs;
@@ -251,8 +256,8 @@ struct CombineCrossNodeKernelArgs {
     int64_t magic;
 };
 
-static_assert(sizeof(CombineCrossNodeKernelArgs) == 19U * sizeof(uint64_t),
-    "cross-node combine kernel argument ABI changed");
+static_assert(
+    sizeof(CombineCrossNodeKernelArgs) == 19U * sizeof(uint64_t), "cross-node combine kernel argument ABI changed");
 
 struct CombineCrossNodeDrainKernelArgs {
     GM_ADDR commArgs;
@@ -300,8 +305,8 @@ struct DispatchMemoryKernelArgs {
     int64_t magic;
 };
 
-static_assert(sizeof(DispatchMemoryKernelArgs) == 22U * sizeof(uint64_t),
-    "dispatch memory kernel argument ABI changed");
+static_assert(
+    sizeof(DispatchMemoryKernelArgs) == 22U * sizeof(uint64_t), "dispatch memory kernel argument ABI changed");
 
 struct CombineMemoryKernelArgs {
     GM_ADDR commArgs;
@@ -325,8 +330,7 @@ struct CombineMemoryKernelArgs {
     int64_t magic;
 };
 
-static_assert(sizeof(CombineMemoryKernelArgs) == 19U * sizeof(uint64_t),
-    "combine memory kernel argument ABI changed");
+static_assert(sizeof(CombineMemoryKernelArgs) == 19U * sizeof(uint64_t), "combine memory kernel argument ABI changed");
 
 bool TileXREpUsesCrossNodeKernel(const EpHostLaunchContext &context)
 {
@@ -348,8 +352,7 @@ int64_t TileXREpUdmaStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t s
 bool TileXREpIsA5Soc()
 {
     const char *socName = aclrtGetSocName();
-    return HasPrefix(socName, "Ascend950") || HasPrefix(socName, "Ascend910_9") ||
-        HasPrefix(socName, "A5");
+    return HasPrefix(socName, "Ascend950") || HasPrefix(socName, "Ascend910_9") || HasPrefix(socName, "A5");
 }
 
 int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLaunchContext &context)
@@ -369,22 +372,56 @@ int TileXREpLaunchDispatchKernel(const EpDispatchParams &params, const EpHostLau
         return registerRet;
     }
 
-    DispatchKernelArgs args { context.devArgs, static_cast<GM_ADDR>(params.x),
+    DispatchKernelArgs args {context.devArgs, static_cast<GM_ADDR>(params.x),
         reinterpret_cast<GM_ADDR>(params.expertIds), static_cast<GM_ADDR>(params.scales),
         reinterpret_cast<GM_ADDR>(params.xActiveMask), static_cast<GM_ADDR>(params.expandXOut),
         static_cast<GM_ADDR>(params.dynamicScalesOut), reinterpret_cast<GM_ADDR>(params.expertTokenNumsOut),
         reinterpret_cast<GM_ADDR>(params.epRecvCountsOut), reinterpret_cast<GM_ADDR>(params.tpRecvCountsOut),
-        reinterpret_cast<GM_ADDR>(params.assistInfoForCombineOut), static_cast<GM_ADDR>(params.workspace),
-        params.bs, params.h, params.topK, params.moeExpertNum, context.window.dtypeBytes,
-        context.window.maxRoutesPerSrc, context.window.rowBytes, context.window.payloadRowBytes,
-        context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot, context.window.slotBytes,
-        context.window.totalBytes, params.expertTokenNumsType, params.sharedExpertNum,
-        params.sharedExpertRankNum, params.quantMode, params.tpWorldSize, params.tpRankId, magic };
+        reinterpret_cast<GM_ADDR>(params.assistInfoForCombineOut), static_cast<GM_ADDR>(params.workspace), params.bs,
+        params.h, params.topK, params.moeExpertNum, context.window.dtypeBytes, context.window.maxRoutesPerSrc,
+        context.window.rowBytes, context.window.payloadRowBytes, context.window.payloadBytesPerSlot,
+        context.window.assistBytesPerSlot, context.window.slotBytes, context.window.totalBytes,
+        params.expertTokenNumsType, params.sharedExpertNum, params.sharedExpertRankNum, params.quantMode,
+        params.tpWorldSize, params.tpRankId, magic};
 
     const bool crossNode = TileXREpUsesCrossNodeKernel(context);
-    return LaunchRegisteredKernel(crossNode ? &gDispatchCrossNodeKernelStub : &gDispatchKernelStub,
-        kMvpBlockDim, params.stream, &args, sizeof(args),
-        crossNode ? kDispatchCrossNodeKernelName : kDispatchKernelName);
+    return LaunchRegisteredKernel(crossNode ? &gDispatchCrossNodeKernelStub : &gDispatchKernelStub, kMvpBlockDim,
+        params.stream, &args, sizeof(args), crossNode ? kDispatchCrossNodeKernelName : kDispatchKernelName);
+}
+
+int TileXREpRegisterDispatchMemoryServerDedupKernel()
+{
+    if (!TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
+    const KernelEntry entry {kServerDedupKernelName, &gServerDedupKernelStub};
+    return EnsureKernelRegistered(
+        gServerDedupRegistration, kServerDedupKernelFile, &entry, 1U, &gServerDedupKernelStub);
+}
+
+int TileXREpSubmitDispatchMemoryServerDedupKernel(EpServerDedupKernelArgs &args, uint32_t blockDim, aclrtStream stream)
+{
+    // tilingData is an initialized, independently owned GM address. Submit only
+    // the 120B kernel arguments; no inline tiling payload or Runtime relocation.
+    return LaunchRegisteredKernel(
+        &gServerDedupKernelStub, blockDim, stream, &args, sizeof(args), kServerDedupKernelName);
+}
+
+int TileXREpRegisterCombineMemoryServerDedupKernel()
+{
+    if (!TileXREpIsA5Soc()) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
+    const KernelEntry entry {kCombineServerDedupKernelName, &gCombineServerDedupKernelStub};
+    return EnsureKernelRegistered(
+        gCombineServerDedupRegistration, kCombineServerDedupKernelFile, &entry, 1U, &gCombineServerDedupKernelStub);
+}
+
+int TileXREpSubmitCombineMemoryServerDedupKernel(
+    EpServerDedupCombineKernelArgs &args, uint32_t blockDim, aclrtStream stream)
+{
+    return LaunchRegisteredKernel(
+        &gCombineServerDedupKernelStub, blockDim, stream, &args, sizeof(args), kCombineServerDedupKernelName);
 }
 
 int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpHostLaunchContext &context)
@@ -406,8 +443,8 @@ int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpH
 
     const char *blockDimOverride = std::getenv("TILEXR_EP_DISPATCH_MEMORY_BLOCK_DIM");
     uint32_t blockDim = 0U;
-    const int blockDimRet = TileXREpResolveMemoryBlockDim(
-        static_cast<uint32_t>(vectorCoreNum), 2U, blockDimOverride, &blockDim);
+    const int blockDimRet =
+        TileXREpResolveMemoryBlockDim(static_cast<uint32_t>(vectorCoreNum), 2U, blockDimOverride, &blockDim);
     if (blockDimRet != TileXR::TILEXR_SUCCESS) {
         std::cerr << "Invalid TILEXR_EP_DISPATCH_MEMORY_BLOCK_DIM="
                   << (blockDimOverride == nullptr ? "<unset>" : blockDimOverride)
@@ -416,8 +453,7 @@ int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpH
     }
 
     EpMemoryDispatchReferenceConfig memoryConfig {};
-    const int configRet = TileXREpValidateDispatchMemoryConfig(
-        params, *context.hostArgs, blockDim, &memoryConfig);
+    const int configRet = TileXREpValidateDispatchMemoryConfig(params, *context.hostArgs, blockDim, &memoryConfig);
     if (configRet != TileXR::TILEXR_SUCCESS) {
         return configRet;
     }
@@ -433,17 +469,18 @@ int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpH
         return registerRet;
     }
 
-    DispatchMemoryKernelArgs args { context.devArgs, static_cast<GM_ADDR>(params.x),
+    DispatchMemoryKernelArgs args {context.devArgs, static_cast<GM_ADDR>(params.x),
         reinterpret_cast<GM_ADDR>(params.expertIds), reinterpret_cast<GM_ADDR>(params.xActiveMask),
         static_cast<GM_ADDR>(params.expandXOut), static_cast<GM_ADDR>(params.dynamicScalesOut),
         reinterpret_cast<GM_ADDR>(params.expertTokenNumsOut), reinterpret_cast<GM_ADDR>(params.epRecvCountsOut),
         reinterpret_cast<GM_ADDR>(params.assistInfoForCombineOut), params.bs, params.h, params.topK,
-        params.moeExpertNum, params.sharedExpertNum, params.sharedExpertRankNum, globalBs,
-        params.expertTokenNumsType, params.activeMaskType, params.quantMode, static_cast<int64_t>(params.dtype),
-        static_cast<int64_t>(params.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ?
-            params.dtype : params.expandXOutDtype), magic };
-    return LaunchRegisteredKernel(&gDispatchMemoryKernelStub, blockDim, params.stream,
-        &args, sizeof(args), kDispatchMemoryKernelName);
+        params.moeExpertNum, params.sharedExpertNum, params.sharedExpertRankNum, globalBs, params.expertTokenNumsType,
+        params.activeMaskType, params.quantMode, static_cast<int64_t>(params.dtype),
+        static_cast<int64_t>(
+            params.expandXOutDtype == TileXR::TILEXR_DATA_TYPE_RESERVED ? params.dtype : params.expandXOutDtype),
+        magic};
+    return LaunchRegisteredKernel(
+        &gDispatchMemoryKernelStub, blockDim, params.stream, &args, sizeof(args), kDispatchMemoryKernelName);
 }
 
 int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHostLaunchContext &context)
@@ -464,8 +501,8 @@ int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHos
     }
     const char *blockDimOverride = std::getenv("TILEXR_EP_COMBINE_MEMORY_BLOCK_DIM");
     uint32_t blockDim = 0U;
-    const int blockDimRet = TileXREpResolveMemoryBlockDim(
-        static_cast<uint32_t>(vectorCoreNum), 1U, blockDimOverride, &blockDim);
+    const int blockDimRet =
+        TileXREpResolveMemoryBlockDim(static_cast<uint32_t>(vectorCoreNum), 1U, blockDimOverride, &blockDim);
     if (blockDimRet != TileXR::TILEXR_SUCCESS) {
         std::cerr << "Invalid TILEXR_EP_COMBINE_MEMORY_BLOCK_DIM="
                   << (blockDimOverride == nullptr ? "<unset>" : blockDimOverride)
@@ -474,8 +511,7 @@ int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHos
     }
 
     EpMemoryCombineReferenceConfig memoryConfig {};
-    const int configRet = TileXREpValidateCombineMemoryConfig(
-        params, *context.hostArgs, blockDim, &memoryConfig);
+    const int configRet = TileXREpValidateCombineMemoryConfig(params, *context.hostArgs, blockDim, &memoryConfig);
     if (configRet != TileXR::TILEXR_SUCCESS) {
         return configRet;
     }
@@ -491,15 +527,14 @@ int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHos
         return registerRet;
     }
 
-    CombineMemoryKernelArgs args { context.devArgs,
-        static_cast<GM_ADDR>(params.expertOut), reinterpret_cast<GM_ADDR>(params.assistInfoForCombine),
-        reinterpret_cast<GM_ADDR>(params.epRecvCounts), reinterpret_cast<GM_ADDR>(params.expertScales),
-        reinterpret_cast<GM_ADDR>(params.xActiveMask), static_cast<GM_ADDR>(params.sharedExpertX),
-        static_cast<GM_ADDR>(params.yOut), params.bs, params.h, params.topK, params.moeExpertNum,
-        params.sharedExpertNum, params.sharedExpertRankNum, globalBs, params.activeMaskType,
-        params.quantMode, static_cast<int64_t>(params.dtype), magic };
-    return LaunchRegisteredKernel(&gCombineMemoryKernelStub, blockDim, params.stream,
-        &args, sizeof(args), kCombineMemoryKernelName);
+    CombineMemoryKernelArgs args {context.devArgs, static_cast<GM_ADDR>(params.expertOut),
+        reinterpret_cast<GM_ADDR>(params.assistInfoForCombine), reinterpret_cast<GM_ADDR>(params.epRecvCounts),
+        reinterpret_cast<GM_ADDR>(params.expertScales), reinterpret_cast<GM_ADDR>(params.xActiveMask),
+        static_cast<GM_ADDR>(params.sharedExpertX), static_cast<GM_ADDR>(params.yOut), params.bs, params.h, params.topK,
+        params.moeExpertNum, params.sharedExpertNum, params.sharedExpertRankNum, globalBs, params.activeMaskType,
+        params.quantMode, static_cast<int64_t>(params.dtype), magic};
+    return LaunchRegisteredKernel(
+        &gCombineMemoryKernelStub, blockDim, params.stream, &args, sizeof(args), kCombineMemoryKernelName);
 }
 
 int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunchContext &context)
@@ -519,14 +554,14 @@ int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunc
     }
 
     if (TileXREpUsesCrossNodeKernel(context)) {
-        CombineCrossNodeKernelArgs args { context.devArgs, static_cast<GM_ADDR>(params.expertOut),
+        CombineCrossNodeKernelArgs args {context.devArgs, static_cast<GM_ADDR>(params.expertOut),
             reinterpret_cast<GM_ADDR>(params.assistInfoForCombine), reinterpret_cast<GM_ADDR>(params.epRecvCounts),
-            static_cast<GM_ADDR>(params.yOut), static_cast<GM_ADDR>(params.workspace), params.bs, params.h,
-            params.topK, params.moeExpertNum, static_cast<int64_t>(params.dtype), context.window.dtypeBytes,
+            static_cast<GM_ADDR>(params.yOut), static_cast<GM_ADDR>(params.workspace), params.bs, params.h, params.topK,
+            params.moeExpertNum, static_cast<int64_t>(params.dtype), context.window.dtypeBytes,
             context.window.maxRoutesPerSrc, context.window.rowBytes, context.window.payloadBytesPerSlot,
-            context.window.assistBytesPerSlot, context.window.slotBytes, context.window.totalBytes, magic };
-        int ret = LaunchRegisteredKernel(&gCombineCrossNodeKernelStub, kMvpBlockDim, params.stream,
-            &args, sizeof(args), kCombineCrossNodeKernelName);
+            context.window.assistBytesPerSlot, context.window.slotBytes, context.window.totalBytes, magic};
+        int ret = LaunchRegisteredKernel(&gCombineCrossNodeKernelStub, kMvpBlockDim, params.stream, &args, sizeof(args),
+            kCombineCrossNodeKernelName);
         if (ret != TileXR::TILEXR_SUCCESS) {
             return ret;
         }
@@ -536,8 +571,8 @@ int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunc
             return TileXR::TILEXR_ERROR_INTERNAL;
         }
         uint64_t status = TileXREp::kEpStatusOk;
-        const int64_t statusOffset = TileXREpUdmaStatusOffset(
-            context.window.totalBytes, context.window.rankSize, context.window.slotBytes);
+        const int64_t statusOffset =
+            TileXREpUdmaStatusOffset(context.window.totalBytes, context.window.rankSize, context.window.slotBytes);
         if (statusOffset == TileXR::TILEXR_INVALID_VALUE) {
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
@@ -550,23 +585,23 @@ int TileXREpLaunchCombineKernel(const EpCombineParams &params, const EpHostLaunc
             return TileXR::TILEXR_ERROR_TIMEOUT;
         }
 
-        CombineCrossNodeDrainKernelArgs drainArgs { context.devArgs,
-            static_cast<GM_ADDR>(params.yOut), static_cast<GM_ADDR>(params.workspace), params.bs, params.h,
-            params.topK, params.moeExpertNum, static_cast<int64_t>(params.dtype), context.window.dtypeBytes,
-            context.window.maxRoutesPerSrc, context.window.rowBytes, context.window.payloadBytesPerSlot,
-            context.window.assistBytesPerSlot, context.window.slotBytes, context.window.totalBytes };
-        return LaunchRegisteredKernel(&gCombineCrossNodeDrainKernelStub, kMvpBlockDim, params.stream,
-            &drainArgs, sizeof(drainArgs), kCombineCrossNodeDrainKernelName);
+        CombineCrossNodeDrainKernelArgs drainArgs {context.devArgs, static_cast<GM_ADDR>(params.yOut),
+            static_cast<GM_ADDR>(params.workspace), params.bs, params.h, params.topK, params.moeExpertNum,
+            static_cast<int64_t>(params.dtype), context.window.dtypeBytes, context.window.maxRoutesPerSrc,
+            context.window.rowBytes, context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot,
+            context.window.slotBytes, context.window.totalBytes};
+        return LaunchRegisteredKernel(&gCombineCrossNodeDrainKernelStub, kMvpBlockDim, params.stream, &drainArgs,
+            sizeof(drainArgs), kCombineCrossNodeDrainKernelName);
     }
 
-    CombineKernelArgs args { context.devArgs, static_cast<GM_ADDR>(params.expertOut),
+    CombineKernelArgs args {context.devArgs, static_cast<GM_ADDR>(params.expertOut),
         reinterpret_cast<GM_ADDR>(params.assistInfoForCombine), reinterpret_cast<GM_ADDR>(params.epRecvCounts),
         static_cast<GM_ADDR>(params.yOut), params.bs, params.h, params.topK, params.moeExpertNum,
         static_cast<int64_t>(params.dtype), context.window.dtypeBytes, context.window.maxRoutesPerSrc,
         context.window.rowBytes, context.window.payloadBytesPerSlot, context.window.assistBytesPerSlot,
-        context.window.slotBytes, context.window.totalBytes, magic };
-    return LaunchRegisteredKernel(&gCombineKernelStub, kMvpBlockDim, params.stream,
-        &args, sizeof(args), kCombineKernelName);
+        context.window.slotBytes, context.window.totalBytes, magic};
+    return LaunchRegisteredKernel(
+        &gCombineKernelStub, kMvpBlockDim, params.stream, &args, sizeof(args), kCombineKernelName);
 }
 
 } // namespace TileXREp
