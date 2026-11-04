@@ -9,22 +9,18 @@
  */
 
 /*
- * 功能：声明 TileXR Host 公共接口，涵盖 communicator 生命周期、CommArgs 获取、
- * magic 轮次推进，以及 UDMA/SDMA 能力与资源访问。
- * 关系：应用和 collectives/EP Host 层通过本接口使用核心运行时；
- * src/comm/comm_wrap.cpp 将入口转发给 TileXRComm。comm_args.h 定义传给
- * Device kernel 的共享参数；tilexr_udma_fullmesh.h 与 tilexr_udma_reg.h
- * 提供 UDMA 接口类型。TileXRCommPtr 是运行时对象的不透明句柄。
+ * 功能：声明 Host 侧 communicator、CommArgs、magic 轮次及传输资源接口。
+ * 调用关系：应用和 collectives/EP Host 代码使用此接口；comm_wrap.cpp 转发到 TileXRComm，RDMA API 由 tilexr_rdma.h 提供。
+ * 资源与生命周期：TileXRCommPtr 是 opaque handle，由初始化接口返回，交给 TileXRCommDestroy 销毁。
  *
- * Purpose: Declare public TileXR Host interfaces for communicator lifecycle,
- * CommArgs access, magic-round advancement, and UDMA/SDMA capabilities/resources.
- * Relationships: Applications and collectives/EP Host code use this runtime API;
- * src/comm/comm_wrap.cpp forwards entry points to TileXRComm. comm_args.h defines
- * shared arguments passed to Device kernels; tilexr_udma_fullmesh.h and
- * tilexr_udma_reg.h supply UDMA API types. TileXRCommPtr is an opaque runtime handle.
+ * Purpose: Declare Host interfaces for communicators, CommArgs, magic rounds and transport resources.
+ * Calls: Applications and collectives/EP Host code use comm_wrap.cpp and TileXRComm; tilexr_rdma.h supplies RDMA APIs.
+ * Lifetime: Initialization returns TileXRCommPtr as an opaque handle; callers destroy it through TileXRCommDestroy.
  */
 #ifndef TILEXR_API_H
 #define TILEXR_API_H
+
+#include "tilexr_rdma.h"
 
 #ifdef __cplusplus
 #include <cstddef>

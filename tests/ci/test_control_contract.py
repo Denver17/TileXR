@@ -1048,22 +1048,26 @@ class HostChecksBehaviorTests(unittest.TestCase):
                 line for line in result.stdout.splitlines()
                 if line.startswith("[host-check] ")
             ]
-            self.assertEqual(7, len(case_lines))
             expected = [
                 "shell-syntax",
                 "ci-ctest",
                 "comm-host",
+                "rdma-host",
                 "ep-host",
                 "data-as-flag",
                 "relay-host",
                 "collectives-vllm-patch",
             ]
+            self.assertEqual(len(expected), len(case_lines))
             self.assertEqual(
                 expected,
                 [line.split(":", 1)[0][len("[host-check] "):] for line in case_lines],
             )
             self.assertIn("[host-check] ep-host: FAIL (exit=23", result.stdout)
-            self.assertIn("Host cases: 7 total, 6 passed, 1 failed", result.stdout)
+            self.assertIn(
+                "Host cases: {} total, {} passed, 1 failed".format(len(expected), len(expected) - 1),
+                result.stdout,
+            )
             self.assertIn("Failed cases: ep-host", result.stdout)
 
 

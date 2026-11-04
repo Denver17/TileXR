@@ -7,6 +7,16 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
+/*
+ * 功能：生成 bootstrap 地址，建立 rank 之间的 TCP 连接，并收发初始化所需的元数据。
+ * 调用关系：TileXRComm 使用 TileXRSockExchange；连接供头文件中的 AllGather 实现使用。
+ * 资源与生命周期：对象记录 socket fd；析构调用 Cleanup，尝试关闭已记录的连接。
+ *
+ * Purpose: Generate bootstrap addresses, establish rank TCP connections and exchange setup metadata.
+ * Calls: TileXRComm uses TileXRSockExchange; the header's AllGather implementation uses these connections.
+ * Lifetime: Tracks socket fds; destruction calls Cleanup to attempt closing recorded connections.
+ */
 #include "tilexr_sock_exchange.h"
 
 #include <unistd.h>
@@ -435,7 +445,6 @@ int BootstrapGetServerIp(TileXRSocketAddress& handle)
     for (size_t i = 0; i < sizeof(handle); ++i) {
         ((uint8_t*)&handle)[i] = 0;
     }
-    int ret = 0; // EOK
     handle.sin.sin_family = AF_INET;
     handle.sin.sin_addr.s_addr = inet_addr(host); // 将IP地址填入sockaddr_in
     handle.sin.sin_port = 0;
@@ -449,7 +458,6 @@ int BootstrapGetUniqueId(TileXRBootstrapHandle *handle, int commDomain)
     for (size_t i = 0; i < sizeof(TileXRBootstrapHandle); ++i) {
         ((uint8_t*)handle)[i] = 0;
     }
-    int ret = 0; // EOK
 
     bool envProvided = false;
     const char* env = std::getenv("TILEXR_COMM_ID");

@@ -141,6 +141,7 @@ check_tracked_shell_syntax() {
             tests/memory \
             tests/sdma \
             tests/udma \
+            tests/rdma \
             tests/collectives
     )
     if [[ "${#tracked_shell_files[@]}" -eq 0 ]]; then
@@ -171,6 +172,12 @@ run_ep_host_tests() {
         -DBUILD_TILEXR_EP_DEMO=OFF
     cmake --build "${BUILD_ROOT}/ep" -j"$(nproc)"
     (cd "${BUILD_ROOT}/ep" && ctest --output-on-failure)
+}
+
+run_rdma_host_tests() {
+    cmake -S "${ROOT_DIR}/tests/rdma" -B "${BUILD_ROOT}/rdma"
+    cmake --build "${BUILD_ROOT}/rdma" -j"$(nproc)"
+    ctest --test-dir "${BUILD_ROOT}/rdma" --output-on-failure
 }
 
 run_data_as_flag_tests() {
@@ -243,6 +250,7 @@ trap finalize_host_checks EXIT
 run_and_accumulate_case shell-syntax check_tracked_shell_syntax
 run_and_accumulate_case ci-ctest run_ci_ctest
 run_and_accumulate_case comm-host run_comm_host_tests
+run_and_accumulate_case rdma-host run_rdma_host_tests
 run_and_accumulate_case ep-host run_ep_host_tests
 run_and_accumulate_case data-as-flag run_data_as_flag_tests
 run_and_accumulate_case relay-host run_relay_host_tests

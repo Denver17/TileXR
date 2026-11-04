@@ -7,6 +7,17 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
+/*
+ * 功能：初始化 rank 信息、peer memory 和可选传输，生成供 kernel 使用的 CommArgs。
+ * 调用关系：comm_wrap.cpp 调用 TileXRComm；本文件通过 ACL/runtime 分配内存、打开 IPC mapping，通过 socket 交换 rank 信息。
+ * 资源与生命周期：对象持有本地 allocation、IPC mapping 和 device CommArgs；显式销毁先执行可返回错误的 cleanup，析构再尝试释放本地资源。
+ *
+ * Purpose: Initialize rank information, peer memory and optional transports, and prepare kernel CommArgs.
+ * Calls: comm_wrap.cpp calls TileXRComm; ACL/runtime allocates memory and opens IPC mappings, while sockets exchange rank information.
+ * Lifetime: Owns local allocations, IPC mappings and device CommArgs. Explicit destruction runs fallible cleanup
+ *           before the destructor attempts local resource release.
+ */
 #include "tilexr_comm.h"
 #include "tilexr_kernel_tiling_cache.h"
 #include "ep_profiling_compat/capture.h"
@@ -32,6 +43,7 @@
 #include <cstring>
 
 #include "tilexr_log.h"
+#include "rdma/tilexr_rdma_transport.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 
 #include "runtime/mem.h"
@@ -954,6 +966,10 @@ int TileXRComm::Init()
     } else {
         TILEXR_LOG(INFO) << "TileXR UDMA disabled by TILEXR_ENABLE_UDMA";
     }
+    ret = InitRDMA();
+    if (ret != TILEXR_SUCCESS) {
+        return ret;
+    }
     if (!memoryOnlyDomain_) {
         ret = InitSDMA();
         if (ret != TILEXR_SUCCESS) {
@@ -1506,6 +1522,10 @@ TileXRComm::~TileXRComm()
     if (resourceRet != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR internal resource cleanup failed: " << resourceRet;
     }
+    // TileXRCommDestroy performs collective RDMA cleanup before deleting us.
+    // Initialization failures have no user registrations; the local fallback
+    // destructor can reclaim their partially created queues without collectives.
+    rdmaTransport_.reset();
     {
         lock_guard<mutex> lock(g_mtx);
         if (g_localPeerMemAllocationMap.find(uid_) != g_localPeerMemAllocationMap.end()) {

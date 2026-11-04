@@ -9,22 +9,13 @@
  */
 
 /*
- * 功能：实现 tilexr_api.h 的 Host API 包装层，处理参数检查、communicator
- * 创建与销毁，以及通信参数、传输资源和 profiling 资源的访问。
- * 关系：公共 API 调用方经此文件进入 tilexr_comm.h 中的 TileXRComm；
- * socket bootstrap 提供 unique ID，多设备线程初始化通过 ACL 选择设备。
- * 初始化成功后将对象交给不透明句柄；销毁时先清理内部资源，
- * 再依次释放 profiling、kernel tiling 和 UDMA 资源，成功后删除对象。
+ * 功能：校验 Host API 参数，创建 communicator，并转发查询、注册和销毁请求。
+ * 调用关系：实现 tilexr_api.h 的入口，调用 TileXRComm；unique ID 由 socket bootstrap 生成。
+ * 资源与生命周期：创建成功后返回 opaque handle；销毁时调用 cleanup，失败则返回，成功后删除对象。
  *
- * Purpose: Implement the Host API wrappers declared in tilexr_api.h, including
- * argument checks, communicator creation/destruction, and access to communication
- * arguments, transport resources, and profiling resources.
- * Relationships: Public API callers reach TileXRComm in tilexr_comm.h here.
- * Socket bootstrap supplies unique IDs; multi-device threaded initialization
- * selects devices through ACL. Successful initialization transfers the object
- * to an opaque handle. Destruction first cleans up internal resources, then
- * releases profiling, kernel tiling, and UDMA resources in order, deleting the
- * object only after successful cleanup.
+ * Purpose: Validate Host API arguments, create communicators and forward queries, registration and destruction.
+ * Calls: Implements tilexr_api.h through TileXRComm; socket bootstrap supplies unique IDs.
+ * Lifetime: Returns an opaque handle after creation. Destruction runs cleanup and deletes the object only if it succeeds.
  */
 #include "tilexr_api.h"
 #include <vector>
@@ -528,6 +519,10 @@ int TileXRCommDestroy(TileXRCommPtr comm)
     }
     const int profilingRet = c->AgreeInternalStatus(c->FinalizeProfilingSlots());
     if (profilingRet != TILEXR_SUCCESS) return profilingRet;
+    const int rdmaRet = c->FinalizeRDMA();
+    if (rdmaRet != TILEXR_SUCCESS) {
+        return rdmaRet;
+    }
     const int udmaRet = c->FinalizeUDMA();
     if (udmaRet != TILEXR_SUCCESS) {
         return udmaRet;

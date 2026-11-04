@@ -1,4 +1,3 @@
-#
 # Copyright (c) 2024 Huawei Technologies Co., Ltd.
 # This file is a part of the CANN Open Software.
 # Licensed under CANN Open Software License Agreement Version 1.0 (the "License").
@@ -8,10 +7,34 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 #
 
+# 功能：检测可选传输所需的头文件和库，构建 libtile-comm 并安装公共头文件。
+# 调用关系：由根 CMakeLists.txt 引入；为 src/comm 下的实现设置 CANN/driver 依赖和编译选项。
+#
+# Purpose: Probe optional transport dependencies, build libtile-comm and install public headers.
+# Calls: Included by the root CMakeLists.txt; sets CANN/driver dependencies and compile options for src/comm.
 include(GNUInstallDirs)
 include(CMakePushCheckState)
 include(CheckIncludeFileCXX)
 include(CheckCXXSourceCompiles)
+
+option(TILEXR_BUILD_RDMA "Build optional standard verbs RDMA support when headers are available" ON)
+if(TILEXR_BUILD_RDMA)
+    check_include_file_cxx("infiniband/verbs.h" TILEXR_HAVE_IBVERBS_HEADER)
+    find_path(TILEXR_IBV_EXTEND_INCLUDE ibv_extend.h
+        HINTS "${ASCEND_DRIVER_PATH}/include")
+    if(TILEXR_IBV_EXTEND_INCLUDE AND TILEXR_HAVE_IBVERBS_HEADER)
+        cmake_push_check_state(RESET)
+        set(CMAKE_REQUIRED_INCLUDES "${TILEXR_IBV_EXTEND_INCLUDE}")
+        check_cxx_source_compiles("
+#include <ibv_extend.h>
+#if IBV_EXTEND_VERSION_MAJOR != 4 || IBV_EXTEND_VERSION_MINOR < 2
+#error unsupported extension ABI
+#endif
+int main() { queue_info q{}; ibv_extend_ops ops{}; (void)q; (void)ops; return 0; }
+" TILEXR_HAVE_IBV_EXTEND_HEADER)
+        cmake_pop_check_state()
+    endif()
+endif()
 
 set(TILEXR_PTO_SDMA_INCLUDE_DIRS
         ${ASCEND_HOME_PATH}/${ARCH}-linux/include
@@ -103,6 +126,11 @@ configure_file(
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
         ep_profiling_compat/runtime.cpp
         ep_profiling_compat/capture.cpp
+        rdma/tilexr_rdma_api.cpp
+        rdma/tilexr_rdma_config.cpp
+        rdma/tilexr_rdma_transport.cpp
+        rdma/tilexr_rdma_verbs.cpp
+        rdma/tilexr_rdma_nda.cpp
         comm_wrap.cpp
         tilexr_internal.cpp
         tilexr_internal.h
@@ -182,6 +210,17 @@ set(TILEXR_SOURCE_FILE tilexr_comm.cpp
 )
 
 add_library(tile-comm SHARED ${TILEXR_SOURCE_FILE})
+if(TILEXR_BUILD_RDMA AND TILEXR_HAVE_IBVERBS_HEADER)
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_IBVERBS=1)
+else()
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_IBVERBS=0)
+endif()
+if(TILEXR_BUILD_RDMA AND TILEXR_HAVE_IBVERBS_HEADER AND TILEXR_HAVE_IBV_EXTEND_HEADER)
+    target_include_directories(tile-comm PRIVATE "${TILEXR_IBV_EXTEND_INCLUDE}")
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_IBV_EXTEND=1)
+else()
+    target_compile_definitions(tile-comm PRIVATE TILEXR_HAVE_IBV_EXTEND=0)
+endif()
 set_target_properties(tile-comm PROPERTIES
         BUILD_WITH_INSTALL_RPATH FALSE
         SKIP_BUILD_RPATH TRUE
@@ -236,6 +275,13 @@ install(TARGETS tile-comm LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
         ${CMAKE_CURRENT_BINARY_DIR}/include/tilexr_sdma_config.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_api.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma_device_types.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma_device.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma_wire.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma_pipeline.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma_write.h
+        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_rdma_write_options.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_types.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/comm_args.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sync.h

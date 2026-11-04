@@ -7,6 +7,16 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
+/*
+ * 功能：声明 bootstrap 类型和连接接口，实现经 rank 0 收集、分发数据的 AllGather，以及完整收发循环。
+ * 调用关系：TileXRComm 和 RDMA 初始化使用此控制通道；连接建立和关闭由 tilexr_sock_exchange.cpp 实现。
+ * 调用约定：send/receive buffer 由调用方提供；各 rank 须按相同顺序进入 collective。
+ *
+ * Purpose: Declare bootstrap and connection interfaces, implement AllGather through rank 0 and handle partial socket I/O.
+ * Calls: TileXRComm and RDMA setup use this control channel; tilexr_sock_exchange.cpp establishes and closes connections.
+ * Contract: Callers provide send/receive buffers; ranks must enter collectives in the same order.
+ */
 #ifndef TILEXR_SOCK_EXCHANGE_H
 #define TILEXR_SOCK_EXCHANGE_H
 
@@ -170,7 +180,7 @@ private:
 
     template <typename T> int ServerRecvSend(const T *sendBuf, size_t sendSize, T *recvBuf)
     {
-        for (int i = 0; i < sendSize; ++i) {
+        for (size_t i = 0; i < sendSize; ++i) {
             recvBuf[i] = sendBuf[i];
         }
 

@@ -16,6 +16,14 @@ This checklist reflects the current TileXR codebase. The core runtime builds `li
 
 ## Environment
 
+For optional RoCEv2 connection and registered-memory validation, see
+[RDMA integration](RDMA_INTEGRATION.md). Its Host suite is built from
+`tests/rdma` and runs in maintained Host CI. When matching driver and ACL headers
+are available, mock extension tests also check AIV queue ownership and cleanup.
+These checks launch no NPUs and do not qualify L3 forwarding or AIV transfers.
+Reuse the matching retained environment baseline before hardware validation,
+as required by `AGENTS.md`.
+
 ```bash
 cd /path/to/TileXR
 source scripts/common_env.sh

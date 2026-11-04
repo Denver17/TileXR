@@ -7,6 +7,16 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
+/*
+ * 功能：声明 communicator 的 rank 状态、CommArgs、内存和传输对象，以及初始化和 cleanup 接口。
+ * 调用关系：comm_wrap.cpp 通过 TileXRComm 实现公共 API；成员函数分别由 tilexr_comm.cpp 和传输模块实现。
+ * 资源与生命周期：对象持有通信资源；getter 返回的 CommArgs、workspace 和 transport 指针供调用方借用。
+ *
+ * Purpose: Declare communicator rank state, CommArgs, memory and transport members, with setup and cleanup interfaces.
+ * Calls: comm_wrap.cpp implements public APIs through TileXRComm; tilexr_comm.cpp and transport modules define its methods.
+ * Lifetime: The object owns communication resources; pointers returned for CommArgs, workspaces and transports are borrowed.
+ */
 #ifndef TILEXR_COMM_H
 #define TILEXR_COMM_H
 
@@ -44,6 +54,7 @@ static_assert(TILEXR_BUFF_BYTES ==
 
 class TileXRSockExchange;
 class TileXRUDMAContext;
+class TileXRRDMATransport;
 struct TileXRUDMACommArgsState;
 class TileXRSDMATransport;
 class TileXRCcuBackend;
@@ -99,6 +110,8 @@ public:
     int FinalizeInternalResource();
     int FinalizeUDMA();
     int FinalizeProfilingSlots();
+    int FinalizeRDMA();
+    TileXRRDMATransport* GetRDMATransport();
     int AgreeInternalStatus(int localStatus) const;
     void LockInternalResource();
     void UnlockInternalResource();
@@ -133,6 +146,7 @@ private:
     int SyncCommArgs();
     int InitDumpAddr();
     int InitUDMA();
+    int InitRDMA();
     int InitUDMAPeerMemory();
     int ApplyUDMACommArgsState(const TileXRUDMACommArgsState &state);
     static int ApplyUDMACommArgsStateCallback(const TileXRUDMACommArgsState &state, void *userData);
@@ -171,6 +185,7 @@ private:
     TileXRSockExchange *socketExchange_ = nullptr;
     bool isEnableMsprofOp_ = false;
     std::unique_ptr<TileXRUDMAContext> udmaContext_;
+    std::unique_ptr<TileXRRDMATransport> rdmaTransport_;
     std::unique_ptr<TileXRCcuBackend> ccuBackend_;
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
