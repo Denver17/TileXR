@@ -26,7 +26,7 @@ If the user provides enough connection, package, or operator context, treat that
 
 ## Deployment Workflow
 
-1. Read `sst-cann-runbook.md` in this repository (root level).
+1. Read `references/sst-cann-runbook.md`.
 2. Confirm the deployment inputs. If target host, username, authentication, target home, or package source is missing, ask only for the missing item. If they are present, proceed without additional prompting.
 3. Confirm SSH login, OS, disk, compiler tools, package list, and target ownership.
 4. For SST, connect as the ordinary user and build/install into that user's home.
