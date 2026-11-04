@@ -1,0 +1,7 @@
+{
+  "schema": "tilexr.unitest.run.v1",
+  "mode": "correctness",
+  "iterations": 100,
+  "check_schedule": "powers_of_two",
+  "profiling": {"enabled": false}
+}

@@ -1,0 +1,23 @@
+{
+  "schema": "tilexr.unitest.case.v1",
+  "id": "ep-memory-dispatch-barrier-bf16",
+  "backend": "memory",
+  "dtype": "bf16",
+  "quant_mode": 0,
+  "bs": 16,
+  "h": 128,
+  "topk": 2,
+  "moe_expert_num": 8,
+  "seed": 1,
+  "steps": [
+    {
+      "id": "dispatch",
+      "operator": "ep_dispatch"
+    },
+    {
+      "id": "barrier",
+      "operator": "barrier"
+    }
+  ],
+  "validate": "dispatch.output"
+}

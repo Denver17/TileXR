@@ -216,3 +216,17 @@ match `TILEXR_EP_REMOTE_REPO`.
 
 The UDMA backend always allocates and registers its aligned workspace. The same demo path is used for same-node and
 cross-node runs; topology-specific behavior remains inside TileXR.
+
+## Generic fixed-slot profiling checks
+
+`TILEXR_EP_ENABLE_PROFILING=ON` enables two generic events around each Memory
+Dispatch/Combine invocation. The descriptor comes from CommArgs and magic;
+public EP execution APIs and registered Kernel argument signatures are unchanged.
+This is separate from the existing v2 per-AIV instrumentation.
+
+The kernel-launch Host test checks uninstrumented rejection by default. Configure
+its standalone build with `-DCMAKE_CXX_FLAGS=-DTILEXR_EP_ENABLE_PROFILING=1` to
+check lane capacity, exhausted slots and the unchanged registered signature.
+These mocked runtime checks do not establish device scalar visibility or real
+capture completeness. Build Host and device together after changing CommArgs;
+validate actual records after stream completion on A5 before claiming NPU support.

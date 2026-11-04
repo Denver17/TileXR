@@ -10,6 +10,8 @@
 #include "tilexr_comm.h"
 #include "tilexr_kernel_tiling_cache.h"
 #include "ep_profiling_compat/capture.h"
+#include <tilexr/profiling/acl.h>
+#include <fstream>
 #include "tilexr_internal.h"
 #include "ccu/tilexr_ccu_backend.h"
 #include "sdma/tilexr_sdma_transport.h"
@@ -476,6 +478,8 @@ int TileXRComm::SyncCommArgs()
     }
 
     int ret = 0;
+    ret = InitProfilingSlots();
+    if (ret != TILEXR_SUCCESS) return ret;
     ret = aclrtMalloc(reinterpret_cast<void **>(&commArgsPtr_), sizeof(commArgs_), ACL_MEM_MALLOC_HUGE_FIRST);
     if (ret != ACL_SUCCESS) {
         TILEXR_LOG(ERROR) << "aclrtMalloc err " << __LINE__ << " " << ret;
@@ -486,6 +490,124 @@ int TileXRComm::SyncCommArgs()
         TILEXR_LOG(ERROR) << "aclrtMemcpy err " << __LINE__ << " " << ret;
         FreePeerMem(commArgsPtr_);
         return TILEXR_ERROR_INTERNAL;
+    }
+    return TILEXR_SUCCESS;
+}
+
+// Environment selects a static slot file. The SDK owns each capture's layout,
+// allocation and records encoding; the domain owns only lifetime and the table.
+int TileXRComm::InitProfilingSlots()
+{
+    const char *path = std::getenv("TILEXR_PROFILING_SLOTS_FILE");
+    if (!path || !*path || commArgs_.profilingDescriptorsGM) return TILEXR_SUCCESS;
+    try {
+        std::ifstream input(path);
+        uint64_t count = 0, budget = 0;
+        if (!(input >> count >> budget) || !count || budget > (UINT64_C(1) << 30) ||
+            count > budget / 72) return TILEXR_ERROR_PARA_CHECK_FAIL;
+        int32_t device = 0;
+        int64_t capacity = 0;
+        if (aclrtGetDevice(&device) != ACL_SUCCESS ||
+            aclrtGetDeviceInfo(uint32_t(device), ACL_DEV_ATTR_VECTOR_CORE_NUM, &capacity) != ACL_SUCCESS ||
+            capacity <= 0 || capacity > Profiling::MAX_LOGICAL_STREAMS) return TILEXR_ERROR_INTERNAL;
+        profilingCaptures_.resize(size_t(count));
+        profilingPaths_.resize(size_t(count));
+        profilingPublished_.resize(size_t(count), false);
+        std::vector<Profiling::CaptureConfig> configs;
+        std::vector<size_t> selected;
+        std::set<std::string> paths, ids;
+        uint64_t bytes = count * 72, ordinal = 0;
+        std::string id, output;
+        while (input >> ordinal) {
+            if (!(input >> id >> std::quoted(output)) || ordinal == 0 || ordinal > count ||
+                id.size() != 32 || output.empty() || output.find('\0') != std::string::npos ||
+                !profilingPaths_[size_t(ordinal-1)].empty() || !paths.insert(output).second ||
+                !ids.insert(id).second)
+                return TILEXR_ERROR_PARA_CHECK_FAIL;
+            Profiling::CaptureConfig config;
+            config.rank = rank_; config.logicalStreamCount = uint32_t(capacity);
+            config.recordsPerStream = 8; config.maxWorkspaceBytes = budget;
+            for (size_t i = 0; i < 16; ++i) {
+                auto hex = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' :
+                    c >= 'a' && c <= 'f' ? c-'a'+10 : -1; };
+                const int high = hex(id[2*i]), low = hex(id[2*i+1]);
+                if (high < 0 || low < 0) return TILEXR_ERROR_PARA_CHECK_FAIL;
+                config.captureId[i] = uint8_t(high*16+low);
+            }
+            if (std::all_of(config.captureId.begin(), config.captureId.end(), [](uint8_t b){return b == 0;}))
+                return TILEXR_ERROR_PARA_CHECK_FAIL;
+            Profiling::Layout layout;
+            if (!Profiling::BuildLayout(config, &layout) || layout.bytes > budget-bytes)
+                return TILEXR_ERROR_PARA_CHECK_FAIL;
+            bytes += layout.bytes;
+            selected.push_back(size_t(ordinal-1)); configs.push_back(config);
+            profilingPaths_[size_t(ordinal-1)] = output;
+        }
+        if (!input.eof()) return TILEXR_ERROR_PARA_CHECK_FAIL;
+        std::vector<uint64_t> descriptors(size_t(count), 0);
+        for (size_t i = 0; i < selected.size(); ++i) {
+            auto &capture = profilingCaptures_[selected[i]];
+            capture.reset(new Profiling::AclCapture);
+            // Initialization precedes all domain work. Finalize performs device
+            // completion before SDK collection on its borrowed default stream.
+            const auto status = capture->Initialize(configs[i], nullptr);
+            if (!status) { TILEXR_LOG(ERROR) << status.message; return TILEXR_ERROR_INTERNAL; }
+            descriptors[selected[i]] = reinterpret_cast<uint64_t>(capture->DeviceArgs());
+        }
+        const size_t tableBytes = size_t(count)*8, stateBytes = size_t(count)*64;
+        if (aclrtMalloc(reinterpret_cast<void **>(&commArgs_.profilingDescriptorsGM), tableBytes,
+                        ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
+            aclrtMalloc(reinterpret_cast<void **>(&commArgs_.profilingLaneCountsGM), stateBytes,
+                        ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS) return TILEXR_ERROR_INTERNAL;
+        if (aclrtMemcpy(commArgs_.profilingDescriptorsGM, tableBytes, descriptors.data(), tableBytes,
+                        ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS ||
+            aclrtMemset(commArgs_.profilingLaneCountsGM, stateBytes, 0, stateBytes) != ACL_SUCCESS)
+            return TILEXR_ERROR_INTERNAL;
+        commArgs_.profilingSlotCount = count;
+        commArgs_.profilingMagicBase = magic_.load();
+        commArgs_.profilingLaneCapacity = uint32_t(capacity);
+        return TILEXR_SUCCESS;
+    } catch (const std::exception &error) {
+        TILEXR_LOG(ERROR) << "profiling slot initialization: " << error.what();
+        return TILEXR_ERROR_INTERNAL;
+    }
+}
+
+int TileXRComm::FinalizeProfilingSlots()
+{
+    if (!commArgs_.profilingDescriptorsGM) return TILEXR_SUCCESS;
+    if (magic_.load() - commArgs_.profilingMagicBase != int64_t(commArgs_.profilingSlotCount))
+        return TILEXR_ERROR_PARA_CHECK_FAIL;
+    if (aclrtSynchronizeDevice() != ACL_SUCCESS) {
+        profilingUnsafe_ = true;
+        return TILEXR_ERROR_INTERNAL;
+    }
+    profilingUnsafe_ = false;
+    std::vector<uint32_t> lanes(size_t(commArgs_.profilingSlotCount)*16);
+    if (aclrtMemcpy(lanes.data(), lanes.size()*4, commArgs_.profilingLaneCountsGM, lanes.size()*4,
+                    ACL_MEMCPY_DEVICE_TO_HOST) != ACL_SUCCESS) return TILEXR_ERROR_INTERNAL;
+    for (size_t i = 0; i < profilingCaptures_.size(); ++i) {
+        auto &capture = profilingCaptures_[i];
+        if (!capture) continue;
+        if (!profilingPublished_[i]) {
+            const uint32_t actual = lanes[i*16];
+            if (!actual || actual > commArgs_.profilingLaneCapacity) return TILEXR_ERROR_INTERNAL;
+            auto status = capture->Collect();
+            if (!status) { TILEXR_LOG(ERROR) << status.message; return TILEXR_ERROR_INTERNAL; }
+            auto snapshot = *capture->Snapshot();
+            // SDK storage reserves device capacity; only launched lanes belong
+            // to this invocation. Never discard an incomplete launched lane.
+            snapshot.streams.resize(actual);
+            for (const auto &lane : snapshot.streams)
+                if (!lane.complete || lane.dropped || lane.records.size() != 2 ||
+                    lane.records[0].eventId != 1 || lane.records[1].eventId != 2)
+                    return TILEXR_ERROR_INTERNAL;
+            status = Profiling::ExportSnapshot(snapshot, profilingPaths_[i]);
+            if (!status) { TILEXR_LOG(ERROR) << status.message; return TILEXR_ERROR_INTERNAL; }
+            profilingPublished_[i] = true;
+        }
+        const auto status = capture->Close();
+        if (!status) return TILEXR_ERROR_INTERNAL;
     }
     return TILEXR_SUCCESS;
 }
@@ -1369,6 +1491,17 @@ int TileXRComm::SetIpcPidSdid(string &name, const uint32_t *pids, const int64_t 
 
 TileXRComm::~TileXRComm()
 {
+    // Explicit destruction has already completed/exported work. During failed
+    // init there are no launches; retain buffers if completion cannot be proven.
+    if (commArgs_.profilingDescriptorsGM && aclrtSynchronizeDevice() != ACL_SUCCESS)
+        profilingUnsafe_ = true;
+    if (profilingUnsafe_) {
+        for (auto &capture : profilingCaptures_) (void)capture.release();
+    } else {
+        profilingCaptures_.clear();
+        FreePeerMem(commArgs_.profilingDescriptorsGM);
+        FreePeerMem(commArgs_.profilingLaneCountsGM);
+    }
     const int resourceRet = FinalizeInternalResource();
     if (resourceRet != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "TileXR internal resource cleanup failed: " << resourceRet;

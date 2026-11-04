@@ -20,6 +20,7 @@ for UDMA data-plane claims. Sources under `reference/` are comparison-only.
 | Data-as-flag device protocol | [data-as-flag.md](data-as-flag.md) |
 | SDMA transport | [sdma-transport.md](sdma-transport.md) |
 | UDMA transport | [udma-transport.md](udma-transport.md) |
+| Installed-operator correctness, Host timing and profiling | [unitest.md](unitest.md) |
 | EP memory backend | [ep-memory.md](ep-memory.md) |
 | EP memory Server Dedup Dispatch/Combine and EP profiling compatibility | [Current design](ep-memory-server-dedup-dispatch-combine-design.md) |
 | MoonEP runtime and planner | [moonep-runtime.md](moonep-runtime.md) |

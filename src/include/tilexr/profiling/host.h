@@ -35,7 +35,9 @@ struct CaptureConfig {
 struct Layout {
     uint64_t descriptorOffset = 0, timestampsOffset = 0, eventIdsOffset = 0;
     uint64_t countsOffset = 0, droppedOffset = 0, statesOffset = 0, bytes = 0;
-    uint32_t recordStride = 0, stateStride = COUNT_STRIDE;
+    // A5 scalar GM stores write back 64-byte cache lines. Independent lane
+    // writers must not share a line, even when their payload is only two words.
+    uint32_t recordStride = 0, stateStride = 16U;
     uint64_t recordElements = 0, stateElements = 0;
 };
 inline Status BuildLayout(const CaptureConfig &config, Layout *out)
@@ -46,7 +48,7 @@ inline Status BuildLayout(const CaptureConfig &config, Layout *out)
         config.maxFileBytes > MAX_RECORD_FILE_BYTES)
         return {StatusCode::InvalidArgument, "rank/lane/capacity outside profiling limits"};
     Layout l;
-    l.recordStride = config.recordsPerStream;
+    l.recordStride = (config.recordsPerStream + 15U) / 16U * 16U;
     l.recordElements = uint64_t(config.logicalStreamCount) * l.recordStride;
     l.stateElements = uint64_t(config.logicalStreamCount) * l.stateStride;
     l.timestampsOffset = 128;
@@ -83,7 +85,7 @@ inline Status MakeDeviceView(const CaptureConfig &config, void *workspace,
 {
     Layout layout; Status s = BuildLayout(config,&layout); if (!s) return s;
     const uint64_t base = reinterpret_cast<uintptr_t>(workspace);
-    if (!out || !base || base % 32 || workspaceBytes < layout.bytes ||
+    if (!out || !base || base % 64 || workspaceBytes < layout.bytes ||
         layout.bytes > std::numeric_limits<uintptr_t>::max() ||
         base > std::numeric_limits<uintptr_t>::max() - layout.bytes)
         return {StatusCode::InvalidArgument,"workspace must be aligned, sized, and addressable for capture layout"};

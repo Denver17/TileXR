@@ -526,6 +526,8 @@ int TileXRCommDestroy(TileXRCommPtr comm)
     if (finalizeRet != TILEXR_SUCCESS) {
         return finalizeRet;
     }
+    const int profilingRet = c->AgreeInternalStatus(c->FinalizeProfilingSlots());
+    if (profilingRet != TILEXR_SUCCESS) return profilingRet;
     const int udmaRet = c->FinalizeUDMA();
     if (udmaRet != TILEXR_SUCCESS) {
         return udmaRet;

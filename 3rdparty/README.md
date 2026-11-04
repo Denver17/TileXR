@@ -8,6 +8,17 @@ for the complete tree. Do not copy upstream source into TileXR modules.
 | --- | --- | --- |
 | `spdlog` | Core Host logging | recorded by the Git submodule |
 | `tilelang-ascend` | Ascend Python DSL/compiler and generated GEMM launcher | `87e6d1c2f0a9d2ff6a9013d9a1202325c4a619b1` |
+| `picojson` | UniTest Host JSON parsing (header-only) | v1.3.0, `25fc213cca61ea22b3c2e4db8def9927562ba5f7` |
+
+UniTest uses picojson as a Git submodule, without building or linking an
+additional library. Initialize it before configuring `tools/unitest`:
+
+```bash
+git submodule update --init 3rdparty/picojson
+```
+
+Keep the submodule at the recorded revision. Its upstream BSD-2-Clause license
+is retained in `3rdparty/picojson/LICENSE` and the header.
 
 The optional production `tilexr-relay` Host library loads offline-generated
 ABI-v1 kernels. It does not require collectives, compile Python/TVM or link

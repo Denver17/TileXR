@@ -17,6 +17,8 @@ include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cce")
 enable_language(CCE)
 
+option(TILEXR_EP_ENABLE_PROFILING "Enable generic fixed-slot EP captures" OFF)
+
 option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Combine Memory kernel" OFF)
 option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
@@ -128,6 +130,9 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_kernel
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h")
 
 set(_tilexr_dispatch_memory_definitions)
+if(TILEXR_EP_ENABLE_PROFILING)
+    list(APPEND _tilexr_dispatch_memory_definitions TILEXR_ENABLE_PROFILING=1)
+endif()
 if(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
     list(APPEND _tilexr_dispatch_memory_definitions
         TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING=1)
@@ -139,11 +144,16 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_dispatch_memory_profile.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 
 set(_tilexr_combine_memory_definitions)
+if(TILEXR_EP_ENABLE_PROFILING)
+    list(APPEND _tilexr_combine_memory_definitions TILEXR_ENABLE_PROFILING=1)
+endif()
 if(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
     list(APPEND _tilexr_combine_memory_definitions
         TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING=1)
@@ -155,6 +165,8 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_combine_memory_profile.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
@@ -247,6 +259,10 @@ add_library(tilexr-ep SHARED
     host/tilexr_ep_memory_server_dedup_combine.cpp
     ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp
 )
+
+if(TILEXR_EP_ENABLE_PROFILING)
+    target_compile_definitions(tilexr-ep PRIVATE TILEXR_EP_ENABLE_PROFILING=1)
+endif()
 
 add_dependencies(tilexr-ep ${TILEXR_EP_KERNEL_TARGETS})
 target_compile_definitions(tilexr-ep PUBLIC

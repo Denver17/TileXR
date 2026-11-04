@@ -31,7 +31,8 @@ Expected:
 ## Build Core Runtime
 
 ```bash
-cmake -S . -B /tmp/tilexr-build -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake -S . -B /tmp/tilexr-build -DCMAKE_INSTALL_PREFIX="$PWD/install" \
+  -DTILEXR_BUILD_UNITEST=OFF
 cmake --build /tmp/tilexr-build --target tile-comm -j"$(nproc)"
 cmake --install /tmp/tilexr-build
 ```
@@ -60,6 +61,47 @@ cannot select incompatible declarations and cause unresolved `aclrtMalloc` or
 `aclrtMemcpy` symbols. When validating these targets, include the CANN header
 search paths used by the root build; a standalone mock-only build does not
 exercise this include-order boundary.
+
+## Build TileXR and UniTest Together
+
+The root `TILEXR_BUILD_UNITEST` option defaults to ON. It includes core,
+diagnostics and EP dependencies even when `TILEXR_BUILD_EP=OFF`. Initialize
+the source dependencies and build all targets before installing:
+
+```bash
+git submodule update --init 3rdparty/spdlog 3rdparty/picojson
+cmake -S . -B /tmp/tilexr-unitest-integrated \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install" -DCMAKE_INSTALL_LIBDIR=lib \
+  -DBUILD_TESTING=OFF -DTILEXR_BUILD_TESTS=OFF
+cmake --build /tmp/tilexr-unitest-integrated -j"$(nproc)"
+cmake --install /tmp/tilexr-unitest-integrated
+install/bin/tilexr-unitest --help
+```
+
+This path links the Worker to the current build's TileXR targets without a
+preinstalled TileXR dependency. `BUILD_TESTING` does not control the tool.
+Core-only and package-only builds must explicitly disable UniTest if they do
+not build/install its Worker. Installed operator runs still require an idle,
+compatible A5 environment and real runtime libraries; `--help` alone does not
+prove Worker initialization. Standalone builds against an existing installation
+remain supported; see [UniTest instructions](../tools/unitest/README.md).
+
+### UniTest link-only hosts
+
+On an x86_64 compile-only host without a real driver HAL, if the core link fails
+with `cannot find -lascend_hal`, load the CANN SDK and set its link-time search path
+before configuring/building:
+
+```bash
+export LIBRARY_PATH="$ASCEND_HOME_PATH/x86_64-linux/devlib${LIBRARY_PATH:+:$LIBRARY_PATH}"
+```
+
+Use the SDK platform directory matching the target architecture. This selects an
+official link stub for build checks only; never add it to runtime
+`LD_LIBRARY_PATH` or RPATH/RUNPATH. Real execution still requires a compatible
+NPU and driver HAL. This core link issue does not require changing standalone
+UniTest CMake rules. Revision-specific builds and hardware evidence are retained
+in [UniTest validation records](validation/unitest.md).
 
 ## Build UDMA Tests
 
@@ -108,6 +150,7 @@ EP uses one installation layout for every deployment environment. Do not pass
 ```bash
 cmake -S . -B /tmp/tilexr-ep-build \
   -DTILEXR_BUILD_EP=ON \
+  -DTILEXR_BUILD_UNITEST=OFF \
   -DCMAKE_INSTALL_PREFIX="$PWD/install"
 cmake --build /tmp/tilexr-ep-build --target tilexr-ep -j"$(nproc)"
 cmake --install /tmp/tilexr-ep-build

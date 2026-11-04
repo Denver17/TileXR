@@ -1,0 +1,5 @@
+{
+  "schema": "tilexr.unitest.run.v1",
+  "mode": "single",
+  "profiling": {"enabled": false}
+}

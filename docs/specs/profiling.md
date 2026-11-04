@@ -63,12 +63,18 @@ flowchart LR
 | 对象 | 当前约束 |
 |---|---|
 | `DeviceView` | 72 bytes，8-byte 对齐；8 个 uint32 元信息 + 5 个 uint64 GM 数组地址；字段偏移由编译期断言固定 |
-| SDK 默认布局 | 描述符位于 workspace 起始处，timestamps 从 offset 128 开始，随后为 eventIds/counts/dropped/states；数组地址按 32 bytes 对齐 |
-| record stride | 以记录元素计；当前 Host 布局等于 `recordsPerStream`，容量 8…65536 且是 8 的倍数 |
-| state stride | 以 uint32 元素计，当前为 8；每 lane 的 count/dropped/state 位于各自数组的 `lane * stateStride` |
+| SDK 默认布局 | 描述符位于 workspace 起始处，timestamps 从 offset 128 开始，随后为 eventIds/counts/dropped/states；workspace 和数组地址按 64 bytes 对齐 |
+| record stride | 以记录元素计；当前 Host 布局将 `recordsPerStream` 向上补齐至 16 的倍数，容量仍为 8…65536 且是 8 的倍数 |
+| state stride | 以 uint32 元素计，当前为 16；每 lane 的 count/dropped/state 位于各自数组的 `lane * stateStride` |
 | 有效 count | 真正有效的 `[0,count)`，可以不是 8 的倍数；不得按存储对齐向上补成有效事件 |
 | 身份 | rank 0…65535；lane 数 1…65536，索引 0…65535；磁盘 stream ID 为 `(rank << 16) | lane` |
 | 预算 | 初始化前检查 workspace 和最坏编码大小；默认 workspace 上限 1 GiB，文件上限 256 MiB，实际可用配置同时受两者限制 |
+
+相邻 lane 必须隔开 64-byte scalar cache line。2026-11-04 A5/CANN 9.2 实测中，
+原有 32-byte event/state 间距出现交错 lane 的事件或提交状态丢失；仅增大 records
+容量不能修复 state 区。修正只增加工作区 padding，DeviceView 字段和 records.v1
+文件格式不变，容量与有效记录数不随 padding 增加；外部工作区调用者需使用 64-byte
+对齐，并重新调用 BuildLayout 核对预算。
 
 ### 3.2 lane 提交
 

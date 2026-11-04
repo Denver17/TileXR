@@ -47,6 +47,7 @@ class TileXRUDMAContext;
 struct TileXRUDMACommArgsState;
 class TileXRSDMATransport;
 class TileXRCcuBackend;
+namespace Profiling { class AclCapture; }
 class TileXRComm {
 public:
     TileXRComm(int rank, int rankSize);
@@ -97,6 +98,7 @@ public:
     int DetachInternalResource(void *resource);
     int FinalizeInternalResource();
     int FinalizeUDMA();
+    int FinalizeProfilingSlots();
     int AgreeInternalStatus(int localStatus) const;
     void LockInternalResource();
     void UnlockInternalResource();
@@ -105,6 +107,11 @@ public:
     friend class LcclTest;
 
 private:
+    int InitProfilingSlots();
+    std::vector<std::unique_ptr<Profiling::AclCapture>> profilingCaptures_;
+    std::vector<std::string> profilingPaths_;
+    std::vector<bool> profilingPublished_;
+    bool profilingUnsafe_ = false;
     int SetMemoryName(std::string &name);
     int SetIpcPidSdid(std::string &name, const uint32_t *pids, const int64_t *sdids) const;
     int OpenIpcMem(const char names[TILEXR_MAX_RANK_SIZE][IPC_NAME_SIZE]);

@@ -70,6 +70,20 @@ uint8_t gServerDedupKernelStub = 0;
 KernelRegistrationState gCombineServerDedupRegistration;
 uint8_t gCombineServerDedupKernelStub = 0;
 
+int ValidateProfilingSlot(const TileXR::CommArgs &args, int64_t magic, uint32_t lanes)
+{
+    if (!args.profilingDescriptorsGM) return TileXR::TILEXR_SUCCESS;
+#if defined(TILEXR_EP_ENABLE_PROFILING) && TILEXR_EP_ENABLE_PROFILING == 1
+    if (magic < args.profilingMagicBase ||
+        uint64_t(magic - args.profilingMagicBase) >= args.profilingSlotCount ||
+        lanes > args.profilingLaneCapacity) return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    return TileXR::TILEXR_SUCCESS;
+#else
+    (void)magic; (void)lanes;
+    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+#endif
+}
+
 bool HasPrefix(const char *value, const char *prefix)
 {
     if (value == nullptr || prefix == nullptr) {
@@ -464,6 +478,8 @@ int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpH
     if (magicRet != TileXR::TILEXR_SUCCESS) {
         return magicRet;
     }
+    const int profilingRet = ValidateProfilingSlot(*context.hostArgs, magic, blockDim);
+    if (profilingRet != TileXR::TILEXR_SUCCESS) return profilingRet;
     const int registerRet = EnsureDispatchMemoryKernelRegistered();
     if (registerRet != TileXR::TILEXR_SUCCESS) {
         return registerRet;
@@ -522,6 +538,8 @@ int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHos
     if (magicRet != TileXR::TILEXR_SUCCESS) {
         return magicRet;
     }
+    const int profilingRet = ValidateProfilingSlot(*context.hostArgs, magic, blockDim);
+    if (profilingRet != TileXR::TILEXR_SUCCESS) return profilingRet;
     const int registerRet = EnsureCombineMemoryKernelRegistered();
     if (registerRet != TileXR::TILEXR_SUCCESS) {
         return registerRet;

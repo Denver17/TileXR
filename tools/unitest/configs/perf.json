@@ -1,0 +1,9 @@
+{
+  "schema": "tilexr.unitest.run.v1",
+  "mode": "perf",
+  "timing": "host_batch",
+  "warmup": 5,
+  "iterations": 100,
+  "batches": 3,
+  "profiling": {"enabled": false}
+}

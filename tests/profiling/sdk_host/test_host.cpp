@@ -64,7 +64,10 @@ int main()
 {
     CHECK(OtherTranslationUnit()==1);
     CaptureConfig c; c.logicalStreamCount=3; c.recordsPerStream=8; c.rank=65535;
-    Layout l; CHECK(BuildLayout(c,&l)); CHECK(l.recordElements==24 && l.stateElements==24);
+    Layout l; CHECK(BuildLayout(c,&l)); CHECK(l.recordElements==48 && l.stateElements==48);
+    CHECK(l.recordStride*sizeof(uint32_t)%64==0 && l.stateStride*sizeof(uint32_t)%64==0);
+    for (uint64_t offset : {l.timestampsOffset,l.eventIdsOffset,l.countsOffset,l.droppedOffset,l.statesOffset})
+        CHECK(offset%64==0);
     CaptureConfig bad=c; bad.rank=-1; CHECK(!BuildLayout(bad,&l)); bad.rank=65536; CHECK(!BuildLayout(bad,&l));
     bad=c; bad.logicalStreamCount=0; CHECK(!BuildLayout(bad,&l)); bad.logicalStreamCount=65537; CHECK(!BuildLayout(bad,&l));
     bad=c; bad.recordsPerStream=0; CHECK(!BuildLayout(bad,&l)); bad.recordsPerStream=65537; CHECK(!BuildLayout(bad,&l));
@@ -79,14 +82,16 @@ int main()
     CHECK(view.timestampsAddress==4096+l.timestampsOffset);
     CHECK(!MakeDeviceView(c,nullptr,l.bytes,&view));
     CHECK(!MakeDeviceView(c,reinterpret_cast<void *>(uintptr_t(4097)),l.bytes,&view));
+    CHECK(!MakeDeviceView(c,reinterpret_cast<void *>(uintptr_t(4128)),l.bytes,&view));
     CHECK(!MakeDeviceView(c,reinterpret_cast<void *>(uintptr_t(4096)),l.bytes-1,&view));
     CHECK(!MakeDeviceView(c,reinterpret_cast<void *>(uintptr_t(UINTPTR_MAX&~uintptr_t(31))),l.bytes,&view));
-    std::vector<uint32_t> counts(24),dropped(24),states(24),ids(24); std::vector<uint64_t> times(24);
+    std::vector<uint32_t> counts(l.stateElements),dropped(l.stateElements),states(l.stateElements),ids(l.recordElements);
+    std::vector<uint64_t> times(l.recordElements);
     states[0]=uint32_t(Completion::COMMITTED); counts[0]=3; dropped[0]=7;
     ids[0]=1;ids[1]=2;ids[2]=3; times[0]=4;times[1]=0;times[2]=4;
     // Incomplete lanes' nonsensical counts and payloads must be ignored.
-    states[8]=uint32_t(Completion::WRITING); counts[8]=UINT32_MAX; ids[8]=99;
-    states[16]=uint32_t(Completion::COMMITTED);
+    states[l.stateStride]=uint32_t(Completion::WRITING); counts[l.stateStride]=UINT32_MAX; ids[l.recordStride]=99;
+    states[2*l.stateStride]=uint32_t(Completion::COMMITTED);
     CaptureSnapshot snapshot; CHECK(BuildSnapshot(c,counts,dropped,states,times,ids,&snapshot));
     CHECK(snapshot.streams.size()==3 && snapshot.streams[0].id==0xffff0000U);
     CHECK(snapshot.streams[0].records.size()==3 && snapshot.streams[0].records[0].timestamp==0);

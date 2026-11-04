@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Locate the installed controller, Worker and cases relative to this command.
+
+Dispatch to the controller without relying on source paths or the working
+directory, so the installed framework can be relocated as a complete prefix.
+"""
+from pathlib import Path
+import sys
+
+command_dir = Path(__file__).resolve().parent
+package_dir = (command_dir / "@UNITEST_SHARE_FROM_BIN@").resolve()
+sys.path.insert(0, str(package_dir))
+from controller.__main__ import main
+
+sys.exit(main(worker=(command_dir / "@UNITEST_LIBEXEC_FROM_BIN@" / "tilexr_unitest_worker").resolve(),
+              cases=package_dir / "cases"))

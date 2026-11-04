@@ -1,0 +1,4 @@
+# Keep local build, installation and generated case results out of source control.
+/build/
+/install/
+/unitest-results/

@@ -4,3 +4,6 @@
 [submodule "3rdparty/tilelang-ascend"]
 	path = 3rdparty/tilelang-ascend
 	url = https://github.com/tile-ai/tilelang-ascend.git
+[submodule "3rdparty/picojson"]
+	path = 3rdparty/picojson
+	url = https://github.com/kazuho/picojson.git

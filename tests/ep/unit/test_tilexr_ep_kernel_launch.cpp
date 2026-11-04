@@ -305,6 +305,30 @@ void TestCombineMemoryRuntimeLaunch()
         "memory combine registers its exact entry point");
     CheckLaunch(0, "tilexr_ep_combine_memory_kernel", 19);
     Check(gLaunches[0].blockDim == 48, "memory combine uses runtime vector core count");
+
+    commArgs.profilingDescriptorsGM = reinterpret_cast<GM_ADDR>(0x50000);
+    commArgs.profilingMagicBase = kNextMagic;
+    commArgs.profilingSlotCount = 1;
+    commArgs.profilingLaneCapacity = 48;
+    ResetCapture();
+#if defined(TILEXR_EP_ENABLE_PROFILING) && TILEXR_EP_ENABLE_PROFILING == 1
+    Check(TileXREp::TileXREpLaunchCombineMemoryKernel(params, context) == TileXR::TILEXR_SUCCESS,
+        "fixed slot launches without changing the registered signature");
+    CheckLaunch(0, "tilexr_ep_combine_memory_kernel", 19);
+    commArgs.profilingLaneCapacity = 47;
+    ResetCapture();
+    Check(TileXREp::TileXREpLaunchCombineMemoryKernel(params, context) == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL,
+        "too few profiling lanes rejects launch");
+    Check(gLaunches.empty(), "capacity failure never launches");
+    commArgs.profilingLaneCapacity = 48;
+    commArgs.profilingMagicBase = kNextMagic - 1;
+    Check(TileXREp::TileXREpLaunchCombineMemoryKernel(params, context) == TileXR::TILEXR_ERROR_PARA_CHECK_FAIL,
+        "exhausted profiling table rejects launch");
+#else
+    Check(TileXREp::TileXREpLaunchCombineMemoryKernel(params, context) == TileXR::TILEXR_ERROR_NOT_SUPPORT,
+        "uninstrumented build rejects requested captures");
+    Check(gLaunches.empty(), "unsupported profiling never launches");
+#endif
 }
 
 } // namespace

@@ -179,6 +179,12 @@ struct CommArgs {
     GM_ADDR tilexrCombineProfilingDroppedCountsGM = nullptr;
     uint32_t tilexrCombineProfilingRecordsPerCore = 0U;
     uint32_t tilexrCombineProfilingCoreCapacity = 0U;
+    // Fixed generic capture slots, indexed by magic - profilingMagicBase.
+    GM_ADDR profilingDescriptorsGM = nullptr; // uint64_t[profilingSlotCount]
+    GM_ADDR profilingLaneCountsGM = nullptr;  // uint32_t[profilingSlotCount * 16]
+    uint64_t profilingSlotCount = 0;
+    int64_t profilingMagicBase = 0;
+    uint32_t profilingLaneCapacity = 0;
 };
 
 struct LcclDumpBlockInfo {
