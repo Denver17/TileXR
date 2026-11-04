@@ -61,6 +61,13 @@ a 64-host cap; use `-j N` only to limit concurrency. Run
 `tools\tssh\tssh.cmd -C NAME --install-key` for one-time public-key
 setup; Paramiko is used only by that setup mode.
 
+## PR File Headers
+
+- Before submitting a PR, ensure every first-party code file added or modified by that PR has a file-level comment near the top, after existing license notices (and shebang/encoding declarations where applicable). Include source files, headers, scripts, and code templates; exclude vendored third-party code, generated outputs, and comparison-only `reference/` files.
+- Describe the purpose and relationships in both Chinese and English: responsibilities and main interfaces, callers or consumers, dependencies, and relevant data/control flow or ownership boundaries. Name concrete repository paths or symbols rather than merely repeating the filename or listing includes. Use the language's native comment syntax.
+- Keep both versions consistent with the implementation and update them in the same PR when responsibilities or relationships change. Consolidate existing summaries instead of duplicating them; preserve license notices. Headers guide navigation and do not replace API contracts or validation; avoid claims broader than the implementation or validation supports.
+- Check headers during final PR diff review. Document untouched historical files incrementally; an example PR does not require a repository-wide rewrite. Examples: `src/include/tilexr_api.h`, `src/comm/comm_wrap.cpp`, and `src/include/comm_args.h`.
+
 ## Continuous Improvement
 
 - Before completing a development change, identify reusable lessons and pitfalls that are likely to matter in future work. Record them in the most relevant maintained Markdown document and include that documentation update in the same commit as the change that produced the lesson.

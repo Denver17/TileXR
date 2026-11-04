@@ -8,6 +8,24 @@
  * See LICENSE in the root of the software repository for the full text of the License.
  */
 
+/*
+ * 功能：定义 Host 与 Device 共用的 CommArgs 布局、ExtraFlag 能力位，
+ * 以及通信缓冲区、同步和 DFX 使用的常量与数据结构。
+ * 关系：src/comm/tilexr_comm.cpp 填充并同步通信参数，tilexr_api.h 暴露
+ * Host/Device 参数访问入口；tilexr_sync.h、collectives 和 EP kernel 消费
+ * peer/credit 地址、magic 与传输视图。tilexr_sdma_types.h 提供 SDMA 类型。
+ * 地址引用运行时或调用方管理的资源，本文件不分配或释放资源；
+ * 修改共享布局时必须同时考虑 Host 和 Device 使用方。
+ *
+ * Purpose: Define the shared Host/Device CommArgs layout, ExtraFlag capability
+ * bits, and constants/data structures for communication buffers, sync, and DFX.
+ * Relationships: src/comm/tilexr_comm.cpp populates and synchronizes the arguments;
+ * tilexr_api.h exposes Host/Device access. tilexr_sync.h, collectives, and EP
+ * kernels consume peer/credit addresses, magic values, and transport views.
+ * tilexr_sdma_types.h supplies SDMA types. Stored addresses refer to resources
+ * managed by the runtime or caller; this file neither allocates nor frees them.
+ * Shared layout changes must account for both Host and Device consumers.
+ */
 #ifndef TILEXR_COMM_ARGS_H
 #define TILEXR_COMM_ARGS_H
 #include <cstdint>

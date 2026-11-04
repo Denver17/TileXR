@@ -7,6 +7,22 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+
+/*
+ * 功能：声明 TileXR Host 公共接口，涵盖 communicator 生命周期、CommArgs 获取、
+ * magic 轮次推进，以及 UDMA/SDMA 能力与资源访问。
+ * 关系：应用和 collectives/EP Host 层通过本接口使用核心运行时；
+ * src/comm/comm_wrap.cpp 将入口转发给 TileXRComm。comm_args.h 定义传给
+ * Device kernel 的共享参数；tilexr_udma_fullmesh.h 与 tilexr_udma_reg.h
+ * 提供 UDMA 接口类型。TileXRCommPtr 是运行时对象的不透明句柄。
+ *
+ * Purpose: Declare public TileXR Host interfaces for communicator lifecycle,
+ * CommArgs access, magic-round advancement, and UDMA/SDMA capabilities/resources.
+ * Relationships: Applications and collectives/EP Host code use this runtime API;
+ * src/comm/comm_wrap.cpp forwards entry points to TileXRComm. comm_args.h defines
+ * shared arguments passed to Device kernels; tilexr_udma_fullmesh.h and
+ * tilexr_udma_reg.h supply UDMA API types. TileXRCommPtr is an opaque runtime handle.
+ */
 #ifndef TILEXR_API_H
 #define TILEXR_API_H
 
