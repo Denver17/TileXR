@@ -106,16 +106,35 @@ sst example0.py > ~/sst-build-logs/simpleElementExample-example0.log 2>&1
 grep -q 'Simulation is complete' ~/sst-build-logs/simpleElementExample-example0.log
 ```
 
-## CANN 8.3 Install
+## CANN 9.1.0 Install
 
-Inspect packages:
+The simulator baseline is CANN **9.1.0**. Prefer the pre-installed `tilexr-sim-9.1` image (CANN already at `/opt/sim/Ascend/cann-9.1.0`) over a manual install. Use manual install only when no image is available or a non-container host is required.
+
+### Primary path: use the pre-installed image
+
+The image already provides CANN 9.1.0 and the environment script:
+
+```bash
+source /opt/sim/cann-env.sh
+bisheng --version    # or: ccec --version
+```
+
+Key image facts:
+
+- `CANN_ROOT=/opt/sim/Ascend/cann-9.1.0` (single unified package; no 8.3-style split `toolkit/runtime/compiler/opp/...` directories)
+- `ASCEND_HOME_PATH=$CANN_ROOT` is already exported by `/opt/sim/cann-env.sh`
+- Packages download as `Ascend-cann_9.1.0_linux-x86_64.run` (aarch64: `Ascend-cann_9.1.0_linux-aarch64.run`)
+
+### Backup path: manual install of CANN 9.1.0
+
+Only for hosts without the image. Inspect the package first:
 
 ```bash
 cd ~/pkg
-for f in CANN-*-8.3*.run; do ./$f --help | sed -n '1,120p'; done
+./Ascend-cann_9.1.0_linux-x86_64.run --help | sed -n '1,120p'
 ```
 
-If running as root and `/root/log` is a file:
+If running as root and `/root/log` is a file (a known 8.x-era install blocker that some 9.1.0 builds may still hit):
 
 ```bash
 mv /root/log /root/log.backup-before-cann-$(date +%Y%m%d%H%M%S)
@@ -123,7 +142,7 @@ mkdir -p /root/log/makeself
 chmod 755 /root/log /root/log/makeself
 ```
 
-Install typical CANN 8.3 packages into `~/Ascend`:
+Install into `~/Ascend`:
 
 ```bash
 PREFIX=$HOME/Ascend
@@ -131,16 +150,10 @@ LOGDIR=$HOME/cann-install-logs
 mkdir -p "$PREFIX" "$LOGDIR"
 cd "$HOME/pkg"
 
-./CANN-toolkit-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/toolkit.log"
-./CANN-runtime-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/runtime.log"
-./CANN-compiler-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/compiler.log"
-./CANN-opp-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/opp.log"
-./CANN-hccl-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/hccl.log"
-./CANN-fwkplugin-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/fwkplugin.log"
-./CANN-opensdk-8.3.t11.0.b080-linux.x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/opensdk.log"
+./Ascend-cann_9.1.0_linux-x86_64.run --full --quiet --install-path="$PREFIX" 2>&1 | tee "$LOGDIR/cann.log"
 ```
 
-Create `~/cann-env.sh`:
+Create `~/cann-env.sh` (single-root layout; the 8.3 split layout does not apply to 9.1.0):
 
 ```bash
 export ASCEND_HOME_PATH=$HOME/Ascend/latest
@@ -158,15 +171,13 @@ Verify:
 atc --help >/tmp/atc-help.txt 2>&1
 grep -q 'usage: atc' /tmp/atc-help.txt
 ccec --version
-for d in toolkit runtime compiler opp hccl fwkplugin opensdk; do
-  grep -q '8.3.T11.0.B080' "$HOME/Ascend/8.3.RC1/$d/version.info"
-done
+grep -q '9.1.0' "$HOME/Ascend/9.1.0/version.info"
 ```
 
 If a user-provided `tests/set_env.sh` points to an old path, either update it or override:
 
 ```bash
-export ASCEND_TOOLKIT_HOME=$HOME/Ascend/8.3.RC1/x86_64-linux
+export ASCEND_TOOLKIT_HOME=$HOME/Ascend/9.1.0/x86_64-linux
 export TIKCPP_INCLUDE_PATH=${ASCEND_TOOLKIT_HOME}/ascendc/include/basic_api:${ASCEND_TOOLKIT_HOME}/tikcpp/tikcfw
 export CPLUS_INCLUDE_PATH=$TIKCPP_INCLUDE_PATH:$TIKCPP_INCLUDE_PATH/impl:$TIKCPP_INCLUDE_PATH/interface:${ASCEND_TOOLKIT_HOME}/include:${ASCEND_TOOLKIT_HOME}/include/ascendc/basic_api:${CPLUS_INCLUDE_PATH:-}
 ```
