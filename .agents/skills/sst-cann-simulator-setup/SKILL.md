@@ -15,7 +15,7 @@ If the user provides enough connection, package, or operator context, treat that
 
 - Install SST as the target ordinary user, not root. If root previously installed into the user's home, fix ownership or rebuild as the user.
 - Keep SST Core and SST Elements versions matched unless the user explicitly asks otherwise. For the known simulator setup, use `sstcore-14.0.0` with `sstelements-14.0.0`.
-- Install only requested CANN versions. For CANN 8.3, ignore unrelated MindStudio or 8.2 packages unless the user asks.
+- Install only requested CANN versions. The known simulator baseline is CANN 9.1.0; treat every CANN 8.x object as incompatible unless a separate version-matched build and simulation proves otherwise. Ignore unrelated MindStudio or other 8.x packages unless the user asks.
 - Always save logs under the target home, for example `~/sst-build-logs` and `~/cann-install-logs`.
 - Verify using commands that compile or run something, not just directory listings.
 - Treat `sst` exit 0 as necessary but not sufficient for operator correctness. Inspect output bins and compare against expected values.
@@ -273,7 +273,7 @@ source set_env.sh
 test -s ./smoke_aivUrma.o
 ```
 
-Use concrete paths such as `/home/<user>/Ascend/8.3.RC1` only when the user provided them for the current machine.
+Use concrete paths such as `/home/<user>/Ascend/9.1.0` only when the user provided them for the current machine.
 
 For full upstream objects:
 
@@ -300,7 +300,7 @@ For collectives such as allreduce:
 
 | Symptom | Likely cause | Action |
 |---|---|---|
-| `kernel_operator.h file not found` | `set_env.sh` points to an old CANN path | Fix `ASCEND_TOOLKIT_HOME` to `~/Ascend/latest/x86_64-linux` or `~/Ascend/8.3.RC1/x86_64-linux` |
+| `kernel_operator.h file not found` | `set_env.sh` points to an old CANN path | Fix `ASCEND_TOOLKIT_HOME` to `~/Ascend/latest/x86_64-linux` or `~/Ascend/9.1.0/x86_64-linux` |
 | CANN `.run --version` complains about `/root/log/makeself` | `/root/log` is a file, not a directory | Back up `/root/log`, then create `/root/log/makeself` |
 | `opp` install says only one operation type is supported | `--check-path` was combined with `--full` | Install OPP without `--check-path`; use `--check-path` separately if needed |
 | `sst-info | head` exits 141 | `pipefail` plus SIGPIPE from `head` | Redirect to a file, then inspect with `sed` or `grep` |
