@@ -100,6 +100,9 @@ def render_result(report, summary_path):
             cores = config.get(operator + "_send_core_num")
             if cores is not None:
                 parts.append(f"{operator}_cores(send/recv)={cores}/{64 - cores}")
+        count_cores = config.get("dispatch_count_core_num")
+        if count_cores is not None:
+            parts.append(f"dispatch_count_cores={count_cores}(cores={64 - count_cores}..63)")
     if "rank_size" in report:
         parts.append(f"ranks={report.get('completed_ranks', 0)}/{report['rank_size']}")
     parts.append(f"result={summary_path}")

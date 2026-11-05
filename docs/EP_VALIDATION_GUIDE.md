@@ -47,6 +47,7 @@ bash run.sh -n 2 -e 96 -m 0 -l 3 0 operator_mode=both
 | build: dedup=auto/0/1 | 默认 auto：BS≤32 直发，BS>32 去重；0/1 强制模式 |
 | build: breakdown=0/1 | 设备内部打点开关，默认关闭 |
 | build: dispatch_send_cores=N | 16..48，步长 4；默认 32 |
+| build: dispatch_count_cores=C | 1..64，默认 32；末尾 C 个核发送 count |
 | build: combine_send_cores=N | 16..56，步长 4；默认 32 |
 | run: -n N -e E | hostfile 前 N 台、总专家数 E，必填 |
 | run: -m 0/1/2 | functional / performance / breakdown |
@@ -62,6 +63,13 @@ bash run.sh -n 2 -e 96 -m 0 -l 3 0 operator_mode=both
 完整参数以 `bash run.sh --help` 和 `bash build_all.sh --help` 为准。
 functional/performance 要求打点关闭的包，breakdown 要求打点开启的包；不匹配时启动前拒绝。
 策略和核数是构建参数；shape、类型、路由 seed、轮数是运行参数。
+
+例如 `bash build_all.sh dispatch_count_cores=16` 让核 48～63 发送 count；
+默认 token 分工仍为核 0～31 发送、32～63 接收。Count 核发送完继续原分工，
+其余核直接进入原分工。所有核仍须初始化共享 scratch；C 大于接收核数时，
+兼任 token 发送的 Count 核必须保留异步 count records，Host 按各核实际重叠检查 UB。
+核数与 BS 无关；专家按 Count 局部核号分片，空分片不发送，也不保留 records。
+修改 C 后须配套重建 Host、kernel、consumer 并同步全部 Rank。
 
 ```bash
 # 独立 Combine 性能；与 Dispatch 量化开关无关。
@@ -121,8 +129,11 @@ bash run_host_validation.sh
 回归时保持同一 build mode。纯 Host 包只能做 Host 回归和 dry-run，不能用于 NPU 运行。
 
 回归按职责覆盖公共 ABI、Host 参数和容量、Count/布局、发送接收、五表、Combine 数值、
-跨轮 Flag 清理、profiling 生命周期及工作流失败传播。同步 CPU API 替身不模拟真实 MTE
-异步、缓存可见性和跨机调度；这些行为需要匹配 CANN 编译和实际设备测试补充。
+跨轮 Flag 清理、profiling 生命周期及工作流失败传播。源码 `tests/ep` 的 CTest 另含
+C=1/16/31/48/64 的 Count 矩阵，检查末尾核所有权、空/不均匀分片、完整直方图及异步
+records 保留；该矩阵不在安装包 `run_host_validation.sh` 导出的测试集合中。
+CPU API 替身不模拟真实 MTE 调度、缓存可见性和跨机调度；这些行为需要匹配 CANN 编译
+和实际设备测试补充。
 
 ## 设备回归矩阵
 

@@ -47,7 +47,12 @@ Dispatch/Combine 必须使用相同策略和原始 BS；auto 小 BS 仍须提供
 
 Dispatch 与 Combine 默认各使用 32 个发送核，其余为接收核；两者可独立配置。
 `dispatch_send_cores` 支持 16..48、步长 4；`combine_send_cores` 支持 16..56、步长 4。
-Dispatch 的 Count 在 BS<512 时由全部 64 核参与，否则由接收核参与，与数据核分工独立。
+Dispatch 的 Count 由 `dispatch_count_cores=C` 独立配置（1..64，默认 32），
+仅末尾 C 个物理核 `[64-C,64)` 参与，与 BS 和 token 发送/接收核数独立。
+Count 局部核号为 `physicalCore-(64-C)`，按此号将完整专家区间均匀分成 C 份；
+每核扫描完整原始路由，只发送所拥有专家的 count，包括零计数。
+所有核初始化后续阶段需要的 scratch，空分片跳过 Count；完成后均继续原 token 分工，
+例如 C=16 时核 48～63 先发送 Count，再进入原接收流程。
 改变策略或分核必须重建 Host、kernel、consumer 并向全部 rank 同步；同一 communicator
 生命周期内保持配置一致。256-rank 的 CommArgs 布局也要求通信库与所有消费者配套重建。
 

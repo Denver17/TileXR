@@ -5,6 +5,7 @@
 
 int main()
 {
-    std::printf("{\"dispatch_send_core_num\":%u,\"combine_send_core_num\":%u}\n",
-        TileXREp::kEpServerDedupSendCoreNum, TileXREp::kEpServerDedupCombineSendCoreNum);
+    std::printf("{\"dispatch_send_core_num\":%u,\"combine_send_core_num\":%u,\"dispatch_count_core_num\":%u}\n",
+        TileXREp::kEpServerDedupSendCoreNum, TileXREp::kEpServerDedupCombineSendCoreNum,
+        TileXREp::kEpServerDedupCountCoreNum);
 }

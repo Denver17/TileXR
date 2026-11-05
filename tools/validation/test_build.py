@@ -97,7 +97,7 @@ class BuildTests(unittest.TestCase):
         args = [str(value) for value in argv]
         self.commands.append((args, Path(log), kwargs))
         if Path(args[0]).name == "core-config":
-            return json.dumps(dict(dispatch_send_core_num=32, combine_send_core_num=32))
+            return json.dumps(dict(dispatch_send_core_num=32, combine_send_core_num=32, dispatch_count_core_num=32))
         if "-B" in args:
             directory = Path(args[args.index("-B") + 1])
             self.install_prefixes[directory] = Path(next(

@@ -381,22 +381,28 @@ sys.exit(int(os.environ['INJECT_HOST_EXIT']) if action == 'host-validate' else 0
         (self.root / "tools/validation/workflow.py").write_text(
             "import os,json; print(json.dumps(dict(os.environ)))\n")
         environment = dict(self.env, TILEXR_VALIDATION_BUILD_MODE="host",
-                           TILEXR_VALIDATION_DISPATCH_SEND_CORES="48", TILEXR_VALIDATION_COMBINE_SEND_CORES="56")
-        cases = [([], ("", "")),
-                (["dispatch_send_cores=24", "combine_send_cores=40"], ("24", "40")),
-                (["combine_send_cores=52"], ("", "52")),
-                (["combine_send_cores=56"], ("", "56"))]
+                           TILEXR_VALIDATION_DISPATCH_SEND_CORES="48", TILEXR_VALIDATION_COMBINE_SEND_CORES="56",
+                           TILEXR_VALIDATION_DISPATCH_COUNT_CORES="48")
+        cases = [([], ("", "", "")),
+                (["dispatch_send_cores=24", "combine_send_cores=40"], ("24", "40", "")),
+                (["combine_send_cores=52"], ("", "52", "")),
+                (["combine_send_cores=56"], ("", "56", ""))]
         cases.extend(([f"dispatch_send_cores={cores}", f"combine_send_cores={cores}"],
-                      (str(cores), str(cores))) for cores in range(16, 49, 4))
+                      (str(cores), str(cores), "")) for cores in range(16, 49, 4))
+        cases.extend(([f"dispatch_count_cores={count}"], ("", "", str(count))) for count in (1, 16, 31, 48, 64))
+        cases.append((["dispatch_send_cores=24", "dispatch_count_cores=48"], ("24", "", "48")))
         for arguments, expected in cases:
             result = subprocess.run([str(self.bash), "build_all.sh", *arguments], cwd=self.root,
                                     env=environment, text=True, capture_output=True, timeout=10)
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             values = json.loads(result.stdout.splitlines()[-1])
             self.assertEqual((values["TILEXR_VALIDATION_DISPATCH_SEND_CORES"],
-                              values["TILEXR_VALIDATION_COMBINE_SEND_CORES"]), expected)
+                              values["TILEXR_VALIDATION_COMBINE_SEND_CORES"],
+                              values["TILEXR_VALIDATION_DISPATCH_COUNT_CORES"]), expected)
         for argument in ("dispatch_send_cores=52", "dispatch_send_cores=12", "combine_send_cores=60",
-                         "combine_send_cores=30", "combine_send_cores=", "dispatch_send_cores=028"):
+                         "combine_send_cores=30", "combine_send_cores=", "dispatch_send_cores=028",
+                         "dispatch_count_cores=0", "dispatch_count_cores=65", "dispatch_count_cores=-1",
+                         "dispatch_count_cores=01", "dispatch_count_cores="):
             result = subprocess.run([str(self.bash), "build_all.sh", argument], cwd=self.root,
                                     env=environment, capture_output=True, timeout=10)
             self.assertNotEqual(result.returncode, 0)

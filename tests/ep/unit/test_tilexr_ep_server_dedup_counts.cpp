@@ -17,7 +17,8 @@ namespace {
 using TileXREp::ServerDedupCounts;
 constexpr uint32_t sendCoreNum = TileXREp::kEpServerDedupSendCoreNum;
 constexpr uint32_t recvCoreNum = TileXREp::kEpServerDedupRecvCoreNum;
-using TileXREp::kEpServerDedupAllCoreCountBsThreshold;
+using TileXREp::kEpServerDedupCountCoreNum;
+using TileXREp::kEpServerDedupFirstCountCore;
 using ServerDedupTest::Check;
 // Independent wire contract: 32B records occupy the start of 512B GM slots.
 constexpr uint32_t countSlotWords = 128U;
@@ -171,9 +172,9 @@ void CheckReceiveTaskBoundaries()
 void CheckDeferredCountReceive()
 {
     constexpr uint32_t world = 64U, experts = 384U;
-    const uint32_t receiver = 1U, core = sendCoreNum + receiver;
-    const uint32_t countCores = 1U < kEpServerDedupAllCoreCountBsThreshold ? 64U : recvCoreNum;
-    const uint32_t countCore = countCores == 64U ? core : receiver;
+    const uint32_t core = 63U, receiver = core - sendCoreNum;
+    const uint32_t countCores = kEpServerDedupCountCoreNum;
+    const uint32_t countCore = core - kEpServerDedupFirstCountCore;
     const uint32_t start = countCore * (experts / countCores) + std::min(countCore, experts % countCores);
     const uint32_t count = experts / countCores + (countCore < experts % countCores);
     const uint32_t recvCount = experts / recvCoreNum + (receiver < experts % recvCoreNum);
@@ -221,7 +222,7 @@ void CheckDeferredCountReceive()
     AscendC::EventObserver() = {};
     Check(mte3Waits == 0U, "incoming polling, local sum and relative prefix do not wait for outgoing MTE3");
     Check(AscendC::PendingMte3().size() > countWrites, "local sum and cleanup are issued behind the still-pending cnt");
-    Check(counts.ReservedBytes() == ((count + 7U) / 8U * 8U) * 32U,
+    Check(counts.ReservedBytes() == (((experts + countCores - 1U) / countCores + 7U) / 8U * 8U) * 32U,
         "only aligned count records remain reserved outside shared scratch");
     Check(pipe.bytes == 190U * 1024U, "count and receiver views share a single bounded UB reservation");
     AscendC::CompleteMte3();
@@ -342,10 +343,14 @@ void Run(uint32_t world, uint32_t experts, uint32_t bs, uint32_t k, uint32_t rou
 #endif
             Check(AscendC::GetCtrlSpr<60, 60>() == 0,
                 "Count preserves the FP overflow mode for subsequent quantization, without resetting the pipe");
-            if (bs >= kEpServerDedupAllCoreCountBsThreshold && id % 64 < sendCoreNum)
-                Check(AscendC::testCopies == before, "BS at/above the independent threshold leaves send cores out of Count");
-            if (bs < kEpServerDedupAllCoreCountBsThreshold && experts >= 64U)
-                Check(AscendC::testCopies > before, "BS below the independent threshold lets all 64 cores publish Count");
+            const uint32_t core = id % 64U;
+            const bool publishes = core >= kEpServerDedupFirstCountCore &&
+                core - kEpServerDedupFirstCountCore < experts;
+            Check((AscendC::testCopies > before) == publishes,
+                "only trailing Count cores with nonempty expert partitions publish, independently of BS");
+            Check(ranks[id / 64U].cores[core].ReservedBytes() ==
+                (publishes ? ((experts + kEpServerDedupCountCoreNum - 1U) / kEpServerDedupCountCoreNum + 7U) / 8U * 8U * 32U : 0U),
+                "non-Count cores release all scratch while publishers retain aligned records");
         }
         for (uint32_t r = 0; r < world; ++r) for (uint32_t i = 0; i < experts; ++i) {
             Check(ranks[r].states[bank][offset / 4 + i * countSlotWords] == 0x3f800000, "every cnt record, including zero, is notified");
@@ -478,17 +483,14 @@ int main()
             Run(16, 64, 7, 6, 4);       // Per-expert reduction below 64 routes.
             Run(16, 64, 8, 8, 4);       // Vector-range selection at 64 routes.
             Run(32, 96, 47, 6, 4);      // Exercises BS between send-core count and the default threshold.
-            Run(64, 384, 48, 6, 4);     // Historical small-BS boundary; now still uses all-core Count.
-            Run(64, 384, 96, 6, 2);     // Senders also participate in Count for the common BS96 case.
+            Run(64, 384, 48, 6, 4);     // Historical small-BS boundary keeps configured Count ownership.
+            Run(64, 384, 96, 6, 2);     // Common BS96 case keeps configured Count ownership.
             Run(24, 1008, 49, 32, 4);   // Non-power-of-two topology with unaligned partition tails.
-            Run(16, 1024, 256, 32, 4);  // New per-card L=64, at most 64 cnt records/core.
+            Run(16, 1024, 256, 32, 4);  // Per-card L=64, including the single Count core configuration.
             Run(128, 1024, 48, 8, 4);   // 128P / eight experts per card.
-            if (kEpServerDedupAllCoreCountBsThreshold > 0U && kEpServerDedupAllCoreCountBsThreshold <= 1024U) {
-                if (kEpServerDedupAllCoreCountBsThreshold > 1U)
-                    Run(16, 64, kEpServerDedupAllCoreCountBsThreshold - 1U, 1, 2);
-                Run(16, 64, kEpServerDedupAllCoreCountBsThreshold, 1, 2);
-                Run(16, 64, kEpServerDedupAllCoreCountBsThreshold + 1U, 1, 2);
-            }
+            Run(16, 64, 511U, 1, 2);
+            Run(16, 64, 512U, 1, 2);
+            Run(16, 64, 513U, 1, 2); // Former BS boundary no longer changes Count ownership.
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;

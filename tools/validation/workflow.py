@@ -312,6 +312,11 @@ class Config:
                     if value not in allowed:
                         raise ValueError(f"Invalid {operator}_send_cores={value}; expected {'/'.join(allowed)}")
                     self.core_overrides[operator + "_send_core_num"] = int(value)
+            value = os.environ.get("TILEXR_VALIDATION_DISPATCH_COUNT_CORES", "")
+            if value:
+                if value not in tuple(str(cores) for cores in range(1, 65)):
+                    raise ValueError(f"Invalid dispatch_count_cores={value}; expected 1..64")
+                self.core_overrides["dispatch_count_core_num"] = int(value)
             dedup = os.environ.get("TILEXR_VALIDATION_DEDUP", "auto")
             if dedup not in ("auto", "0", "1"):
                 raise ValueError("编译 dedup 必须为 auto/0/1")
@@ -560,6 +565,7 @@ def artifact_files(install):
 CORE_MACROS = {
     "dispatch_send_core_num": "TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM",
     "combine_send_core_num": "TILEXR_EP_SERVER_DEDUP_COMBINE_SEND_CORE_NUM",
+    "dispatch_count_core_num": "TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM",
 }
 
 
@@ -567,8 +573,9 @@ def validate_core_config(value):
     if not isinstance(value, dict) or set(value) != set(CORE_MACROS):
         raise ValueError("缺少编译核数配置，请重新执行 build_all.sh 和 sync.sh")
     for key, cores in value.items():
-        maximum = 48 if key == "dispatch_send_core_num" else 56
-        if type(cores) is not int or cores not in range(16, maximum + 1, 4):
+        allowed = range(1, 65) if key == "dispatch_count_core_num" else range(
+            16, 49 if key == "dispatch_send_core_num" else 57, 4)
+        if type(cores) is not int or cores not in allowed:
             raise ValueError(f"非法编译核数 {key}={cores}，请重新构建/同步")
     return dict(value)
 
@@ -696,7 +703,8 @@ def build(config):
         command([tool, "--version"], log / (tool + "-version.log"))
     cores = compile_core_config(config, work, log, command)
     print("编译核数：" + " ".join(f"{operator}={cores[operator + '_send_core_num']}/{64 - cores[operator + '_send_core_num']}"
-                                for operator in ("dispatch", "combine")), flush=True)
+                                for operator in ("dispatch", "combine")) +
+          f" dispatch_count={cores['dispatch_count_core_num']} (trailing cores)", flush=True)
     combine_tests = COMBINE_TESTS
     if (config.root / ".git").exists():
         status = command(["git", "status", "--porcelain", "--untracked-files=normal"],

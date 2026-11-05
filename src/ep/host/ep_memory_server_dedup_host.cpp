@@ -90,11 +90,13 @@ int TileXREpValidateMemoryServerDedupConfig(
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }
-    if (!EpServerDedupEnabled(uint32_t(p.bs))) {
-        const uint32_t owned = (uint32_t(p.bs) + kEpServerDedupSendCoreNum - 1U) / kEpServerDedupSendCoreNum;
-        const uint32_t records = p.bs < kEpServerDedupAllCoreCountBsThreshold ?
-            uint32_t(TileXREpDedupAlign((uint32_t(p.moeExpertNum) + 63U) / 64U, 8U)) * 32U :
-            0U;
+    for (uint32_t core = 0; core < kEpServerDedupSendCoreNum; ++core) {
+        const uint32_t owned =
+            uint32_t(p.bs) / kEpServerDedupSendCoreNum + (core < uint32_t(p.bs) % kEpServerDedupSendCoreNum ? 1U : 0U);
+        if (EpServerDedupEnabled(uint32_t(p.bs)) && owned == 0U) {
+            continue;
+        }
+        const uint32_t records = TileXREpServerDedupCountReservedBytes(uint32_t(p.moeExpertNum), core);
         if (TileXREpServerDedupSendFixedUbBytes(uint32_t(p.bs), uint32_t(p.topK), uint32_t(commArgs.rankSize), owned,
                 records, p.quantMode == 4, next.data) +
                 next.data.tokenStride >

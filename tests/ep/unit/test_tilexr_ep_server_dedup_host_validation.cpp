@@ -281,13 +281,15 @@ int main()
         CheckRejected(valid, TILEXR_ERROR_PARA_CHECK_FAIL);
     }
     auto large = valid;
-    large.dispatch.h = 65536;
-    large.dispatch.bs = 256;
-    large.dispatch.globalBs = 64 * 256;
+    large.dispatch.h = 20480;
+    large.dispatch.bs = 512;
+    large.dispatch.globalBs = 64 * 512;
     g_commArgs.peerMemBytes = 8ULL << 30;
     CheckRejected(large, TILEXR_ERROR_PARA_CHECK_FAIL);
     g_commArgs.peerMemBytes = 32ULL << 30;
-    Check(Invoke(large) == (kEpServerDedupEnable ? TILEXR_SUCCESS : TILEXR_ERROR_NOT_SUPPORT), "large view fits an actual domain larger than 8 GiB");
+    Check(Invoke(large) == TILEXR_SUCCESS, "large view fits both sender UB and an actual domain larger than 8 GiB");
+    large.dispatch.h = 65536;
+    CheckRejected(large, TILEXR_ERROR_NOT_SUPPORT); // Sufficient GM cannot compensate for insufficient sender UB.
     g_commArgs.peerMemBytes = ServerDedupTest::kPeerBytes;
     const auto savedPeer = g_commArgs.peerMems[63];
     g_commArgs.peerMems[63] = reinterpret_cast<GM_ADDR>(UINTPTR_MAX & ~uintptr_t(511U));

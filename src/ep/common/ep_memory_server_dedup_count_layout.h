@@ -5,10 +5,6 @@
 #include "ep_memory_server_dedup_buffer_layout.h"
 #include "tilexr_types.h"
 
-// Count participation threshold is independent of the compile-time send/receive split.
-#ifndef TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD
-#define TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD 512U
-#endif
 #include "ep_memory_server_dedup_mode.h"
 
 namespace TileXREp {
@@ -22,8 +18,13 @@ static_assert(
     kEpServerDedupSendCoreNum >= 16U && kEpServerDedupSendCoreNum <= 48U && kEpServerDedupSendCoreNum % 4U == 0U,
     "TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM must be 16..48 in steps of 4");
 constexpr uint32_t kEpServerDedupRecvCoreNum = kEpServerDedupCoreNum - kEpServerDedupSendCoreNum;
-// BS below this threshold uses all 64 cores for Count; otherwise only receivers.
-constexpr uint32_t kEpServerDedupAllCoreCountBsThreshold = TILEXR_EP_SERVER_DEDUP_ALL_CORE_COUNT_BS_THRESHOLD;
+#ifndef TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM
+#define TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM 32U
+#endif
+constexpr uint32_t kEpServerDedupCountCoreNum = TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM;
+static_assert(kEpServerDedupCountCoreNum >= 1U && kEpServerDedupCountCoreNum <= kEpServerDedupCoreNum,
+    "TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM must be 1..64");
+constexpr uint32_t kEpServerDedupFirstCountCore = kEpServerDedupCoreNum - kEpServerDedupCountCoreNum;
 constexpr uint32_t kEpServerDedupMaxExperts = 1024U;
 constexpr uint32_t kEpServerDedupCountRecordBytes = 32U;
 constexpr uint32_t kEpServerDedupCountGmStride = 512U;
@@ -47,6 +48,17 @@ static_assert(uint64_t(kEpServerDedupMaxExperts) * sizeof(int32_t) * kEpServerDe
 #else
 #define TILEXR_EP_DEDUP_INLINE inline
 #endif
+
+// Shared Host/kernel budget for the asynchronous records retained after SendCnt.
+// Only trailing Count cores with a nonempty expert partition reserve records.
+TILEXR_EP_DEDUP_INLINE uint32_t TileXREpServerDedupCountReservedBytes(uint32_t experts, uint32_t core)
+{
+    if (core < kEpServerDedupFirstCountCore || core - kEpServerDedupFirstCountCore >= experts) {
+        return 0U;
+    }
+    const uint32_t records = (experts + kEpServerDedupCountCoreNum - 1U) / kEpServerDedupCountCoreNum;
+    return (records + 7U) / 8U * 8U * kEpServerDedupCountRecordBytes;
+}
 
 // Matrix offsets are relative to cntOffset; cntOffset, counterOffset and
 // stateBytes are relative to the selected window. Leading padding is retained.

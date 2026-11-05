@@ -76,7 +76,9 @@ int TileXRMoeEpDispatchMemory(void *x, int32_t *expertIds, void *scales, bool *x
     TileXR::TileXRDataType dtype, TileXR::TileXRDataType expandXOutDtype, aclrtStream stream);
 
 // Server Dedup Dispatch 使用 A5 固定 64 AIV；发送/接收核数由
-// TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 编译期配置（默认 32/32，支持 16/24/32/40/48）。
+// TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM 编译期配置（默认 32/32，支持 16..48、步长 4）。
+// Count 独立使用末尾 C 个核，TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM 默认 32，支持 1..64。
+// Count 核完成计数发送后继续按原分工发送/接收 token，参与核数不随 BS 改变。
 // 剩余 AIV 用于接收；同一 communicator 生命周期内所有 Rank 必须保持相同且固定的核数配置。
 // build_all.sh dedup=auto|0|1 选择策略，默认 auto；须配套重建 Host、kernel 和布局消费者。
 // auto 固定采用去重资源/通信包布局，kernel 按原始每 rank BS <=32 关闭去重、>32 开启。

@@ -487,7 +487,10 @@ endforeach()
 # This tests arithmetic, strided addresses and cleanup, not CANN or device ordering.
 foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_dedup_counts_profile
         test_tilexr_ep_server_dedup_counts_send20 test_tilexr_ep_server_dedup_counts_send28
-        test_tilexr_ep_server_dedup_counts_send36 test_tilexr_ep_server_dedup_counts_send44)
+        test_tilexr_ep_server_dedup_counts_send36 test_tilexr_ep_server_dedup_counts_send44
+        test_tilexr_ep_server_dedup_counts_count1 test_tilexr_ep_server_dedup_counts_count16
+        test_tilexr_ep_server_dedup_counts_count31 test_tilexr_ep_server_dedup_counts_count48
+        test_tilexr_ep_server_dedup_counts_count64)
     add_executable(${test_target} unit/test_tilexr_ep_server_dedup_counts.cpp)
     target_include_directories(${test_target} PRIVATE
         unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS}
@@ -499,8 +502,14 @@ foreach(test_target test_tilexr_ep_server_dedup_counts test_tilexr_ep_server_ded
             $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_SEND_CORE_NUM=${_count_send_cores}>)
         set_property(TARGET ${test_target} PROPERTY TILEXR_TEST_DISPATCH_SEND_CORES ${_count_send_cores})
     endif()
+    if(test_target MATCHES "_count([0-9]+)$")
+        set(_count_cores ${CMAKE_MATCH_1})
+        target_compile_definitions(${test_target} PRIVATE
+            $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM=${_count_cores}>)
+        set_property(TARGET ${test_target} PROPERTY TILEXR_TEST_DISPATCH_COUNT_CORES ${_count_cores})
+    endif()
     add_test(NAME ${test_target} COMMAND ${test_target})
-    # Includes empty/uneven count segments and both sides of the BS512 threshold.
+    # Includes empty/uneven partitions and the former BS512 Count boundary.
     set_tests_properties(${test_target} PROPERTIES TIMEOUT 240)
     install(TARGETS ${test_target} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endforeach()
@@ -514,13 +523,18 @@ add_test(NAME test_tilexr_ep_server_dedup_profile COMMAND test_tilexr_ep_server_
 set_tests_properties(test_tilexr_ep_server_dedup_profile PROPERTIES TIMEOUT 30)
 install(TARGETS test_tilexr_ep_server_dedup_profile RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 
-foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_server_dedup_source_send_profile test_tilexr_ep_server_dedup_source_send_auto)
+foreach(test_target test_tilexr_ep_server_dedup_source_send test_tilexr_ep_server_dedup_source_send_profile test_tilexr_ep_server_dedup_source_send_auto test_tilexr_ep_server_dedup_source_send_count64)
     add_executable(${test_target} unit/test_tilexr_ep_server_dedup_source_send.cpp
         ${CMAKE_CURRENT_LIST_DIR}/../../src/ep/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.cpp)
     target_include_directories(${test_target} PRIVATE
         unit/server_dedup_count_fake ${TILEXR_EP_TEST_INCLUDE_DIRS} ${TILEXR_ROOT}/src/ep/kernels)
     target_compile_definitions(${test_target} PRIVATE __CCE__=1 __CCE_IS_AICORE__=1)
     set_target_properties(${test_target} PROPERTIES CXX_STANDARD 17)
+    if(test_target MATCHES "_count64$")
+        target_compile_definitions(${test_target} PRIVATE
+            $<$<NOT:$<BOOL:${TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM}>>:TILEXR_EP_SERVER_DEDUP_COUNT_CORE_NUM=64>)
+        set_property(TARGET ${test_target} PROPERTY TILEXR_TEST_DISPATCH_COUNT_CORES 64)
+    endif()
     add_test(NAME ${test_target} COMMAND ${test_target})
     # Five core splits plus runtime mode/window reuse take about 118s on blue.
     set_tests_properties(${test_target} PROPERTIES TIMEOUT 180)

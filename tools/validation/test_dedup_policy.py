@@ -16,7 +16,7 @@ class DedupPolicyTests(unittest.TestCase):
             for bs in (1, 31, 32, 33, 256):
                 with self.subTest(policy=policy, bs=bs), tempfile.TemporaryDirectory() as directory:
                     manifest = dict(server_dedup_enabled=layout, server_dedup_protocol=2,
-                        server_dedup_core_config=dict(dispatch_send_core_num=32, combine_send_core_num=32),
+                        server_dedup_core_config=dict(dispatch_send_core_num=32, combine_send_core_num=32, dispatch_count_core_num=32),
                         mode="host", checkpoint=None, server_dedup_contract=workflow.DISPATCH_ABI, server_dedup_combine_contract=workflow.combine_contract(), server_dedup_profiling=False,
                         architecture=platform.machine(), artifacts={})
                     if policy is not None:

@@ -48,7 +48,8 @@ void CheckReceiveUnpack(uint32_t h, bool quantized)
 
 void CheckDeferredCountSender()
 {
-    if (TileXREp::kEpServerDedupAllCoreCountBsThreshold <= 1U) return;
+    // Core 0 participates in Count only in the all-core configuration.
+    if (TileXREp::kEpServerDedupCountCoreNum != 64U) return;
     constexpr uint32_t experts = 384U, world = 64U, h = 32U;
     const auto data = TileXREp::TileXREpServerDedupDataLayout(1U, h, 1U, experts, false);
     const auto countLayout = TileXREp::TileXREpServerDedupCountLayout(experts);

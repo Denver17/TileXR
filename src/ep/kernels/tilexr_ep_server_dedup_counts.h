@@ -27,7 +27,6 @@ public:
         rscvStatusNum_ = experts;
         moeExpertNumPerRank_ = experts / epWorldSize_;
         expertTokenNumsType_ = expertTokenNumsType;
-        useAllCoreCount_ = bs < kEpServerDedupAllCoreCountBsThreshold;
         layout_ = TileXREpServerDedupCountLayout(experts);
         stateOffset_ = TileXREpServerDedupWindowOffset(magic, args_->peerMemBytes) + layout_.cntOffset;
         GM_ADDR localState = args_->peerMems[epRankId_] + stateOffset_;
@@ -116,7 +115,6 @@ private:
     uint32_t statusCntAlign_ = 0;
     uint32_t startStatusIndex_ = 0, endStatusIndex_ = 0, recStatusNumPerCore_ = 0;
     uint32_t activeCumSumCores_ = 0;
-    bool useAllCoreCount_ = false;
     GM_ADDR recvCntWorkspaceGM_ = nullptr;
     GM_ADDR sendCountsOutGM_ = nullptr;
     GlobalTensor<int32_t> expertIdsGMTensor_;
@@ -135,16 +133,17 @@ private:
 
 __aicore__ inline void ServerDedupCounts::SendCnt(ServerDedupProfile &profile)
 {
-    const uint32_t cores = useAllCoreCount_ ? kEpServerDedupCoreNum : aivUsedCumSum_;
+    const uint32_t cores = kEpServerDedupCountCoreNum;
     uint32_t start = 0, end = 0, count = 0;
-    if (useAllCoreCount_ || aivId_ >= aivUsedAllToAll_) {
-        const uint32_t core = useAllCoreCount_ ? aivId_ : aivId_ - aivUsedAllToAll_;
+    if (aivId_ >= kEpServerDedupFirstCountCore) {
+        const uint32_t core = aivId_ - kEpServerDedupFirstCountCore;
         SplitToCore(rscvStatusNum_, cores, core, start, end, count);
     }
-    statusCntAlign_ = count == 0U ? 0U : Ceil(Ceil(rscvStatusNum_, cores), UB_ALIGN_DATA_COUNT) * UB_ALIGN_DATA_COUNT;
+    statusCntAlign_ = TileXREpServerDedupCountReservedBytes(rscvStatusNum_, aivId_) / kEpServerDedupCountRecordBytes;
     if (count != 0U) {
         tpipe_->InitBuffer(statusBuf_, ReservedBytes());
     }
+    // Even non-Count cores need this pool for the following send/receive stage.
     tpipe_->InitBufPool(stagePool_, kEpServerDedupCountUbBytes - ReservedBytes());
     if (count == 0U) {
         return;
