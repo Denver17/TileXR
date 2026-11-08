@@ -1,14 +1,14 @@
 /* Copyright (c) 2026 TileXR Project. Licensed under the Apache License, Version 2.0. */
 
 /*
- * 功能：创建 NDA QP/CQ，分配 queue buffer 和 state，映射 doorbell，并校验导出的 device queue。
- * 调用关系：VerbsProvider 通过 RdmaNdaResources 调用本文件；动态加载 ibv_extend、verbs、ACL/HAL。
- * 资源与生命周期：记录扩展 handle、bootstrap MR、allocation 和 mapping；显式 cleanup 保留失败项供重试，析构不强制释放存活资源。
+ * 功能：创建 NDA QP/CQ 和 state，按实际队列容量分配 pending FIFO，映射 doorbell 并校验 device queue 描述。
+ * 调用关系：VerbsProvider 使用 RdmaNdaResources；本文件动态加载 ibv_extend、verbs 和 ACL/HAL。
+ * 资源与生命周期：记录 queue allocation、mapping 和 bootstrap MR；显式 teardown 保留失败项供重试，析构遇到存活资源时保留 Impl。
  *
- * Purpose: Create NDA QPs/CQs, allocate queue buffers and state, map doorbells and validate device queue exports.
- * Calls: VerbsProvider uses RdmaNdaResources; the implementation dynamically loads ibv_extend, verbs and ACL/HAL.
- * Lifetime: Tracks extension handles, bootstrap MR, allocations and mappings. Explicit cleanup retains failed items for retry;
- *           destruction leaves live resources allocated.
+ * Purpose: Create NDA QPs/CQs and state, size pending storage from queue capacity, map doorbells and validate device queue descriptors.
+ * Calls: VerbsProvider uses RdmaNdaResources, which dynamically loads ibv_extend, verbs and ACL/HAL.
+ * Lifetime: Tracks queue allocations, mappings and the bootstrap MR. Explicit teardown retains failed items for retry;
+ *           destruction retains Impl when resources remain live.
  */
 #include "rdma/tilexr_rdma_nda.h"
 #include "rdma/tilexr_rdma_transport.h"
@@ -134,6 +134,8 @@ struct RdmaNdaResources::Impl {
         ibv_qp_extend* qp = nullptr;
         ibv_cq_extend* cq = nullptr;
         void* state = nullptr;
+        void* pending = nullptr;
+        uint32_t pendingCapacity = 0;
         uint32_t maxSendSge = 0;
         uint32_t maxSendWr = 0;
     };
@@ -549,6 +551,10 @@ int RdmaNdaResources::Impl::View(const Queue& source, uint32_t gidIndex, uint32_
         !DeviceMemory(sq.qbuf.base, uint64_t(sq.qbuf.entry_cnt) * 64) ||
         !DeviceMemory(cq.qbuf.base, uint64_t(cq.qbuf.entry_cnt) * 64) ||
         !DeviceMemory(reinterpret_cast<uintptr_t>(source.state), sizeof(TileXRRDMADeviceState), false) ||
+        source.pendingCapacity != RdmaWire::PipelineRecordCapacity(sq.qbuf.entry_cnt,
+            cq.qbuf.entry_cnt, source.maxSendWr) ||
+        !DeviceMemory(reinterpret_cast<uintptr_t>(source.pending), uint64_t(source.pendingCapacity) * 8U, false) ||
+        (reinterpret_cast<uintptr_t>(source.pending) & 63U) != 0 ||
         (reinterpret_cast<uintptr_t>(source.state) & 63U) != 0 || qpn == 0 || qpn > 0xfffffU ||
         cos > 7 || gidIndex > 127 || mtuEnum < IBV_MTU_256 || mtuEnum > IBV_MTU_4096 ||
         // iov_len describes the 8-byte doorbell register. Hard mode selects
@@ -589,6 +595,8 @@ int RdmaNdaResources::Impl::View(const Queue& source, uint32_t gidIndex, uint32_
     queue.queueAbi = TILEXR_RDMA_QUEUE_ABI_UBNIC_V2;
     queue.maxSendSge = source.maxSendSge;
     queue.maxSendWr = source.maxSendWr;
+    queue.pendingBatches = reinterpret_cast<uintptr_t>(source.pending);
+    queue.pendingCapacity = source.pendingCapacity;
     return TILEXR_SUCCESS;
 }
 
@@ -776,6 +784,17 @@ int RdmaNdaResources::Create(int peer, ibv_pd* pd, ibv_qp*& qp, ibv_cq*& cq)
     if (queue->state == nullptr) { return TILEXR_ERROR_INTERNAL; }
     if (self.aclrtMemsetFn(queue->state, sizeof(TileXRRDMADeviceState), 0,
         sizeof(TileXRRDMADeviceState)) != 0) { return TILEXR_ERROR_INTERNAL; }
+    const uint32_t sqDepth = queue->qp->sq_info.qbuf.entry_cnt;
+    const uint32_t cqDepth = queue->cq->cq_info.qbuf.entry_cnt;
+    if (!PowerOfTwo(sqDepth) || !PowerOfTwo(cqDepth) || queue->maxSendWr == 0U) {
+        return TILEXR_ERROR_NOT_SUPPORT;
+    }
+    queue->pendingCapacity = RdmaWire::PipelineRecordCapacity(sqDepth, cqDepth, queue->maxSendWr);
+    // One record per potentially outstanding WR also covers one-WR tail batches
+    // and callers that change postBatch. Records are written before publication.
+    try { queue->pending = self.Allocate(size_t(queue->pendingCapacity) * sizeof(uint64_t), false); }
+    catch (...) { return TILEXR_ERROR_INTERNAL; }
+    if (queue->pending == nullptr) { return TILEXR_ERROR_INTERNAL; }
     return self.callbackStatus;
 }
 

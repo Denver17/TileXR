@@ -1,3 +1,12 @@
+/*
+ * 功能：计算 benchmark 的 SGE 地址和 warmup slot；Host 侧另计算 source/target 布局、payload 标识及保护区预期值。
+ * 调用关系：bench/multiqp 使用 Host 布局初始化、校验 buffer，AIV kernel 复用地址 helper；CPU 布局测试也调用这些函数。
+ * 资源与生命周期：只计算大小、地址偏移和预期值，不分配或持有 payload buffer。
+ *
+ * Purpose: Compute benchmark SGE addresses/warmup slots and, on Host, source/target layouts, payload tags and expected guard contents.
+ * Calls: bench/multiqp initialize and verify buffers using Host helpers; AIV kernels share address helpers and CPU layout tests exercise them.
+ * Lifetime: Computes sizes, offsets and expected values without allocating or owning payload buffers.
+ */
 #pragma once
 #include <stdint.h>
 // Shared by the Host layout and the scalar kernel descriptor builder. Logical
@@ -11,6 +20,10 @@ RDMA_BENCH_INLINE uint64_t SgeSourceOffset(uint64_t source, uint32_t payload,
     uint32_t numSge, uint32_t entry)
 {
     return source + uint64_t(numSge - 1U - entry) * (uint64_t(payload) + (numSge > 1U ? 64U : 0U));
+}
+RDMA_BENCH_INLINE uint32_t MultiQpWarmupSlot(uint32_t call, uint32_t count, uint32_t cyclicSlots)
+{
+    return cyclicSlots != 0U ? 1U % cyclicSlots : call % count;
 }
 #undef RDMA_BENCH_INLINE
 

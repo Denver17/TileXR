@@ -1,13 +1,13 @@
 /* Copyright (c) 2026 TileXR Project. Licensed under the Apache License, Version 2.0. */
 
 /*
- * 功能：检查各 rank 的 RDMA 启用配置，初始化可选 transport，并转发公共 RDMA Host API。
- * 调用关系：TileXRComm::Init 调用初始化；Host API 经 TileXRRDMATransport 执行操作，socket AllGather 交换配置。
- * 资源与生命周期：communicator 持有 transport；显式 Shutdown 成功后才 reset，失败时保留对象。
+ * 功能：检查各 rank 的 RDMA 启用配置，初始化可选 transport，并实现公共 Host API 的参数检查与转发。
+ * 调用关系：TileXRComm 调用初始化和 teardown；Host API 转给 TileXRRDMATransport，rank 配置通过 socket AllGather 交换。
+ * 资源与生命周期：communicator 持有 transport；FinalizeRDMA 仅在 Shutdown 成功后销毁它，失败时保留对象。
  *
- * Purpose: Check RDMA enablement across ranks, initialize the optional transport and forward public RDMA Host APIs.
- * Calls: TileXRComm::Init starts setup; Host APIs call TileXRRDMATransport, using socket AllGather for configuration exchange.
- * Lifetime: The communicator owns the transport; explicit Shutdown resets it only on success, retaining it on failure.
+ * Purpose: Check RDMA enablement across ranks, initialize the optional transport and validate/forward public Host API calls.
+ * Calls: TileXRComm invokes setup/teardown; Host APIs use TileXRRDMATransport and socket AllGather exchanges rank settings.
+ * Lifetime: The communicator owns the transport; FinalizeRDMA destroys it only after successful Shutdown, retaining it on failure.
  */
 #include "rdma/tilexr_rdma_transport.h"
 #include <algorithm>
@@ -134,7 +134,7 @@ int TileXRRDMAGet(void* comm, TileXRRDMAMemHandle handle, int peer,
         transport->Transfer(true, handle, peer, localOffset, remoteOffset, bytes);
 }
 
-int TileXRRDMAGetDeviceViewV2(void* comm, TileXRRDMAMemHandle handle, int peer,
+int TileXRRDMAGetDeviceViewV3(void* comm, TileXRRDMAMemHandle handle, int peer,
     TileXRRDMADeviceView* view)
 {
     if (view != nullptr) { *view = TileXRRDMADeviceView {}; }
@@ -142,7 +142,7 @@ int TileXRRDMAGetDeviceViewV2(void* comm, TileXRRDMAMemHandle handle, int peer,
     auto* transport = Transport(comm);
     return transport == nullptr ? TileXR::TILEXR_ERROR_NOT_SUPPORT : transport->DeviceView(handle, peer, view);
 }
-int TileXRRDMAGetDeviceViews(void* comm, TileXRRDMAMemHandle handle, int peer,
+int TileXRRDMAGetDeviceViewsV3(void* comm, TileXRRDMAMemHandle handle, int peer,
     TileXRRDMADeviceView* views, uint32_t qpCount)
 {
     if (views != nullptr && qpCount >= 1 && qpCount <= TILEXR_RDMA_MAX_QPS) {

@@ -1,3 +1,12 @@
+/*
+ * 功能：验证 NDA queue 容量、pending FIFO、device queue 导出、mapping 共享，以及创建和清理失败后的重试行为。
+ * 调用关系：调用实际 RdmaNdaResources；fake verbs、ibv_extend、ACL/HAL DSO 提供资源计数和失败注入。
+ * 资源与生命周期：测试显式调用 DestroyQueues/Close 并检查资源计数；不创建真实 NPU/NIC 资源。
+ *
+ * Purpose: Test NDA queue capacity, pending FIFOs, queue exports, shared mappings and retry behavior after setup/cleanup failures.
+ * Calls: Exercises real RdmaNdaResources with resource counters and failure injection from fake verbs, ibv_extend and ACL/HAL DSOs.
+ * Lifetime: Explicitly calls DestroyQueues/Close and checks resource counts; creates no real NPU/NIC resources.
+ */
 #include "rdma/tilexr_rdma_nda.h"
 #include "rdma/tilexr_rdma_transport.h"
 #include <infiniband/verbs.h>
@@ -60,6 +69,10 @@ int main()
         TileXRRDMADeviceQueue view {};
         assert(resource.DeviceQueue(1, 1, IBV_MTU_1024, view) == 0);
         assert(view.sqDepth == limits.sqDepth && view.cqDepth == limits.cqDepth);
+        assert(view.pendingBatches && (view.pendingBatches & 63U) == 0 && view.pendingReserved == 0);
+        const uint32_t sqSlots = view.sqDepth - 1U, cqSlots = view.cqDepth - 1U;
+        const uint32_t ringSlots = sqSlots < cqSlots ? sqSlots : cqSlots;
+        assert(view.pendingCapacity == (ringSlots < view.maxSendWr ? ringSlots : view.maxSendWr));
         assert(resource.DestroyQueues() == 0 && resource.Close() == 0);
         assert(queues() == 0 && allocated() == 0 && mappings() == 0 && segments() == 0);
     }
@@ -179,10 +192,12 @@ int main()
         assert(first.sqDbValue == (uint64_t(qp->qp_num) | (1ULL << 20) | (3ULL << 24) |
             (21ULL << 27) | (2ULL << 50) | (1ULL << 53)));
         assert(resource.DeviceQueue(1, 1, IBV_MTU_1024, second) == 0 && second.state == first.state);
+        assert(second.pendingBatches == first.pendingBatches && second.pendingCapacity == first.pendingCapacity);
         assert(resource.Create(2, &pd, qp, cq) == 0);
         assert(mrs(&pd) == 1); // One FE registration is shared across this owner's queues.
         assert(mappings() == 1 && queues() == 4); // Same doorbell page, independent QPs.
         assert(resource.DeviceQueue(2, 1, IBV_MTU_1024, second) == 0 && second.state != first.state);
+        assert(second.pendingBatches != first.pendingBatches);
         assert(resource.Close() != 0); // Cannot unload live callbacks/memory.
         failDestroy(1);
         assert(resource.DestroyQueues() != 0 && queues() == 2);

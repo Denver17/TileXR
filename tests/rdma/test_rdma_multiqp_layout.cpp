@@ -1,3 +1,10 @@
+/*
+ * 功能：检查 multi-QP benchmark 的 payload 标识、SGE gather、保护区，以及 warmup 和测量阶段的地址范围。
+ * 调用关系：复用 multiqp_layout.h 的布局和预期值计算，在 CPU vector 中复制 payload 并注入数据损坏；覆盖批量和单 WQE 模式。
+ *
+ * Purpose: Check multi-QP payload identity, SGE gather, guards and warmup/measured address extents.
+ * Calls: Reuses multiqp_layout.h layout/expectation helpers, copies payloads in CPU vectors and injects corruption in batched/single-WQE modes.
+ */
 #include "../../tools/rdma_compare/multiqp_layout.h"
 #include <algorithm>
 #include <array>
@@ -54,10 +61,70 @@ bool Matches(const Memory& memory, const CaseLayout& l, uint32_t qp, uint32_t co
     }
     return true;
 }
+
+void SingleWqeLayout()
+{
+    if (!kMultiQpSingleWqeCalls) {
+        const auto l = MultiQpCaseLayout(512,48,1);
+        assert(l.slots == CyclicSlots(512) && l.cycles == l.slots);
+        return;
+    }
+    for (uint32_t n : {1U,2U,16U}) {
+        for (uint32_t count : {1U,32U,33U,48U,129U}) {
+            const auto l = MultiQpCaseLayout(512,count,n);
+            assert(l.cycles == 0 && l.slots == count);
+            for (uint32_t direction : {0U,1U}) {
+                auto memory = Initial(l,0);
+                for (uint32_t call = 0; call < kMultiQpWarmupCalls + count; ++call) {
+                    const uint32_t slot = call < kMultiQpWarmupCalls ? call % count : call - kMultiQpWarmupCalls;
+                    const uint64_t target = l.target + uint64_t(slot)*l.targetStride;
+                    assert(target + l.totalWqeBytes <= l.bytes);
+                    for (uint32_t entry = 0; entry < n; ++entry) {
+                        const uint64_t source = l.SourceOffset(slot,entry);
+                        assert(source + l.sgeBytes <= l.target);
+                        std::copy_n(memory[direction].begin()+source/8,l.sgeBytes/8,
+                            memory[1-direction].begin()+(target+entry*uint64_t(l.sgeBytes))/8);
+                    }
+                }
+                assert(Matches(memory,l,0,count,direction));
+            }
+        }
+    }
+}
+
+void BatchedWarmupLayout()
+{
+    if (kMultiQpSingleWqeCalls) { return; }
+    for (uint32_t bytes : {512U,1048576U}) {
+        for (uint32_t sge : {1U,2U,16U}) {
+            for (uint32_t count : {1U,8U,48U}) {
+                const auto l = MultiQpCaseLayout(bytes,count,sge);
+                assert(kMultiQpWarmupCalls % l.cycles == 0U);
+                auto memory = Initial(l,0);
+                for (uint32_t call = 0; call < kMultiQpWarmupCalls; ++call) {
+                    const auto slot = MultiQpWarmupSlot(call,count,l.cycles);
+                    for (uint32_t entry = 0; entry < sge; ++entry) {
+                        const auto from = l.SourceOffset(slot,entry);
+                        const auto to = l.target + slot*l.targetStride + entry*uint64_t(bytes);
+                        std::copy_n(memory[0].begin()+from/8,bytes/8,memory[1].begin()+to/8);
+                    }
+                }
+                Transfer(memory,l,count,0);
+                assert(Matches(memory,l,0,count,0));
+            }
+        }
+    }
+}
 }
 
 int main()
 {
+    SingleWqeLayout();
+    BatchedWarmupLayout();
+    if (kMultiQpSingleWqeCalls) {
+        std::puts("rdma_multiqp_single_layout: PASS (linear slots, address extents, gather and full guards)");
+        return 0;
+    }
     // QP/entry/slot swaps must never impersonate another payload or a guard.
     for (uint32_t n : {1U,2U,4U,8U,16U}) {
         std::set<uint64_t> tags;

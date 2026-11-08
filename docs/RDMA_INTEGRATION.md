@@ -123,7 +123,11 @@ purpose/dependency overviews at the start of each source file.
 5. Export Host POD views only after successful setup/registration, then copy them
    to GM. One QP has one state allocation across every MR/view; registration does
    not reset counters. Do not reuse expired/failed exports.
-6. Quiesce all local kernels/streams and remote consumers before collective cleanup.
+6. On the success path, explicitly `RDMAWait` on every owned QP before reusing
+   source data or notifying remote consumers. Pending sends span calls and MR
+   views; `aclrtSynchronizeStream` after a submit-only kernel is not an RDMA
+   completion proof. Quiesce all local kernels/streams and remote consumers before
+   collective cleanup.
    Destroy all peer QPs/CQs on every rank and agree success **before** MR release;
    then release segments, PD and context. Partial release retains ownership for retry.
 
@@ -162,14 +166,36 @@ Applications normally use `tilexr_rdma_write.h`. The lower-level entries in
 
 | Entry | Completion and capacity model | Required UB scratch |
 | --- | --- | ---: |
-| `RDMAPut` / `RDMAPutStridedBatch` | All WRs signaled; batch window bounded by actual WR/SQ/CQ limits. Single-SGE SQ/CQ ring reuse is supported by the low-level algorithm. | 512B |
-| `RDMAPutSgeList` | One gathered WRITE and one CQE; rejects the WQE/stop crossing the physical SQ tail. | 512B |
-| `RDMAPutPipeline` | Up to two batches, each signaling its final WR; no physical SQ/CQ reuse. | 4608B |
-| `RDMAPutSgeListPipeline` | Same scheduler with 1..16 gathered segments; SQ accounting uses multiple BBs per WR; no physical SQ/CQ reuse. | 20992B |
+| `RDMAPut` / `RDMAPutStridedBatch` | Synchronous completion, all WRs signaled; batch window bounded by actual WR/SQ/CQ limits. Single-SGE SQ/CQ ring reuse is supported by the low-level algorithm. | 512B |
+| `RDMAPutSgeList` | Synchronous completion of one gathered WRITE and one CQE; rejects the WQE/stop crossing the physical SQ tail. | 512B |
+| `RDMAPutPipeline` | Submit-only, per-QP SQ/WR-adaptive pending window across calls, each batch signaling its final WR; backpressure may wait; no physical SQ/CQ reuse. | 4608B |
+| `RDMAPutSgeListPipeline` | Same submit-only scheduler with 1..16 gathered segments; SQ accounting uses multiple BBs per WR; no physical SQ/CQ reuse. | 20992B |
+| `RDMAWait(view, scratch, maxPolls = 1000000U)` | Drains all shared pending pipeline batches on the selected QP, including other MR views; valid healthy empty/repeated waits do not poll. | Reuse WRITE scratch; only the 512B base workspace is used. |
 
-All scratch is 32B-aligned caller-owned UB and remains valid through the call.
-Every posted error leaves sticky QP state. Sparse signaling tags the QP mode:
-a fully drained all-signaled QP may enter pipeline, but cannot return to an
+All scratch is 32B-aligned caller-owned UB and remains valid through each call.
+The pipeline and public `RDMAWrite*` adapters return success after submitting
+the current WRs, without an unconditional tail drain. They can still block on
+the oldest batch for WR-window, SQ or pending-record backpressure. `RDMAWait`, declared
+in `tilexr_rdma_device.h` and available through `tilexr_rdma_write.h`, provides
+the explicit send-completion boundary. It returns a device status that callers
+must check; it neither traverses other QPs nor synchronizes remote consumers.
+Each multi-QP owner waits on `views + qpIndex` with its own scratch and poll budget.
+Host Put/Get and the legacy all-signaled device entries remain synchronous.
+
+WQE publication and its MTE work finish within submission, so UB scratch and
+kernel-local SGE descriptors can be reused when WRITE returns. Reuse the WRITE
+scratch for Wait and keep it valid during Wait. Do not confuse those temporary
+descriptors with the source HBM still read by the NIC: source contents, MRs,
+QPs, shared state and relevant views remain owned through completion. Preserve
+single-AIV QP ownership and ordered use across calls, MR views, streams and
+kernels; no concurrent access capability is added. A submit-only kernel may
+exit before the NIC completes, so stream sync alone is insufficient. Before
+freeing allocations, also quiesce users and complete collective cleanup.
+
+Both submission backpressure and Wait can report CQE errors or timeouts.
+Every posted error leaves sticky QP state and does not cancel memory references;
+retain resources for the existing quiesce/destroy protocol. Sparse signaling tags
+the QP mode: a fully drained all-signaled QP may enter pipeline, but cannot return to an
 all-signaled API. Public `RDMAWriteSge` selects the smaller single-segment
 pipeline for one SGE; use `RDMAWriteScratchBytes` for application sizing.
 
@@ -185,14 +211,26 @@ Assemble WQEs in UB. Publish the invalid stop, then continuation/tail BBs, then
 the first control BB through completed MTE3 before ringing `st_dev`. A bulk copy
 is not atomic across cache lines; NIC prefetch must never see valid control with
 an unpublished tail. Keep fresh cache invalidation/CQE reads and event ordering.
-The device adapter loads the view header first and rejects a smaller V1 view
-before reading V2-only fields.
+The device adapter loads the view header first and rejects older/smaller views
+before reading V3-only fields. Both Host view-output C symbols are versioned V3
+as well, so an old caller cannot provide an undersized output allocation.
 
 SQ `producer/completed` count BBs, CQ CI counts completion slots, and pipeline
 WR ordinal is independent. CQE identity checks use the correct WR sequence;
 partial successful prefixes do not retire a failed window. `maxPolls` bounds
 snapshots per expected completion, not elapsed milliseconds. AIV errors require
 kernel/state inspection in addition to the Host `Query.failed` value.
+
+The 64B QP state persists FIFO producer/consumer and pending WR counts across
+calls/MR views. Each QP additionally owns an HBM array of 8B records, with capacity
+`min(maxSendWr, sqDepth-1, cqDepth-1)`. Each record stores the SQ end, final WR
+identity and actual WR count. This covers variable batches and single-WR tails,
+not just `ceil(window / currentBatch)` records. Backpressure checks pending WRs
+against the effective SQ/WR window plus an optional application cap; BB differences
+cannot replace WR counts when adjacent calls change SGE count or batch size.
+Wait retires records FIFO only after a successful matching CQE. Software record
+slots may be reused; hardware SQ/CQ wrap remains forbidden. The record buffer
+shares QP lifetime and cleanup, is never NIC-registered, and is shared by all MR views.
 
 ### Limits, reuse and ABI
 
@@ -204,17 +242,27 @@ cannot meet a 4096-in-flight request just because its ring has more BBs.
 
 The low-level all-signaled batch defaults to a 4096-WR upper window, additionally
 bounded by `maxSendWr`, `sqDepth-1` and `cqDepth-1`. Public WRITE defaults instead
-to batch64/max128 and checks the **entire cumulative call** before posting; see
+to requested batch64 and `min((sqDepth-1)/WqeBlocks(numSge), maxSendWr)` WRs in flight.
+A positive application `maxInFlight` only narrows that window; the default
+`UINT32_MAX` adds no cap. Actual batch length is `min(postBatch, window)`.
+WRITE checks the **entire cumulative call** before posting; see
 [capacity formulas](RDMA_API.md#5-参数与容量--options-and-capacity). Warmups, control
-WRs and previous calls consume capacity too. Fresh QPs, not in-place state reset,
-are needed to keep tests free of wrap. For example, seven rounds of 1000 data
+WRs and pending batches from earlier calls/MR views count toward admission:
+reserve their unconsumed CQEs as well as new batch CQEs before any backpressure
+drain or publication. Consuming CQEs does not restore physical no-wrap capacity.
+Fresh QPs, not in-place state reset, are needed to keep tests free of wrap.
+For example, seven rounds of 1000 data
 WRs plus one control WR each need 7007 entries, exceeding a 4096-entry ring.
 
-V2 exports a 152B view, 104B queue, 64B state and 16B SGE. The Host symbol is
-`TileXRRDMAGetDeviceViewV2`; the old source spelling maps to it. Rebuild library,
+V3 exports a 168B view, 120B queue, 64B state and 16B SGE. The Host symbols are
+`TileXRRDMAGetDeviceViewV3` and `TileXRRDMAGetDeviceViewsV3`; the source spellings
+without suffixes map to them. Rebuild library,
 Host application, kernels and headers together, and recreate queues/views.
 Never reuse stale views after unregister/shutdown or fabricate copies of QP state.
-WRITE completion does not notify a remote consumer or order different QPs.
+Adaptive pending storage grows the view/queue from V2 and changes state semantics;
+matching library/application/kernel/header implementations are required on a QP.
+Do not mix old and new pipeline code. Successful Wait does not notify a remote consumer or order
+different QPs.
 
 ## Verification
 
@@ -256,6 +304,13 @@ mock cases. A 14-case Host run without those headers must not be described as a
 The following results were retained in the supplied patch. They were not rerun
 for this documentation revision and qualify only their recorded sources, binaries,
 environments and cases.
+
+The submit/explicit-wait change is not qualified by those historical synchronous
+runs. It remains unqualified pending matching CANN compilation and device evidence
+from the green validation target for data, cross-call completion, errors/timeouts
+and teardown. Both benchmark kernels
+include successful Wait in their timed intervals; early submission return is not
+a bandwidth improvement, and this migration makes no performance claim.
 
 The supplied patch records a 41-case public multi-QP/WRITE API regression on 2026-11-04
 on host 79, physical devices 0/2, CANN 9.3.0 and driver 25.9.rc1.8. This includes
@@ -374,6 +429,20 @@ or launch can add event time outside the kernel's counter interval. Log measured
 ticks, event duration and ratio before rejecting a calibration; failed samples
 do not become bandwidth measurements. Calibration must not post WQEs or consume
 the fresh QP's queue progress.
+
+When migrating a caller from synchronous WRITE to submission plus explicit
+Wait, keep Wait inside any completed-transfer timer and propagate its error.
+Stream synchronization proves kernel exit, not completion of pending RDMA.
+Only UB scratch and kernel-local SGE descriptors are reusable on submission
+return; source HBM and MR/QP/view ownership persist until completion or safe
+collective teardown. CPU tests and historical measurements cannot qualify the
+new device-completion boundary or establish a performance gain.
+
+从同步 WRITE 迁移到提交加显式 Wait 时，completed-transfer 计时必须包含 Wait，
+并传播其错误。stream sync 仅证明 kernel 退出，不证明 pending RDMA 完成。
+提交返回后可复用的是 UB scratch 和 kernel-local SGE 描述符，不是 NIC 仍可能读取的
+source HBM；MR/QP/view 必须保留至完成或安全集体清理。CPU 测试及历史测量不证明
+新完成边界的设备正确性或性能收益。
 
 - An A5 L3 RoCE connection needs GID/QPN/PSN/rkey metadata; UB EID/Jetty/token
   metadata cannot describe it. Keep capability and memory contracts separate.

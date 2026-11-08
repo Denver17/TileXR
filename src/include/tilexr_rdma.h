@@ -1,13 +1,13 @@
 /* Copyright (c) 2026 TileXR Project. Licensed under the Apache License, Version 2.0. */
 
 /*
- * 功能：声明 RDMA 的 QP 配置、内存注册、Host 传输和 AIV view 查询接口。
- * 调用关系：由 tilexr_api.h 引入；tilexr_rdma_api.cpp 将请求转给 communicator 的 transport。
- * 资源与生命周期：注册不转移 payload buffer 所有权；调用方须停止本地和远端使用，再注销或关闭 transport。
+ * 功能：声明 RDMA Host API，用于查询能力、配置 QP、注册内存、发起 Host 传输和导出 AIV view。
+ * 调用关系：tilexr_api.h 引入本文件；tilexr_rdma_api.cpp 将调用转给 communicator 的 transport。
+ * 资源与生命周期：注册不转移 payload buffer 所有权；调用方须停止本地和远端使用，且注销或 Shutdown 成功后才能释放 buffer。
  *
- * Purpose: Declare RDMA QP configuration, memory registration, Host transfers and AIV view queries.
- * Calls: Included by tilexr_api.h; tilexr_rdma_api.cpp forwards requests to the communicator's transport.
- * Lifetime: Registration retains caller ownership of payload buffers; quiesce local and remote users before deregistration or shutdown.
+ * Purpose: Declare Host APIs for RDMA capability queries, QP setup, memory registration, Host transfers and AIV view export.
+ * Calls: Included by tilexr_api.h; tilexr_rdma_api.cpp forwards calls to the communicator's transport.
+ * Lifetime: Payload buffers remain caller-owned; quiesce local/remote users and successfully unregister or shut down before freeing them.
  */
 #ifndef TILEXR_RDMA_H
 #define TILEXR_RDMA_H
@@ -70,22 +70,24 @@ int TileXRRDMAGet(void *comm, TileXRRDMAMemHandle handle, int peer,
 
 /* Host-side descriptor for kernel RDMA. Copy the returned POD to device memory.
  * Requires TILEXR_RDMA_MODE=aiv and a supported NDA provider. No Host fallback.
- * A QP has one AIV owner across ALL views/regions/streams. Complete each operation
- * before the next; synchronize streams and remote consumers before unregister or
- * destroy. Views expire at unregister/destroy and must never be used afterwards.
+ * A QP has one AIV owner across ALL views/regions/streams. Serialize calls under
+ * that owner; pipeline submissions may remain pending until RDMAWait. Complete
+ * sends and synchronize streams/remote consumers before unregister or destroy.
+ * Views expire at unregister/destroy and must never be used afterwards.
  * Queue counters are transport-owned and shared by every region's view. */
-/* V2 grows the output POD. Version the C symbol as well so loading an old
- * Host binary cannot write a 152-byte view into a V1 144-byte allocation.
- * The source-level spelling remains available; rebuild Host and kernel together. */
-#define TileXRRDMAGetDeviceView TileXRRDMAGetDeviceViewV2
-int TileXRRDMAGetDeviceViewV2(void *comm, TileXRRDMAMemHandle handle, int peer,
+/* V3 grows the output POD to 168 bytes. Version both C symbols so an old
+ * caller cannot receive a larger view in its V1/V2 allocation.
+ * Source-level spellings remain available; rebuild Host, library and kernel together. */
+#define TileXRRDMAGetDeviceView TileXRRDMAGetDeviceViewV3
+int TileXRRDMAGetDeviceViewV3(void *comm, TileXRRDMAMemHandle handle, int peer,
     TileXRRDMADeviceView *view);
 /* Host output array, exactly qpCount elements matching ConfigureQps. Every view
  * shares this registration's memory but owns an independent QP/state. Copy the
  * array to device memory and assign one AIV owner per index. Partition remote
  * offsets explicitly; there is no ordering across QPs. Failure clears the output
- * when qpCount is in the supported range. The V2 single-view API selects QP0. */
-int TileXRRDMAGetDeviceViews(void *comm, TileXRRDMAMemHandle handle, int peer,
+ * when qpCount is in the supported range. The single-view API selects QP0. */
+#define TileXRRDMAGetDeviceViews TileXRRDMAGetDeviceViewsV3
+int TileXRRDMAGetDeviceViewsV3(void *comm, TileXRRDMAMemHandle handle, int peer,
     TileXRRDMADeviceView *views, uint32_t qpCount);
 
 #ifdef __cplusplus

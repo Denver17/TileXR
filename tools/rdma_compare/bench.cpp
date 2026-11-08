@@ -1,9 +1,20 @@
+/*
+ * 功能：运行两 rank、单 QP WRITE benchmark，校准计时器，校验 payload/保护区和队列进度，再输出性能样本。
+ * 调用关系：通过 TileXR Host API 创建 communicator、注册内存并导出 view；注册并启动 bench_kernel.cpp 生成的 ELF，socket 交换阶段状态。
+ * 资源与生命周期：Benchmark 持有 stream、MR backing buffer 和 launch 资源；Cleanup 等待 stream、销毁 communicator 后释放 buffer，中途失败则停止清理。
+ *
+ * Purpose: Run a two-rank, single-QP WRITE benchmark, calibrate timing, verify payloads/guards/queue progress and report samples.
+ * Calls: TileXR Host APIs create the communicator, register memory and export views; launches the bench_kernel.cpp ELF and exchanges phases over sockets.
+ * Lifetime: Benchmark owns the stream, MR backing and launch resources. Cleanup waits for the stream, destroys the communicator, then frees buffers;
+ *           a failure stops subsequent cleanup.
+ */
 #include "tilexr_api.h"
 #include "tilexr_rdma.h"
 #include "tilexr_rdma_wire.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 #include "bench_abi.h"
 #include "case_layout.h"
+#include "profile_capture.h"
 #include <acl/acl.h>
 #include <runtime/kernel.h>
 #include <algorithm>
@@ -77,10 +88,12 @@ public:
     }
 
     BenchResult Launch(bool calibration) {
+        WriteProfileCapture profile;
+        void* profileGM = profile.Prepare(socket_, stream_, rank_, 1, calibration);
         Check(aclrtMemset(resultGM_, sizeof(BenchResult), 0, sizeof(BenchResult)), "clear results");
         BenchArgs args{reinterpret_cast<uintptr_t>(viewGM_), reinterpret_cast<uintptr_t>(resultGM_),
             layout_.source, layout_.target, layout_.stride, payload_, count_, rank_, direction_, layout_.cycles,
-            uint32_t(calibration), layout_.targetStride, sgeCount_, 0U};
+            uint32_t(calibration), layout_.targetStride, sgeCount_, 0U, reinterpret_cast<uintptr_t>(profileGM)};
         rtArgsEx_t launch{}; launch.args = &args; launch.argsSize = sizeof(args);
         rtTaskCfgInfo_t task{};
         Check(aclrtRecordEvent(eventStart_, stream_), "start event");
@@ -89,6 +102,7 @@ public:
         Check(aclrtSynchronizeStreamWithTimeout(stream_, 20000), "stream sync");
         BenchResult result{};
         Check(aclrtMemcpy(&result, sizeof(result), resultGM_, sizeof(result), ACL_MEMCPY_DEVICE_TO_HOST), "read result");
+        profile.Export();
         if (result.magic != 0x5458524D41544348ULL || result.status || result.error) {
             std::cerr << "KERNEL_RESULT rank=" << rank_ << " calibration=" << calibration
                 << " magic=" << result.magic << " status=" << result.status << " error=" << result.error

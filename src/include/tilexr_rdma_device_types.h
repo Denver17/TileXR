@@ -1,13 +1,13 @@
 /* Copyright (c) 2026 TileXR Project. Licensed under the Apache License, Version 2.0. */
 
 /*
- * 功能：定义 Host/AIV 共享的 view、queue、state、SGE 布局和状态码，不依赖 CANN kernel 头文件。
- * 调用关系：Host provider 填写这些结构，device/wire/write 层读取并使用其中的地址和 key。
- * 资源与生命周期：结构只描述资源；复制 view 不会复制或接管底层 MR、QP 或 state。
+ * 功能：定义 Host 与 AIV 共享的 view、queue、state、SGE 布局及状态码，不依赖 CANN kernel 头文件。
+ * 调用关系：Host provider 填写资源描述；device、wire 和 pipeline 使用其中的地址、key 与队列容量。
+ * 资源与生命周期：结构不持有底层资源；同一 QP 的各 MR view 共享 queue、state 和 pending FIFO，复制 view 不转移所有权。
  *
  * Purpose: Define Host/AIV view, queue, state, SGE layouts and status codes without CANN kernel headers.
- * Calls: Host providers fill these structures; device/wire/write code consumes their addresses and keys.
- * Lifetime: These are resource descriptors; copying a view neither copies nor takes ownership of the MR, QP or state.
+ * Calls: Host providers fill descriptors; device, wire and pipeline code consume addresses, keys and queue capacities.
+ * Lifetime: Descriptors do not own resources. MR views of one QP share its queue, state and pending FIFO; copying a view transfers no ownership.
  */
 #ifndef TILEXR_RDMA_DEVICE_TYPES_H
 #define TILEXR_RDMA_DEVICE_TYPES_H
@@ -18,7 +18,7 @@
 /* Host/device ABI: fixed-width, pointer-free PODs. All addresses are device VAs.
  * The provider must validate actual NDA resources and this queue ABI before
  * exporting a view. These structures do not enable a capability or select a Host fallback. */
-#define TILEXR_RDMA_DEVICE_VERSION 2U
+#define TILEXR_RDMA_DEVICE_VERSION 3U
 #define TILEXR_RDMA_QUEUE_ABI_UBNIC_V1 1U
 #define TILEXR_RDMA_QUEUE_ABI_UBNIC_V2 2U
 #define TILEXR_RDMA_DEVICE_MAX_SGE 16U
@@ -51,7 +51,7 @@ typedef struct TileXRRDMADeviceState {
     uint64_t cqConsumer;     /* Next absolute CQ slot; legacy all-signaled WR ordinal. */
     uint32_t error;          /* Sticky TileXRRDMADeviceStatus; zero is healthy. */
     uint32_t syndrome;       /* Raw CQE syndrome on failure. */
-    uint64_t reserved[4];    /* Opt-in pipeline: [0] mode tag, [1] next WR ordinal. */
+    uint64_t reserved[4];    /* Pipeline: tag, next WR, next batch ordinal, pending WR count. */
 } TileXRRDMADeviceState;
 
 typedef struct TileXRRDMADeviceQueue {
@@ -73,6 +73,9 @@ typedef struct TileXRRDMADeviceQueue {
     uint32_t queueAbi;       /* TILEXR_RDMA_QUEUE_ABI_UBNIC_V2. */
     uint32_t maxSendSge;     /* Negotiated QP limit, capped at DEVICE_MAX_SGE. */
     uint32_t maxSendWr;      /* Admitted outstanding WRs, independent of BBs. */
+    uint64_t pendingBatches; /* Transport-owned HBM FIFO; each record is one uint64_t. */
+    uint32_t pendingCapacity;/* Record slots, shared by all MR views of this QP. */
+    uint32_t pendingReserved;/* Must be zero. */
 } TileXRRDMADeviceQueue;
 
 /* Sources within deviceView.localAddress/localBytes, all using its localKey.
@@ -89,7 +92,7 @@ typedef struct TileXRRDMADeviceSge {
  * alone does not notify or synchronize a remote consumer. */
 typedef struct TileXRRDMADeviceView {
     uint32_t version;        /* TILEXR_RDMA_DEVICE_VERSION. */
-    uint32_t structBytes;    /* sizeof(TileXRRDMADeviceView), currently 152. */
+    uint32_t structBytes;    /* sizeof(TileXRRDMADeviceView), currently 168. */
     uint64_t localAddress;
     uint64_t localBytes;
     uint64_t remoteAddress;
@@ -102,11 +105,12 @@ typedef struct TileXRRDMADeviceView {
 #ifdef __cplusplus
 static_assert(sizeof(TileXRRDMADeviceState) == 64, "RDMA state ABI");
 static_assert(sizeof(TileXRRDMADeviceSge) == 16, "RDMA SGE ABI");
-static_assert(sizeof(TileXRRDMADeviceQueue) == 104, "RDMA queue ABI");
-static_assert(sizeof(TileXRRDMADeviceView) == 152, "RDMA view ABI");
+static_assert(sizeof(TileXRRDMADeviceQueue) == 120, "RDMA queue ABI");
+static_assert(sizeof(TileXRRDMADeviceView) == 168, "RDMA view ABI");
 static_assert(offsetof(TileXRRDMADeviceQueue, state) == 40, "RDMA state address ABI");
 static_assert(offsetof(TileXRRDMADeviceQueue, qpn) == 64, "RDMA queue fields ABI");
 static_assert(offsetof(TileXRRDMADeviceQueue, dbMode) == 88, "RDMA mode ABI");
+static_assert(offsetof(TileXRRDMADeviceQueue, pendingBatches) == 104, "RDMA pending address ABI");
 static_assert(offsetof(TileXRRDMADeviceView, queue) == 48, "RDMA queue view ABI");
 #endif
 

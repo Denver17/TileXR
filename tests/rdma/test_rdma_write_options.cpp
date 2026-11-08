@@ -1,3 +1,12 @@
+/*
+ * 功能：验证四种 WRITE adapter 的参数、scratch 大小、SGE 地址、QP 选择及提交后显式 Wait 的状态变化。
+ * 调用关系：编译实际 tilexr_rdma_write.h；write_stubs 提供 CPU I/O，fixture 注入 CQE 并检查 WQE 和 ABI。
+ * 资源与生命周期：fixture 持有 queue buffer 和兼容入口的 UB scratch；这些测试不验证设备 cache 或 NIC 行为。
+ *
+ * Purpose: Test options, scratch sizing, SGE addresses, QP selection and submit/explicit-Wait state changes for the four WRITE adapters.
+ * Calls: Compiles real tilexr_rdma_write.h with write_stubs CPU I/O; fixtures supply CQEs and inspect WQEs/ABI.
+ * Lifetime: Fixtures own queue buffers and compatibility UB scratch; these tests do not validate device caches or NIC behavior.
+ */
 #include "kernel_operator.h" // The one CPU fixture; the production adapter is compiled below.
 #include "tilexr_rdma_write.h"
 #include <array>
@@ -11,16 +20,17 @@ using TileXR::RDMAWriteOptions;
 using Scratch = AscendC::LocalTensor<uint8_t>;
 #define CHECK(x) do { if (!(x)) { std::fprintf(stderr, "%d: %s\n", __LINE__, #x); std::abort(); } } while (0)
 
-// Host/kernel ABI examples remain the existing V2 PODs. The options are a
-// source-level convenience and introduce no fields into those exported views.
-static_assert(sizeof(TileXRRDMADeviceView) == 152U, "V2 view ABI");
-static_assert(offsetof(TileXRRDMADeviceView, queue) == 48U, "V2 queue offset");
-static_assert(sizeof(TileXRRDMADeviceQueue) == 104U, "queue ABI");
+// V3 adds per-QP pending metadata; UBNIC V2 and the state header remain unchanged.
+static_assert(sizeof(TileXRRDMADeviceView) == 168U, "V3 view ABI");
+static_assert(offsetof(TileXRRDMADeviceView, queue) == 48U, "V3 queue offset");
+static_assert(sizeof(TileXRRDMADeviceQueue) == 120U, "queue ABI");
 static_assert(sizeof(TileXRRDMADeviceSge) == 16U, "SGE ABI");
+static_assert(sizeof(TileXRRDMADeviceState) == 64U, "state ABI");
+static_assert(offsetof(TileXRRDMADeviceState, reserved) == 32U, "pending storage ABI");
 static_assert(std::is_standard_layout<RDMAWriteOptions>::value, "value options");
 static_assert(std::is_trivially_copyable<RDMAWriteOptions>::value, "copyable options");
-static_assert(TileXR::RDMAWriteScratchBytes() == W::kPipelineScratchBytes, "default scratch");
-static_assert(TileXR::RDMAWriteScratchBytes(16) == W::kPipelineSgeScratchBytes, "SGE scratch");
+static_assert(TileXR::RDMAWriteWorkScratchBytes() == W::kPipelineScratchBytes, "default work scratch");
+static_assert(TileXR::RDMAWriteWorkScratchBytes(16) == W::kPipelineSgeScratchBytes, "SGE work scratch");
 
 using SingleSignature = uint32_t (*)(const TileXRRDMADeviceView*, uint64_t, uint64_t, uint32_t,
     const RDMAWriteOptions&, const Scratch&);
@@ -30,10 +40,12 @@ using MultiSignature = uint32_t (*)(const TileXRRDMADeviceView*, uint32_t, uint3
     uint64_t, uint64_t, uint32_t, const RDMAWriteOptions&, const Scratch&);
 using SgeMultiSignature = uint32_t (*)(const TileXRRDMADeviceView*, uint32_t, uint32_t,
     const TileXRRDMADeviceSge*, uint32_t, uint64_t, const RDMAWriteOptions&, const Scratch&);
-static_assert(std::is_same<decltype(&TileXR::RDMAWrite), SingleSignature>::value, "WRITE signature");
-static_assert(std::is_same<decltype(&TileXR::RDMAWriteSge), SgeSignature>::value, "SGE signature");
-static_assert(std::is_same<decltype(&TileXR::RDMAWriteMultiQp), MultiSignature>::value, "multi signature");
-static_assert(std::is_same<decltype(&TileXR::RDMAWriteSgeMultiQp), SgeMultiSignature>::value, "SGE multi signature");
+static_assert(std::is_same<decltype(static_cast<SingleSignature>(&TileXR::RDMAWrite)), SingleSignature>::value, "WRITE signature");
+static_assert(std::is_same<decltype(static_cast<SgeSignature>(&TileXR::RDMAWriteSge)), SgeSignature>::value, "SGE signature");
+static_assert(std::is_same<decltype(static_cast<MultiSignature>(&TileXR::RDMAWriteMultiQp)), MultiSignature>::value, "multi signature");
+static_assert(std::is_same<decltype(static_cast<SgeMultiSignature>(&TileXR::RDMAWriteSgeMultiQp)), SgeMultiSignature>::value, "SGE multi signature");
+using WaitSignature = uint32_t (*)(const TileXRRDMADeviceView*, const Scratch&, uint32_t);
+static_assert(std::is_same<decltype(static_cast<WaitSignature>(&TileXR::RDMAWait)), WaitSignature>::value, "wait signature");
 
 namespace {
 template <typename T> uint64_t Address(T* value) { return reinterpret_cast<uint64_t>(value); }
@@ -43,6 +55,7 @@ struct Qp {
     alignas(64) std::array<uint8_t, depth * 64U> sq;
     alignas(64) std::array<uint8_t, depth * 64U> cq{};
     alignas(64) TileXRRDMADeviceState state{};
+    alignas(64) std::array<uint64_t, depth> pending{};
     alignas(8) std::array<uint64_t, 256> doorbell{};
     uint32_t sqDbr = 0U, cqDbr = 0U;
     TileXRRDMADeviceView view{};
@@ -64,6 +77,8 @@ struct Qp {
         q.qpn = qpn; q.cqn = qpn + 100U;
         q.sqDepth = q.cqDepth = depth; q.sqEntryBytes = q.cqEntryBytes = 64U;
         q.maxSendSge = TILEXR_RDMA_DEVICE_MAX_SGE; q.maxSendWr = 128U;
+        q.pendingBatches = Address(pending.data());
+        q.pendingCapacity = W::PipelineRecordCapacity(depth, depth, q.maxSendWr);
         q.queueAbi = TILEXR_RDMA_QUEUE_ABI_UBNIC_V2;
         q.dbMode = TILEXR_RDMA_DB_HARD;
         q.sqDbValue = W::MakeSqDbValue(qpn, 1, 5, 0);
@@ -73,7 +88,7 @@ struct Qp {
     void Completions(uint32_t count, uint32_t batch)
     {
         uint64_t wr = state.reserved[0] == 0U ? state.cqConsumer : state.reserved[1];
-        uint32_t slot = static_cast<uint32_t>(state.cqConsumer);
+        uint32_t slot = static_cast<uint32_t>(state.cqConsumer) + W::PendingBatchCount(state);
         for (uint32_t sent = 0U; sent < count; ) {
             const uint32_t n = count - sent < batch ? count - sent : batch;
             CHECK(n != 0U && slot < depth);
@@ -98,7 +113,7 @@ struct Qp {
 };
 
 struct Ub {
-    alignas(32) std::array<uint8_t, W::kPipelineSgeScratchBytes + 32U> bytes;
+    alignas(32) std::array<uint8_t, TileXR::RDMAWriteScratchBytes(16) + 32U> bytes;
     Ub() { bytes.fill(0xA5); }
     Scratch Tensor(uint32_t numSge = 1U) { return Scratch(bytes.data(), TileXR::RDMAWriteScratchBytes(numSge)); }
     void CheckGuard(uint32_t numSge) const {
@@ -108,24 +123,25 @@ struct Ub {
     }
 };
 
-void NoIO(uint32_t status, uint32_t expected = TILEXR_RDMA_DEVICE_INVALID)
+void NoSubmission(uint32_t status, uint32_t expected = TILEXR_RDMA_DEVICE_INVALID)
 {
     CHECK(status == expected);
     const auto& log = RdmaWriteTest::ActivityLog();
-    CHECK(log.publications == 0U && log.rings == 0U && log.reads == 0U);
+    CHECK(log.rings == 0U); // Restore/save may copy metadata; no doorbell is issued on rejection.
 }
 
 void DefaultsAndScratch()
 {
     constexpr RDMAWriteOptions o{};
     static_assert(o.count == 1U && o.localStride == 0U && o.remoteStride == 0U, "default spans");
-    static_assert(o.postBatch == 64U && o.maxInFlight == 128U && o.cyclicSlots == 0U &&
+    static_assert(o.postBatch == 64U && o.maxInFlight == UINT32_MAX && o.cyclicSlots == 0U &&
         o.maxPolls == 1000000U, "default pipeline");
     CHECK(TileXR::RDMAWriteScratchBytes(0) == 0U);
     CHECK(TileXR::RDMAWriteScratchBytes(17) == 0U);
     CHECK(TileXR::RDMAWriteScratchBytes(UINT32_MAX) == 0U);
     for (uint32_t n = 1; n <= 16; ++n) {
-        CHECK(TileXR::RDMAWriteScratchBytes(n) == (n == 1U ? W::kPipelineScratchBytes : W::kPipelineSgeScratchBytes));
+        CHECK(TileXR::RDMAWriteScratchBytes(n) == TileXR::RDMAWriteWorkScratchBytes(n) +
+            TileXR::RDMAWriteContextBytes(TILEXR_RDMA_DEVICE_DEFAULT_MAX_IN_FLIGHT));
         CHECK(TileXR::RDMAWriteScratchBytes(n) % TILEXR_RDMA_DEVICE_SCRATCH_ALIGNMENT == 0U);
     }
 }
@@ -140,6 +156,8 @@ void SingleAndOptions()
             q.Completions(count, batch);
             RdmaWriteTest::ActivityLog() = {};
             CHECK(TileXR::RDMAWrite(&q.view, 3, 5, 8, o, ub.Tensor()) == 0U);
+            CHECK(q.state.completed < q.state.producer);
+            CHECK(TileXR::RDMAWait(&q.view, ub.Tensor()) == 0U);
             CHECK(q.state.producer == count && q.state.completed == count);
             CHECK(q.state.cqConsumer == (count + batch - 1U) / batch);
             CHECK(RdmaWriteTest::ActivityLog().rings == q.state.cqConsumer);
@@ -158,14 +176,14 @@ void SingleAndOptions()
         if (kind == 1U) { o.postBatch = 0U; }
         if (kind == 2U) { o.postBatch = 65U; }
         if (kind == 3U) { o.maxInFlight = 0U; }
-        if (kind == 4U) { o.maxInFlight = 127U; }
+        if (kind == 4U) { q.view.queue.pendingCapacity = 0U; }
         if (kind == 5U) { o.maxPolls = 0U; }
         RdmaWriteTest::ActivityLog() = {};
-        NoIO(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()));
+        NoSubmission(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()));
         CHECK(q.state.producer == 0U && q.sq[0] == 0xCC);
     }
     Qp q; Ub ub; RDMAWriteOptions o;
-    o.count = 1; o.maxInFlight = 1; // A full two-batch window is unnecessary for one WR.
+    o.count = 1; o.maxInFlight = 1;
     q.Completions(1, 64);
     CHECK(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()) == 0U);
 }
@@ -184,6 +202,7 @@ void GatherAndCyclic()
         o.localStride = 128; o.remoteStride = 256;
         q.Completions(o.count, o.postBatch);
         CHECK(TileXR::RDMAWriteSge(&q.view, sges.data(), n, 9, o, ub.Tensor(n)) == 0U);
+        CHECK(TileXR::RDMAWait(&q.view, ub.Tensor(n)) == 0U);
         const uint32_t blocks = (48U + n * 16U + 63U) / 64U;
         CHECK(q.state.producer == o.count * blocks && q.state.completed == q.state.producer);
         for (uint32_t wr = 0; wr < o.count; ++wr) {
@@ -207,6 +226,7 @@ void GatherAndCyclic()
     q.view.queue.dbMode = TILEXR_RDMA_DB_SOFT;
     q.Completions(3, 64);
     CHECK(TileXR::RDMAWrite(&q.view, 3, 5, 8, o, ub.Tensor()) == 0U);
+    CHECK(TileXR::RDMAWait(&q.view, ub.Tensor()) == 0U);
     for (uint32_t i = 0; i < 3; ++i) {
         CHECK(q.Be(i * 64U + 48U, 8) == q.view.localAddress + 3U);
         CHECK(q.Be(i * 64U + 32U, 8) == q.view.remoteAddress + 5U);
@@ -232,7 +252,7 @@ void BoundsAndSgeValidation()
             if (kind == 7U) { o.count = 2; o.localStride = UINT64_MAX; }
             if (kind == 8U) { o.count = 2; o.remoteStride = UINT64_MAX; }
             if (kind == 9U) { o.cyclicSlots = UINT32_MAX; o.localStride = UINT64_MAX; }
-            if (kind == 10U) { o.count = 128; q.view.queue.maxSendWr = 127; }
+            if (kind == 10U) { q.view.queue.maxSendWr = 0; }
             if (kind == 11U) { q.state.producer = q.state.completed = Qp::depth - 1U; }
             if (kind == 12U) { q.state.cqConsumer = Qp::depth - 1U; }
             if (kind == 13U) { o.count = UINT32_MAX; }
@@ -240,19 +260,21 @@ void BoundsAndSgeValidation()
             if (kind == 15U) { o.count = 129; o.postBatch = UINT32_MAX; }
             if (kind == 16U) { o.maxPolls = 0; }
             RdmaWriteTest::ActivityLog() = {};
-            NoIO(TileXR::RDMAWriteSge(&q.view, sges.data(), n, remote, o, ub.Tensor(n)));
+            NoSubmission(TileXR::RDMAWriteSge(&q.view, sges.data(), n, remote, o, ub.Tensor(n)));
         }
     }
     Qp q; Ub ub; RDMAWriteOptions o; TileXRRDMADeviceSge sge{4088U, 8U, 0U};
     RdmaWriteTest::ActivityLog() = {};
-    NoIO(TileXR::RDMAWriteSge(&q.view, nullptr, 1, 0, o, ub.Tensor()));
-    NoIO(TileXR::RDMAWriteSge(&q.view, &sge, 0, 0, o, ub.Tensor()));
-    NoIO(TileXR::RDMAWriteSge(&q.view, &sge, 17, 0, o, ub.Tensor()));
-    NoIO(TileXR::RDMAWriteSge(&q.view, &sge, UINT32_MAX, 0, o, ub.Tensor()));
-    NoIO(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, Scratch(ub.bytes.data(), TileXR::RDMAWriteScratchBytes() - 1U)));
-    NoIO(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, Scratch(ub.bytes.data() + 1, TileXR::RDMAWriteScratchBytes())));
+    NoSubmission(TileXR::RDMAWriteSge(&q.view, nullptr, 1, 0, o, ub.Tensor()));
+    NoSubmission(TileXR::RDMAWriteSge(&q.view, &sge, 0, 0, o, ub.Tensor()));
+    NoSubmission(TileXR::RDMAWriteSge(&q.view, &sge, 17, 0, o, ub.Tensor()));
+    NoSubmission(TileXR::RDMAWriteSge(&q.view, &sge, UINT32_MAX, 0, o, ub.Tensor()));
+    NoSubmission(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, Scratch(ub.bytes.data(),
+        TileXR::RDMAWriteScratchBytes(1, q.view.queue.pendingCapacity) - 1U)));
+    NoSubmission(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, Scratch(ub.bytes.data() + 1, TileXR::RDMAWriteScratchBytes())));
     TileXRRDMADeviceSge pair[2] = {{0, 8, 0}, {8, 8, 0}};
-    NoIO(TileXR::RDMAWriteSge(&q.view, pair, 2, 0, o, ub.Tensor()));
+    NoSubmission(TileXR::RDMAWriteSge(&q.view, pair, 2, 0, o,
+        Scratch(ub.bytes.data(), TileXR::RDMAWriteWorkScratchBytes(2) - 1U)));
     q.Completions(1, 64);
     CHECK(TileXR::RDMAWriteSge(&q.view, &sge, 1, 4088, o, ub.Tensor()) == 0U); // Exact MR boundary.
 
@@ -260,7 +282,7 @@ void BoundsAndSgeValidation()
     large.view.localBytes = large.view.remoteBytes = 1ULL << 32;
     TileXRRDMADeviceSge overflow[2] = {{0, 0x40000000U, 0}, {0, 0x40000000U, 0}};
     RdmaWriteTest::ActivityLog() = {};
-    NoIO(TileXR::RDMAWriteSge(&large.view, overflow, 2, 0, o, ub.Tensor(2))); // Gather sum reaches 2^31.
+    NoSubmission(TileXR::RDMAWriteSge(&large.view, overflow, 2, 0, o, ub.Tensor(2))); // Gather sum reaches 2^31.
 }
 
 void MultiQp()
@@ -286,12 +308,14 @@ void MultiQp()
         // The selected view alone fits, but the declared full array overflows.
         if (kind == 6U) { address = reinterpret_cast<const TileXRRDMADeviceView*>(UINT64_MAX - 159U); }
         RdmaWriteTest::ActivityLog() = {};
-        NoIO(TileXR::RDMAWriteMultiQp(address, count, index, 0, 0, 8, o, ub.Tensor()));
-        NoIO(TileXR::RDMAWriteSgeMultiQp(address, count, index, &sge, 1, 0, o, ub.Tensor()));
+        NoSubmission(TileXR::RDMAWriteMultiQp(address, count, index, 0, 0, 8, o, ub.Tensor()));
+        NoSubmission(TileXR::RDMAWriteSgeMultiQp(address, count, index, &sge, 1, 0, o, ub.Tensor()));
     }
     // A call must touch only its explicit QP, regardless of its position.
     for (uint32_t selected : {15U, 0U, 7U}) {
         CHECK(TileXR::RDMAWriteMultiQp(views.data(), 16, selected, 3, 5, 8, o, ub.Tensor()) == 0U);
+        CHECK(queues[selected].state.completed == 0U);
+        CHECK(TileXR::RDMAWait(views.data() + selected, ub.Tensor()) == 0U);
         CHECK(queues[selected].state.completed == 1U);
     }
     for (uint32_t i = 0; i < queues.size(); ++i) {
@@ -301,6 +325,7 @@ void MultiQp()
     CHECK(queues[14].Be(48, 8) == queues[14].view.localAddress + 17U);
     TileXRRDMADeviceSge pair[2] = {{33, 8, 0}, {17, 16, 0}};
     CHECK(TileXR::RDMAWriteSgeMultiQp(views.data(), 16, 13, pair, 2, 9, o, ub.Tensor(2)) == 0U);
+    CHECK(TileXR::RDMAWait(views.data() + 13, ub.Tensor(2)) == 0U);
     CHECK(queues[13].state.completed == 2U && queues[13].Be(20, 4) == 24U);
     Qp single; single.Completions(1, 64);
     CHECK(TileXR::RDMAWriteMultiQp(&single.view, 1, 0, 0, 0, 8, o, ub.Tensor()) == 0U);
@@ -310,7 +335,7 @@ void StatusPropagation()
 {
     for (uint32_t kind = 0; kind < 5; ++kind) {
         Qp q; Ub ub; RDMAWriteOptions o;
-        if (kind == 0U) { q.view.version = 1U; }
+        if (kind == 0U) { q.view.version = 2U; }
         if (kind == 1U) { q.state.error = TILEXR_RDMA_DEVICE_TIMEOUT; }
         if (kind == 2U) { q.state.producer = 1U; }
         if (kind == 3U) { q.state.reserved[0] = 123U; }
@@ -319,17 +344,94 @@ void StatusPropagation()
             kind == 2U ? TILEXR_RDMA_DEVICE_BUSY : TILEXR_RDMA_DEVICE_UNSUPPORTED;
         RdmaWriteTest::ActivityLog() = {};
         TileXRRDMADeviceSge pair[2] = {{0, 8, 0}, {8, 8, 0}};
-        NoIO(TileXR::RDMAWriteSge(&q.view, pair, 2, 0, o, ub.Tensor(2)), expected);
+        NoSubmission(TileXR::RDMAWriteSge(&q.view, pair, 2, 0, o, ub.Tensor(2)), expected);
     }
     Qp q; Ub ub; RDMAWriteOptions o;
     o.maxPolls = 3;
     q.cq[7] = 0xF8U; // Pending opcode 31: exhaust exactly the configured poll bound.
     RdmaWriteTest::ActivityLog() = {};
-    CHECK(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()) == TILEXR_RDMA_DEVICE_TIMEOUT);
-    CHECK(RdmaWriteTest::ActivityLog().reads == 3U);
+    CHECK(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()) == 0U);
+    CHECK(RdmaWriteTest::ActivityLog().reads == 1U); // Temporary context header restore, no CQ poll.
+    CHECK(TileXR::RDMAWait(&q.view, ub.Tensor(), o.maxPolls) == TILEXR_RDMA_DEVICE_TIMEOUT);
+    CHECK(RdmaWriteTest::ActivityLog().reads == 6U); // Header/FIFO restore plus exactly three CQ polls.
     CHECK(q.state.error == TILEXR_RDMA_DEVICE_TIMEOUT && q.state.producer == 1U && q.state.completed == 0U);
     RdmaWriteTest::ActivityLog() = {};
-    NoIO(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()), TILEXR_RDMA_DEVICE_POISONED);
+    NoSubmission(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()), TILEXR_RDMA_DEVICE_POISONED);
+}
+
+void AdaptiveCapacityAndVersion()
+{
+    for (uint32_t limit : {128U, 255U}) {
+        Qp q; Ub ub; RDMAWriteOptions o; o.count = 192; o.postBatch = 16;
+        q.view.queue.maxSendWr = limit;
+        q.view.queue.pendingCapacity = limit;
+        q.Completions(o.count, o.postBatch);
+        RdmaWriteTest::ActivityLog() = {};
+        CHECK(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()) == 0);
+        CHECK(RdmaWriteTest::ActivityLog().reads == (limit == 128U ? 5U : 1U));
+        CHECK(W::PendingBatchCount(q.state) == (limit == 128U ? 8U : 12U));
+        CHECK(TileXR::RDMAWait(&q.view, ub.Tensor()) == 0 && q.state.completed == 192);
+    }
+    for (uint32_t kind = 0; kind < 5; ++kind) {
+        Qp q; Ub ub; RDMAWriteOptions o;
+        if (kind == 0) { q.view.queue.pendingBatches = 0; }
+        if (kind == 1) { q.view.queue.pendingBatches += 8; }
+        if (kind == 2) { q.view.queue.pendingBatches = UINT64_MAX - 63U; }
+        if (kind == 3) { q.view.queue.pendingReserved = 1; }
+        if (kind == 4) { q.view.structBytes = 152; }
+        RdmaWriteTest::ActivityLog() = {};
+        NoSubmission(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()),
+            kind == 4 ? TILEXR_RDMA_DEVICE_UNSUPPORTED : TILEXR_RDMA_DEVICE_INVALID);
+    }
+    // Only the old header is accessible: rejection must precede V3 field loads.
+    struct OldHeader { uint32_t version = 2; uint32_t bytes = 152; };
+    alignas(8) OldHeader old;
+    Ub ub; RDMAWriteOptions o;
+    RdmaWriteTest::ActivityLog() = {};
+    NoSubmission(TileXR::RDMAWrite(reinterpret_cast<const TileXRRDMADeviceView*>(&old),
+        0, 0, 8, o, ub.Tensor()), TILEXR_RDMA_DEVICE_UNSUPPORTED);
+}
+
+void ExplicitWaitAndSharedViews()
+{
+    Qp q; Ub ub; RDMAWriteOptions o; o.postBatch = 1;
+    RdmaWriteTest::ActivityLog() = {};
+    NoSubmission(TileXR::RDMAWait(&q.view, ub.Tensor()), TILEXR_RDMA_DEVICE_SUCCESS);
+    CHECK(q.state.reserved[0] == 0U); // An empty wait does not select pipeline mode.
+    q.Completions(2, 1);
+    q.cq[7] = 0xF8U; // Neither submission may poll this unavailable CQE.
+    CHECK(TileXR::RDMAWrite(&q.view, 0, 0, 8, o, ub.Tensor()) == 0U);
+    auto second = q.view;
+    second.localAddress += 0x10000U; second.localKey += 1U;
+    TileXRRDMADeviceSge pair[2] = {{0, 8, 0}, {16, 8, 0}};
+    CHECK(TileXR::RDMAWriteSge(&second, pair, 2, 32, o, ub.Tensor(2)) == 0U);
+    CHECK(q.state.producer == 3U && q.state.completed == 0U && q.state.reserved[1] == 2U);
+    CHECK(q.Be(64U + 48U, 8) == second.localAddress);
+    CHECK(RdmaWriteTest::ActivityLog().reads == 4U); // Empty wait and two restores; no CQ poll.
+    // Bad requests must not drain the pending QP or mutate its state.
+    const auto saved = q.state;
+    RdmaWriteTest::ActivityLog() = {};
+    NoSubmission(TileXR::RDMAWrite(&q.view, UINT64_MAX, 0, 8, o, ub.Tensor()));
+    CHECK(std::memcmp(&saved, &q.state, sizeof(saved)) == 0);
+    NoSubmission(TileXR::RDMAWait(nullptr, ub.Tensor()));
+    NoSubmission(TileXR::RDMAWait(reinterpret_cast<const TileXRRDMADeviceView*>(Address(&q.view) + 1U), ub.Tensor()));
+    NoSubmission(TileXR::RDMAWait(reinterpret_cast<const TileXRRDMADeviceView*>(UINT64_MAX - 7U), ub.Tensor()));
+    NoSubmission(TileXR::RDMAWait(&q.view, Scratch(ub.bytes.data(), TILEXR_RDMA_DEVICE_SCRATCH_BYTES - 1U)));
+    NoSubmission(TileXR::RDMAWait(&q.view, Scratch(ub.bytes.data() + 1, TileXR::RDMAWriteScratchBytes())));
+    NoSubmission(TileXR::RDMAWait(&q.view, ub.Tensor(), 0U));
+    auto invalid = second; invalid.version = 1U;
+    NoSubmission(TileXR::RDMAWait(&invalid, ub.Tensor()), TILEXR_RDMA_DEVICE_UNSUPPORTED);
+    // Descriptor and UB lifetimes end at submit return; payload/QP remain live.
+    pair[0].localOffset = UINT64_MAX;
+    std::memset(ub.bytes.data(), 0xA5, TileXR::RDMAWriteScratchBytes(2));
+    q.cq[7] = 0x24U;
+    const uint32_t readsBeforeWait = RdmaWriteTest::ActivityLog().reads;
+    CHECK(TileXR::RDMAWait(&second, ub.Tensor(2)) == 0U);
+    CHECK(q.state.completed == 3U && q.state.cqConsumer == 2U);
+    CHECK(RdmaWriteTest::ActivityLog().reads == readsBeforeWait + 4U); // Restore header/FIFO and two CQEs.
+    RdmaWriteTest::ActivityLog() = {};
+    NoSubmission(TileXR::RDMAWait(&q.view, ub.Tensor()), TILEXR_RDMA_DEVICE_SUCCESS);
+    ub.CheckGuard(2);
 }
 } // namespace
 
@@ -341,5 +443,7 @@ int main()
     BoundsAndSgeValidation();
     MultiQp();
     StatusPropagation();
-    std::puts("rdma_write_options: PASS (CPU adapter, options, scratch, SGE, QP routing, bounds, ABI, errors)");
+    AdaptiveCapacityAndVersion();
+    ExplicitWaitAndSharedViews();
+    std::puts("rdma_write_options: PASS (CPU adapters, submit/wait, shared QP, scratch, SGE, routing, bounds, ABI, errors)");
 }

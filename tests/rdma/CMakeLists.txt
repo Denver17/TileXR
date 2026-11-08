@@ -1,3 +1,10 @@
+# 功能：构建并注册 RDMA Host/CPU 测试，覆盖 transport、WRITE/Wait、UB context、profiling 和 benchmark 布局。
+# 调用关系：独立 CMake 工程直接编译 runtime 源码与测试 stub；按 verbs、扩展 ABI 和 ACL 头文件可用性启用 fake DSO 测试。
+# 边界：CTest 使用 CPU 模型或 fake driver，不启动 NPU 数据传输。
+#
+# Purpose: Build/register RDMA Host/CPU tests for transport, WRITE/Wait, UB contexts, profiling and benchmark layouts.
+# Calls: This standalone CMake project compiles runtime sources and stubs; verbs, extension ABI and ACL headers gate fake-DSO tests.
+# Scope: CTest uses CPU models or fake drivers and does not launch NPU transfers.
 cmake_minimum_required(VERSION 3.16)
 project(TileXR_Rdma_Tests LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 14)
@@ -83,15 +90,33 @@ add_test(NAME rdma_ubnic_wire COMMAND test_rdma_wire)
 add_test(NAME rdma_ubnic_wire_no_wrap COMMAND test_rdma_wire --no-wrap)
 
 add_executable(test_rdma_pipeline test_rdma_pipeline.cpp)
+target_compile_definitions(test_rdma_pipeline PRIVATE TILEXR_RDMA_DEBUG=1)
 target_include_directories(test_rdma_pipeline PRIVATE ${TILEXR_ROOT}/src/include)
 target_compile_options(test_rdma_pipeline PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME rdma_pipeline_cpu COMMAND test_rdma_pipeline)
 
 add_executable(test_rdma_write_options test_rdma_write_options.cpp)
+target_compile_definitions(test_rdma_write_options PRIVATE TILEXR_RDMA_DEBUG=1)
 target_include_directories(test_rdma_write_options PRIVATE
     ${TILEXR_ROOT}/src/include ${CMAKE_CURRENT_LIST_DIR}/write_stubs)
 target_compile_options(test_rdma_write_options PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME rdma_write_api_cpu COMMAND test_rdma_write_options)
+
+foreach(rdma_debug 0 1)
+    add_executable(test_rdma_context_${rdma_debug} test_rdma_context.cpp)
+    target_include_directories(test_rdma_context_${rdma_debug} PRIVATE
+        ${TILEXR_ROOT}/src/include ${CMAKE_CURRENT_LIST_DIR}/write_stubs)
+    target_compile_definitions(test_rdma_context_${rdma_debug} PRIVATE TILEXR_RDMA_DEBUG=${rdma_debug})
+    target_compile_options(test_rdma_context_${rdma_debug} PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME rdma_context_${rdma_debug}_cpu COMMAND test_rdma_context_${rdma_debug})
+endforeach()
+add_executable(test_rdma_context_profile test_rdma_context.cpp)
+target_include_directories(test_rdma_context_profile PRIVATE
+    ${TILEXR_ROOT}/src/include ${CMAKE_CURRENT_LIST_DIR}/write_stubs)
+target_compile_definitions(test_rdma_context_profile PRIVATE
+    TILEXR_RDMA_DEBUG=1 TILEXR_ENABLE_PROFILING=1 __CCE__=1 __CCE_IS_AICORE__=1)
+target_compile_options(test_rdma_context_profile PRIVATE -Wall -Wextra -Werror)
+add_test(NAME rdma_context_profile_cpu COMMAND test_rdma_context_profile)
 
 add_executable(test_rdma_sge_layout test_rdma_sge_layout.cpp)
 target_compile_options(test_rdma_sge_layout PRIVATE -Wall -Wextra -Werror -UNDEBUG)
@@ -104,6 +129,11 @@ add_test(NAME rdma_multiqp_summary_cpu COMMAND test_rdma_multiqp_summary)
 add_executable(test_rdma_multiqp_layout test_rdma_multiqp_layout.cpp)
 target_compile_options(test_rdma_multiqp_layout PRIVATE -Wall -Wextra -Werror -UNDEBUG)
 add_test(NAME rdma_multiqp_layout_cpu COMMAND test_rdma_multiqp_layout)
+
+add_executable(test_rdma_multiqp_single_layout test_rdma_multiqp_layout.cpp)
+target_compile_definitions(test_rdma_multiqp_single_layout PRIVATE TILEXR_RDMA_SINGLE_WQE_CALLS=1)
+target_compile_options(test_rdma_multiqp_single_layout PRIVATE -Wall -Wextra -Werror -UNDEBUG)
+add_test(NAME rdma_multiqp_single_layout_cpu COMMAND test_rdma_multiqp_single_layout)
 
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 add_executable(test_rdma_socket_control test_rdma_socket_control.cpp

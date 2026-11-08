@@ -1,3 +1,12 @@
+/*
+ * 功能：验证 WRITE pipeline 的编码、发布顺序、容量背压、跨调用 pending、显式 Wait 和错误状态。
+ * 调用关系：直接运行 tilexr_rdma_pipeline.h；CPU Model 保存 SQ/state/pending，并按提交的 WQE 生成 CQ 快照。
+ * 边界：Model 检查调用与数据内容，不模拟 MTE、cache 或真实 NIC 的执行时序。
+ *
+ * Purpose: Test WRITE pipeline encoding, publication order, capacity backpressure, cross-call pending state, explicit Wait and errors.
+ * Calls: Runs tilexr_rdma_pipeline.h with a CPU Model that holds SQ/state/pending and derives CQ snapshots from submitted WQEs.
+ * Scope: The model checks calls and contents, not MTE, cache or real NIC execution timing.
+ */
 #include "tilexr_rdma_pipeline.h"
 #include <array>
 #include <cstdio>
@@ -21,6 +30,8 @@ static TileXRRDMADeviceView View(uint32_t mode)
     q.sqDepth = q.cqDepth = 32768; q.sqEntryBytes = q.cqEntryBytes = 64;
     q.maxSendSge = 1; q.maxSendWr = 4096; q.queueAbi = TILEXR_RDMA_QUEUE_ABI_UBNIC_V2;
     q.dbMode = mode; q.doorbellBytes = 2048;
+    q.pendingBatches = 0x600000;
+    q.pendingCapacity = W::PipelineRecordCapacity(q.sqDepth, q.cqDepth, q.maxSendWr);
     q.sqDbValue = W::MakeSqDbValue(q.qpn, 1, 5, 0);
     return v;
 }
@@ -31,12 +42,14 @@ struct Model {
     std::array<uint8_t, W::kPipelineSgeScratchBytes> scratch{};
     std::vector<uint8_t> sq;
     std::vector<uint64_t> completions, locals, remotes;
+    std::vector<uint64_t> pending;
     std::vector<std::vector<uint64_t>> segmentLocals;
     uint64_t nextSq = 0, nextWr = 0, peak = 0;
     uint32_t publications = 0, rings = 0, reads = 0, signalCount = 0;
     uint32_t failCq = UINT32_MAX;
     bool timeout = false, mismatch = false;
-    explicit Model(const TileXRRDMADeviceView& view) : v(view), sq(view.queue.sqDepth * 64U, 0xCC) {}
+    explicit Model(const TileXRRDMADeviceView& view) : v(view), sq(view.queue.sqDepth * 64U, 0xCC),
+        pending(view.queue.pendingCapacity) {}
     void SetByte(uint32_t off, uint8_t value) { scratch.at(off) = value; }
     uint8_t GetByte(uint32_t off) const { return scratch.at(off); }
     void SetWord(uint32_t off, uint32_t value) {
@@ -45,6 +58,8 @@ struct Model {
     }
     TileXRRDMADeviceState LoadState() const { return state; }
     void StoreState(const TileXRRDMADeviceState& s) { state = s; }
+    uint64_t LoadPending(uint64_t address) const { return pending.at((address - v.queue.pendingBatches) / 8U); }
+    void StorePending(uint64_t address, uint64_t value) { pending.at((address - v.queue.pendingBatches) / 8U) = value; }
     void Publish(uint64_t address, uint32_t off, uint32_t bytes) {
         CHECK(off + bytes <= scratch.size());
         if (address >= v.queue.sq && address < v.queue.sq + sq.size()) {
@@ -98,7 +113,8 @@ struct Model {
         const uint64_t completedWr = state.cqConsumer ? completions.at(state.cqConsumer - 1U) + 1U : 0U;
         const uint64_t outstandingWr = nextWr - completedWr;
         peak = peak > outstandingWr ? peak : outstandingWr;
-        CHECK(outstandingWr <= 128U);
+        CHECK(outstandingWr <= v.queue.maxSendWr);
+        CHECK(state.producer - state.completed < v.queue.sqDepth);
         ++rings;
     }
     void ReadCqe(uint64_t address) {
@@ -115,6 +131,73 @@ struct Model {
         ++reads;
     }
 };
+
+static void AdaptiveWindow()
+{
+    auto v = View(TILEXR_RDMA_DB_HARD);
+    Model m(v); W::PipelineOptions options;
+    options.postBatch = 16; options.maxInFlight = 128;
+    CHECK(W::PutPipeline(v, 0, 0, 8, 128, 0, 0, options, 3, m) == 0);
+    CHECK(m.reads == 0 && m.peak == 128 && m.state.completed == 0);
+    CHECK(W::WaitPipeline(v, 3, m) == 0 && m.state.completed == 128);
+
+    Model automatic(v); W::PipelineOptions defaults;
+    CHECK(W::PutPipeline(v, 0, 0, 8, 1000, 0, 0, defaults, 3, automatic) == 0);
+    CHECK(automatic.reads == 0 && automatic.peak == 1000);
+    CHECK(W::WaitPipeline(v, 3, automatic) == 0 && automatic.state.completed == 1000);
+
+    for (uint32_t depth : {1024U, 2048U, 32768U}) {
+        for (uint32_t maxWr : {127U, 4095U, 65535U}) {
+            for (uint32_t sge : {1U, 2U, 4U, 8U, 16U}) {
+                auto q = v.queue; q.sqDepth = depth; q.maxSendWr = maxWr;
+                const uint32_t blocks = (48U + 16U * sge + 63U) / 64U;
+                const uint32_t sqLimit = (depth - 1U) / blocks;
+                const uint32_t expected = sqLimit < maxWr ? sqLimit : maxWr;
+                CHECK(W::PipelineWindow(q, sge) == expected);
+                CHECK(W::PipelineWindow(q, sge, 7U) == 7U);
+            }
+        }
+    }
+    {
+        auto bounded = v;
+        bounded.queue.sqDepth = 1024; bounded.queue.maxSendWr = 65535;
+        bounded.queue.maxSendSge = 16;
+        bounded.queue.pendingCapacity = W::PipelineRecordCapacity(1024, bounded.queue.cqDepth, 65535);
+        TileXRRDMADeviceSge sges[16];
+        for (auto& sge : sges) { sge = {0, 8, 0}; }
+        Model fits(bounded), exceeds(bounded);
+        CHECK(W::PutSgeListPipeline(bounded, sges, 16, 0, 204, 0, 0, defaults, 3, fits) == 0);
+        CHECK(fits.peak == 204 && fits.reads == 0 && fits.state.producer == 1020);
+        CHECK(W::WaitPipeline(bounded, 3, fits) == 0 && fits.state.completed == 1020);
+        CHECK(W::PutSgeListPipeline(bounded, sges, 16, 0, 205, 0, 0, defaults, 3, exceeds) ==
+            TILEXR_RDMA_DEVICE_INVALID);
+        CHECK(exceeds.rings == 0 && exceeds.reads == 0 && exceeds.state.producer == 0);
+    }
+    v.queue.maxSendWr = v.queue.pendingCapacity = 4;
+    Model reused(v); defaults.postBatch = 1;
+    CHECK(W::PutPipeline(v, 0, 0, 8, 12, 0, 0, defaults, 3, reused) == 0);
+    CHECK(reused.reads == 8 && reused.peak == 4 && W::PendingBatchCount(reused.state) == 4);
+    CHECK(W::WaitPipeline(v, 3, reused) == 0 && reused.state.completed == 12);
+
+    Model small(v); defaults.postBatch = 64; defaults.maxInFlight = 1;
+    CHECK(W::PutPipeline(v, 0, 0, 8, 7, 0, 0, defaults, 3, small) == 0);
+    CHECK(small.peak == 1 && small.rings == 7 && small.reads == 6);
+    CHECK(W::WaitPipeline(v, 3, small) == 0 && small.state.completed == 7);
+
+    v = View(TILEXR_RDMA_DB_HARD); v.queue.maxSendSge = 16; v.queue.maxSendWr = 256;
+    v.queue.pendingCapacity = W::PipelineRecordCapacity(v.queue.sqDepth, v.queue.cqDepth, v.queue.maxSendWr);
+    Model mixed(v); W::PipelineOptions varied; varied.postBatch = 16;
+    TileXRRDMADeviceSge sges[16];
+    for (auto& sge : sges) { sge = {0, 8, 0}; }
+    CHECK(W::PutSgeListPipeline(v, sges, 16, 0, 48, 0, 0, varied, 3, mixed) == 0);
+    CHECK(W::PutPipeline(v, 0, 0, 8, 80, 0, 0, varied, 3, mixed) == 0);
+    CHECK(mixed.reads == 0 && W::PendingBatchCount(mixed.state) == 8 && mixed.state.producer == 320);
+    varied.maxInFlight = 64;
+    CHECK(W::PutSgeListPipeline(v, sges, 2, 0, 16, 0, 0, varied, 3, mixed) == 0);
+    CHECK(mixed.reads == 5 && mixed.state.completed == 272 && mixed.state.producer == 352);
+    CHECK(W::PendingBatchCount(mixed.state) == 4 && W::PendingWrCount(mixed.state) == 64);
+    CHECK(W::WaitPipeline(v, 3, mixed) == 0 && mixed.state.completed == 352);
+}
 
 static void Golden()
 {
@@ -133,10 +216,12 @@ static void Success(uint32_t mode)
     for (uint32_t count : {1U, 48U, 64U, 65U, 128U, 512U, 1000U}) {
         Model m(v); W::PipelineOptions options;
         CHECK(W::PutPipeline(v, 0, 0, 512, count, 576, 576, options, 3, m) == 0);
+        CHECK(m.state.completed < m.state.producer);
+        CHECK(W::WaitPipeline(v, 3, m) == 0);
         CHECK(m.state.producer == count && m.state.completed == count);
         CHECK(m.state.cqConsumer == (count + 63U) / 64U);
         CHECK(m.signalCount == m.state.cqConsumer && m.rings == m.signalCount);
-        CHECK(m.publications == m.rings && m.peak <= 128);
+        CHECK(m.publications == m.rings && m.peak == count);
         for (uint32_t i = 0; i < count; ++i) {
             CHECK(m.locals[i] == v.localAddress + uint64_t(i) * 576);
             CHECK(m.remotes[i] == v.remoteAddress + uint64_t(i) * 576);
@@ -148,23 +233,24 @@ static void Success(uint32_t mode)
     Model m(v); W::PipelineOptions o; o.cyclicSlots = 32;
     CHECK(W::Put(v, 0, 0, 8, 3, m) == 0); // old all-signaled WR consumes ordinal zero.
     CHECK(W::PutPipeline(v, 0, 0, 512, 65, 512, 512, o, 3, m) == 0);
+    CHECK(W::WaitPipeline(v, 3, m) == 0);
     for (uint32_t i = 0; i < 65; ++i) { CHECK(m.locals[i + 1] == v.localAddress + ((i + 2U) % 32U) * 512U); }
     CHECK(m.state.producer == 66 && m.state.cqConsumer == 3 && m.state.reserved[1] == 66);
 }
 
 static void Failures()
 {
-    auto v = View(TILEXR_RDMA_DB_HARD); W::PipelineOptions o;
+    auto v = View(TILEXR_RDMA_DB_HARD); W::PipelineOptions o; o.maxInFlight = 128;
     for (uint32_t kind = 0; kind < 8; ++kind) {
         Model m(v); auto opts = o; uint32_t count = 512;
         if (kind == 0) { count = 0; }
         if (kind == 1) { opts.postBatch = 65; }
-        if (kind == 2) { opts.maxInFlight = 127; }
+        if (kind == 2) { opts.maxInFlight = 0; }
         if (kind == 3) { m.state.producer = m.state.completed = 32700; }
         if (kind == 4) { m.state.cqConsumer = 32765; }
         if (kind == 5) { m.state.reserved[0] = 123; }
         if (kind == 6) { m.v.localBytes = 512; }
-        if (kind == 7) { m.v.queue.maxSendWr = 127; }
+        if (kind == 7) { m.v.queue.pendingCapacity = 0; }
         CHECK(W::PutPipeline(m.v, 0, 0, 512, count, 576, 576, opts, 3, m) != 0);
         CHECK(m.rings == 0 && m.publications == 0 && m.state.reserved[1] == 0);
     }
@@ -203,9 +289,11 @@ static void SgePipeline()
         for (uint32_t count : {1U,48U,64U,65U,128U,512U,1000U}) {
             Model m(v); W::PipelineOptions opts; opts.cyclicSlots = 32;
             CHECK(W::PutSgeListPipeline(v,sges,n,17,count,131072,8192,opts,3,m)==0);
+            CHECK(m.state.completed < m.state.producer);
+            CHECK(W::WaitPipeline(v,3,m)==0);
             CHECK(m.state.producer==uint64_t(count)*blocks && m.state.completed==m.state.producer);
             CHECK(m.state.reserved[1]==count && m.state.cqConsumer==(count+63U)/64U);
-            CHECK(m.peak<=128 && m.signalCount==m.state.cqConsumer);
+            CHECK(m.peak==count && m.signalCount==m.state.cqConsumer);
             for (uint32_t wr=0;wr<count;++wr) {
                 const uint64_t index=(wr+1U)%32U;
                 CHECK(m.remotes[wr]==v.remoteAddress+17+index*8192);
@@ -216,7 +304,7 @@ static void SgePipeline()
             CHECK(W::PutSgeListPipeline(v,sges,2,0,65,0,0,opts,3,m)==0);
             CHECK(m.state.reserved[1]==count+65U && m.state.producer==uint64_t(count)*blocks+130);
         }
-        Model m(v); m.failCq=0; W::PipelineOptions opts;
+        Model m(v); m.failCq=0; W::PipelineOptions opts; opts.maxInFlight=128;
         CHECK(W::PutSgeListPipeline(v,sges,n,0,512,0,0,opts,3,m)==TILEXR_RDMA_DEVICE_CQE_ERROR);
         CHECK(m.state.producer==128U*blocks && m.state.completed==0 && m.state.reserved[1]==128);
         CHECK(W::PutSgeListPipeline(v,sges,n,0,1,0,0,opts,3,m)==TILEXR_RDMA_DEVICE_POISONED);
@@ -240,8 +328,70 @@ static void SgePipeline()
     }
 }
 
+static void ExplicitWaitAndCrossCallWindow()
+{
+    for (uint32_t mode : {TILEXR_RDMA_DB_HARD, TILEXR_RDMA_DB_SOFT}) {
+        auto v = View(mode); W::PipelineOptions options;
+        Model empty(v);
+        CHECK(W::WaitPipeline(v, 3, empty) == 0 && empty.reads == 0 && empty.state.reserved[0] == 0);
+        for (uint32_t kind = 0; kind < 3; ++kind) {
+            Model m(v); m.timeout = kind == 0; m.failCq = kind == 1 ? 0 : UINT32_MAX;
+            m.mismatch = kind == 2;
+            CHECK(W::PutPipeline(v, 0, 0, 8, 1, 0, 0, options, 3, m) == 0);
+            CHECK(m.reads == 0 && m.state.completed == 0 && m.state.producer == 1);
+            const uint32_t status = kind == 0 ? TILEXR_RDMA_DEVICE_TIMEOUT :
+                kind == 1 ? TILEXR_RDMA_DEVICE_CQE_ERROR : TILEXR_RDMA_DEVICE_CQE_MISMATCH;
+            CHECK(W::WaitPipeline(v, 3, m) == status);
+            CHECK(m.reads == (kind == 0 ? 3U : 1U) && m.state.error == status);
+            CHECK(m.state.completed == 0 && W::PendingBatchCount(m.state) != 0);
+            CHECK(W::WaitPipeline(v, 3, m) == TILEXR_RDMA_DEVICE_POISONED);
+        }
+        Model partial(v); partial.failCq = 1;
+        CHECK(W::PutPipeline(v, 0, 0, 8, 65, 0, 0, options, 3, partial) == 0);
+        CHECK(W::WaitPipeline(v, 3, partial) == TILEXR_RDMA_DEVICE_CQE_ERROR);
+        CHECK(partial.state.completed == 64 && partial.state.cqConsumer == 1);
+        CHECK(W::PendingBatchCount(partial.state) == 1 && W::PendingWrCount(partial.state) == 1);
+        v.queue.maxSendSge = 16; v.queue.maxSendWr = 2;
+        v.queue.pendingCapacity = W::PipelineRecordCapacity(v.queue.sqDepth, v.queue.cqDepth, v.queue.maxSendWr);
+        Model m(v); options.postBatch = 1; options.maxInFlight = 2;
+        TileXRRDMADeviceSge sges[16];
+        for (auto& sge : sges) { sge = {0, 8, 0}; }
+        CHECK(W::PutSgeListPipeline(v, sges, 16, 0, 1, 0, 0, options, 3, m) == 0);
+        CHECK(W::PutPipeline(v, 0, 0, 8, 1, 0, 0, options, 3, m) == 0);
+        CHECK(m.reads == 0 && m.state.producer == 6 && m.state.completed == 0 && m.peak == 2);
+        // A smaller next-call window drains both pending WRs, not six WQEBBs.
+        options.maxInFlight = 1;
+        CHECK(W::PutPipeline(v, 0, 0, 8, 1, 0, 0, options, 3, m) == 0);
+        CHECK(m.reads == 2 && m.state.completed == 6 && m.state.producer == 7);
+        CHECK(W::WaitPipeline(v, 3, m) == 0 && m.state.completed == 7 && m.reads == 3);
+        CHECK(W::WaitPipeline(v, 3, m) == 0 && m.reads == 3);
+        CHECK(W::PendingBatchCount(m.state) == 0 && W::PendingWrCount(m.state) == 0);
+    }
+    auto v = View(TILEXR_RDMA_DB_HARD); v.queue.cqDepth = 4;
+    v.queue.pendingCapacity = W::PipelineRecordCapacity(v.queue.sqDepth, v.queue.cqDepth, v.queue.maxSendWr);
+    Model m(v); W::PipelineOptions options; options.postBatch = 1;
+    CHECK(W::PutPipeline(v, 0, 0, 8, 2, 0, 0, options, 3, m) == 0);
+    const auto state = m.state;
+    const auto records = m.pending;
+    // Four requested CQEs exceed the non-wrap guard even though CI is still zero.
+    CHECK(W::PutPipeline(v, 0, 0, 8, 2, 0, 0, options, 3, m) == TILEXR_RDMA_DEVICE_INVALID);
+    CHECK(m.reads == 0 && m.rings == 2 && std::memcmp(&state, &m.state, sizeof(state)) == 0);
+    CHECK(m.pending == records);
+    options.postBatch = 2; // Appending one batch exactly fits the remaining guarded CQ span.
+    CHECK(W::PutPipeline(v, 0, 0, 8, 2, 0, 0, options, 3, m) == 0);
+    CHECK(m.reads == 0 && m.state.completed == 0 && m.state.producer == 4);
+    CHECK(W::WaitPipeline(v, 3, m) == 0 && m.state.cqConsumer == 3 && m.state.completed == 4);
+    v = View(TILEXR_RDMA_DB_HARD); v.queue.sqDepth = 131072;
+    Model longRun(v); options.postBatch = 64;
+    CHECK(W::PutPipeline(v, 0, 0, 8, 65537, 0, 0, options, 3, longRun) == 0);
+    CHECK(W::WaitPipeline(v, 3, longRun) == 0);
+    CHECK(longRun.state.reserved[1] == 65537 && longRun.state.completed == 65537);
+}
+
 int main()
 {
+    AdaptiveWindow();
     Golden(); Success(TILEXR_RDMA_DB_HARD); Success(TILEXR_RDMA_DB_SOFT); Failures(); SgePipeline();
-    std::puts("pipeline CPU model PASS: golden WQE, sparse CQ ordinals, 1/48/64/65/128/512/1000 tails, two-batch window, no-wrap admission, error ownership");
+    ExplicitWaitAndCrossCallWindow();
+    std::puts("pipeline CPU model PASS: WQE, sparse CQ, submit/wait, cross-call WR window, no-wrap admission, sticky errors");
 }

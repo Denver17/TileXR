@@ -1,0 +1,27 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "RDMAWrite UB context",
+  "cycles_per_us": null,
+  "stages": [
+    {"name": "total", "category": "total", "critical": true, "begin": 1000, "end": 1001},
+    {"name": "warmup", "category": "setup", "parent": "total", "track": "measurement", "begin": 1080, "end": 1081},
+    {"name": "measured_issue", "category": "issue", "parent": "total", "track": "measurement", "begin": 1082, "end": 1083},
+    {"name": "api", "category": "issue", "parent": "total", "track": "api", "begin": 1070, "end": 1071},
+    {"name": "RDMAWrite", "category": "issue", "parent": "api", "track": "entry", "begin": 1010, "end": 1011},
+    {"name": "RDMAWriteSge", "category": "issue", "parent": "api", "track": "entry", "begin": 1012, "end": 1013},
+    {"name": "RDMAWriteMultiQp", "category": "issue", "parent": "api", "track": "entry", "begin": 1014, "end": 1015},
+    {"name": "RDMAWriteSgeMultiQp", "category": "issue", "parent": "api", "track": "entry", "begin": 1016, "end": 1017},
+    {"name": "view", "category": "setup", "parent": "total", "track": "detail", "begin": 1030, "end": 1031},
+    {"name": "validation", "category": "diagnostic", "parent": "api", "track": "detail", "begin": 1032, "end": 1033},
+    {"name": "state_ub", "category": "setup", "parent": "api", "track": "detail", "begin": 1034, "end": 1035},
+    {"name": "encode_wqe", "category": "compute", "parent": "api", "track": "detail", "begin": 1040, "end": 1041},
+    {"name": "publish_stop", "category": "copy", "parent": "api", "track": "detail", "begin": 1042, "end": 1043},
+    {"name": "publish_tail", "category": "copy", "parent": "api", "track": "detail", "begin": 1044, "end": 1045},
+    {"name": "publish_head", "category": "copy", "parent": "api", "track": "detail", "begin": 1046, "end": 1047},
+    {"name": "doorbell", "category": "issue", "parent": "api", "track": "detail", "begin": 1050, "end": 1051},
+    {"name": "backpressure_cq", "category": "wait", "parent": "api", "track": "detail", "begin": 1052, "end": 1053},
+    {"name": "explicit_wait", "category": "wait", "parent": "total", "track": "wait", "begin": 1054, "end": 1055},
+    {"name": "restore", "category": "setup", "parent": "total", "track": "context", "begin": 1060, "end": 1061},
+    {"name": "save", "category": "finalize", "parent": "total", "track": "context", "begin": 1062, "end": 1063}
+  ]
+}

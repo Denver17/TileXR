@@ -1,8 +1,8 @@
 # RDMA WRITE 使用指南 / RDMA WRITE User Guide
 
-TileXR 支持在 Ascend C AIV kernel 中直接提交 RDMA WRITE：Host 建立连接并管理 QP/MR，AIV 通过四个 `RDMAWrite*` 接口发送连续数据或多 SGE 数据。本文按接入顺序说明配置、调用和清理。
+TileXR 支持在 Ascend C AIV kernel 中直接提交 RDMA WRITE：Host 建立连接并管理 QP/MR，AIV 通过四个 `RDMAWrite*` 接口提交连续数据或多 SGE 数据，并用 `RDMAWait` 显式等待完成。本文按接入顺序说明配置、调用和清理。
 
-TileXR lets Ascend C AIV kernels post RDMA WRITE directly. The Host owns connections, QPs and MRs; four `RDMAWrite*` adapters submit contiguous or gathered data. Follow this guide for setup, calls and cleanup.
+TileXR lets Ascend C AIV kernels post RDMA WRITE directly. The Host owns connections, QPs and MRs; four `RDMAWrite*` adapters submit contiguous or gathered data, and `RDMAWait` explicitly waits for completion. Follow this guide for setup, calls and cleanup.
 
 环境配置、低层队列契约、历史硬件证据与实现来源见 [RDMA 集成说明 / Integration and validation](RDMA_INTEGRATION.md)。可运行的 benchmark 及其纯 kernel 构建方式见 [rdma_compare](../tools/rdma_compare/README.md)。
 
@@ -13,17 +13,21 @@ TileXR lets Ascend C AIV kernels post RDMA WRITE directly. The Host owns connect
 | 一个连续段 / One contiguous span | `TileXR::RDMAWrite` | `TileXR::RDMAWriteMultiQp` |
 | 多个离散段 / Multiple scattered spans | `TileXR::RDMAWriteSge` | `TileXR::RDMAWriteSgeMultiQp` |
 
-四个接口均同步等待本次调用的全部 WR 完成。`count` 是所选 QP 的 WR 数；多 QP 接口只选择 `qpIndex`，应用负责启动 AIV、分区和同步。每个 QP 同时只能有一个 AIV owner，包括跨 region、kernel 和 stream 的使用。
+四个接口成功仅表示本次 WR 已提交，不在返回前无条件排空尾部 CQE；QP 的在途窗口、SQ 或 pending 记录容量不足时仍可能等待最早批次形成背压，不保证严格 non-blocking。默认窗口由每个 QP 的实际 SQ/WR 能力决定，不再固定为两批或 128 WR。`count` 是所选 QP 的 WR 数；多 QP 接口只选择 `qpIndex`，应用负责启动 AIV、分区和同步。每个 QP 同时只能有一个 AIV owner，包括跨 region、kernel 和 stream 的使用。
 
-All four calls wait for every WR in that call to complete. `count` is the WR count on the selected QP. Multi-QP calls select `qpIndex`; the application launches AIVs, partitions buffers and synchronizes them. Each QP has one exclusive AIV owner across regions, kernels and streams.
+All four calls return success after submitting this call's WRs, without an unconditional tail drain. They may still wait for the oldest batch under in-flight, SQ or pending-record backpressure, so they are not strictly non-blocking. The default window follows each QP's actual SQ/WR capacity, not a fixed two batches or 128 WRs. `count` is the WR count on the selected QP. Multi-QP calls select `qpIndex`; the application launches AIVs, partitions buffers and synchronizes them. Each QP has one exclusive AIV owner across regions, kernels and streams.
+
+在需要完成边界的位置调用 `TileXR::RDMAWait(view, scratch, maxPolls)`；它排空所选 QP 跨调用、跨 MR view 的共享 pending 批次，而不只等待当前 view 的发送。多 QP owner 使用 `views + qpIndex` 分别等待，不隐式遍历其他 QP。接口位于 `tilexr_rdma_device.h`，包含 `tilexr_rdma_write.h` 也可使用；低层 `RDMAPutPipeline` / `RDMAPutSgeListPipeline` 采用相同提交/等待契约。
+
+Call `TileXR::RDMAWait(view, scratch, maxPolls)` where completion is required. It drains the selected QP's shared pending batches across calls and MR views, not only WRs submitted through this view. Each multi-QP owner waits on `views + qpIndex`; no other QP is traversed implicitly. The API is in `tilexr_rdma_device.h`, also included by `tilexr_rdma_write.h`. Low-level `RDMAPutPipeline` / `RDMAPutSgeListPipeline` use the same submit/wait contract.
 
 多 SGE 按**列表顺序** gather 到一个远端连续区域。例如本地 `[A:64B, B:128B, C:32B]` 写到远端 `R`，结果为 `[R,R+64)=A`、`[R+64,R+192)=B`、`[R+192,R+224)=C`。不需要先拼接 payload；一个 WQE 只有一个远端起点和 rkey。
 
 Multiple SGEs are gathered in **list order** into one contiguous remote span. The example above produces `[A][B][C]` at `R`, without a payload staging copy. One WQE has one remote starting address and rkey; arbitrary remote scatter needs separate WRs.
 
-Host 下发仍由 `TileXRRDMAPut/Get` 提供，使用 `TILEXR_RDMA_MODE=host`。本文的 AIV 接口要求 `aiv` 模式；AIV 提交失败时不会改用 Host 提交。
+Host 下发仍由 `TileXRRDMAPut/Get` 提供，使用 `TILEXR_RDMA_MODE=host`，完成语义不变；非 pipeline 的 legacy device API 也保持同步完成。本文的 AIV WRITE 接口要求 `aiv` 模式；AIV 提交失败时不会改用 Host 提交。
 
-Host posting remains available through `TileXRRDMAPut/Get` in `host` mode. The AIV interfaces in this guide require `aiv` mode and never fall back to Host posting.
+Host posting remains available through `TileXRRDMAPut/Get` in `host` mode with unchanged completion semantics; non-pipeline legacy device APIs also remain synchronous. The AIV WRITE interfaces in this guide require `aiv` mode and never fall back to Host posting.
 
 ## 2. 构建和环境 / Build and environment
 
@@ -67,16 +71,16 @@ Select `hard` or `soft` only from the installed driver/firmware contract. All ra
 | 4 | 按相同顺序 collective `Register` 各 rank 的原始 allocation。 / Collectively register original local allocations in matching order. |
 | 5 | `GetDeviceViews` 导出 Host POD 数组，复制到 GM。 / Export Host POD views and copy them to GM. |
 | 6 | 发布 source/view，确认接收端就绪，启动发送 kernel。 / Publish source/views, confirm receiver readiness and launch the sender. |
-| 7 | 检查 stream 及每个 AIV 状态；通知接收端完成消费。 / Check the stream and every AIV status, then coordinate receiver consumption. |
+| 7 | 每个 owner 显式 Wait，检查 stream 及每个 AIV 状态，再通知接收端消费；stream sync 本身不证明 RDMA 完成。 / Each owner explicitly waits; check the stream and every AIV status before coordinating receiver consumption. Stream sync alone does not prove RDMA completion. |
 | 8 | 等待所有使用者退出，collective `Unregister`/`Shutdown`，成功后释放。 / Quiesce all users, collectively unregister/shut down, then free on success. |
 
 `ConfigureQps` 接受每个 peer 的 1..16 个 QP，默认 1，只能保持或增长，并且必须在任何 MR 注册前调用。即使数量不变，它仍是 collective。部分扩容失败后停止使用 transport，按第 6 节清理。
 
 `ConfigureQps` accepts 1..16 QPs per peer, defaults to one, permits only unchanged/increasing counts and must precede all MR registrations. It remains collective even if the count is unchanged. A partial expansion failure requires teardown as described in section 6.
 
-`GetDeviceViews` 输出数组的数量必须**恰好等于已配置 QP 数**。同一 handle 的 views 共享 local/remote MR 和 key，各 QP 有独立队列与 state。不同 handle 指向相同 QP 的 views 仍共享该 QP 的所有权和进度。`TileXRRDMAGetDeviceViewV2` 及其源代码别名 `TileXRRDMAGetDeviceView` 始终选择 QP0。
+`GetDeviceViews` 输出数组的数量必须**恰好等于已配置 QP 数**。同一 handle 的 views 共享 local/remote MR 和 key，各 QP 有独立队列与 state/pending 存储。不同 handle 指向相同 QP 的 views 仍共享该 QP 的所有权和进度。`TileXRRDMAGetDeviceView` / `TileXRRDMAGetDeviceViews` 分别是 V3 C 符号的源代码别名；单 view 接口始终选择 QP0。
 
-`GetDeviceViews` requires an array count **exactly equal to the configured QP count**. Views for one handle share MRs/keys but have independent per-QP queues/state. Views from different handles targeting one QP still share its ownership and progress. The single-view V2 API and its source alias always select QP0.
+`GetDeviceViews` requires an array count **exactly equal to the configured QP count**. Views for one handle share MRs/keys but have independent per-QP queues/state/pending storage. Views from different handles targeting one QP still share its ownership and progress. `TileXRRDMAGetDeviceView` / `TileXRRDMAGetDeviceViews` alias their V3 C symbols; the single-view API always selects QP0.
 
 导出失败后不要使用旧 GM view。支持数量范围内的失败会清空 Host 输出，但不会替应用清空 GM 副本。仅在本次导出和复制成功后启动 kernel。
 
@@ -165,7 +169,7 @@ void RunAndCloseDemo(DemoSession& s, DemoApp& app, int rank,
             localStatus = static_cast<int>(status[q*8]);
         }
     }
-    app.CheckAll(localStatus, "sender complete; notify receiver explicitly");
+    app.CheckAll(localStatus, "sender RDMAWait complete; notify receiver explicitly");
     app.CheckAll(app.ConsumeAndQuiesce(rank, s.payload, kDemoMrBytes, s.stream), "consumers done");
     app.CheckAll(aclrtSynchronizeStream(s.stream), "all local device users stopped");
     app.CheckAll(TileXRRDMAUnregister(s.comm, s.handle), "unregister collectively");
@@ -182,6 +186,10 @@ void RunAndCloseDemo(DemoSession& s, DemoApp& app, int rank,
 所有 rank 采用相同阶段调用 `aclInit`、`PrepareDemo`、`RunAndCloseDemo`；只有整个应用不再使用 ACL 时才 reset/finalize。单 QP 示例传 `owners=1`，多 QP 示例传 `owners=kDemoQps`，`count` 可选 1 或 512。例如 `RunAndCloseDemo(s, app, rank, "demo_write_sge_multiqp", kDemoQps, 512)` 表示每个 QP 各发送 512 条 WR。
 
 All ranks call `aclInit`, `PrepareDemo` and `RunAndCloseDemo` in matching phases; reset/finalize ACL only when the whole application is done. Use one owner for single-QP examples or `kDemoQps` owners for multi-QP examples. The call above sends 512 WRs **per QP**. Use a fresh example session when switching demonstrations; production reuse must respect cumulative capacity.
+
+下面每个 kernel 将 WRITE 或 Wait 的错误写回 status；Host 必须在 stream sync 后检查每个 owner 的结果。成功边界来自 kernel 内显式 Wait，而非 `aclrtSynchronizeStream` 本身；如果 kernel 只提交，stream sync 后仍需由同一 QP owner 在有序的后续 kernel 中 Wait，再通知远端或复用 source。
+
+Each kernel below reports either the WRITE or Wait error through status. The Host checks every owner's result after stream sync. Completion comes from the explicit Wait in the kernel, not `aclrtSynchronizeStream` alone. After a submit-only kernel, the same QP owner must Wait in an ordered subsequent kernel before notifying the peer or reusing source data.
 
 ## 4. 四种 AIV 调用示例 / Four AIV examples
 
@@ -246,8 +254,11 @@ extern "C" __global__ __aicore__ void demo_write(
     auto scratch = b.scratchBuffer.Get<uint8_t>();
     auto options = RdmaDemo::Options(count);
     auto view = reinterpret_cast<const __gm__ TileXRRDMADeviceView*>(viewsGM);
-    const uint32_t status = TileXR::RDMAWrite(view, RdmaDemo::kSource,
+    uint32_t status = TileXR::RDMAWrite(view, RdmaDemo::kSource,
         RdmaDemo::kDestination, 512, options, scratch);
+    if (status == TILEXR_RDMA_DEVICE_SUCCESS) {
+        status = TileXR::RDMAWait(view, scratch, options.maxPolls);
+    }
     b.Finish(statusGM, 0, status);
 }
 
@@ -263,8 +274,11 @@ extern "C" __global__ __aicore__ void demo_write_sge(
     auto view = reinterpret_cast<const __gm__ TileXRRDMADeviceView*>(viewsGM);
     TileXRRDMADeviceSge sges[2] = {
         {RdmaDemo::kSource+640, 512, 0}, {RdmaDemo::kSource, 512, 0}};
-    const uint32_t status = TileXR::RDMAWriteSge(view, sges, 2,
+    uint32_t status = TileXR::RDMAWriteSge(view, sges, 2,
         RdmaDemo::kDestination, options, scratch);
+    if (status == TILEXR_RDMA_DEVICE_SUCCESS) {
+        status = TileXR::RDMAWait(view, scratch, options.maxPolls);
+    }
     b.Finish(statusGM, 0, status);
 }
 
@@ -279,8 +293,11 @@ extern "C" __global__ __aicore__ void demo_write_multiqp(
     auto options = RdmaDemo::Options(count);
     auto views = reinterpret_cast<const __gm__ TileXRRDMADeviceView*>(viewsGM);
     const uint64_t delta = uint64_t(index) * RdmaDemo::kQpSpan;
-    const uint32_t status = TileXR::RDMAWriteMultiQp(views, qpCount, index,
+    uint32_t status = TileXR::RDMAWriteMultiQp(views, qpCount, index,
         RdmaDemo::kSource+delta, RdmaDemo::kDestination+delta, 512, options, scratch);
+    if (status == TILEXR_RDMA_DEVICE_SUCCESS) {
+        status = TileXR::RDMAWait(views + index, scratch, options.maxPolls);
+    }
     b.Finish(statusGM, index, status);
 }
 
@@ -297,8 +314,11 @@ extern "C" __global__ __aicore__ void demo_write_sge_multiqp(
     const uint64_t delta = uint64_t(index) * RdmaDemo::kQpSpan;
     TileXRRDMADeviceSge sges[2] = {
         {RdmaDemo::kSource+delta+640, 512, 0}, {RdmaDemo::kSource+delta, 512, 0}};
-    const uint32_t status = TileXR::RDMAWriteSgeMultiQp(views, qpCount, index,
+    uint32_t status = TileXR::RDMAWriteSgeMultiQp(views, qpCount, index,
         sges, 2, RdmaDemo::kDestination+delta, options, scratch);
+    if (status == TILEXR_RDMA_DEVICE_SUCCESS) {
+        status = TileXR::RDMAWait(views + index, scratch, options.maxPolls);
+    }
     b.Finish(statusGM, index, status);
 }
 ```
@@ -323,18 +343,28 @@ Multi-QP wrappers do not partition payloads, synchronize AIVs or order different
 | `count` | 1 | 所选 QP 的 WR 数，必须大于 0。 / Positive WR count on the selected QP. |
 | `localStride` | 0 | 每个 WR 对每个本地段的位移；0 复用 source。 / Per-WR displacement of every local segment; zero reuses it. |
 | `remoteStride` | 0 | 每个远端连续结果的位移；0 重复覆盖。 / Per-WR remote displacement; zero overwrites the same span. |
-| `postBatch` | 64 | 1..64；每批最后一个 WR 请求 CQE，包括不足一批的尾部。 / Last WR of every batch, including a partial tail, requests a CQE. |
-| `maxInFlight` | 128 | 必须容纳 `min(count, 2*postBatch)` 个 WR；实际 QP 的 `maxSendWr` 也必须容纳该峰值。 / Both this limit and actual `maxSendWr` must admit that peak. |
+| `postBatch` | 64 | 1..64，实际批长不超过有效窗口；每批最后一个 WR 请求 CQE，包括尾批。 / Effective batch is capped by the window; each batch's last WR, including a partial tail, requests a CQE. |
+| `maxInFlight` | `UINT32_MAX` | 默认不额外限制，自适应 SQ/WR 窗口；显式正值仅收紧上限，0 非法。 / No extra application cap by default; a positive value narrows the adaptive SQ/WR window, zero is invalid. |
 | `cyclicSlots` | 0 | 0 为线性 stride；非 0 按持久 WR ordinal 循环 payload。 / Zero uses linear strides; nonzero cycles payload slots from the persistent WR ordinal. |
-| `maxPolls` | 1000000 | 每个预期 batch CQE 的最大快照数，大于 0，非时间单位。 / Positive snapshot limit per expected batch CQE, not a time duration. |
+| `maxPolls` | 1000000 | 提交背压时每个预期 batch CQE 的最大快照数，大于 0，非时间单位；Wait 单独传入 poll budget。 / Positive snapshot limit per expected batch CQE during submission backpressure, not a time duration; pass the Wait budget separately. |
 
-每个 SGE 为 `{localOffset, bytes, reserved}`；`reserved=0`，长度大于 0，SGE 数为 `1..min(16, view.queue.maxSendSge)`。每段及总长度均小于 `2^31`，本地全部段与远端完整结果必须处于对应 MR 内；检查完整 count/stride 跨度及溢出。SGE 列表为 kernel-local 数组，在调用期间稳定，所有段共用该 view 的 local MR/lkey。
+每个 SGE 为 `{localOffset, bytes, reserved}`；`reserved=0`，长度大于 0，SGE 数为 `1..min(16, view.queue.maxSendSge)`。每段及总长度均小于 `2^31`，本地全部段与远端完整结果必须处于对应 MR 内；检查完整 count/stride 跨度及溢出。SGE 列表为 kernel-local 数组，在提交调用期间稳定，返回后可复用；所有段共用该 view 的 local MR/lkey，source HBM 必须继续保留至发送完成。
 
-Each SGE is `{localOffset, bytes, reserved}` with zero reserved and positive length. Count is `1..min(16, view.queue.maxSendSge)`. Every segment and the total are below `2^31`; validate complete local/remote spans across count/strides and overflow. Supply a stable kernel-local list using one local MR/lkey, not a Host pointer or a cast GM array.
+Each SGE is `{localOffset, bytes, reserved}` with zero reserved and positive length. Count is `1..min(16, view.queue.maxSendSge)`. Every segment and the total are below `2^31`; validate complete local/remote spans across count/strides and overflow. Supply a kernel-local list stable during submission, not a Host pointer or a cast GM array. The list may be reused on return, but its source HBM in the view's local MR/lkey must remain valid until send completion.
 
-使用 `RDMAWriteScratchBytes(numSge)` 分配 32B 对齐的 UB：当前 1 SGE 为 4608B，2..16 SGE 为 20992B，非法数量返回 0。不要使用低层单 WR 的 512B scratch 代替。每个并发 owner 独占 scratch，且与 SGE 数组不重叠。
+兼容入口用 `RDMAWriteScratchBytes(numSge, pendingCapacity)` 分配 32B 对齐的 UB，包含工作区和临时 context。
+第二个参数默认 4096，实际 QP 容量更大时必须传实际值。默认大小为 1 SGE 37440B、2..16 SGE 53824B；
+非法数量返回 0。不要继续使用旧的 4608B/20992B 常量或低层单 WR 的 512B scratch。
+显式 context 入口只需 `RDMAWriteWorkScratchBytes(numSge)`（4608B/20992B），另分配
+`RDMAWriteContextBytes(view.queue.pendingCapacity)`。并发 owner 的 UB 不重叠；工作 scratch 返回后可复用，
+context 则保留至显式 Save 完成。兼容 Wait 复用扩大的 WRITE scratch。
 
-Allocate 32B-aligned UB with `RDMAWriteScratchBytes(numSge)`: currently 4608B for one SGE, 20992B for 2..16, and zero for invalid counts. The low-level 512B single-WR scratch is insufficient here. Concurrent owners need separate scratch, disjoint from their SGE arrays.
+Compatibility calls use `RDMAWriteScratchBytes(numSge, pendingCapacity)`, including a temporary UB context.
+The default capacity is 4096; pass the actual larger capacity when needed. Default sizes are 37440B/53824B,
+not the previous 4608B/20992B constants. Explicit-context calls instead allocate separate work scratch
+(`RDMAWriteWorkScratchBytes`, 4608B/20992B) and `RDMAWriteContextBytes(actualCapacity)`.
+Keep each context alive until explicit Save completes; work scratch alone is reusable on return.
+Compatibility Wait reuses the enlarged WRITE scratch, not a standalone 512B allocation.
 
 | 每 WR 的 SGE 数 / SGEs per WR | SQ 64B 块 / SQ blocks |
 | --- | ---: |
@@ -347,15 +377,95 @@ Allocate 32B-aligned UB with `RDMAWriteScratchBytes(numSge)`: currently 4608B fo
 本接口不复用物理 SQ/CQ 尾部，发布前必须满足以下累计容量条件。 / These interfaces reject physical SQ/CQ reuse and check cumulative capacity before posting:
 
 ```text
+L = ceil((48 + 16 * numSge) / 64)  // WQEBBs per WQE
+defaultWindow = min(floor((sqDepth - 1) / L), maxSendWr)
+window = min(defaultWindow, maxInFlight)
+batch = min(postBatch, window)
 producer + count * WqeBlocks(numSge) < sqDepth
-cqConsumer + ceil(count / postBatch) < cqDepth
-min(count, 2 * postBatch) <= maxInFlight
-min(count, 2 * postBatch) <= maxSendWr
+cqConsumer + pendingBatchCount + ceil(count / batch) < cqDepth
+recordCapacity = min(maxSendWr, sqDepth - 1, cqDepth - 1)
 ```
 
 `producer/completed` 数 SQ 块，`cqConsumer` 数 CQ 槽，`count/maxInFlight/maxSendWr` 数 WR；不能互换。预热和先前调用也消耗空间，注册新 MR 不重置 QP。耗尽时停止并重建 communicator/QP，不能清 state 或把 producer 取模。`cyclicSlots` 只循环 payload，不允许队列 wrap，也不表示远端已消费。
 
 SQ progress counts blocks; CQ progress counts completion slots; count/in-flight limits count WRs. Warmups and earlier calls consume capacity, and a new MR does not reset a QP. Stop and recreate exhausted QPs instead of clearing state or applying modulo. Cyclic payload slots neither enable queue wrap nor acknowledge remote consumption.
+
+`pendingBatchCount` 是所选 QP 共享状态中尚未消费 CQE 的批次数，包括其他调用和 MR view；上限为 QP 的 `recordCapacity`，不固定为 2。每项为 8B，WRITE/Wait 的工作副本在 UB context 中，仅在 Restore/Save 边界与 transport 拥有的 HBM FIFO 交换。整个请求先检查累计 SQ/CQ 容量，再允许背压消费最早批次。下批发布前，要求 pending WR 数加该批长度不超过 `window`，且保留 SQ stop 和可用记录槽；使用完整批次策略，可能剩余不足一批的窗口。相邻调用更换 batch 或 SGE 数时按记录的真实 WR 数和 SQ end 分别核算，不用 SQ 块差代替 WR 数。
+
+`pendingBatchCount` counts shared unconsumed batches across calls/MR views, bounded by the QP's `recordCapacity`, not two slots. WRITE/Wait operate on 8B records in UB; Restore/Save exchange checkpoints with the transport-owned HBM FIFO. Check cumulative SQ/CQ admission before draining any batch. Before publishing the next batch, pending WRs plus its length must fit `window`, with an SQ stop and a free record slot. Whole-batch scheduling may leave less than a batch of unused WR capacity. Changing batch or SGE count uses actual recorded WR counts and SQ ends separately; BB differences cannot replace WR counts.
+
+### 5.1 显式 UB context 与 Debug 边界 / Explicit UB context and Debug policy
+
+连续调用应使用新增的 context overload（四个 `RDMAWrite*` 的最后一个参数都是
+`RDMAWriteContext&`），由同一 AIV 独占 QP。以下片段位于已初始化 TPipe 的 kernel 中：
+
+```cpp
+AscendC::TBuf<AscendC::QuePosition::VECCALC> workBuffer, stateBuffer;
+pipe.InitBuffer(workBuffer, TileXR::RDMAWriteWorkScratchBytes(1));
+pipe.InitBuffer(stateBuffer, TileXR::RDMAWriteContextBytes(view->queue.pendingCapacity));
+auto work = workBuffer.Get<uint8_t>();
+TileXR::RDMAWriteContext context(stateBuffer.Get<uint8_t>());
+uint32_t status = context.Restore(view);
+if (status == 0) {
+    status = TileXR::RDMAWrite(view, localOffset, remoteOffset, bytes, options, work, context);
+    if (status == 0) { status = TileXR::RDMAWait(view, work, context, options.maxPolls); }
+    const uint32_t saved = context.Save(); // 即使 Write/Wait 返回错误，也保存错误和进度。
+    if (status == 0) { status = saved; }
+}
+```
+
+Restore 只在交接边界执行一次，同时缓存整个 view；多个 WRITE/Wait 之间不重新加载 GM view，
+也不读取/写回 GM 软件状态。`context.State()` 查询 UB，缓存的 view 位于 caller-local 栈/寄存器。
+显式 context 绑定 Restore 时的同一个 view 地址；MR 地址、长度、key 和 QP 元数据在绑定期间必须不可变。
+即使另一个 MR view 使用同一 QP，也必须先 Wait/Save，再 Restore 新 view，不能仅更换 Write 参数中的指针。
+Debug 检查绑定指针；Release 由调用方保证此约束。Save 不清除缓存，也不重新读取 view。
+跨 kernel 或把 QP 交给另一个 owner 前显式 Save；Save 不代表等待发送完成。
+未 Save 时，GM checkpoint 不是最新进度；kernel 异常或提前退出不能凭旧 checkpoint 恢复提交，
+应停止该 QP 并按现有错误清理流程处理。禁止并发 context 或与旧 all-signaled API 混用。
+无 context 的兼容入口会在每次调用边界 Restore/Save，但不逐 batch 同步 GM。
+
+Use one explicit context per exclusive AIV/QP owner across successive calls. Restore once at handoff;
+Restore snapshots the entire immutable view in caller-local stack/register storage; Write/Wait reuse it
+without GM view reloads, while `State()` reads UB. Keep the exact Restore view pointer and all its
+MR/QP fields unchanged while bound. To switch MR views even on the same QP, Wait/Save and Restore
+the new view first. Debug checks pointer identity; Release relies on the caller. Save retains the cache.
+Save before crossing kernels or transferring ownership, including on
+returned errors; Save does not wait for send completion. An aborted kernel leaves a stale GM checkpoint:
+do not resume posting from it. Stop and clean up that QP. Compatibility calls checkpoint at each API
+boundary rather than every batch.
+
+`TILEXR_RDMA_DEBUG=1` 检查地址、长度、SGE、stride 和调用方 scratch 等前置条件；
+`=0` 将热路径中的这些检查编译掉，由调用方保证正确性。未显式定义时按 `NDEBUG`
+选择 0/1。版本/布局不匹配、队列容量、完成错误、超时和 poison 处理在 Release 中保留；
+冷路径 Restore/Save 也保留 checkpoint 校验。benchmark 显式为 Host 和 device 传入同一宏值。
+
+`TILEXR_RDMA_DEBUG=0` removes hot-path caller-argument checks; valid addresses, lengths, SGEs,
+strides and UB allocation become caller preconditions. ABI rejection, queue admission, completion
+errors, timeouts and poison handling remain active. Restore/Save retain cold checkpoint validation.
+The default follows `NDEBUG`; the benchmark explicitly sets matching Host/device values.
+
+Debug 打点只使用 `tilexr_profiling.h` 已有的 `DirectWriter`，覆盖四个 WRITE 入口及内部阶段；
+调用方先 Initialize 指定 lane，再 Attach 到 context，测量结束后 Publish。每个 marker
+读取 cycle counter 并通过 RecordAt 追加到 GM，不分配 profiling UB，也不扩展公共 SDK。
+此处的 GM trace 写入不同于 QP 软件状态访问：显式 context 的 state/pending 仍在 UB。
+采集、阶段 mapping 和时间归因见 [rdma_compare](../tools/rdma_compare/README.md#write-stage-profiling-debug-only)。
+Debug markers use the existing DirectWriter: Initialize a lane, Attach it to the context, then Publish
+after recording. Each marker reads the cycle counter and appends to GM with RecordAt; no profiling UB
+or public SDK extension is added. GM trace writes are separate from QP software state: explicit
+context state/pending remain in UB. Release emits no RDMA markers. Instrumented Debug timing includes
+recording overhead and does not measure uninstrumented Release performance.
+
+维护注意：接入 profiling 时先核对现有 writer 的事件追加和生命周期契约。重复阶段事件
+可使用 DirectWriter；不要仅为接入一个算子而新增通用 recorder、采集协议或文件格式。
+Review existing writer append/lifetime contracts before integration. DirectWriter supports repeated
+stage events; an operator integration alone does not require a new recorder, capture protocol or format.
+
+维护注意：pending FIFO 的有效区间可能从非 32B 对齐记录开始，并跨 FIFO 尾部。
+Restore/Save 将搬运区间向外对齐到 UB 32B 边界，但不超出实际 GM 分配；保存时仅清零
+不活跃的 padding，不能覆盖另一半 wrapped active records。CPU 回归覆盖容量为 3 的
+FIFO 交接和 UB 端点对齐；真实 MTE 行为仍需目标 CANN/设备验证。
+Pending checkpoints can wrap at unaligned record indices: align UB copy endpoints without
+overrunning GM or zeroing active wrapped neighbors. CPU substitutes check this contract, not device ordering.
 
 `RDMAWrite*` 包括 `count=1` 都进入 pipeline 模式；健康且完全 drain 的 all-signaled QP 可以进入 pipeline，之后不能返回旧 all-signaled API。
 
@@ -367,21 +477,39 @@ Payload volume is `QP count * count * sum(SGE lengths)`. For example, 512 eight-
 
 ## 6. 完成、错误与释放 / Completion, errors and release
 
-成功返回表示本次 WR 已完成，但不会通知接收端或建立其 stream/cache 可见性。应用先发布 source，再提交 WRITE；发送完成后通过控制消息/轮次 flag 通知远端，并按目标设备规则处理缓存和消费者依赖。不同 QP 覆盖同一区域没有全局顺序。
+WRITE 成功仅表示提交成功。应用先发布 source，再提交 WRITE；可执行不依赖发送结果且不修改待发送 source 的独立工作，然后显式等待：
 
-Success completes the call's WRs but does not notify the receiver or establish its stream/cache visibility. Publish source data before WRITE; coordinate remote completion with control messages/round flags and the target device's cache/consumer rules. Different QPs have no global ordering for overlapping destinations.
+WRITE success means submission only. Publish source data before WRITE; independent work may follow if it neither depends on completion nor modifies pending source data. Then explicitly wait:
+
+```cpp
+uint32_t TileXR::RDMAWait(const __gm__ TileXRRDMADeviceView* view,
+    const AscendC::LocalTensor<uint8_t>& scratch, uint32_t maxPolls = 1000000U);
+```
+
+必须检查返回的设备状态码。`maxPolls` 默认 1000000U，必须大于 0，按每个 pending batch 限制快照数；不是时间单位。合法且健康的空 Wait 或重复 Wait 成功且不轮询 CQ。成功 Wait 排空该 QP 的全部 pending 批次，跨调用及 MR view 生效；不等待其他 QP，也不通知接收端或建立其 stream/cache 可见性。发送完成后通过控制消息/轮次 flag 通知远端，并按目标设备规则处理缓存和消费者依赖。不同 QP 覆盖同一区域没有全局顺序。
+
+Check the returned device status. `maxPolls` defaults to 1000000U, must be positive, and bounds snapshots per pending batch, not elapsed time. A valid healthy empty or repeated Wait succeeds without CQ polling. Successful Wait drains all pending batches on that QP across calls and MR views, not other QPs. It neither notifies the receiver nor establishes its stream/cache visibility. Coordinate receiver consumption through control messages/round flags and the target device's cache/consumer rules. Different QPs have no global ordering for overlapping destinations.
+
+仅在 submit-only kernel 后调用 `aclrtSynchronizeStream` 不能证明 RDMA 完成；kernel 可在 NIC 仍读取 source 时退出。必须完成有序的显式 Wait 并检查其状态，才能将发送视为完成。QP、MR、共享 state 和相关 view 的生命周期跨越提交 kernel；同一 QP 不得并发访问。
+
+Calling `aclrtSynchronizeStream` after a submit-only kernel does not prove RDMA completion: the kernel may exit while the NIC still reads source HBM. Finish an ordered explicit Wait and check its status before treating the send as complete. QPs, MRs, shared state and relevant views outlive submission kernels; access to a QP remains exclusive.
 
 | 资源 / Resource | 释放条件 / Lifetime boundary |
 | --- | --- |
-| HBM、MR、key | 所有使用者退出且 collective Unregister/Shutdown 成功。 / All users quiescent and collective unregister/shutdown successful. |
-| GM view、QP、state、mapping | 所有相关 kernel 退出；注销/关闭后旧 view 失效。 / Live through every using kernel; old views expire at unregister/shutdown. |
-| UB scratch、SGE list | 同步调用及相关 MTE 完成。 / Live through the synchronous call and its MTE operations. |
-| source | NIC 不再引用；timeout 不能证明已取消。 / Until no NIC references remain; timeout does not cancel them. |
+| HBM、MR、key | 至少保留至发送完成；释放前所有使用者退出且 collective Unregister/Shutdown 成功。 / Retain through send completion; free only after all users quiesce and collective unregister/shutdown succeeds. |
+| GM view、QP、state、mapping | 保留至所有 pending 完成且相关 kernel 退出，或成功集体关闭；注销/关闭后旧 view 失效。 / Retain through pending completion and all using kernels, or successful collective shutdown; old views expire at unregister/shutdown. |
+| UB scratch | WRITE 发布及相关 MTE 在调用内完成，返回后可复用；Wait 复用 WRITE scratch，并在 Wait 期间有效。 / Publication/MTE finish within WRITE; reuse on return. Reuse WRITE scratch for Wait and keep it valid during Wait. |
+| kernel-local SGE list | 提交调用内保持稳定，返回后可复用；不同于其指向的 source HBM。 / Stable during submission, reusable on return; distinct from referenced source HBM. |
+| source 内容 / contents | 所有相关 QP 成功 Wait 确认 NIC 不再引用后才可改写；timeout/错误不代表取消。 / Modify only after successful Wait on all relevant QPs establishes no remaining NIC references; timeout/errors do not cancel them. |
 | destination | 接收端按应用协议消费结束。 / Until receiver consumption completes under the application protocol. |
 
 设备返回码为 `TileXRRDMADeviceStatus`：0 success、1 invalid、2 unsupported、3 busy、4 timeout、5 CQE error、6 CQE mismatch、7 poisoned。Host API 使用独立的 int 错误码；`Query.failed` 不能替代 kernel 返回码和共享 state 检查。
 
 Device calls return the status enum above; Host APIs use their separate int error codes. Inspect every owner's kernel result and shared state, not only `Query.failed`.
+
+提交背压和显式 Wait 都可能返回 CQE 错误或 timeout，并保留 QP 的 sticky error。失败不表示发送已取消，也不能立即改写/释放可能仍被 NIC 引用的 source、MR 或 QP；按下面清理协议处理。
+
+Submission backpressure and explicit Wait may both report CQE errors or timeouts and retain sticky QP errors. Failure does not cancel sends or permit immediate reuse/free of potentially NIC-referenced source, MRs or QPs; follow the cleanup protocol below.
 
 错误后的处理顺序 / Error-path order:
 
@@ -402,7 +530,7 @@ Normal unregister is also collective and requires remote consumer quiescence. Un
 | [tilexr_rdma_device_types.h](../src/include/tilexr_rdma_device_types.h) | 共享 POD ABI / Shared POD ABI | 固定宽度标准类型 / Fixed-width standard types |
 | [tilexr_rdma_write_options.h](../src/include/tilexr_rdma_write_options.h) | 参数及 scratch 大小 / Options and scratch size | `pipeline`，Host 可包含 / Host-safe |
 | [tilexr_rdma_write.h](../src/include/tilexr_rdma_write.h) | 四个业务 WRITE 入口 / Four application WRITE adapters | `device`、`write_options` |
-| [tilexr_rdma_device.h](../src/include/tilexr_rdma_device.h) | AIV cache/MTE/MMIO 操作 / AIV cache/MTE/MMIO adapter | `kernel_operator.h`、`wire`、`pipeline` |
+| [tilexr_rdma_device.h](../src/include/tilexr_rdma_device.h) | AIV cache/MTE/MMIO 及共享 QP 的 `RDMAWait` / AIV cache/MTE/MMIO and shared-QP `RDMAWait` | `kernel_operator.h`、`wire`、`pipeline` |
 | [tilexr_rdma_pipeline.h](../src/include/tilexr_rdma_pipeline.h) | 批量调度及完成回收 / Batch scheduling and retirement | `wire`、device 提供的 IO / device-supplied IO |
 | [tilexr_rdma_wire.h](../src/include/tilexr_rdma_wire.h) | 队列编码及基础算法 / Queue encoding and base algorithms | `device_types`、模板 IO / templated IO |
 
@@ -414,9 +542,9 @@ Host code normally includes `tilexr_api.h`/`tilexr_rdma.h`; AIV kernels include 
 
 Headers install under the configured include directory and the Host library under the configured library directory. Install pure AICore binaries separately under `tilexr/kernels`, load relative to the owning Host library, register them and launch with the runtime APIs above. Production Host libraries neither embed kernel objects nor use triple-chevron launches.
 
-V2 布局为 view 152B、queue 104B、state 64B、SGE 16B；版本及 `structBytes` 必须匹配。库、应用、kernel 与安装头文件一起重建并重新创建 QP/view，不能混用 V1/V2。
+V3 布局为 view 168B、queue 120B、state 64B、SGE 16B；版本及 `structBytes` 必须匹配。queue 新增 pending 地址/容量，state 保留生产序号及 WR 计数。单 view 与多 view 导出均升级为 V3 C 符号，避免旧调用方的较小缓冲区被新库覆盖。库、应用、kernel 与安装头文件一起重建并重新创建 QP/view；不提供旧布局回退，不能混用新旧 pipeline。UBNIC V2 硬件队列格式不变。
 
-V2 uses 152B views, 104B queues, 64B state and 16B SGEs. Version and `structBytes` must match. Rebuild library, application, kernels and installed headers together and recreate QPs/views; do not mix V1/V2 artifacts.
+V3 uses 168B views, 120B queues, 64B state and 16B SGEs. Version and `structBytes` must match. Queues add pending address/capacity; state keeps producer ordinals and WR counts. Both single/array view exports use V3 C symbols to prevent new libraries overwriting old callers' smaller allocations. Rebuild library, application, kernels and installed headers together and recreate QPs/views; no old-layout fallback or mixed pipeline implementations are supported. The UBNIC V2 hardware queue format is unchanged.
 
 ## 8. 验证与已知限制 / Validation and known limitations
 
@@ -435,3 +563,7 @@ Test count depends on available headers; NDA mock cases require matching verbs/e
 已保留的硬件记录包含 16QP/SGE1/512WR/2KiB 的 CQ timeout，根因未确定；1KiB 成功及旧工具复现不能把 2KiB 归为通过。历史回归矩阵、原始证据位置、CANN 版本以及未验证的跨机/L3/SOFT/wrap 边界统一见 [集成说明](RDMA_INTEGRATION.md#hardware-validation-boundary)。文档改写不构成新的硬件验证。
 
 Retained hardware records include an unresolved CQ timeout at 16 QPs, SGE1, 512 WRs and 2KiB. A passing 1KiB case or reproduction with the earlier tool does not make 2KiB pass. See the linked integration record for matrices, evidence locations, versions and untested cross-host/L3/SOFT/wrap boundaries. This documentation revision establishes no new hardware result.
+
+提交/显式等待变更尚未获得设备验证，仍待绿区验证目标上匹配版本的 CANN 编译与设备证据；历史同步调用结果不证明此变更的设备正确性或性能收益。benchmark 的计时必须包含成功 Wait，不得将提前提交返回视为带宽提升。
+
+The submit/explicit-wait change remains unqualified pending matching-version CANN compilation and device evidence from the green validation target. Historical synchronous-call results establish neither device correctness nor a performance gain for this change. Benchmark timing must include successful Wait; early submission return is not a bandwidth improvement.

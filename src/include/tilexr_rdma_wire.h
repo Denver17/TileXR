@@ -1,13 +1,13 @@
 /* Copyright (c) 2026 TileXR Project. Licensed under the Apache License, Version 2.0. */
 
 /*
- * 功能：校验 device view 和传输范围，编码 UBNIC WRITE WQE/doorbell，并解析 CQE、推进发送状态。
- * 调用关系：device 和 pipeline 层使用这些模板；IO 提供 buffer 访问、queue 发布和 CQE 读取。
- * 资源与生命周期：不分配 queue 内存；已提交操作出错后记录 sticky error，保留未完成的发送计数。
+ * 功能：校验 view 和传输范围，计算 QP 容量上限，编码 UBNIC WQE/doorbell，解析 CQE 并更新发送状态。
+ * 调用关系：device 和 pipeline 复用这些函数；模板 IO 提供 scratch、queue 和 state 的实际读写。
+ * 资源与生命周期：本文件不分配 queue 或 payload；已提交操作超时或 CQE 出错时记录 sticky error，不取消 NIC 内存访问。
  *
- * Purpose: Validate device views and transfer ranges, encode UBNIC WRITE WQEs/doorbells, decode CQEs and advance send state.
- * Calls: Used by device and pipeline code; IO supplies buffer access, queue publication and CQE reads.
- * Lifetime: Allocates no queue memory; posted failures record a sticky error and retain outstanding send counters.
+ * Purpose: Validate views/ranges, compute QP capacity limits, encode UBNIC WQEs/doorbells, decode CQEs and update send state.
+ * Calls: Device and pipeline code reuse these functions; template IO supplies scratch, queue and state access.
+ * Lifetime: Allocates no queues or payloads. Posted timeouts/CQE errors set a sticky error without cancelling NIC memory accesses.
  */
 #ifndef TILEXR_RDMA_WIRE_H
 #define TILEXR_RDMA_WIRE_H
@@ -195,6 +195,22 @@ TILEXR_RDMA_WIRE_INLINE void EncodeStop(Buffer& b, uint64_t next, uint32_t depth
 TILEXR_RDMA_WIRE_INLINE uint32_t WqeBlocks(uint32_t numSge)
 {
     return (48U + 16U * numSge + kEntryBytes - 1U) / kEntryBytes;
+}
+
+// All depths have already passed ValidateView / provider queue validation.
+TILEXR_RDMA_WIRE_INLINE uint32_t PipelineRecordCapacity(uint32_t sqDepth,
+    uint32_t cqDepth, uint32_t maxSendWr)
+{
+    const uint32_t capacity = sqDepth - 1U < cqDepth - 1U ? sqDepth - 1U : cqDepth - 1U;
+    return capacity < maxSendWr ? capacity : maxSendWr;
+}
+
+TILEXR_RDMA_WIRE_INLINE uint32_t PipelineWindow(const TileXRRDMADeviceQueue& q,
+    uint32_t numSge, uint32_t applicationLimit = UINT32_MAX)
+{
+    const uint32_t sqWrCapacity = (q.sqDepth - 1U) / WqeBlocks(numSge);
+    const uint32_t window = sqWrCapacity < q.maxSendWr ? sqWrCapacity : q.maxSendWr;
+    return window < applicationLimit ? window : applicationLimit;
 }
 
 template <typename Buffer>

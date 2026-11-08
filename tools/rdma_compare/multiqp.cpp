@@ -1,9 +1,20 @@
+/*
+ * 功能：运行两 rank、多 QP WRITE benchmark，为每个 QP 准备独立 payload，校验数据和队列进度后汇总耗时与带宽。
+ * 调用关系：TileXR Host API 配置 QP、注册 MR 并导出 view；multiqp_kernel.cpp 执行 warmup、提交和 Wait，Host 读取分段计时及可选 profiling。
+ * 资源与生命周期：Benchmark 持有 stream 和 buffer；Cleanup 等待 stream、调用 RDMA Shutdown 和 communicator destroy，成功后继续释放 buffer，失败则停止。
+ *
+ * Purpose: Run a two-rank, multi-QP WRITE benchmark with separate per-QP payloads, verify data/queue progress and aggregate timing/bandwidth.
+ * Calls: TileXR Host APIs configure QPs/register MRs/export views; multiqp_kernel.cpp warms up, submits and waits; Host reads timing and optional profiling.
+ * Lifetime: Benchmark owns streams/buffers. Cleanup waits for the stream, calls RDMA Shutdown and communicator destroy, then frees buffers;
+ *           failures stop subsequent cleanup.
+ */
 #include "tilexr_api.h"
 #include "tilexr_rdma.h"
 #include "tools/socket/tilexr_sock_exchange.h"
 #include "multiqp_layout.h"
 #include "multiqp_summary.h"
-#include "tilexr_rdma_wire.h"
+#include "tilexr_rdma_pipeline.h"
+#include "profile_capture.h"
 #include <acl/acl.h>
 #include <runtime/kernel.h>
 #include <algorithm>
@@ -52,10 +63,12 @@ class Benchmark {
     bool initialized_ = false;
     uint64_t phase_ = 0;
     float lastEventMs_ = 0;
+    std::vector<MultiQpTiming> timings_;
+    size_t ResultBytes() const { return qps_ * (sizeof(BenchResult) + sizeof(MultiQpTiming)); }
 public:
     Benchmark(uint32_t rank,uint32_t device,uint32_t bytes,uint32_t count,uint32_t direction,uint32_t qps,uint32_t numSge)
         : rank_(rank),device_(device),payload_(bytes),count_(count),direction_(direction),qps_(qps),sgeCount_(numSge),
-          layout_(bytes,count,false,numSge),socket_(rank,2,0),memories_(qps),views_(qps) {}
+          layout_(MultiQpCaseLayout(bytes,count,numSge)),socket_(rank,2,0),memories_(qps),views_(qps) {}
     template<class F> void Phase(F function) {
         uint64_t failed = 0;
         try { function(); } catch (const std::exception& e) {
@@ -70,10 +83,12 @@ public:
         }
     }
     std::vector<BenchResult> Launch(bool calibration) {
-        Check(aclrtMemset(resultGM_,qps_*sizeof(BenchResult),0,qps_*sizeof(BenchResult)),"clear results");
+        WriteProfileCapture profile;
+        void* profileGM = profile.Prepare(socket_, stream_, rank_, qps_, calibration);
+        Check(aclrtMemset(resultGM_,ResultBytes(),0,ResultBytes()),"clear results");
         BenchArgs args{reinterpret_cast<uintptr_t>(viewGM_),reinterpret_cast<uintptr_t>(resultGM_),
             layout_.source,layout_.target,layout_.stride,payload_,count_,rank_,direction_,layout_.cycles,
-            uint32_t(calibration),layout_.targetStride,sgeCount_,qps_};
+            uint32_t(calibration),layout_.targetStride,sgeCount_,qps_,reinterpret_cast<uintptr_t>(profileGM)};
         rtArgsEx_t launch{}; launch.args=&args; launch.argsSize=sizeof(args); rtTaskCfgInfo_t task{};
         Check(aclrtRecordEvent(eventStart_,stream_),"start event");
         Check(rtKernelLaunchWithFlagV2(&signature,qps_,&launch,nullptr,static_cast<rtStream_t>(stream_),0,&task),"launch all QPs");
@@ -82,6 +97,11 @@ public:
         Check(aclrtEventElapsedTime(&lastEventMs_,eventStart_,eventEnd_),"event time");
         std::vector<BenchResult> results(qps_);
         Check(aclrtMemcpy(results.data(),qps_*sizeof(BenchResult),resultGM_,qps_*sizeof(BenchResult),ACL_MEMCPY_DEVICE_TO_HOST),"read results");
+        timings_.resize(qps_);
+        Check(aclrtMemcpy(timings_.data(),qps_*sizeof(MultiQpTiming),
+            static_cast<const uint8_t*>(resultGM_)+qps_*sizeof(BenchResult),qps_*sizeof(MultiQpTiming),
+            ACL_MEMCPY_DEVICE_TO_HOST),"read issue timing");
+        profile.Export();
         bool failed = false;
         for (uint32_t q=0;q<qps_;++q) {
             const auto& r=results[q];
@@ -121,7 +141,7 @@ public:
             Check(aclrtSetDevice(device_),"set device"); Check(aclrtCreateStream(&stream_),"stream");
             Check(aclrtCreateEvent(&eventStart_),"event start"); Check(aclrtCreateEvent(&eventEnd_),"event end");
             Check(aclrtMalloc(&viewGM_,qps_*sizeof(TileXRRDMADeviceView),ACL_MEM_MALLOC_NORMAL_ONLY),"view allocation");
-            Check(aclrtMalloc(&resultGM_,qps_*sizeof(BenchResult),ACL_MEM_MALLOC_NORMAL_ONLY),"results allocation");
+            Check(aclrtMalloc(&resultGM_,ResultBytes(),ACL_MEM_MALLOC_NORMAL_ONLY),"results allocation");
             std::ifstream file(elf,std::ios::binary|std::ios::ate); Require(bool(file),"open ELF");
             const auto n=file.tellg(); Require(n>64 && n<64*1024*1024,"ELF extent");
             binary_.resize(size_t(n)); file.seekg(0); file.read(reinterpret_cast<char*>(binary_.data()),n);
@@ -148,10 +168,17 @@ public:
                 Require(v.version==TILEXR_RDMA_DEVICE_VERSION && v.structBytes==sizeof(v) &&
                     v.localAddress==reinterpret_cast<uintptr_t>(memories_[q]) && v.remoteAddress &&
                     v.localBytes==layout_.bytes && v.remoteBytes==layout_.bytes,"MR view extent/ABI");
-                const uint64_t sqBlocks=uint64_t(count_)*TileXR::RdmaWire::WqeBlocks(sgeCount_);
-                Require(v.queue.sqEntryBytes==64 && v.queue.sqDepth>sqBlocks && v.queue.cqDepth>(count_+63)/64 &&
-                    v.queue.maxSendWr>=std::min(count_,128U) && v.queue.maxSendSge>=sgeCount_ && v.queue.dbMode==TILEXR_RDMA_DB_HARD,
+                Check(TileXR::RdmaWire::ValidatePipelineView(v),"pipeline view");
+                const uint32_t window=TileXR::RdmaWire::PipelineWindow(v.queue,sgeCount_);
+                const uint32_t batch=std::min(kMultiQpPostBatch,window);
+                const uint64_t sqBlocks=uint64_t(count_+kMultiQpWarmupCalls)*TileXR::RdmaWire::WqeBlocks(sgeCount_);
+                Require(batch && v.queue.sqDepth>sqBlocks &&
+                    v.queue.cqDepth>(count_+batch-1U)/batch+kMultiQpWarmupCalls &&
+                    v.queue.maxSendSge>=sgeCount_ && v.queue.dbMode==TILEXR_RDMA_DB_HARD,
                     "queue admission");
+                Require(!kMultiQpSingleWqeCalls || (std::max(count_,kMultiQpWarmupCalls)<=window &&
+                    std::max(count_,kMultiQpWarmupCalls)<=v.queue.pendingCapacity),
+                    "single-WQE calls require the full run to fit without CQ backpressure");
                 Check(aclrtMemset(memories_[q],layout_.bytes,0xA5,layout_.bytes),"initialize MR guards");
                 std::vector<uint64_t> source(payload_/8);
                 for (uint32_t slot=0;slot<layout_.slots;++slot) {
@@ -166,6 +193,7 @@ public:
                     <<" max_send_wr="<<v.queue.maxSendWr<<" db_mode="<<v.queue.dbMode<<" mr_bytes="<<layout_.bytes
                     <<" max_send_sge="<<v.queue.maxSendSge<<" sge_count="<<sgeCount_<<" sge_bytes="<<payload_
                     <<" total_wqe_bytes="<<layout_.totalWqeBytes<<" wqe_blocks="<<TileXR::RdmaWire::WqeBlocks(sgeCount_)
+                    <<" max_in_flight="<<window<<" batch="<<batch<<" pending_capacity="<<v.queue.pendingCapacity
                     <<" required_sq_blocks="<<sqBlocks+1U<<" source_stride="<<layout_.stride<<" target_stride="<<layout_.targetStride
                     <<" doorbell="<<v.queue.doorbell<<" db_value="<<v.queue.sqDbValue<<" shared_provider=1"<<std::endl;
             });
@@ -188,8 +216,13 @@ public:
             const bool send=rank_==direction_;
             for (uint32_t q=0;q<qps_;++q) {
                 const auto& r=results[q];
-                const uint64_t sqBlocks=uint64_t(count_)*TileXR::RdmaWire::WqeBlocks(sgeCount_);
-                Require(r.producer==(send?sqBlocks:0U) && r.completed==r.producer && r.cqConsumer==(send?(count_+63)/64:0U),"QP progress");
+                const uint64_t sqBlocks=uint64_t(count_+kMultiQpWarmupCalls)*TileXR::RdmaWire::WqeBlocks(sgeCount_);
+                Require(r.producer==(send?sqBlocks:0U) && r.completed==r.producer &&
+                    r.cqConsumer==(send?(count_+kMultiQpPostBatch-1U)/kMultiQpPostBatch+kMultiQpWarmupCalls:0U),"QP progress");
+                const auto& timing=timings_[q];
+                Require(timing.warmupCalls==(send?kMultiQpWarmupCalls:0U),"warmup progress");
+                Require(send ? r.start<timing.issueEnd && timing.issueEnd<=r.end : !timing.issueEnd,
+                    "issue and Wait timestamp ordering");
                 if (!send) { Require(!r.start && !r.end,"receiver must not send"); }
                 Verify(q);
             }
@@ -199,6 +232,9 @@ public:
         std::cout<<std::setprecision(12)<<"MULTIQP_SAMPLE {\"rank\":"<<rank_<<",\"device\":"<<device_
             <<",\"qps\":"<<qps_<<",\"bytes\":"<<payload_<<",\"count_per_qp\":"<<count_<<",\"direction\":"<<direction_
             <<",\"sge_count\":"<<sgeCount_<<",\"sge_bytes\":"<<payload_<<",\"total_wqe_bytes\":"<<layout_.totalWqeBytes
+            <<",\"single_wqe_calls\":"<<(kMultiQpSingleWqeCalls?"true":"false")<<",\"post_batch\":"<<kMultiQpPostBatch
+            <<",\"api_calls_per_qp\":"<<(kMultiQpSingleWqeCalls?count_:1U)
+            <<",\"warmup_calls_per_qp\":"<<kMultiQpWarmupCalls
             <<",\"wqe_blocks\":"<<TileXR::RdmaWire::WqeBlocks(sgeCount_)<<",\"source_stride\":"<<layout_.stride
             <<",\"target_stride\":"<<layout_.targetStride<<",\"mr_bytes\":"<<layout_.bytes<<",\"layout_version\":"<<kCaseLayoutVersion
             <<",\"total_wqes\":"<<uint64_t(qps_)*count_<<",\"payload_bytes\":"<<total.payloadBytes
@@ -210,6 +246,9 @@ public:
         for (uint32_t q=0;q<qps_;++q) {
             const auto& r=results[q]; if (q) { std::cout<<','; }
             std::cout<<"{\"qp\":"<<q<<",\"qpn\":"<<views_[q].queue.qpn<<",\"start\":"<<r.start<<",\"end\":"<<r.end
+                <<",\"issue_end\":"<<timings_[q].issueEnd
+                <<",\"issue_duration_ns\":"<<(rank_==direction_?timings_[q].issueEnd-r.start:0U)
+                <<",\"wait_duration_ns\":"<<(rank_==direction_?r.end-timings_[q].issueEnd:0U)
                 <<",\"producer\":"<<r.producer<<",\"completed\":"<<r.completed<<",\"cq\":"<<r.cqConsumer<<'}';
         }
         std::cout<<"]}"<<std::endl;
@@ -254,20 +293,23 @@ int main(int argc,char** argv) {
     try {
         Require(argc==9 || argc==10,"RANK DEVICE BYTES COUNT_PER_QP DIRECTION QPS ELF --describe|--run [NUM_SGE]");
         const auto rank=Number(argv[1],0,1),device=Number(argv[2],0,15),bytes=Number(argv[3],512,1048576);
-        const auto count=Number(argv[4],1,1000),direction=Number(argv[5],0,1),qps=Number(argv[6],1,16);
+        const auto count=Number(argv[4],1,16384),direction=Number(argv[5],0,1),qps=Number(argv[6],1,16);
         const auto numSge=argc==10 ? Number(argv[9],1,16) : 1U;
         Require(!(bytes&(bytes-1U)) && !(qps&(qps-1U)),"bytes and QPs must be powers of two");
         Require(!(numSge&(numSge-1U)),"SGE count must be 1/2/4/8/16");
         if (!std::strcmp(argv[8],"--describe")) {
-            const CaseLayout layout(bytes,count,false,numSge);
+            const auto layout=MultiQpCaseLayout(bytes,count,numSge);
             std::cout<<"MULTIQP_CASE bytes="<<bytes<<" qps="<<qps<<" count_per_qp="<<count
                 <<" total_wqes="<<uint64_t(qps)*count<<" sge="<<numSge<<" sge_count="<<numSge<<" sge_bytes="<<bytes
                 <<" total_wqe_bytes="<<layout.totalWqeBytes<<" payload_bytes="<<uint64_t(qps)*count*layout.totalWqeBytes
                 <<" wqe_blocks="<<TileXR::RdmaWire::WqeBlocks(numSge)
-                <<" required_sq_blocks="<<uint64_t(count)*TileXR::RdmaWire::WqeBlocks(numSge)+1U
-                <<" cq_completions="<<(count+63U)/64U<<" source_stride="<<layout.stride<<" target_stride="<<layout.targetStride
+                <<" required_sq_blocks="<<uint64_t(count+kMultiQpWarmupCalls)*TileXR::RdmaWire::WqeBlocks(numSge)+1U
+                <<" cq_completions="<<(count+kMultiQpPostBatch-1U)/kMultiQpPostBatch+kMultiQpWarmupCalls
+                <<" source_stride="<<layout.stride<<" target_stride="<<layout.targetStride
                 <<" mr_bytes="<<layout.bytes<<" layout_version="<<kCaseLayoutVersion
-                <<" batch=64 signal=64 max_in_flight_per_qp=128"
+                <<" requested_batch="<<kMultiQpPostBatch<<" single_wqe_calls="<<kMultiQpSingleWqeCalls
+                <<" api_calls_per_qp="<<(kMultiQpSingleWqeCalls?count:1U)<<" warmup_calls_per_qp="<<kMultiQpWarmupCalls
+                <<" signal=per_batch max_in_flight_per_qp=auto_sq_wr"
                 <<" aivs="<<qps<<" no_wrap=1 shared_provider=1 timer=common_cycle_envelope npu_calls=0"<<std::endl; return 0;
         }
         Require(!std::strcmp(argv[8],"--run") && !std::getenv("RDMA_BENCH_CPU_ONLY"),"explicit --run without CPU-only guard required");
