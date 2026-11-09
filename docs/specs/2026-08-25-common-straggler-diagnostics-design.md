@@ -1,5 +1,104 @@
 # Common Straggler Diagnostics Design
 
+## Periodic clock maintenance
+
+维护入口是 `tilexr_straggler.h`。下表对应实际调用路径；所有 clock offset、补偿和残差都以
+communicator 的逻辑 rank 0 为基准，与 physical device ID 无关。调整 rank/device 映射后，
+基准随 rank 0 移动；rank 0 的模型保持零 offset、零 rate。
+
+| 文件 | 职责与调用关系 |
+| --- | --- |
+| `src/diagnostics/host/straggler_session.cpp` | 校验 owner thread 和 collective 配置，调用采样，交换并校验候选模型，写入文件 |
+| `src/diagnostics/host/clock_kernel.cpp` | 加载独立 binary，注册并向调用方的 stream 提交 clock kernel |
+| `src/diagnostics/kernels/clock_sync_kernel.h` | 执行 rank 0 与 peer 的四时间戳交换，写入采样或失败状态 |
+| `src/diagnostics/host/clock_drift.cpp` | 初始拟合、反馈更新和本地时间戳校正 |
+| `src/diagnostics/host/straggler_analysis.cpp` | 将观测时间戳校正到 rank 0 时间轴，计算 median/MAD 和分类 |
+
+四时间戳中，`t0/t3` 来自本地 rank，`t1/t2` 来自 rank 0。模型的单位为 cycle，
+`rateCorrection` 的单位为 cycle/cycle：
+
+```text
+measuredOffset = ((t1 - t0) + (t2 - t3)) / 2
+correctedCycle = localCycle + offsetCycles
+               + rateCorrection * (localCycle - anchorCycle)
+residual = correctedLocalTime - rank0Time
+```
+
+正 residual 表示补偿后的本地时间领先 rank 0，因此需要减小补偿；负值需要增大补偿。
+对外展示 ns/s 时，将 `rateCorrection` 乘以 `1e9`。`TileXRClockCorrectCycle` 对结果舍入，
+并拒绝非 READY 模型、无效参数和超出 `int64_t` 范围的结果。
+
+Enable `TILEXR_CLOCK_DRIFT_TRACK=1` before creating a detector to fit the initial
+rate over 10 seconds and maintain it with short collective sampling calls. Supply
+`config.outputDir` and at least 64 measured samples. An explicit
+`TILEXR_CLOCK_DRIFT_WINDOW_US` must be `10000000` in this mode. Without tracking,
+the existing optional drift model remains frozen after training.
+
+The caller schedules `TileXRClockSynchronize` approximately every 60 seconds after
+initial training, on the detector owner thread, with observations drained on all
+ranks. There is no background worker. The first 16 exchanges detect the residual;
+the next 16 confirm its sign and magnitude. Both medians must exceed 1000 ns in
+the same direction before a feedback update. Residual means corrected local time
+minus reference time, assuming symmetric effective communication delays.
+
+At an accepted update, use the device sample midpoint as the new anchor, set its
+offset to the measured offset, and blend the previous rate with the slope between
+the previous accepted anchor and the new measurement, with gain 0.25. A probe
+below threshold must not advance the rate anchor: dividing accumulated error by
+only the last probe interval overcorrects. A positive residual requires a negative
+rate increment. Re-anchoring also removes the current phase error; changing only
+the rate would leave it present. Corrected timestamps can step at this boundary.
+
+Every sampling call writes `rank<R>/clock_sync_generation<N>.json` with local raw
+exchanges and all gathered models. `rank<R>/clock_drift_latest.json` is replaced
+with the latest complete snapshot. Tracking metadata identifies the initial
+training generation, pre-update residual, probe validity and actual model update.
+The model generation advances only for initial fitting or an accepted update;
+its sample/span metadata continues to describe the initial fit. Files are evidence
+and checkpoints for inspection; automatic loading across restarts is not provided.
+Sampling/persistence errors are returned collectively. A fresh successful probe
+refreshes validation age, while its device anchor still records the last update.
+A rejected tracking probe must not renew validation age even if enough remaining
+exchanges satisfy the ordinary synchronization minimum-valid-sample threshold.
+
+更新时取第 32 个样本的本地 midpoint 为 `newAnchor`，将前 32 个 measured offset 按旧 rate
+移到这个 anchor 后取 median，得到 `newOffset`。随后计算：
+
+```text
+measuredRate = (newOffset - oldOffset) / (newAnchor - oldAnchor)
+newRate = 0.75 * oldRate + 0.25 * measuredRate
+```
+
+`oldAnchor/oldOffset` 来自上次实际接受的更新，不是上次定时探测。后 32 个样本不参与更新，
+可用于检查更新后的残差。候选 tracker 先经过 collective 探测检查及模型 gather/校验，
+再写入 session。模型已写入 session 后才执行文件持久化；文件写入失败会返回 collective
+错误，但不会回滚已经发布的内存模型。`latest` 使用临时文件加 rename 替换，generation
+文件直接写入；这不等同于断电后的持久性保证，也不保证各 rank 文件同时替换。
+
+调用方持有 communicator 和 stream，session 持有采样/记录 buffer 以及可选 RDMA allocation
+和 registration。调用方应在创建线程上安排 collective 采样，先收集完已有 observation，
+再约每 60 秒探测一次。`maxCalibrationAgeMs` 应覆盖维护间隔与实际调度延迟；默认值为
+60000；`Collect` 检查超龄并返回 timeout，因此 60 秒维护间隔需要为调度抖动预留余量。
+销毁时会等待已记录的 stream，随后尝试注销或关闭 RDMA 并释放 buffer；失败时保留 session 供重试，调用方不能
+继续销毁它借用的 communicator。
+
+For the integration runner, use a 1-second training cadence and a separate
+60-second maintenance cadence, for example:
+
+```bash
+export TILEXR_CLOCK_DRIFT_TRACK=1
+export TILEXR_CLOCK_DRIFT_WINDOW_US=10000000
+# Launch collectively with rank/device arguments and an existing output directory:
+test_tilexr_clock_sync_e2e --rank-size N --rank R --device-id D \
+  --samples 64 --warmup 0 --rounds 17 --round-gap-ms 1000 \
+  --maintenance-interval-ms 60000 --freeze-calibration 0 \
+  --output-dir OUTPUT --comm-mode local
+```
+
+The 1 us trigger does not guarantee every sample or unobserved instant stays below
+1 us. Report pre-update and held-out residuals separately from residuals evaluated
+with the new model; RTT/2 (`precisionNs`) remains a model bound, not that residual.
+
 ## Status
 
 Approved direction: move clock synchronization and straggler detection out of
@@ -43,7 +142,7 @@ Collectives / EP / MoonEP
 - detector creation, destruction, calibration state, and ownership checks;
 - the communication-domain control exchange used by calibration and collection;
 - clock sample estimation, event classification, and JSON reporting;
-- compilation, embedding, registration, and launch of the standalone clock
+- compilation, loading, registration, and launch of the standalone clock
   synchronization AICore binary;
 - generic producer-side Host observation APIs and device record layout.
 
@@ -61,15 +160,16 @@ argument path.
 ```text
 src/diagnostics/
   CMakeLists.txt
-  cmake/
   host/
-    clock_sync.cpp
-    kernel_registration.cpp
+    clock_drift.h / clock_drift.cpp
+    clock_kernel.h / clock_kernel.cpp
     straggler_analysis.cpp
     straggler_session.cpp
   kernels/
     CMakeLists.txt
-    clock_sync_kernel.cpp
+    clock_sync_kernel.cpp / clock_sync_kernel.h
+    clock_rdma_queue.h
+    clock_rdma_profile.h
 
 src/include/
   tilexr_straggler.h
@@ -192,7 +292,7 @@ sample buffer or considered by the estimator. The default is 32 warmups followed
 by 128 measured samples. `TileXRClockSyncResult::sampleCount` counts measured
 samples only and `warmupSampleCount` records the discarded exchanges.
 
-The diagnostics build embeds a pure AICore object and registers it with
+The diagnostics build installs a standalone AICore object and the Host loads and registers it with
 `rtDevBinaryRegister` and `rtFunctionRegister`. Host launch uses
 `rtKernelLaunchWithFlagV2` with a fixed argument ABI.
 
@@ -214,6 +314,12 @@ diagnostics build. It must not silently compile Ascend950 for `dav-c220-vec`.
   overwrite a prior device-side failure.
 
 ## Reporting
+
+Clock offsets, affine corrections and signed residuals use the communicator's
+logical rank 0 as their reference. Physical device IDs do not select the time
+base: remapping rank 0 moves the reference to that device. A positive residual
+means the corrected local timestamp is ahead of rank 0. Persisted clock
+snapshots record `reference_rank: 0`; rank 0 retains zero offset and rate.
 
 `TileXRStragglerReport` describes a generic communication event. It includes:
 

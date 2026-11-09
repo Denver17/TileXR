@@ -264,6 +264,132 @@ matching library/application/kernel/header implementations are required on a QP.
 Do not mix old and new pipeline code. Successful Wait does not notify a remote consumer or order
 different QPs.
 
+## Clock synchronization over AIV RDMA
+
+The diagnostics Host hooks use the public `TileXRRDMAGetDeviceView` spelling,
+which selects the versioned symbol matching the current headers. Rebuild the
+Host library and kernel together after an RDMA view ABI upgrade; a successful
+textual rebase alone does not validate the Host hooks against the new API.
+
+Build diagnostics with `-DTILEXR_BUILD_DIAGNOSTICS=ON`. The clock API keeps
+its default MTE peer-memory path. Set `TILEXR_CLOCK_TRANSPORT=rdma` before
+creating the detector to opt into device-driven WRITE; every rank must select
+the same clock transport. Also configure the AIV RDMA backend above. With
+`TILEXR_ENABLE_IPC=0`, no remote IPC mapping is needed. An unavailable NDA
+capability is an error, with no Host or MTE fallback.
+
+By default the kernel retains the five 64-byte messages (READY, REQUEST,
+RESPONSE, TIMESTAMP, ACK), fresh magic/sequence checks, and midpoint timestamps. Each
+rank owns one registered 2 MiB allocation containing its local mailboxes,
+device views and serialized send staging. AIV publishes a message to staging,
+constructs/publishes its WQE, issues `st_dev`, and waits for completion before
+reusing the source. Receive polling reads only local mailboxes and invalidates
+NIC-updated cache lines. Host handles setup and result collection, not message
+submission. This is the NDA queue path, independent of SHMEM and UB UDMA.
+
+Two explicit RDMA options reduce serialization; all ranks must agree on them:
+
+| Options | Messages per sample | Source lifetime and CQ policy |
+| --- | --- | --- |
+| Default | READY / REQUEST / RESPONSE / TIMESTAMP / ACK | One staging slot; each send waits for its CQE |
+| `TILEXR_CLOCK_RDMA_DEFER_CQE=1` | Same five messages | Distinct immutable source slots; drain every CQE at the end of the kernel |
+| Both `TILEXR_CLOCK_RDMA_DEFER_CQE=1` and `TILEXR_CLOCK_RDMA_COMPACT=1` | REQUEST / RESPONSE / TIMESTAMP | Same immutable sources and complete end-of-kernel CQ drain |
+
+Compact mode requires deferred mode. Registration and the launch control
+collective establish initial readiness; receive slots are not cleared when the
+kernel starts. A leaf sends its next REQUEST only after consuming the preceding
+TIMESTAMP, so the next REQUEST also acknowledges consumption of the preceding
+RESPONSE/TIMESTAMP. The root waits for that REQUEST before overwriting either
+slot. The final result collective establishes that all receivers have finished
+before another round or teardown. Each peer has separate receive slots, and
+each send has its own source slot. The root still visits peers in order, but
+compact mode can advance to the next peer while previous transfers remain in
+flight. Different peer QPs can therefore overlap; four-rank elapsed time need
+not equal three times the two-rank elapsed time. Deferred mode never interprets a remote flag
+as SQ completion: it still checks every CQE's freshness, QPN, opcode, sequence
+and error, publishes CQ CI, and verifies exact queue progress on the Host.
+Successful CQ prefixes may retire on error; unresolved sources and the producer
+remain owned until transport shutdown. Distinct staging must fit before launch.
+
+RDMA `t0` and `t2` bracket completed WQE publication through doorbell issue,
+using the midpoint of that scalar issue window. They do not include a subsequent
+CQ wait, and do not claim to timestamp NIC consumption or packets on the wire.
+Using the midpoint of the entire synchronous send previously included CQ
+waiting and artificially shortened the computed RTT; older RTT/error-bound
+values must not be compared directly with the corrected timing boundary. MTE
+retains its original write-window midpoint. RTT/2 is only a theoretical bound
+under these timestamp and delay assumptions, not a measurement of clock accuracy.
+
+The offset model assumes symmetric **effective one-way delays**, not merely
+the same physical route. With local timestamps `t0,t3` and reference timestamps
+`t1,t2`, it uses `RTT=(t3-t0)-(t2-t1)` and
+`offset=((t1-t0)+(t2-t3))/2`, selecting the minimum valid RTT sample.
+The offset is reference minus local; add it to a local timestamp. A forward/reverse
+delay difference introduces offset bias `(forward-reverse)/2`. Effective delays
+include endpoint software, SQ/NIC queueing, transfer, and receive-poll detection.
+The model also assumes stable counter rates and valid timestamp boundaries;
+the RTT-derived bound does not cover arbitrary timestamp errors or later drift.
+
+For an RDMA comparison, check that both endpoints use matching RoCE version,
+GID address family, MTU, QP type/capacity policies, doorbell/DMA modes and clock
+protocol options. Record each actual NIC, GID and QP configuration: names,
+addresses and QPN values naturally differ. Matching configuration does not
+prove equal effective delays. The clock API does not measure path symmetry.
+`errorBoundCycles` is `ceil(minRTT/2)`; `precisionNs` is the maximum converted
+per-rank bound. JSON retains the ABI-compatible field names and explicitly marks
+the symmetry assumption, `path_symmetry_verified: false` and
+`measured_residual_ns: null`. Repeatability or agreement between transports is
+not an independent measurement of synchronized-clock residual error.
+
+Clock synchronization and RDMA detector destruction are collective. Quiesce
+other users of the communicator's RDMA QPs first. Before unregistering, all
+ranks agree that their streams have stopped. After a clock transfer failure,
+destruction uses `TileXRRDMAShutdown` to close the transport's QPs and release
+MRs before freeing backing memory; this invalidates every RDMA view/handle on
+that communicator. Failed cleanup retains the session for collective retry.
+A broken bootstrap cannot establish safe MR release and requires process exit.
+
+The current clock path deliberately rejects SQ/CQ wrap. Each round consumes
+`3*(warmup+samples)` WRs per root-to-peer QP and
+`2*(warmup+samples)` per peer-to-root QP; compact mode uses respectively
+`2*(warmup+samples)` and `warmup+samples`. It checks actual queue depth and
+progress before launch. Start a fresh communicator before capacity is exhausted.
+
+For diagnosis, build separately with `-DTILEXR_DIAGNOSTICS_CLOCK_PROFILE=ON`
+(default OFF). The integration executable exports per-state send phases,
+receive-poll counts, and the deferred round CQ drain. Counters stay in UB until
+the protocol finishes. Detailed profiling perturbs the loop; use an OFF build
+for final latency. CQ read/decode subphases belong inside doorbell-to-CQE time
+and must not be added again. Moving CQ waits may move the same underlying delay
+into receive polling, so a large CQ phase alone is not evidence that all that
+time is removable software overhead.
+
+The integration executable accepts explicit physical device IDs, including
+noncontiguous selections; launch one process per assigned device:
+
+```bash
+test_tilexr_clock_sync_e2e --rank-size "$RANK_SIZE" --rank "$RANK" \
+  --device-id "$DEVICE_ID" --comm-mode socket --rounds 10 \
+  --samples 128 --warmup 32 --output-dir "$OUTPUT_DIR"
+```
+
+Create the output directory first and use a shared `TILEXR_COMM_ID` for all
+ranks. `RDMA_BENCH_CPU_ONLY` forbids running this executable on NPUs. Each rank
+writes per-round metrics, raw measured samples and RDMA queue progress CSVs.
+`host_ns` measures the synchronous API, including bootstrap collectives and
+first-call registration; `kernel_cycles` spans the device protocol including
+warmup and initial rank-arrival skew. Convert with `cycles_per_second`. Keep
+first-call and steady results separate. The min-RTT/2 `error_bound_ns` is an
+algorithmic uncertainty bound, not independent absolute-clock-error evidence.
+The benchmark agrees all local validation outcomes before another clock round
+or collective teardown, preventing mismatched bootstrap message sizes.
+
+MTE requires peer-memory reachability, which RoCE TCP/bootstrap connectivity
+does not establish. If cross-host `rtIpcOpenMemory` fails, retain that failure
+and compare MTE versus RDMA on the same supported local pair. Cross-host RDMA
+results must be reported separately. A direct same-subnet IPv4 RoCEv2 run does
+not prove that the packets traversed a layer-three router.
+
 ## Verification
 
 CANN-free Host checks (no NPU launches):
@@ -514,6 +640,119 @@ and hardware remain the authority for actual NPU registration support.
   prove NIC receipt, and CQ polling time includes network/device waiting; it
   cannot all be counted as removable software overhead. Use a calibrated timer
   and report raw observer cost instead of subtracting guessed instruction costs.
+
+### Clock messages and GM staging
+
+Clock RDMA always stages each complete 64B protocol slot from UB into GM,
+then publishes an ordinary one-SGE RDMA WRITE. QP creation does not request
+inline capacity; providers with zero inline bytes remain supported. Deferred
+sends use distinct immutable GM slots until the full-round CQ drain completes.
+The synchronous path reuses its staging slot only after completion. Each WRITE
+consumes one SQ entry and one CQ entry; the reserved queue-mode field stays zero.
+Owner, QPN, opcode, sequence, syndrome, credit, no-wrap and teardown checks apply
+to both completion policies.
+
+Keep NDA tests focused on the active queue contract: when removing a posting
+mode, remove its capability sweep and fake-provider controls together. Ordinary
+queue creation, capacity, export and cleanup tests still cover the GM path;
+varying an unused inline limit only repeats the same case.
+
+An earlier inline experiment on CANN 9.3/Ascend950PR reduced the median of
+per-round half-minimum effective RTTs from about 7.1us to 6.6us. The maintained
+clock path uses GM staging to avoid a second queue format and an inline
+capability requirement. Send preparation before
+publication is outside the clock's effective RTT, and root processing between
+receive and response is subtracted from it. Retain publication/receive timestamp
+boundaries and raw samples when evaluating changes. Neither RTT/2 nor matching
+bidirectional configuration measures synchronized residual clock error or
+proves path-delay symmetry. Host queue models validate source lifetime and
+completion accounting; they do not validate the NPU/NIC data plane.
+
+The installed extension's `QP_ENABLE_DIRECT_WQE` flag advertises a separate
+capability request. Its presence alone does not specify an AIV DWQE aperture,
+payload format or publication ordering. The reference routine named
+`roce3_post_send_deal_dwqe_and_db` still rings an ordinary SQ doorbell; its name
+is not evidence of a working direct-WQE data path. Qualify those contracts
+before using DWQE as a further optimization.
+
+Protocol snapshot UB reuse needs both dependencies: `S_MTE2` before the copy
+overwrites the preceding Scalar-consumed snapshot, and `MTE2_S` before Scalar
+reads the new snapshot. Do not assume the compiler supplies the first edge;
+the tested CANN 9.3 binary did not. Optional receive profiling separately
+exports successful REQUEST/RESPONSE snapshot window counts and sum/min/max,
+captured after the existing t1/t3 endpoints. Counts include warmup, and the root
+aggregates its peers. Require nonzero expected window counts before using the
+new fields: old profile binaries have zero-filled padding at those offsets.
+
+A later Host-memory control built from the reference perftest actually
+negotiated inline64 and reported median half RTTs of 6.14--6.21us on the same
+NIC pair (two independent trials in each orientation). This narrows the gap
+to AIV clock measurements but still uses different timing, source memory and
+CQ policies; it is neither a matched NDA baseline nor a hardware-floor proof.
+The inspected CANN SIMT DWQE implementation targets URMA/UB-CTP, whereas its
+RoCE implementation uses `st_dev`. Never reuse an aperture offset from one
+protocol for another without the matching provider contract.
+# Corrected-clock validation
+
+## Frozen offset and rate compensation
+
+Set `TILEXR_CLOCK_DRIFT_WINDOW_US=20000000` before creating a detector to fit
+the clock offset over approximately 20 seconds. Repeated `TileXRClockSynchronize`
+calls collect the raw four-timestamp exchanges; callers control their sampling
+cadence. The first exchange whose local-midpoint span reaches the requested
+window closes training. The returned model records the actual span, point
+count and training generation. Coefficients then stay frozen until the detector
+is destroyed. A window of `20` requests 20 microseconds, not 20 seconds; the
+exchange duration may permit too few points to fit a rate. Report such a model
+as `INSUFFICIENT`, rather than silently extending the window or applying noise.
+
+`TileXRClockGetDriftModel` returns the separate extension without changing
+existing clock/config ABI layouts. For a READY model, `TileXRClockCorrectCycle`
+and straggler timestamp alignment use:
+
+```text
+reference = local + offset_at_anchor + rate_correction * (local - anchor)
+```
+
+`rate_correction` is reference-minus-local cycles per local cycle. Multiply by
+1e9 for the nominal ns/s correction; it has the opposite sign to uncorrected
+local-minus-reference drift. Fit using centered cycle differences, keeping large
+absolute timestamps out of the regression. Root mapping is identity. Rejected
+models retain offset-only alignment; inspect model state explicitly. The model
+does not change physical clocks, the AIV RDMA exchange or the RTT/2-derived
+`precisionNs` field. The original synchronization result remains the per-call
+offset candidate; use the model getter for the frozen affine mapping. Later
+measurement rounds do not refresh the accepted rate model's Host calibration
+age: the existing maximum-calibration-age check still limits its use.
+Gathered model arrays are committed only after the complete collective and all
+rank/window/version checks succeed; an interrupted or mismatched gather must
+not replace the previously accepted mapping with partial receive data.
+
+For validation, keep the fit closed, exclude its entire closing round, and use
+new exchanges for at least a minute. Compare offset-only-at-anchor and affine
+corrections on exactly the same held-out timestamps, retaining all outliers.
+Verify raw sample provenance, queue progress, actual window and coefficient
+immutability. Training RMS or a regression standard error is not independent
+post-calibration accuracy or a guarantee of long-term extrapolation. Effective
+path symmetry remains an assumption; changing asymmetric endpoint/network delay
+can look like clock drift and bias either fitted coefficient.
+
+`precisionNs` is half the minimum effective RTT, not a measured difference
+between corrected clocks. For held-out two-rank validation, run the clock E2E
+test with `--freeze-calibration 1 --round-gap-ms 250 --rounds 20`. Round zero
+selects the production minimum-RTT correction; subsequent rounds reuse the raw
+sampler but discard its candidate corrections and restore the first calibration.
+The frozen correction is exported with every sample. Run
+`tests/diagnostics/analyze_clock_residual.py --input RUN --output ANALYSIS`.
+
+For local `t0,t3`, root `t1,t2`, and frozen additive local-to-root correction
+`f`, the signed residual estimate is `f-((t1-t0)+(t2-t3))/2`. The two-card range
+is its absolute value. This requires equal **effective** one-way delays and
+approximately constant offset during each exchange. Matching NIC/GID/QP policy
+does not prove those assumptions. Without an independent common event/time
+reference, keep the independently measured residual null. Include all validation
+outliers, the finite validation window and model assumptions; never substitute
+RTT/2, launch/barrier skew, or calibration-sample fit for the requested maximum.
 
 ## Maintaining the documentation / 文档维护
 

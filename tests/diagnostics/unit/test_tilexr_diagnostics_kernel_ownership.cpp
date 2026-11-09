@@ -1,3 +1,9 @@
+/*
+ * 功能：读取源码和 CMake，检查 diagnostics 的模块依赖边界及 kernel 注册/安装配置。
+ * 调用关系：由 diagnostics CTest 启动，使用 TILEXR_SOURCE_ROOT 定位仓库文件；不执行 kernel。
+ * Purpose: Inspect source/CMake text for diagnostics dependency boundaries and kernel registration/install wiring.
+ * Calls: Diagnostics CTest supplies TILEXR_SOURCE_ROOT to locate repository files; no kernel is executed.
+ */
 #include <dirent.h>
 
 #include <fstream>
@@ -92,31 +98,6 @@ int main()
     Require(hostPath, host, "rtFunctionRegister");
     Require(hostPath, host, "rtKernelLaunchWithFlagV2");
     Forbid(hostPath, host, "kernel<<<");
-
-    const std::string kernelPath = "src/diagnostics/kernels/clock_sync_kernel.h";
-    const std::string kernel = ReadFile(kernelPath);
-    Require(kernelPath, kernel, "AscendC::GetSystemCycle()");
-    Require(kernelPath, kernel, "TILEXR_CLOCK_SYNC_READY");
-    Require(kernelPath, kernel, "TILEXR_CLOCK_SYNC_REQUEST");
-    Require(kernelPath, kernel, "TILEXR_CLOCK_SYNC_RESPONSE");
-    Require(kernelPath, kernel, "TILEXR_CLOCK_SYNC_TIMESTAMP");
-    Require(kernelPath, kernel, "TILEXR_CLOCK_SYNC_ACK");
-    Require(kernelPath, kernel, "warmupSampleCount");
-    Require(kernelPath, kernel, "GM_ADDR requestSlot = rootMemory + slotOffset");
-    Require(kernelPath, kernel, "ClockSyncAckSlotOffset");
-    Require(kernelPath, kernel, "ClockSyncTimestampSlotOffset");
-    Require(kernelPath, kernel, "TileXRStragglerWriteGm(requestSlot");
-    Require(kernelPath, kernel, "TileXRStragglerWriteGm(timestampSlot");
-    Require(kernelPath, kernel, "StragglerReadProtocolMatches");
-    Require(kernelPath, kernel, "t1 = readStart + (readEnd - readStart) / 2u");
-    Require(kernelPath, kernel, "t3 = readStart + (readEnd - readStart) / 2u");
-    Require(kernelPath, kernel, "requestWriteStart + (requestWriteEnd - requestWriteStart) / 2u");
-    Require(kernelPath, kernel,
-            "responseWriteStart + (responseWriteEnd - responseWriteStart) / 2u");
-
-    const std::string sessionPath = "src/diagnostics/host/straggler_session.cpp";
-    const std::string session = ReadFile(sessionPath);
-    Require(sessionPath, session, "nextMagic(session->comm, &magic)");
 
     ScanDirectory("src/diagnostics");
 

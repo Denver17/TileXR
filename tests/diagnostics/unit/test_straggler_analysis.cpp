@@ -1,3 +1,9 @@
+/*
+ * 功能：检查采样筛选、offset 估计、记录分类和 drift 模型对观测时间戳的校正。
+ * 调用关系：用合成采样/记录调用 straggler_analysis.cpp，核对公开 result/report 及 ABI 布局。
+ * Purpose: Check sample selection, offset estimation, classification and drift correction of observation timestamps.
+ * Calls: Feed synthetic samples/records to straggler_analysis.cpp and check public results/reports and ABI layouts.
+ */
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -142,6 +148,29 @@ void TestClockEstimatorSelectsMinimumDelay()
     CheckEq("offset ns", result.offsetNs, static_cast<int64_t>(100));
     CheckEq("valid samples", result.validSamples, static_cast<uint32_t>(4));
     CheckEq("rejected samples", result.rejectedSamples, static_cast<uint32_t>(0));
+}
+
+void TestClockEstimatorSymmetryAssumption()
+{
+    // True reference-minus-local offset is 100 cycles in both cases.
+    // The same RTT can hide a bias of (forward - reverse) / 2.
+    TileXRClockRankResult results[2] {};
+    for (uint32_t asymmetric = 0; asymmetric < 2; ++asymmetric) {
+        std::vector<TileXR::TileXRClockSyncDeviceSample> samples;
+        for (uint32_t sequence = 0; sequence < 4; ++sequence) {
+            const uint64_t start = 1000 + sequence * 100;
+            const uint64_t forward = asymmetric ? 30 : 20;
+            const uint64_t reverse = asymmetric ? 10 : 20;
+            samples.push_back(Sample(start, start + 100 + forward,
+                start + 100 + forward + 10, start + forward + 10 + reverse, sequence));
+        }
+        CheckTrue("estimate symmetric/asymmetric model", TileXRDiagnostics::Host::EstimateClockRank(
+            samples, 1000000000ull, 1, results[asymmetric]));
+        CheckEq("same model RTT", results[asymmetric].minRoundTripCycles, uint64_t {40});
+        CheckEq("same model bound", results[asymmetric].errorBoundCycles, uint64_t {20});
+    }
+    CheckEq("symmetric offset", results[0].offsetCycles, int64_t {100});
+    CheckEq("asymmetric offset has ten-cycle bias", results[1].offsetCycles, int64_t {110});
 }
 
 void TestClockEstimatorRejectsInvalidSamples()
@@ -375,12 +404,40 @@ void TestRejectsMismatchedCalibration()
         (report.ranks[1].reasonFlags & TILEXR_STRAGGLER_REASON_CLOCK_UNSYNCHRONIZED) != 0);
 }
 
+void TestAppliesDriftToCollectedTimestamps()
+{
+    auto clock = Clock(2);
+    clock.ranks[1].offsetCycles = 100;
+    const uint64_t local = 1020000000000ull;
+    std::vector<TileXR::TileXRStragglerTimingRecord> records {
+        Record(0,17,local+6100,1000),Record(1,17,local,1000)};
+    TileXRClockDriftModel models[2] {};
+    models[1].version = 1;
+    models[1].state = TILEXR_CLOCK_DRIFT_READY;
+    models[1].rank = 1;
+    models[1].anchorCycle = 1000000000000ull;
+    models[1].offsetCycles = 100;
+    models[1].rateCorrection = 300e-9;
+    models[1].cyclesPerSecond = clock.cyclesPerSecond;
+    TileXRStragglerReport report {};
+    CheckEq("drift compensated classification",TileXRDiagnostics::Host::ClassifyStragglerRecords(
+        Config(),clock,records,report,models),TileXR::TILEXR_SUCCESS);
+    CheckEq("production path aligns using same affine model",report.ranks[1].alignedStartNs,
+        report.ranks[0].alignedStartNs);
+    models[1].state = TILEXR_CLOCK_DRIFT_INSUFFICIENT;
+    CheckEq("insufficient drift keeps offset-only path",TileXRDiagnostics::Host::ClassifyStragglerRecords(
+        Config(),clock,records,report,models),TileXR::TILEXR_SUCCESS);
+    CheckEq("rejected rate is not applied",report.ranks[0].alignedStartNs-report.ranks[1].alignedStartNs,
+        int64_t {6000});
+}
+
 } // namespace
 
 int main()
 {
     TestLayout();
     TestClockEstimatorSelectsMinimumDelay();
+    TestClockEstimatorSymmetryAssumption();
     TestClockEstimatorRejectsInvalidSamples();
     TestClockEstimatorRejectsUnwrittenSamples();
     TestClockEstimatorRejectsPartialCompletion();
@@ -394,5 +451,6 @@ int main()
     TestObservationErrorReason();
     TestRejectsMismatchedLaunch();
     TestRejectsMismatchedCalibration();
+    TestAppliesDriftToCollectedTimestamps();
     return g_failures == 0 ? 0 : 1;
 }

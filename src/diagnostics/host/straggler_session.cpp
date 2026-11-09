@@ -1,9 +1,20 @@
+/*
+ * 功能：创建诊断 session，校验 collective 调用，执行 clock 采样、模型交换、文件写入和观测收集。
+ * 调用关系：实现 tilexr_straggler.h 的会话接口，调用 clock kernel、drift 拟合和记录分析模块。
+ * 资源与生命周期：session 借用 communicator 和 stream，持有采样/记录及可选 RDMA buffer。
+ *   Destroy 等待已记录的 stream 并尝试释放资源；失败时保留 session 供重试。
+ * Purpose: Create diagnostic sessions, validate collective calls, sample clocks, exchange/save models and collect observations.
+ * Calls: Implement tilexr_straggler.h session APIs using the clock kernel, drift fitter and record analyzer.
+ * Lifetime: Sessions borrow communicators/streams and own sample, record and optional RDMA buffers.
+ *   Destroy waits for recorded streams and attempts cleanup; failures retain the session for retry.
+ */
 #include "straggler_session.h"
 
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -32,6 +43,12 @@ enum class ControlOperation : uint32_t {
     CLOCK_READY = 2,
     CLOCK_RESULT = 3,
     COLLECT_PREFLIGHT = 4,
+    CLOCK_RDMA_ALLOCATED = 5,
+    CLOCK_RDMA_PREPARED = 6,
+    CLOCK_DESTROY = 7,
+    CLOCK_DESTROY_RELEASED = 8,
+    CLOCK_PERSISTED = 9,
+    CLOCK_MODEL_READY = 10,
 };
 
 struct ControlEnvelope {
@@ -48,6 +65,15 @@ struct ControlEnvelope {
 };
 
 static_assert(sizeof(ControlEnvelope) == 64, "straggler control envelope ABI changed");
+static_assert(TileXR::TILEXR_CLOCK_RDMA_VIEWS_OFFSET +
+    TILEXR_STRAGGLER_MAX_RANKS * sizeof(TileXRRDMADeviceView) <= TileXR::TILEXR_CLOCK_RDMA_STAGING_OFFSET,
+    "clock views overlap send staging");
+static_assert(TileXR::TILEXR_CLOCK_RDMA_STAGING_OFFSET + sizeof(TileXR::TileXRClockSyncProtocolSlot) <=
+    TileXR::TILEXR_CLOCK_RDMA_PROFILE_OFFSET, "clock staging overlaps profiling");
+static_assert(TileXR::TILEXR_CLOCK_RDMA_PROFILE_OFFSET + sizeof(TileXR::TileXRClockRdmaProfile) <=
+    TileXR::TILEXR_CLOCK_RDMA_ASYNC_STAGING_OFFSET, "clock profiling overlaps deferred staging");
+static_assert(TileXR::TILEXR_CLOCK_RDMA_ASYNC_STAGING_OFFSET < TileXR::TILEXR_CLOCK_SYNC_REGION_OFFSET,
+    "clock deferred staging overlaps protocol mailboxes");
 
 aclError MallocDevice(void **ptr, size_t bytes)
 {
@@ -96,6 +122,11 @@ const StragglerRuntimeHooks kDefaultHooks {
     LaunchClockSyncKernel,
     SteadyNowNs,
     aclGetRecentErrMsg,
+    TileXRRDMAQuery,
+    TileXRRDMARegister,
+    TileXRRDMAUnregister,
+    TileXRRDMAGetDeviceView,
+    TileXRRDMAShutdown,
 };
 
 const StragglerRuntimeHooks *g_hooks = &kDefaultHooks;
@@ -140,10 +171,15 @@ int GatherControl(StragglerSession &session, ControlOperation operation, uint64_
     local.sequence = sequence;
     local.launchId = launchId;
     local.configHash = ConfigHash(session.config);
+    local.configHash = (local.configHash ^ session.clockDrift.windowUs) * 1099511628211ull;
+    local.configHash = (local.configHash ^ session.clockDrift.tracking) * 1099511628211ull;
     local.status = localStatus;
     local.operation = static_cast<uint32_t>(operation);
     local.rank = static_cast<uint32_t>(session.hostArgs->rank);
     local.generation = generation;
+    local.reserved0 = (session.clockUsesRdma ? 1u : 0u) | (session.clockRdmaDeferred ? 2u : 0u) |
+        (session.clockRdmaCompact ? 4u : 0u);
+    local.reserved1 = session.clockRdmaFailed ? 1u : 0u;
     std::vector<ControlEnvelope> envelopes(static_cast<size_t>(session.hostArgs->rankSize));
     const int gatherStatus = g_hooks->hostAllGather(
         session.comm, &local, sizeof(local), envelopes.data(), session.config.timeoutMs);
@@ -151,17 +187,19 @@ int GatherControl(StragglerSession &session, ControlOperation operation, uint64_
         return gatherStatus;
     }
     int domainStatus = TileXR::TILEXR_SUCCESS;
+    bool abortRdma = false;
     for (int rank = 0; rank < session.hostArgs->rankSize; ++rank) {
         const ControlEnvelope &item = envelopes[static_cast<size_t>(rank)];
         if (item.magic != local.magic || item.operation != local.operation ||
             item.sequence != sequence || item.generation != generation ||
             item.configHash != local.configHash ||
-            item.rank != static_cast<uint32_t>(rank)) {
+            item.rank != static_cast<uint32_t>(rank) || item.reserved0 != local.reserved0) {
             return TileXR::TILEXR_ERROR_INTERNAL;
         }
         if (domainStatus == TileXR::TILEXR_SUCCESS && item.status != TileXR::TILEXR_SUCCESS) {
             domainStatus = item.status;
         }
+        abortRdma = abortRdma || item.reserved1 != 0;
     }
     if (domainStatus != TileXR::TILEXR_SUCCESS) {
         return domainStatus;
@@ -171,7 +209,113 @@ int GatherControl(StragglerSession &session, ControlOperation operation, uint64_
             return TileXR::TILEXR_ERROR_INTERNAL;
         }
     }
+    if (operation == ControlOperation::CLOCK_DESTROY) {
+        session.clockRdmaFailed = abortRdma;
+    }
     return domainStatus;
+}
+
+int PrepareClockRdma(StragglerSession &session, aclrtStream stream,
+                     uint64_t sequence, uint32_t generation)
+{
+    if (!session.clockUsesRdma) {
+        return TileXR::TILEXR_SUCCESS;
+    }
+    session.clockRdmaParticipating = true;
+    int status = TileXR::TILEXR_SUCCESS;
+    if (!session.clockRdmaReady) {
+        if (session.clockRdmaMemory == nullptr &&
+            g_hooks->mallocDevice(&session.clockRdmaMemory, TileXR::TILEXR_CLOCK_RDMA_BYTES) !=
+                ACL_SUCCESS) {
+            status = TileXR::TILEXR_ERROR_INTERNAL;
+        }
+        if (session.clockRdmaMemory == nullptr) {
+            status = TileXR::TILEXR_ERROR_INTERNAL;
+        }
+        if (status == TileXR::TILEXR_SUCCESS) {
+            const aclError clear = g_hooks->memsetDeviceAsync(session.clockRdmaMemory,
+                TileXR::TILEXR_CLOCK_RDMA_BYTES, 0, TileXR::TILEXR_CLOCK_RDMA_BYTES, stream);
+            const aclError sync = g_hooks->synchronizeStream(stream);
+            if (clear != ACL_SUCCESS || sync != ACL_SUCCESS) {
+                status = TileXR::TILEXR_ERROR_INTERNAL;
+            }
+        }
+        int ret = GatherControl(session, ControlOperation::CLOCK_RDMA_ALLOCATED,
+            sequence, 0, generation, status);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            return ret;
+        }
+        // Collective registration includes the complete allocation, never an IPC alias.
+        status = g_hooks->rdmaRegister(session.comm, session.clockRdmaMemory,
+            TileXR::TILEXR_CLOCK_RDMA_BYTES, &session.clockRdmaHandle);
+        if (status != TileXR::TILEXR_SUCCESS) {
+            TileXRRDMAInfo info {};
+            session.clockRdmaFailed = g_hooks->rdmaQuery(session.comm, &info) != TileXR::TILEXR_SUCCESS ||
+                info.failed != 0;
+            return status;
+        }
+        session.clockRdmaViews.resize(static_cast<size_t>(session.hostArgs->rankSize));
+        for (int peer = 0; peer < session.hostArgs->rankSize; ++peer) {
+            if (peer == session.hostArgs->rank) {
+                continue;
+            }
+            status = g_hooks->rdmaGetView(session.comm, session.clockRdmaHandle, peer,
+                &session.clockRdmaViews[peer]);
+            if (status != TileXR::TILEXR_SUCCESS) {
+                break;
+            }
+        }
+        const size_t bytes = session.clockRdmaViews.size() * sizeof(TileXRRDMADeviceView);
+        if (status == TileXR::TILEXR_SUCCESS) {
+            const uint64_t deferred = (session.clockRdmaDeferred ? 1u : 0u) |
+                (session.clockRdmaCompact ? 2u : 0u);
+            const aclError modeCopy = g_hooks->copyHostToDeviceAsync(session.clockRdmaMemory,
+                sizeof(deferred), &deferred, sizeof(deferred), stream);
+            void *views = static_cast<uint8_t *>(session.clockRdmaMemory) +
+                TileXR::TILEXR_CLOCK_RDMA_VIEWS_OFFSET;
+            const aclError copy = g_hooks->copyHostToDeviceAsync(views, bytes,
+                session.clockRdmaViews.data(), bytes, stream);
+            const aclError sync = g_hooks->synchronizeStream(stream);
+            if (modeCopy != ACL_SUCCESS || copy != ACL_SUCCESS || sync != ACL_SUCCESS) {
+                status = TileXR::TILEXR_ERROR_INTERNAL;
+            }
+        }
+        ret = GatherControl(session, ControlOperation::CLOCK_RDMA_PREPARED,
+            sequence, 0, generation, status);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            return ret;
+        }
+        session.clockRdmaReady = true;
+    }
+    // One serialized AIV owns each QP. Reserve room for this whole clock round
+    // and its invalid stop entry; this clock path deliberately refuses wrap.
+    const uint64_t samples = session.config.clockSyncSamples + session.config.clockSyncWarmupSamples;
+    const uint64_t sourceSlots = samples * 3u * (session.hostArgs->rankSize - 1u);
+    if (session.clockRdmaDeferred && sourceSlots >
+        (TileXR::TILEXR_CLOCK_SYNC_REGION_OFFSET - TileXR::TILEXR_CLOCK_RDMA_ASYNC_STAGING_OFFSET) / 64u) {
+        return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+    }
+    for (int peer = 0; peer < session.hostArgs->rankSize; ++peer) {
+        if (peer == session.hostArgs->rank || (session.hostArgs->rank != 0 && peer != 0)) {
+            continue;
+        }
+        const auto &view = session.clockRdmaViews[peer];
+        TileXRRDMADeviceState state {};
+        if (g_hooks->copyDeviceToHost(&state, sizeof(state),
+                reinterpret_cast<const void *>(view.queue.state), sizeof(state)) != ACL_SUCCESS) {
+            return TileXR::TILEXR_ERROR_INTERNAL;
+        }
+        const uint64_t sends = samples * (session.hostArgs->rank == 0 ?
+            (session.clockRdmaCompact ? 2u : 3u) : (session.clockRdmaCompact ? 1u : 2u));
+        if (state.error != 0 || state.producer != state.completed ||
+            state.reserved[0] != 0 ||
+            (session.clockRdmaDeferred && sends > view.queue.maxSendWr) ||
+            state.producer >= view.queue.sqDepth || sends >= view.queue.sqDepth - state.producer ||
+            state.cqConsumer >= view.queue.cqDepth || sends >= view.queue.cqDepth - state.cqConsumer) {
+            return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+        }
+    }
+    return TileXR::TILEXR_SUCCESS;
 }
 
 void TrackOutstandingStream(StragglerSession &session, aclrtStream stream)
@@ -257,7 +401,44 @@ bool EnsureDirectory(const std::string &path)
     return true;
 }
 
-int WriteClockJson(const StragglerSession &session)
+int UpdateClockModels(StragglerSession &session,
+                      const std::vector<TileXR::TileXRClockSyncDeviceSample> &samples,
+                      uint64_t sequence, uint64_t magic, uint32_t generation)
+{
+    if (session.clockDrift.windowUs == 0) { return TileXR::TILEXR_SUCCESS; }
+    auto candidate = session.clockDrift;
+    UpdateClockDrift(candidate, samples,
+        session.cyclesPerSecond, session.hostArgs->rank, generation);
+    int status = TileXR::TILEXR_SUCCESS;
+    if (candidate.tracking) {
+        const bool invalidProbe = session.clockDrift.closed &&
+            candidate.model.state == TILEXR_CLOCK_DRIFT_READY &&
+            session.hostArgs->rank != 0 && !candidate.probeValid;
+        status = GatherControl(session,
+            ControlOperation::CLOCK_MODEL_READY, sequence, magic, generation,
+            invalidProbe ? TileXR::TILEXR_ERROR_INTERNAL : TileXR::TILEXR_SUCCESS);
+        if (status != TileXR::TILEXR_SUCCESS) { return status; }
+    }
+    std::vector<TileXRClockDriftModel> models(session.hostArgs->rankSize);
+    status = g_hooks->hostAllGather(session.comm, &candidate.model, sizeof(TileXRClockDriftModel),
+        models.data(), session.config.timeoutMs);
+    if (status != TileXR::TILEXR_SUCCESS) { return status; }
+    for (size_t rank = 0; rank < models.size(); ++rank) {
+        const auto &model = models[rank];
+        if (model.version != 1 || model.rank != static_cast<int32_t>(rank) ||
+            model.requestedWindowUs != session.clockDrift.windowUs ||
+            model.cyclesPerSecond != session.cyclesPerSecond ||
+            model.state < TILEXR_CLOCK_DRIFT_COLLECTING || model.state > TILEXR_CLOCK_DRIFT_UNSTABLE) {
+            return TileXR::TILEXR_ERROR_INTERNAL;
+        }
+    }
+    session.clockDrift = std::move(candidate);
+    session.clockDriftModels.swap(models);
+    return TileXR::TILEXR_SUCCESS;
+}
+
+int WriteClockJson(const StragglerSession &session,
+                    const std::vector<TileXR::TileXRClockSyncDeviceSample> &samples)
 {
     if (session.outputDir.empty()) {
         return TileXR::TILEXR_SUCCESS;
@@ -267,12 +448,11 @@ int WriteClockJson(const StragglerSession &session)
     }
     std::ostringstream path;
     path << session.outputDir << "/clock_sync_generation" << session.clock.generation << ".json";
-    std::ofstream out(path.str().c_str(), std::ios::out | std::ios::trunc);
-    if (!out.is_open()) {
-        return TileXR::TILEXR_ERROR_INTERNAL;
-    }
+    std::ostringstream out;
+    out << std::setprecision(17);
     out << "{\n  \"schema\": \"tilexr_clock_sync.v1\",\n"
         << "  \"generation\": " << session.clock.generation << ",\n"
+        << "  \"reference_rank\": 0,\n"
         << "  \"rank_size\": " << session.clock.rankSize << ",\n"
         << "  \"warmup_sample_count\": " << session.clock.warmupSampleCount << ",\n"
         << "  \"sample_count\": " << session.clock.sampleCount << ",\n"
@@ -281,6 +461,10 @@ int WriteClockJson(const StragglerSession &session)
         << "  \"frequency_source\": \"cann_9_1_product_rule\",\n"
         << "  \"precision_cycles\": " << session.clock.precisionCycles << ",\n"
         << "  \"precision_ns\": " << session.clock.precisionNs << ",\n"
+        << "  \"precision_semantics\": \"max_rank_half_min_effective_rtt\",\n"
+        << "  \"offset_model_assumption\": \"symmetric_effective_one_way_delays\",\n"
+        << "  \"path_symmetry_verified\": false,\n"
+        << "  \"measured_residual_ns\": null,\n"
         << "  \"ranks\": [\n";
     for (uint32_t rank = 0; rank < session.clock.rankSize; ++rank) {
         const TileXRClockRankResult &item = session.clock.ranks[rank];
@@ -296,8 +480,52 @@ int WriteClockJson(const StragglerSession &session)
             << ", \"rejected_samples\": " << item.rejectedSamples << "}"
             << (rank + 1 == session.clock.rankSize ? "\n" : ",\n");
     }
-    out << "  ]\n}\n";
-    return out.good() ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_INTERNAL;
+    out << "  ]";
+    if (session.clockDrift.tracking) {
+        out << ",\n  \"tracking\": {\"initial_window_us\": " << session.clockDrift.windowUs
+            << ", \"maintenance_interval_ms\": 60000, \"trigger_ns\": 1000, \"rate_gain\": 0.25"
+            << ", \"initial_generation\": " << session.clockDrift.initialGeneration
+            << ", \"local_model_updated\": " << (session.clockDrift.updated ? "true" : "false")
+            << ", \"local_probe_valid\": " << (session.clockDrift.probeValid ? "true" : "false")
+            << ", \"local_preupdate_residual_ns\": " << session.clockDrift.residualNs << "},\n"
+            << "  \"drift_models\": [\n";
+        for (size_t rank = 0; rank < session.clockDriftModels.size(); ++rank) {
+            const auto &model = session.clockDriftModels[rank];
+            out << "    {\"rank\": " << rank << ", \"state\": " << model.state
+                << ", \"anchor_cycle\": " << model.anchorCycle
+                << ", \"offset_cycles\": " << model.offsetCycles
+                << ", \"rate_correction\": " << model.rateCorrection
+                << ", \"model_generation\": " << model.trainedAtGeneration
+                << ", \"initial_fit_samples\": " << model.sampleCount
+                << ", \"initial_fit_span_cycles\": " << model.spanCycles << "}"
+                << (rank+1 == session.clockDriftModels.size() ? "\n" : ",\n");
+        }
+        out << "  ],\n  \"local_samples\": [\n";
+        for (size_t i = 0; i < samples.size(); ++i) {
+            const auto &s = samples[i];
+            out << "    {\"sequence\": " << s.sequence << ", \"status\": " << s.status
+                << ", \"t0\": " << s.t0 << ", \"t1\": " << s.t1
+                << ", \"t2\": " << s.t2 << ", \"t3\": " << s.t3 << "}"
+                << (i+1 == samples.size() ? "\n" : ",\n");
+        }
+        out << "  ]";
+    }
+    out << "\n}\n";
+    const std::string snapshot = out.str();
+    auto write = [&](const std::string &name) {
+        std::ofstream file(name.c_str(),std::ios::out | std::ios::trunc);
+        file << snapshot;
+        file.close();
+        return !file.fail();
+    };
+    if (!write(path.str())) { return TileXR::TILEXR_ERROR_INTERNAL; }
+    if (session.clockDrift.tracking) {
+        const std::string latest = session.outputDir+"/clock_drift_latest.json";
+        if (!write(latest+".tmp") || std::rename((latest+".tmp").c_str(),latest.c_str()) != 0) {
+            return TileXR::TILEXR_ERROR_INTERNAL;
+        }
+    }
+    return TileXR::TILEXR_SUCCESS;
 }
 
 int WriteReportJson(const StragglerSession &session, const TileXRStragglerReport &report)
@@ -513,6 +741,47 @@ extern "C" int TileXRStragglerCreate(TileXRCommPtr comm,
     }
     session->comm = comm;
     session->config = *config;
+    const char *tracking = std::getenv("TILEXR_CLOCK_DRIFT_TRACK");
+    if (tracking != nullptr && std::strcmp(tracking,"0") != 0 && std::strcmp(tracking,"1") != 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    session->clockDrift.tracking = tracking != nullptr && std::strcmp(tracking,"1") == 0;
+    if (session->clockDrift.tracking) {
+        if (config->outputDir == nullptr || *config->outputDir == '\0' || config->clockSyncSamples < 64) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        session->clockDrift.windowUs = 10000000;
+    }
+    const char *driftWindow = std::getenv("TILEXR_CLOCK_DRIFT_WINDOW_US");
+    if (driftWindow != nullptr) {
+        uint64_t value = 0;
+        if (*driftWindow == '\0') { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
+        for (const char *p = driftWindow; *p != '\0'; ++p) {
+            if (*p < '0' || *p > '9' || value > 6000000u) {
+                return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+            }
+            value = value*10u + static_cast<uint64_t>(*p-'0');
+            if (value > 60000000u) { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
+        }
+        session->clockDrift.windowUs = value;
+    }
+    if (session->clockDrift.tracking && session->clockDrift.windowUs != 10000000) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const char *clockTransport = std::getenv("TILEXR_CLOCK_TRANSPORT");
+    if (clockTransport != nullptr && std::strcmp(clockTransport, "mte") != 0 &&
+        std::strcmp(clockTransport, "rdma") != 0) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    session->clockUsesRdma = clockTransport != nullptr && std::strcmp(clockTransport, "rdma") == 0;
+    const char *deferred = std::getenv("TILEXR_CLOCK_RDMA_DEFER_CQE");
+    session->clockRdmaDeferred = session->clockUsesRdma && deferred != nullptr &&
+        std::strcmp(deferred, "1") == 0;
+    const char *compact = std::getenv("TILEXR_CLOCK_RDMA_COMPACT");
+    session->clockRdmaCompact = compact != nullptr && std::strcmp(compact, "1") == 0;
+    if (session->clockRdmaCompact && !session->clockRdmaDeferred) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
     int ret = TileXRDiagnostics::Host::g_hooks->getCommArgsHost(comm, session->hostArgs);
     if (ret != TileXR::TILEXR_SUCCESS || session->hostArgs == nullptr || session->hostArgs->rankSize <= 0 ||
         session->hostArgs->rankSize > TILEXR_STRAGGLER_MAX_RANKS) {
@@ -529,6 +798,16 @@ extern "C" int TileXRStragglerCreate(TileXRCommPtr comm,
         session->config.outputDir = session->outputDir.c_str();
     }
     session->cyclesPerSecond = TileXRDiagnostics::Host::ResolveCyclesPerSecond(*session->hostArgs);
+    session->clockDriftModels.resize(static_cast<size_t>(session->hostArgs->rankSize));
+    for (size_t rank = 0; rank < session->clockDriftModels.size(); ++rank) {
+        auto &model = session->clockDriftModels[rank];
+        model.version = 1;
+        model.rank = static_cast<int32_t>(rank);
+        model.cyclesPerSecond = session->cyclesPerSecond;
+        model.requestedWindowUs = session->clockDrift.windowUs;
+        model.state = session->clockDrift.windowUs == 0 ? TILEXR_CLOCK_DRIFT_DISABLED :
+            TILEXR_CLOCK_DRIFT_COLLECTING;
+    }
     session->deviceSamplesBytes = static_cast<size_t>(config->clockSyncSamples) *
         sizeof(TileXR::TileXRClockSyncDeviceSample);
     session->deviceRecordsBytes = static_cast<size_t>(config->recordCapacity) *
@@ -537,7 +816,8 @@ extern "C" int TileXRStragglerCreate(TileXRCommPtr comm,
     session->recordStatuses.assign(config->recordCapacity, TileXR::TILEXR_SUCCESS);
     session->recordStreams.assign(config->recordCapacity, nullptr);
     if (TileXRDiagnostics::Host::g_hooks->mallocDevice(&session->deviceSamples,
-            session->deviceSamplesBytes) != ACL_SUCCESS || session->deviceSamples == nullptr) {
+            session->deviceSamplesBytes + sizeof(TileXR::TileXRClockSyncDeviceSample)) != ACL_SUCCESS ||
+        session->deviceSamples == nullptr) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
     if (TileXRDiagnostics::Host::g_hooks->mallocDevice(&session->deviceRecords,
@@ -572,17 +852,53 @@ extern "C" int TileXRStragglerDestroy(TileXRStraggler detector)
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }
     }
+    int quiescenceStatus = TileXR::TILEXR_SUCCESS;
     {
         std::lock_guard<std::mutex> stateGuard(session->stateMutex);
         for (aclrtStream outstanding : session->outstandingStreams) {
             if (TileXRDiagnostics::Host::g_hooks->synchronizeStream(outstanding) != ACL_SUCCESS) {
-                return TileXR::TILEXR_ERROR_INTERNAL;
+                quiescenceStatus = TileXR::TILEXR_ERROR_INTERNAL;
             }
+        }
+        if (session->clockRdmaParticipating) {
+            const int ret = TileXRDiagnostics::Host::GatherControl(*session,
+                TileXRDiagnostics::Host::ControlOperation::CLOCK_DESTROY,
+                session->controlSequence, 0, session->generation, quiescenceStatus);
+            if (ret != TileXR::TILEXR_SUCCESS) {
+                return ret;
+            }
+        } else if (quiescenceStatus != TileXR::TILEXR_SUCCESS) {
+            return quiescenceStatus;
         }
         session->outstandingStreams.clear();
         std::fill(session->recordStreams.begin(), session->recordStreams.end(), nullptr);
     }
     bool failed = false;
+    if (session->clockRdmaFailed) {
+        // Stream quiescence does not cancel NIC requests. Close all QPs and
+        // release MRs collectively before freeing any retained clock backing.
+        const int ret = TileXRDiagnostics::Host::g_hooks->rdmaShutdown(session->comm);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            return ret;
+        }
+        session->clockRdmaHandle = 0;
+        session->clockRdmaFailed = false;
+    }
+    if (session->clockRdmaHandle != 0) {
+        const int ret = TileXRDiagnostics::Host::g_hooks->rdmaUnregister(
+            session->comm, session->clockRdmaHandle);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            return ret;
+        }
+        session->clockRdmaHandle = 0;
+    }
+    if (session->clockRdmaMemory != nullptr) {
+        if (TileXRDiagnostics::Host::g_hooks->freeDevice(session->clockRdmaMemory) == ACL_SUCCESS) {
+            session->clockRdmaMemory = nullptr;
+        } else {
+            failed = true;
+        }
+    }
     if (session->deviceSamples != nullptr) {
         if (TileXRDiagnostics::Host::g_hooks->freeDevice(session->deviceSamples) == ACL_SUCCESS) {
             session->deviceSamples = nullptr;
@@ -597,7 +913,15 @@ extern "C" int TileXRStragglerDestroy(TileXRStraggler detector)
             failed = true;
         }
     }
-    if (failed) {
+    if (session->clockRdmaParticipating) {
+        const int ret = TileXRDiagnostics::Host::GatherControl(*session,
+            TileXRDiagnostics::Host::ControlOperation::CLOCK_DESTROY_RELEASED,
+            session->controlSequence, 0, session->generation,
+            failed ? TileXR::TILEXR_ERROR_INTERNAL : TileXR::TILEXR_SUCCESS);
+        if (ret != TileXR::TILEXR_SUCCESS) {
+            return ret;
+        }
+    } else if (failed) {
         return TileXR::TILEXR_ERROR_INTERNAL;
     }
     {
@@ -676,6 +1000,18 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
                session->nextCollectId <= session->localLaunchId ||
                session->generation == std::numeric_limits<uint32_t>::max())) {
         localStatus = TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    } else if (localStatus == TileXR::TILEXR_SUCCESS && session->clockUsesRdma) {
+        TileXRRDMAInfo info {};
+        if (session->clockRdmaFailed || session->clockRdmaSetupStatus != TileXR::TILEXR_SUCCESS ||
+            TileXRDiagnostics::Host::g_hooks->rdmaQuery == nullptr ||
+            TileXRDiagnostics::Host::g_hooks->rdmaRegister == nullptr ||
+            TileXRDiagnostics::Host::g_hooks->rdmaGetView == nullptr ||
+            TileXRDiagnostics::Host::g_hooks->rdmaUnregister == nullptr ||
+            TileXRDiagnostics::Host::g_hooks->rdmaShutdown == nullptr ||
+            TileXRDiagnostics::Host::g_hooks->rdmaQuery(session->comm, &info) != TileXR::TILEXR_SUCCESS ||
+            !info.connected || !info.deviceDirect || info.failed) {
+            localStatus = TileXR::TILEXR_ERROR_NOT_SUPPORT;
+        }
     } else if (localStatus == TileXR::TILEXR_SUCCESS) {
         for (int rank = 0; rank < session->hostArgs->rankSize; ++rank) {
             if (session->hostArgs->peerMems[rank] == nullptr) {
@@ -698,10 +1034,16 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
         return ret;
     }
     int64_t magic = 0;
-    localStatus = TileXRDiagnostics::Host::g_hooks->nextMagic(session->comm, &magic);
+    session->clockStream = stream;
+    TileXRDiagnostics::Host::TrackOutstandingStream(*session, stream);
+    localStatus = TileXRDiagnostics::Host::PrepareClockRdma(*session, stream, sequence, generation);
+    if (localStatus == TileXR::TILEXR_SUCCESS) {
+        localStatus = TileXRDiagnostics::Host::g_hooks->nextMagic(session->comm, &magic);
+    }
     if (localStatus == TileXR::TILEXR_SUCCESS &&
         TileXRDiagnostics::Host::g_hooks->memsetDeviceAsync(session->deviceSamples,
-            session->deviceSamplesBytes, 0, session->deviceSamplesBytes, stream) != ACL_SUCCESS) {
+            session->deviceSamplesBytes + sizeof(TileXR::TileXRClockSyncDeviceSample), 0,
+            session->deviceSamplesBytes + sizeof(TileXR::TileXRClockSyncDeviceSample), stream) != ACL_SUCCESS) {
         localStatus = TileXR::TILEXR_ERROR_INTERNAL;
     } else if (localStatus == TileXR::TILEXR_SUCCESS) {
         session->clockStream = stream;
@@ -711,6 +1053,9 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
         TileXRDiagnostics::Host::ControlOperation::CLOCK_READY, sequence,
         static_cast<uint64_t>(magic), generation, localStatus);
     if (ret != TileXR::TILEXR_SUCCESS) {
+        if (session->clockUsesRdma) {
+            session->clockRdmaSetupStatus = ret;
+        }
         if (localStatus == TileXR::TILEXR_SUCCESS &&
             TileXRDiagnostics::Host::g_hooks->synchronizeStream(stream) == ACL_SUCCESS) {
             session->clockStream = nullptr;
@@ -756,7 +1101,7 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
                           << ", t0=" << sample.t0
                           << ", t1=" << sample.t1
                           << ", t2=" << sample.t2
-                          << ", t3=" << sample.t3 << std::endl;
+                          << ", t3=" << sample.t3 << ", detail=" << sample.reserved << std::endl;
             }
         }
     }
@@ -764,6 +1109,9 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
         TileXRDiagnostics::Host::ControlOperation::CLOCK_RESULT, sequence,
         static_cast<uint64_t>(magic), generation, local.status);
     if (ret != TileXR::TILEXR_SUCCESS) {
+        if (session->clockUsesRdma) {
+            session->clockRdmaFailed = true;
+        }
         return ret;
     }
     TileXRClockSyncResult clock {};
@@ -793,12 +1141,46 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
         clock.precisionCycles = std::max(clock.precisionCycles, clock.ranks[rank].errorBoundCycles);
         clock.precisionNs = std::max(clock.precisionNs, clock.ranks[rank].errorBoundNs);
     }
+    ret = TileXRDiagnostics::Host::UpdateClockModels(*session, samples, sequence,
+        static_cast<uint64_t>(magic), generation);
+    if (ret != TileXR::TILEXR_SUCCESS) { return ret; }
     *result = clock;
     session->clock = clock;
     session->generation = generation;
-    session->calibrationHostNs = TileXRDiagnostics::Host::g_hooks->steadyNowNs();
-    ret = TileXRDiagnostics::Host::WriteClockJson(*session);
+    const uint64_t now = TileXRDiagnostics::Host::g_hooks->steadyNowNs();
+    const bool driftReady = session->clockDrift.windowUs != 0 &&
+        std::all_of(session->clockDriftModels.begin(),session->clockDriftModels.end(),
+            [](const TileXRClockDriftModel &model) { return model.state == TILEXR_CLOCK_DRIFT_READY; });
+    if (driftReady && session->clockDriftFrozenHostNs == 0) {
+        session->clockDriftFrozenHostNs = now;
+    }
+    // Tracking probes validate the current model; its anchor still changes only
+    // on accepted updates. Frozen mode keeps the original model age.
+    session->calibrationHostNs = session->clockDrift.tracking ? now :
+        (driftReady ? session->clockDriftFrozenHostNs : now);
+    ret = TileXRDiagnostics::Host::WriteClockJson(*session,samples);
+    if (session->clockDrift.tracking) {
+        ret = TileXRDiagnostics::Host::GatherControl(*session,
+            TileXRDiagnostics::Host::ControlOperation::CLOCK_PERSISTED,sequence,
+            static_cast<uint64_t>(magic),generation,ret);
+    }
     return ret;
+}
+
+extern "C" int TileXRClockGetDriftModel(TileXRStraggler detector, int rank,
+                                         TileXRClockDriftModel *model)
+{
+    auto *session = static_cast<TileXRDiagnostics::Host::StragglerSession *>(detector);
+    if (session == nullptr || model == nullptr || rank < 0 ||
+        !TileXRDiagnostics::Host::ValidateOwner(*session)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    std::lock_guard<std::mutex> guard(session->stateMutex);
+    if (static_cast<size_t>(rank) >= session->clockDriftModels.size()) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    *model = session->clockDriftModels[static_cast<size_t>(rank)];
+    return TileXR::TILEXR_SUCCESS;
 }
 
 extern "C" int TileXRStragglerCollect(TileXRStraggler detector,
@@ -870,7 +1252,7 @@ extern "C" int TileXRStragglerCollect(TileXRStraggler detector,
         return ret;
     }
     ret = TileXRDiagnostics::Host::ClassifyStragglerRecords(
-        session->config, session->clock, records, *report);
+        session->config, session->clock, records, *report, session->clockDriftModels.data());
     report->droppedRecords = session->droppedRecords;
     report->calibrationAgeNs = ageNs;
     const bool pendingProducer = std::find_if(records.begin(), records.end(),

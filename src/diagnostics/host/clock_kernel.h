@@ -1,3 +1,11 @@
+/*
+ * 功能：定义 Host 提交 clock kernel 的参数布局和 launch 接口。
+ * 调用关系：straggler_session.cpp 传入 session 与 stream；clock_kernel.cpp 按此 ABI 提交 kernel。
+ * 资源与生命周期：参数中的指针借用 session 和 communicator 的内存，不在此处分配或释放。
+ * Purpose: Define the Host clock launch interface and its argument ABI.
+ * Calls: straggler_session.cpp supplies the session/stream; clock_kernel.cpp submits this ABI.
+ * Lifetime: Argument pointers borrow session/communicator memory; this header allocates or frees none.
+ */
 #ifndef TILEXR_DIAGNOSTICS_HOST_CLOCK_KERNEL_H
 #define TILEXR_DIAGNOSTICS_HOST_CLOCK_KERNEL_H
 
@@ -18,6 +26,7 @@ struct ClockSyncKernelArgs {
     uint64_t timeoutCycles = 0;
     uint32_t sampleCount = 0;
     uint32_t warmupSampleCount = 0;
+    void *rdmaMemory = nullptr;
 };
 
 static_assert(offsetof(ClockSyncKernelArgs, commArgsPtr) == 0, "clock-sync commArgs ABI changed");
@@ -27,7 +36,8 @@ static_assert(offsetof(ClockSyncKernelArgs, timeoutCycles) == 24, "clock-sync ti
 static_assert(offsetof(ClockSyncKernelArgs, sampleCount) == 32, "clock-sync sample-count ABI changed");
 static_assert(offsetof(ClockSyncKernelArgs, warmupSampleCount) == 36,
               "clock-sync warmup-count ABI changed");
-static_assert(sizeof(ClockSyncKernelArgs) == 40, "clock-sync argument ABI changed");
+static_assert(offsetof(ClockSyncKernelArgs, rdmaMemory) == 40, "clock-sync RDMA ABI changed");
+static_assert(sizeof(ClockSyncKernelArgs) == 48, "clock-sync argument ABI changed");
 
 int LaunchClockSyncKernel(const StragglerSession &session, uint32_t warmupSamples,
                           uint32_t samples, int64_t magic, uint64_t timeoutCycles,

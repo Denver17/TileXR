@@ -1,4 +1,11 @@
-// Exported NDA 4.2 ABI with callbacks exercised on Host memory, never an NPU.
+/*
+ * 功能：导出 NDA 4.2 测试 ABI，模拟 queue 创建、能力协商和故障，并记录存活的 QP/CQ。
+ * 调用关系：test_rdma_nda.cpp 通过真实 RdmaNdaResources 动态加载本 DSO；底层 verbs 使用测试替身。
+ * 资源与生命周期：通过传入的 callback 分配/释放 queue buffer 和映射，不访问真实 NPU/NIC。
+ * Purpose: Export a fake NDA 4.2 ABI with queue creation, capability negotiation, fault injection and live QP/CQ tracking.
+ * Calls: test_rdma_nda.cpp loads this DSO through real RdmaNdaResources with fake underlying verbs.
+ * Lifetime: Supplied callbacks allocate/free queue buffers and mappings; no real NPU/NIC is accessed.
+ */
 #include <infiniband/verbs.h>
 extern "C" {
 #include <ibv_extend.h>

@@ -1,3 +1,11 @@
+/*
+ * 功能：公开诊断 session、clock 校准、相对逻辑 rank 0 的时间校正及观测 report 接口。
+ * 调用关系：应用和通信算子调用 Host 接口，diagnostics 的 session、drift 与 analysis 模块实现计算。
+ * 资源与生命周期：调用方持有 communicator 和 stream，在创建线程使用 opaque handle，并在销毁 communicator 前销毁 session。
+ * Purpose: Expose diagnostic sessions, clock calibration, correction relative to logical rank 0 and observation reports.
+ * Calls: Applications/communication operators call Host APIs implemented by diagnostics session, drift and analysis modules.
+ * Lifetime: Callers own communicators/streams, use the opaque handle on its creating thread and destroy the session before its communicator.
+ */
 #ifndef TILEXR_STRAGGLER_H
 #define TILEXR_STRAGGLER_H
 
@@ -63,14 +71,17 @@ typedef struct TileXRStragglerConfig {
 typedef struct TileXRClockRankResult {
     int32_t rank;
     int32_t status;
+    // Logical rank 0 minus local estimate; add to local timestamps. Unbiased only
+    // under symmetric effective one-way delays (including endpoint overhead).
     int64_t offsetCycles;
     uint64_t minRoundTripCycles;
     uint64_t medianRoundTripCycles;
+    // ceil(minimum valid effective RTT / 2), not a measured clock residual.
     uint64_t errorBoundCycles;
     int64_t offsetNs;
     uint64_t minRoundTripNs;
     uint64_t medianRoundTripNs;
-    uint64_t errorBoundNs;
+    uint64_t errorBoundNs; // Converted model bound; path symmetry is assumed, not verified.
     uint32_t validSamples;
     uint32_t rejectedSamples;
 } TileXRClockRankResult;
@@ -83,10 +94,43 @@ typedef struct TileXRClockSyncResult {
     uint32_t frequencySource;
     uint32_t warmupSampleCount;
     uint64_t cyclesPerSecond;
+    // Maximum per-rank errorBound, not measured post-synchronization accuracy.
     uint64_t precisionCycles;
     uint64_t precisionNs;
     TileXRClockRankResult ranks[TILEXR_STRAGGLER_MAX_RANKS];
 } TileXRClockSyncResult;
+
+typedef enum TileXRClockDriftState {
+    TILEXR_CLOCK_DRIFT_DISABLED = 0,
+    TILEXR_CLOCK_DRIFT_COLLECTING = 1,
+    TILEXR_CLOCK_DRIFT_READY = 2,
+    TILEXR_CLOCK_DRIFT_INSUFFICIENT = 3,
+    TILEXR_CLOCK_DRIFT_UNSTABLE = 4,
+} TileXRClockDriftState;
+
+// Separate extension: existing clock/config/result layouts remain unchanged.
+// t_rank0 = t_local + offsetCycles + rateCorrection * (t_local-anchorCycle).
+// The reference is communicator rank 0, independent of its physical device ID.
+// rateCorrection is reference-minus-local cycles per local cycle, NOT ns/s.
+// In opt-in tracking mode, anchor/offset/rate and trainedAtGeneration describe
+// the latest accepted feedback update; sample/span/RMS/SE retain initial-fit metadata.
+// This estimate still assumes symmetric effective forward/reverse delays.
+typedef struct TileXRClockDriftModel {
+    uint32_t version;
+    uint32_t state;
+    uint64_t anchorCycle;
+    double offsetCycles;
+    double rateCorrection;
+    uint64_t spanCycles;
+    uint64_t cyclesPerSecond;
+    uint32_t sampleCount;
+    uint32_t rejectedSamples;
+    double fitRmsCycles;
+    double rateStandardError;
+    uint64_t requestedWindowUs;
+    uint32_t trainedAtGeneration;
+    int32_t rank;
+} TileXRClockDriftModel;
 
 typedef struct TileXRStragglerRankObservation {
     int32_t rank;
@@ -167,10 +211,35 @@ int TileXRStragglerConfigDefault(TileXRStragglerConfig *config);
 int TileXRStragglerCreate(TileXRCommPtr comm,
                           const TileXRStragglerConfig *config,
                           TileXRStraggler *detector);
+/* With TILEXR_CLOCK_TRANSPORT=rdma, synchronization and destruction are
+ * collective. Quiesce other users of the communicator's RDMA QPs first. A
+ * failed clock may close the entire RDMA transport during destroy, invalidating
+ * its other RDMA handles/views. Failed destruction retains the session to retry. */
 int TileXRStragglerDestroy(TileXRStraggler detector);
 int TileXRClockSynchronize(TileXRStraggler detector,
                            aclrtStream stream,
                            TileXRClockSyncResult *result);
+/* Opt in at create with TILEXR_CLOCK_DRIFT_WINDOW_US (1..60000000).
+ * Repeated synchronization calls collect timestamp exchanges until that span;
+ * the first exchange crossing the requested span closes training. Coefficients
+ * then remain frozen for this detector. Too few/noisy samples are reported as
+ * INSUFFICIENT/UNSTABLE, never silently applied. No extra NPU work is launched
+ * by either function below. Existing precisionNs retains its RTT/2 meaning. */
+/* TILEXR_CLOCK_DRIFT_TRACK=1 opts into 10-second initial training followed by
+ * feedback on later synchronization calls. Requires outputDir and >=64 samples;
+ * any explicit drift window must be 10000000 us. The caller schedules collective
+ * calls every ~60 seconds on the owner thread with pending observations drained.
+ * Two 16-sample groups must agree on a signed residual >1000 ns before offset
+ * re-anchoring and a 0.25-gain rate adjustment. Elapsed time starts at the last
+ * accepted model anchor, not the last probe. Per-generation files and
+ * clock_drift_latest.json persist local samples and all ranks' active models.
+ * Successful probes refresh validation age; model generation changes only on
+ * accepted updates. Corrected timestamps can step at a model update boundary.
+ * 单次长窗口训练后每约60秒集合短测；残差确认超阈值后更新并落盘，时间可能在更新点跳变。 */
+int TileXRClockGetDriftModel(TileXRStraggler detector, int rank,
+                             TileXRClockDriftModel *model);
+int TileXRClockCorrectCycle(const TileXRClockDriftModel *model,
+                            uint64_t localCycle, int64_t *referenceCycle);
 int TileXRStragglerObservationBegin(TileXRStraggler detector,
                                     const TileXRStragglerOperation *operation,
                                     aclrtStream stream,

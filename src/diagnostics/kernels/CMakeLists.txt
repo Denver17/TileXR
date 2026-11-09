@@ -1,3 +1,7 @@
+# 功能：按显式 SoC 选择 AICore 架构，编译、链接并填充独立的 clock binary。
+# 调用关系：diagnostics Host 构建引用导出的 artifact 路径；clock_kernel.cpp 在运行时加载该文件。
+# Purpose: Select an AICore architecture from the explicit SoC and compile/link/pad the standalone clock binary.
+# Calls: The diagnostics Host build consumes the exported artifact path; clock_kernel.cpp loads the file at runtime.
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cce")
 enable_language(CCE)
 
@@ -25,6 +29,9 @@ message(STATUS
 
 set_source_files_properties(clock_sync_kernel.cpp PROPERTIES LANGUAGE CCE)
 add_library(tilexr_diagnostics_op_tmp OBJECT clock_sync_kernel.cpp)
+option(TILEXR_DIAGNOSTICS_CLOCK_PROFILE "Instrument individual clock RDMA sends" OFF)
+target_compile_definitions(tilexr_diagnostics_op_tmp PRIVATE
+    TILEXR_DIAGNOSTICS_CLOCK_PROFILE=$<BOOL:${TILEXR_DIAGNOSTICS_CLOCK_PROFILE}>)
 target_include_directories(tilexr_diagnostics_op_tmp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/src/include

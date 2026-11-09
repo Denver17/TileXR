@@ -1,3 +1,11 @@
+/*
+ * 功能：校验四时间戳采样并估计 rank offset；对齐观测记录，用 median/MAD 和阈值判定快慢 rank。
+ * 调用关系：straggler_session.cpp 提供采样、记录和模型；READY 模型通过 clock_drift.cpp 校正时间戳。
+ * 资源与生命周期：输入由调用方持有，计算结果写入传入的 result/report；不操作 stream 或 device buffer。
+ * Purpose: Estimate offsets from validated exchanges and classify aligned observations using median/MAD thresholds.
+ * Calls: straggler_session.cpp supplies inputs; READY models use clock_drift.cpp for timestamp correction.
+ * Lifetime: Inputs belong to the caller and outputs go to result/report; no stream or device buffer is operated here.
+ */
 #include "straggler_analysis.h"
 
 #include <algorithm>
@@ -197,7 +205,8 @@ bool EstimateClockRank(const std::vector<TileXR::TileXRClockSyncDeviceSample> &s
 int ClassifyStragglerRecords(const TileXRStragglerConfig &config,
                               const TileXRClockSyncResult &clock,
                               const std::vector<TileXR::TileXRStragglerTimingRecord> &records,
-                              TileXRStragglerReport &report)
+                              TileXRStragglerReport &report,
+                              const TileXRClockDriftModel *driftModels)
 {
     report = TileXRStragglerReport {};
     if (clock.version != TileXR::TILEXR_STRAGGLER_ABI_VERSION || clock.rankSize == 0 ||
@@ -268,9 +277,17 @@ int ClassifyStragglerRecords(const TileXRStragglerConfig &config,
         int64_t alignedStartCycle = 0;
         int64_t alignedReadyCycle = 0;
         int64_t alignedEndCycle = 0;
-        if (!AddSignedOffset(record.startCycle, clock.ranks[index].offsetCycles, alignedStartCycle) ||
-            !AddSignedOffset(record.readyCycle, clock.ranks[index].offsetCycles, alignedReadyCycle) ||
-            !AddSignedOffset(record.endCycle, clock.ranks[index].offsetCycles, alignedEndCycle) ||
+        auto align = [&](uint64_t cycle, int64_t &aligned) {
+            if (driftModels != nullptr && driftModels[index].state == TILEXR_CLOCK_DRIFT_READY) {
+                return driftModels[index].rank == static_cast<int32_t>(index) &&
+                    driftModels[index].cyclesPerSecond == clock.cyclesPerSecond &&
+                    TileXRClockCorrectCycle(&driftModels[index],cycle,&aligned) == TileXR::TILEXR_SUCCESS;
+            }
+            return AddSignedOffset(cycle,clock.ranks[index].offsetCycles,aligned);
+        };
+        if (!align(record.startCycle, alignedStartCycle) ||
+            !align(record.readyCycle, alignedReadyCycle) ||
+            !align(record.endCycle, alignedEndCycle) ||
             !SignedCyclesToNs(alignedStartCycle, clock.cyclesPerSecond, observation.alignedStartNs) ||
             !SignedCyclesToNs(alignedReadyCycle, clock.cyclesPerSecond, observation.alignedReadyNs) ||
             !SignedCyclesToNs(alignedEndCycle, clock.cyclesPerSecond, observation.alignedEndNs)) {

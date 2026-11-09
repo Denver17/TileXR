@@ -1,3 +1,11 @@
+/*
+ * 功能：定义 clock mailbox、采样、观测记录和 RDMA profiling 的共享布局及 byte offset。
+ * 调用关系：Host session 按这些布局分配/读取内存，clock kernel 和 producer instrumentation 写入对应区域。
+ * 资源与生命周期：这里只定义布局；实际内存由 session 或 communicator 持有。
+ * Purpose: Define shared clock mailboxes, samples, observation/profile records and byte offsets.
+ * Calls: Host sessions allocate/read these layouts; clock kernels and producer instrumentation write them.
+ * Lifetime: This header defines layouts only; sessions or communicators own the backing memory.
+ */
 #ifndef TILEXR_STRAGGLER_LAYOUT_H
 #define TILEXR_STRAGGLER_LAYOUT_H
 
@@ -20,6 +28,38 @@ constexpr uint64_t TILEXR_CLOCK_SYNC_REGION_BYTES = 64u * 1024u;
 constexpr uint64_t TILEXR_CLOCK_SYNC_REGION_OFFSET =
     static_cast<uint64_t>(IPC_DATA_OFFSET) - TILEXR_CLOCK_SYNC_REGION_BYTES;
 constexpr uint64_t TILEXR_CLOCK_SYNC_SLOT_BYTES = 64u;
+// Private clock RDMA allocation: mode word, views, synchronous staging, optional
+// profiling and distinct deferred sources precede the existing protocol slots.
+// Register only this rank's allocation.
+constexpr uint64_t TILEXR_CLOCK_RDMA_BYTES = static_cast<uint64_t>(IPC_DATA_OFFSET);
+constexpr uint64_t TILEXR_CLOCK_RDMA_VIEWS_OFFSET = 64u;
+constexpr uint64_t TILEXR_CLOCK_RDMA_STAGING_OFFSET = 32u * 1024u;
+constexpr uint64_t TILEXR_CLOCK_RDMA_PROFILE_OFFSET = 64u * 1024u;
+constexpr uint64_t TILEXR_CLOCK_RDMA_ASYNC_STAGING_OFFSET = 128u * 1024u;
+constexpr uint64_t TILEXR_CLOCK_RDMA_PROFILE_MAGIC = 0x434C4F434B505246ULL;
+constexpr uint32_t TILEXR_CLOCK_RDMA_PROFILE_STAGES = 14u;
+// Optional compile-time kernel instrumentation. These counters are written once
+// after the protocol; no timestamp records are published between messages.
+struct TileXRClockRdmaSendProfile {
+    uint64_t sends, polls, pending, failures;
+    uint64_t sum[TILEXR_CLOCK_RDMA_PROFILE_STAGES];
+    uint64_t minimum[TILEXR_CLOCK_RDMA_PROFILE_STAGES];
+    uint64_t maximum[TILEXR_CLOCK_RDMA_PROFILE_STAGES];
+    uint64_t padding[2];
+};
+struct TileXRClockRdmaPollProfile {
+    uint64_t calls, matches, invalidateCycles, readCycles;
+    // Successful REQUEST/RESPONSE snapshot windows, including invalidate and
+    // validation. Aggregated separately from unsuccessful polling iterations.
+    uint64_t matchWindowCycles, minMatchWindowCycles, maxMatchWindowCycles, windowMatches;
+};
+struct TileXRClockRdmaProfile {
+    uint64_t magic, generation, bytes, reserved[5];
+    TileXRClockRdmaSendProfile send[5];
+    TileXRClockRdmaPollProfile receive[5];
+};
+static_assert(sizeof(TileXRClockRdmaSendProfile) == 384u, "clock send profile layout");
+static_assert(sizeof(TileXRClockRdmaProfile) == 2304u, "clock profile layout");
 constexpr uint64_t TILEXR_CLOCK_SYNC_READY = 1u;
 constexpr uint64_t TILEXR_CLOCK_SYNC_REQUEST = 2u;
 constexpr uint64_t TILEXR_CLOCK_SYNC_RESPONSE = 3u;

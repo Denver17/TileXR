@@ -1,3 +1,11 @@
+/*
+ * 功能：加载并注册 clock AICore binary，校验 launch 参数并向调用方的 stream 提交 kernel。
+ * 调用关系：straggler_session.cpp 调用此处；依赖 kernel binary loader 和 CANN runtime。
+ * 资源与生命周期：注册状态和 binary handle 保存在文件静态变量中；session 持有采样 buffer。
+ * Purpose: Load/register the clock binary, validate launch arguments and submit it to the caller's stream.
+ * Calls: Used by straggler_session.cpp through the binary loader and CANN runtime.
+ * Lifetime: Static state retains registration and its binary handle; the session owns sample buffers.
+ */
 #include "clock_kernel.h"
 
 #include <cstddef>
@@ -92,6 +100,7 @@ int LaunchClockSyncKernel(const StragglerSession &session, uint32_t warmupSample
     args.magic = static_cast<uint64_t>(magic);
     args.timeoutCycles = timeoutCycles;
     args.warmupSampleCount = warmupSamples;
+    args.rdmaMemory = session.clockRdmaMemory;
     rtTaskCfgInfo_t cfgInfo {};
     cfgInfo.schemMode = 1;
     rtArgsEx_t argsInfo {};

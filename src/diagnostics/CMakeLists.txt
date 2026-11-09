@@ -1,3 +1,7 @@
+# 功能：构建并安装 diagnostics Host library、clock artifact 和公开头文件。
+# 调用关系：顶层构建启用本目录；链接 tile-comm 与 CANN，并通过 TileXRKernelArtifact 附加独立 kernel 文件。
+# Purpose: Build/install the diagnostics Host library, clock artifact and public headers.
+# Calls: Enabled by the root build; link tile-comm/CANN and attach standalone kernels through TileXRKernelArtifact.
 include(GNUInstallDirs)
 
 add_subdirectory(kernels)
@@ -5,6 +9,7 @@ add_subdirectory(kernels)
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 add_library(tilexr-diagnostics SHARED
     host/clock_kernel.cpp
+    host/clock_drift.cpp
     host/straggler_analysis.cpp
     host/straggler_session.cpp
     ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp)
