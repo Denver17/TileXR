@@ -7,6 +7,10 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+/* 声明 collective launcher 和可选 profiling 采集入口，供 collective_kernel.cpp 传递 communicator、stream 与执行参数。
+ * Declare collective launch and optional profiling entry points consumed by collective_kernel.cpp with communicator, stream and execution arguments.
+ */
+
 #ifndef TILEXR_COLLECTIVES_HOST_COLLECTIVE_LAUNCHER_H
 #define TILEXR_COLLECTIVES_HOST_COLLECTIVE_LAUNCHER_H
 
@@ -27,7 +31,8 @@ struct HostLaunchContext {
 
 // Caller holds the communicator resource lock through kernel enqueue.
 void *AcquireCollectiveProfiling(TileXRCommPtr comm, const HostLaunchContext &context,
-    aclrtStream stream, uint32_t lanes);
+    aclrtStream stream, uint32_t lanes, TileXR::TileXRType type,
+    int64_t kernelCount, TileXR::TileXRDataType dataType, int reduction, int root);
 
 int PrepareHostLaunchContext(TileXRCommPtr comm, HostLaunchContext &context);
 

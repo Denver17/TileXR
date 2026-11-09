@@ -185,6 +185,12 @@ allreduce/reducescatter runs require `--datatype int32`; `--check=0` measures an
 
 ### Operator-Internal Profiling
 
+Completion sidecar publication can fail when its target already exists. After
+removing the conflicting target, a successful `Drain()` retry resolves the same
+`completion_export` event while preserving its failure history. Check the latest
+manifest revision when assessing health; the earlier revision records the failed
+attempt. The mock capture queue check covers this retry, not NPU execution.
+
 Collectives uses the [independent profiling SDK](../../tools/profiling/README.md).
 Enable the build flag, set `TILEXR_PROFILING_OUTPUT_DIR` and distribute a fresh
 `TILEXR_PROFILING_CAPTURE_ID` seed across ranks. The perf driver suppresses
@@ -192,9 +198,30 @@ profiling during warmup; the first prepared pool supports up to four sampled
 kernel invocations, each with a separate UUID. Capture exhaustion is logged and
 business execution continues. After communicator cleanup, analyze rank files
 from one UUID directory with `python3 -m tilexr_profiling` and
-`tools/collectives/tilexr_collectives.mapping.json` (or the A5 mapping for A5).
+`src/collectives/kernels/tilexr_collectives_coarse.mapping.json` for ordinary AIV,
+or `src/collectives/kernels/tilexr_alltoall_a5.mapping.json` for grouped A5.
 Never combine different capture directories into one report. Reported timer
 conversion comes from the mapping; verify its frequency for the actual target.
+Use that adjusted mapping's canonical fingerprint in
+`TILEXR_PROFILING_COARSE_MAPPING_SHA256` / `TILEXR_PROFILING_A5_MAPPING_SHA256`
+(shared fallback: `TILEXR_PROFILING_MAPPING_SHA256`). The producer binds actual
+launch workload, host/device identity and execution metadata, and exports rank
+manifest shards, completion and Host events at cleanup. Prepare expected ranks
+and lanes before launch with `build_collective_expected`, then merge explicit
+shards with `merge_manifest_shards`. Never derive the expected participant set
+from successful output files: otherwise missing ranks disappear from coverage.
+Use `collective_capture_id(seed, ordinal)` for ordinals 0 through 3 to predict
+the shared queue capture ID before launch. Without a manifest, status 0 covers
+only the supplied files. If mapping identity is unavailable, capture falls back
+to records without producer metadata and makes no completeness assertion.
+
+The producer's byte counts describe planned algorithm payload, not measured
+physical traffic. Ordinary AIV input bytes are apportioned across lanes; grouped
+A5 accounts for send/receive/self-copy payload and declares control or wait stages
+not applicable. Profiling metadata is inspected manually when needed, without
+producer round-trip tests or CI jobs. The optional queue mock protects capture
+exhaustion, asynchronous resource lifetime and cleanup retry. CPU substitutes
+do not prove ACL execution, NPU cache visibility or UDMA data-plane transfer.
 
 ## Skip Behavior
 

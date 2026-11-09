@@ -1,138 +1,100 @@
-# Independent profiled Add4
+# Minimal profiled Add4
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-## 1. Requirements and behavior
+The example adds four FP32 arrays using four AIV blocks and the standalone
+profiling SDK. It does not use the TileXR communication runtime.
 
-Ascend950 is a restriction of this example's current kernel build path, not of
-the profiling SDK or offline analyzer. This example does not require a TileXR
-runtime installation. For other CANN applications/SoCs, see the standalone
-integration and validation boundaries in the [main guide](../../tools/profiling/README.md).
+```text
+add4/
+├── *.cpp      Host and kernel
+├── CMakeLists.txt
+├── *.py       Manifest, qualification and calibration helpers
+├── run_demo.sh
+├── README.md
+└── README.zh-CN.md
+```
 
-Use Linux, CMake ≥3.16, a C++14 Host compiler, the actual CANN 9.1 toolkit,
-the installed profiling SDK and Python package (Python ≥3.9). Building needs
-the target compiler; running additionally needs an explicitly selected
-Ascend950 card, its real driver, and a confirmed `GetSystemCycle()` conversion.
-Without an NPU, stop after build/install; do not launch the executable or runner.
+The Host's profiling code is `AclCapture`, `CaptureConfig`, `Initialize`,
+`DeviceArgs`, `Save` and `Close` as direct calls. The minimal Host omits return-value,
+SoC and numerical checks, output readback, and validation branches. Python prepares
+the report manifest; optional qualification and calibration helpers remain
+independent of the Host/kernel.
 
-This Linux example consumes only the installed public profiling headers and
-CANN. It creates its ACL device/stream, calls `AclCapture::Initialize(stream,4)`,
-passes `DeviceArgs()` to its kernel, and calls `Save(path)` and `Close()`.
-The application owns ACL initialization, device/context, stream, numerical
-validation and kernel launch. No communicator or TileXR shared library is used.
+The kernel uses named event constants such as `kEventAccumulateBegin` and
+`kEventPartialSum0End` in direct `Recorder<17>::RecordMarker` calls, then `Flush`.
+Only the SDK's `TILEXR_PROFILE_ACTIVE` controls device recording. CMake supplies the same
+numeric `TILEXR_ENABLE_PROFILING` to Host and kernel; Host assigns it to
+`CaptureConfig.enabled`. There are no per-marker predicates or ON/OFF launch
+branches. OFF executes the same Add4 kernel and saves no records.
 
-Four AIV blocks each add four 2,048-element float32 inputs. Each block owns one
-logical lane and writes 20 markers using `TileXR::Profiling::Recorder<20>`.
-Input-copy intervals repeat sequentially; three explicit partial-sum instances
-overlap within `accumulate_window`. IDs `1/2` define the unique critical
-`kernel_total` interval. Flush follows the final measured marker, after the
-operator's own output-copy dependency has completed. Marker calls add no
-automatic pipeline barrier.
+The [mapping](profiled_add4.mapping.template.json) has one shared begin at
+slot **9U**, event **20**, and three partial-sum ends **201/202/203**. Each lane
+records 17 markers in consecutive slots 0–16.
+The three partial sums measure cumulative windows starting at the same raw
+record. Input copies reuse events 10/11 sequentially. Operator dependency
+barriers remain explicit; markers do not add them.
 
-## 2. Build and install from the installed SDK
+## Build and run
 
-Install the independent SDK and Python package using
-the [main guide](../../tools/profiling/README.md), then source the actual
-CANN 9.1 environment. The SDK install includes this entire example at
-`share/tilexr-profiling/examples/add4`; copy that directory to a clean external
-project to exercise installed consumption:
+Requires Linux, CMake ≥3.16, a C++14 Host compiler, CANN 9.1, and the installed
+[SDK and Python package](../../tools/profiling/README.md). This example's build target is
+Ascend950; the SDK itself is not restricted to that SoC.
 
-```sh
-cmake -S /path/to/add4 -B /tmp/add4-build \
-  -DCMAKE_PREFIX_PATH=/path/to/sdk-prefix \
+```bash
+# From the repository root, or use an installed copy's add4 directory.
+cmake -S examples/profiling -B build/add4 \
+  -DCMAKE_PREFIX_PATH=/path/to/profiling-prefix \
   -DTILEXR_PROFILING_SOC=Ascend950
-cmake --build /tmp/add4-build -j2
-cmake --install /tmp/add4-build --prefix /tmp/add4-install
-# Hardware only; /tmp/new.records.bin must not already exist.
+cmake --build build/add4 -j2
+cmake --install build/add4 --prefix /tmp/add4-install
+# Hardware only; choose an available card and a new output file.
 TILEXR_ADD4_DEVICE_ID=0 /tmp/add4-install/bin/tilexr_profiled_add4_demo /tmp/new.records.bin
 ```
 
-The build emits a pure AICore ELF, installs it under
-`${CMAKE_INSTALL_LIBDIR}/tilexr/kernels`, and loads it relative to the executable
-using `/proc/self/exe`. Registration uses `rtDevBinaryRegister` and
-`rtFunctionRegister`; launch uses `rtKernelLaunchWithFlagV2`. The executable does
-not embed a kernel object or depend on a private TileXR loader. Relative bin/lib
-install directories preserve this behavior when the whole prefix moves. The
-kernel is also available under the same relative build-tree layout. Normal CANN
-runtime library discovery must resolve the real runtime/driver libraries.
+CMake's `TILEXR_ENABLE_PROFILING` option defaults to ON. OFF runs without capture.
+Kernel binaries stay external under `${CMAKE_INSTALL_LIBDIR}/tilexr/kernels`
+and load relative to the executable, including after prefix relocation. Launch
+uses `rtDevBinaryRegister`, `rtFunctionRegister` and `rtKernelLaunchWithFlagV2`.
 
-## 3. Run on hardware and generate reports
-
-From the copied Add4 source directory, run `bash run_demo.sh NEW_OUTPUT_DIRECTORY`
-with these variables set to actual local values:
-
-| Variable | Required value |
-|---|---|
-| `ASCEND_HOME_PATH` | Active target CANN installation |
-| `TILEXR_PROFILING_PREFIX` | Installed independent SDK prefix |
-| `TILEXR_PROFILING_SOC` | `Ascend950`, the only current example target |
-| `TILEXR_PROFILING_CYCLES_PER_US` | Confirmed positive conversion for `GetSystemCycle()` |
-| `TILEXR_PROFILING_CLOCK_BASIS` | Version-matched source or calibration justifying it |
-| `TILEXR_ADD4_DEVICE_ID` | Selected card index; defaults to `0` |
-
-Export these variables in the same shell before running the command. The output
-path must not exist. For example, after setting all required variables:
+For a build/run/report example, source CANN and export `TILEXR_PROFILING_PREFIX`,
+`TILEXR_PROFILING_CYCLES_PER_US` and `TILEXR_PROFILING_CLOCK_BASIS`, then run:
 
 ```bash
-cd /path/to/copied-add4
-bash run_demo.sh /path/to/new-add4-evidence
+bash examples/profiling/run_demo.sh /tmp/new-add4-results
 ```
 
-The runner builds and executes the example, then analyzes its records. It uses
-`TILEXR_ADD4_BUILD_DIR` (default `$PWD/build-profiled-add4`) and
-`TILEXR_ADD4_BUILD_JOBS` (default `2`) when set. It is not a compile-only check.
+Supply a confirmed timer conversion and its source; the template intentionally
+contains `cycles_per_us: null`. The runner writes records, the resolved mapping,
+`manifest.json`, the operator log and three reports. `manifest.py` declares the
+four expected lanes and byte counts before launch, then binds the exported
+capture UUID. Both the default runner and `npu_check.py` pass this manifest to
+analysis. Records contain timestamps/event IDs, not workload bytes; omitting the
+manifest leaves bytes and bandwidth unavailable.
 
-Optionally supply `TILEXR_PROFILING_CANN_VERSION`,
-`TILEXR_PROFILING_DRIVER_VERSION`, and `TILEXR_PROFILING_FIRMWARE_VERSION`.
-Unknown values stay unknown. `environment.txt` retains compiler/platform output,
-standards, macro, kernel/SDK version and conversion basis; `operator.log`
-records the actual SoC, external binary path and numerical/record checks. This
-runner never reserves devices: choose an available card using your normal
-environment policy. It performs no communication-environment qualification.
+Each lane handles 2048 FP32 elements (8192 bytes per array). `kernel_total`
+counts four GM reads and one GM write; `copy_input` counts four GM reads and
+`copy_out` one GM write. Each Add counts two UB reads and one UB write, so
+`accumulate_window` counts nine arrays. The three cumulative `partial_sum`
+windows contain 1+2+3 Adds and count 18 arrays in total, matching their summed
+inclusive durations. All metrics use `per_lane_total`; parent/child rows are
+not additive. This is logical lane-time bandwidth, not measured physical GM/UB
+throughput. Full semantics remain in the folded report data.
 
-The mapping template deliberately has `cycles_per_us: null` and cannot be
-analyzed directly. The runner fills it with the confirmed supplied value. Never
-copy a timer conversion from another SoC. Reports use the installed canonical
-`python3 -m tilexr_profiling` entry and include caller-supplied provenance.
-The mapping event forms, hierarchy and statistical meanings are documented in
-the package's `FORMAT.md`; SDK ownership and errors are in `API_REFERENCE.md`.
+The minimal Host does not export health observations; their status remains
+unverified. Optional diagnostic APIs are in the [API reference](../../tools/profiling/docs/API_REFERENCE.md).
 
-## 4. Check results and validation boundaries
+## Results and maintenance
 
-Require all of the following for a successful hardware run:
+Generated records, mappings, manifests and reports stay in the output directory
+chosen for that run. They are not part of this feature change. SDK installation
+ships the example source and READMEs; generated evidence is excluded.
 
-- `operator.log`: numerical validation succeeds; four COMMITTED lanes, 20 records
-  per lane, and zero dropped records.
-- `capture.mapping.json` and `capture.records.bin`: matching events and confirmed
-  clock conversion; retain `environment.txt` and the actual binary provenance.
-- `report/`: `perfetto_trace.json`, `analysis.md`, and `report.html` all exist;
-  the analyzer reports complete. Open the HTML/Markdown to inspect diagnostics.
+Keep ACL device/stream and binary registration alive until capture cleanup has
+finished. Keep the explicit stream wait before `Save` and cleanup: OFF disables
+capture synchronization but still launches the kernel. Capacity/drop/event-sequence
+checks belong in SDK protocol tests or the optional qualifier. The qualifier and
+timer probe validate captures, not Add4 numerical results.
 
-Only a successful explicit hardware run establishes numerical output, four
-COMMITTED lanes, 20 records per lane and complete reports. No NPU test is
-registered in default CTest. The 2026-10-21 WSL / CANN 9.1 validation built and
-installed both the source-tree example and an external copy consuming the
-installed SDK; see [validation evidence](../../tools/profiling/TESTING.md#21-2026-10-21-wsl--cann-91-无-npu-验证).
-This covered the Ascend950 `dav-c310-vec` compiler path and device `gnu++17`
-standard, plus actual device compilation with the profiling macro undefined,
-0 and 1 (2 was rejected). Host code uses C++14. No NPU execution was performed.
-Device C++14, other SoCs, instruction visibility, spill and overhead remain
-unverified. Low-overhead claims additionally require measurements of
-compile-disabled, local-markers-only, and markers-plus-flush builds on the same
-target, including recorder capacities large enough to expose spill.
-
-## 5. Troubleshooting and handoff
-
-An existing output path requires a new path. A null/unknown timer conversion
-requires confirmed target evidence, not a guessed frequency. Missing runtime
-headers require the intended CANN environment and a clean configuration. Bash
-scripts must use LF line endings. For other failures, retain the first failing
-command, its exit code/log, source commit/diff, toolkit/compiler identity, selected
-device and actual Host/kernel paths; distinguish build from execution evidence.
-Keep this guide and its Chinese version synchronized when behavior changes.
-
-When modifying the example, keep kernel data alive through binary registration
-and retain the borrowed stream/context through `Close()` and capture
-destruction. A launch error or Save error does not imply no work is in flight;
-failure cleanup synchronizes before freeing operator memory and conservatively
-retains resources if synchronization fails.
+Keep numeric IDs consistent with the mapping when naming events; pairing uses
+IDs, not C++ names. Verify exported event sequences after instrumentation changes.

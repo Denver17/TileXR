@@ -1,3 +1,5 @@
+# 独立安装 src/include 下的 profiling SDK；仅显式启用手动检查或 examples/profiling 示例。
+# Install the standalone profiling headers from src/include; enable manual checks or examples/profiling only on request.
 cmake_minimum_required(VERSION 3.16)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(TileXRProfiling VERSION 1.0.0 LANGUAGES CXX)
@@ -18,9 +20,11 @@ target_include_directories(tilexr_profiling INTERFACE
 set(profiling_cmake_dir "${CMAKE_INSTALL_LIBDIR}/cmake/TileXRProfiling")
 install(TARGETS tilexr_profiling EXPORT TileXRProfilingTargets)
 install(FILES ../include/tilexr/profiling.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tilexr)
+install(FILES ../include/tilexr_profiling.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY ../include/tilexr/profiling DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tilexr)
 install(FILES LICENSE VERSION DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr-profiling)
-install(DIRECTORY ../../examples/profiling/ DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr-profiling/examples/add4)
+install(DIRECTORY ../../examples/profiling/ DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr-profiling/examples/add4
+    PATTERN "results" EXCLUDE)
 install(EXPORT TileXRProfilingTargets NAMESPACE TileXR:: DESTINATION ${profiling_cmake_dir})
 configure_package_config_file(TileXRProfilingConfig.cmake.in
     "${CMAKE_CURRENT_BINARY_DIR}/TileXRProfilingConfig.cmake" INSTALL_DESTINATION ${profiling_cmake_dir})

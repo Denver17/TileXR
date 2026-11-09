@@ -1,5 +1,7 @@
 /* Copyright (c) 2026 TileXR Project
  * Licensed under the CANN Open Software License Agreement Version 2.0. */
+// 功能：实现 DeviceView 校验和 GM 写入细节，由 device.h 和 direct.h 调用。
+// Purpose: Implement DeviceView validation and GM writes for device.h and direct.h.
 #ifndef TILEXR_PROFILING_DETAIL_DEVICE_H
 #define TILEXR_PROFILING_DETAIL_DEVICE_H
 
@@ -39,7 +41,7 @@ TILEXR_PROFILE_DEVICE uint32_t SaturatingAdd(uint32_t a, uint32_t b)
 TILEXR_PROFILE_DEVICE bool AddressRangeValid(uint64_t address, uint64_t elements,
     uint32_t elementBytes)
 {
-    return address != 0U && address % 32U == 0U &&
+    return address != 0U && address % CACHE_LINE_BYTES == 0U &&
         elements <= (static_cast<uint64_t>(-1) - address) / elementBytes;
 }
 
@@ -47,7 +49,7 @@ TILEXR_PROFILE_DEVICE bool AddressRangeValid(uint64_t address, uint64_t elements
 // reuse, not concurrent writers; shared-lane concurrency is outside the ABI.
 class LaneWriter {
 public:
-    TILEXR_PROFILE_DEVICE bool Initialize(DeviceArgsAddress descriptor, uint32_t lane)
+    TILEXR_PROFILE_DEVICE bool Initialize(DeviceArgsAddress descriptor, uint32_t lane, uint64_t expectedGeneration = 0)
     {
         timestamps = nullptr;
         eventIds = nullptr;
@@ -62,17 +64,31 @@ public:
         TILEXR_PROFILE_GM const DeviceView *view =
             reinterpret_cast<TILEXR_PROFILE_GM const DeviceView *>(descriptor);
         if (view->abiVersion != DEVICE_VIEW_ABI_VERSION ||
+            (expectedGeneration != 0U && view->generation != expectedGeneration) ||
             view->descriptorBytes != sizeof(DeviceView) || view->enabled != 1U ||
             view->reserved != 0U || view->logicalStreamCount == 0U ||
             view->logicalStreamCount > MAX_LOGICAL_STREAMS ||
-            lane >= view->logicalStreamCount || view->recordsPerStream < ALIGNMENT_RECORDS ||
+            view->recordsPerStream < ALIGNMENT_RECORDS ||
             view->recordsPerStream > MAX_RECORDS_PER_STREAM ||
             view->recordsPerStream % ALIGNMENT_RECORDS != 0U ||
             view->recordStride < view->recordsPerStream ||
-            view->recordStride % ALIGNMENT_RECORDS != 0U ||
+            view->recordStride % RECORD_STRIDE_ALIGNMENT != 0U ||
             view->stateStride < COUNT_STRIDE || view->stateStride % COUNT_STRIDE != 0U) {
             return false;
         }
+        uint32_t slot = lane;
+        if (view->logicalLaneIdsAddress != 0U) {
+            if (!AddressRangeValid(view->logicalLaneIdsAddress, view->logicalStreamCount, sizeof(uint32_t))) return false;
+            TILEXR_PROFILE_GM const uint32_t *ids =
+                reinterpret_cast<TILEXR_PROFILE_GM const uint32_t *>(view->logicalLaneIdsAddress);
+            uint32_t begin = 0, end = view->logicalStreamCount;
+            while (begin < end) {
+                const uint32_t middle = begin + (end - begin) / 2U;
+                if (ids[middle] < lane) begin = middle + 1U; else end = middle;
+            }
+            if (begin == view->logicalStreamCount || ids[begin] != lane) return false;
+            slot = begin;
+        } else if (lane >= view->logicalStreamCount) return false;
         const uint64_t records = static_cast<uint64_t>(view->logicalStreamCount) * view->recordStride;
         const uint64_t states = static_cast<uint64_t>(view->logicalStreamCount) * view->stateStride;
         if (!AddressRangeValid(view->timestampsAddress, records, sizeof(uint64_t)) ||
@@ -82,7 +98,7 @@ public:
             !AddressRangeValid(view->statesAddress, states, sizeof(uint32_t))) {
             return false;
         }
-        const uint64_t statusOffset = static_cast<uint64_t>(lane) * view->stateStride;
+        const uint64_t statusOffset = static_cast<uint64_t>(slot) * view->stateStride;
         state = reinterpret_cast<TILEXR_PROFILE_GM uint32_t *>(view->statesAddress) + statusOffset;
         if (*state != static_cast<uint32_t>(Completion::EMPTY)) {
             *state = static_cast<uint32_t>(Completion::INVALID);
@@ -94,7 +110,7 @@ public:
             *state = static_cast<uint32_t>(Completion::INVALID);
             return false;
         }
-        const uint64_t recordOffset = static_cast<uint64_t>(lane) * view->recordStride;
+        const uint64_t recordOffset = static_cast<uint64_t>(slot) * view->recordStride;
         timestamps = reinterpret_cast<TILEXR_PROFILE_GM uint64_t *>(view->timestampsAddress) + recordOffset;
         eventIds = reinterpret_cast<TILEXR_PROFILE_GM uint32_t *>(view->eventIdsAddress) + recordOffset;
         capacity = view->recordsPerStream;

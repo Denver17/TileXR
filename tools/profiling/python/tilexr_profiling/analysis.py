@@ -1,8 +1,10 @@
+# Purpose: Compute coverage-aware stage metrics from paired captures for reports.
+# 用途与关系：从配对后的 capture 计算带覆盖范围的阶段指标，供报表使用。
 """Producer-neutral analysis for normalized profiling runs."""
 
 import math
 import statistics
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Dict, List, Optional, Tuple
 
 from .model import Lane, ProfileRun, ProfilingInputError, StageMetric, StageSample
@@ -33,13 +35,13 @@ class StageSummary:
     name: str
     category: str
     sample_count: int
-    instance_count: int
-    total_us: float
-    median_us: float
-    minimum_us: float
-    maximum_us: float
-    critical_lane_us: float
-    share_of_critical: float
+    instance_count: Optional[int]
+    total_us: Optional[float]
+    median_us: Optional[float]
+    minimum_us: Optional[float]
+    maximum_us: Optional[float]
+    critical_lane_us: Optional[float]
+    share_of_critical: Optional[float]
     bytes: Optional[int]
     byte_semantics: Optional[str]
     bandwidth_gbps: Optional[float]
@@ -49,6 +51,11 @@ class StageSummary:
     critical_lane_exclusive_us: Optional[float]
     union_share_of_critical: Optional[float]
     exclusive_share_of_critical: Optional[float]
+    states: Dict[str, dict] = field(default_factory=dict)
+    rank_latency: dict = field(default_factory=dict)
+    rank_bandwidth: dict = field(default_factory=dict)
+    instance_coverage: dict = field(default_factory=dict)
+    bandwidth_basis: str = "lane-time effective bandwidth"
 
 
 @dataclass(frozen=True)
@@ -70,6 +77,7 @@ class AnalysisResult:
     rank_imbalance_ratio: float
     core_imbalance_ratio: float
     wait_sync_pressure: Optional[float]
+    rank_coverage: dict = field(default_factory=dict)
 
 
 def _union(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
@@ -130,6 +138,127 @@ def _metric_for_stage(lane: Lane, stage_id: int) -> Optional[StageMetric]:
     return next((metric for metric in lane.stage_metrics if metric.stage_id == stage_id), None)
 
 
+def _rank_distribution(values, expected_ranks, partial_ranks=(), *, bandwidth=False):
+    """Summarize local rank measurements without inventing a common clock."""
+    partial = set(partial_ranks)
+    valid = {rank: value for rank, value in values.items()
+             if rank not in partial and rank in expected_ranks}
+    numbers = list(valid.values())
+    covered = sorted(valid)
+    slowest_rank = None
+    if valid:
+        select = min if bandwidth else max
+        slowest_rank = select(valid, key=lambda rank: (valid[rank], rank))
+    return {
+        "minimum": min(numbers) if numbers else None,
+        "median": float(statistics.median(numbers)) if numbers else None,
+        "maximum": max(numbers) if numbers else None,
+        "covered_ranks": len(covered),
+        "expected_ranks": len(expected_ranks),
+        "status": "known" if set(covered) == set(expected_ranks) and covered else "incomplete",
+        "slowest_rank": slowest_rank,
+        "per_rank": {str(rank): {"value": values.get(rank),
+                                 "state": "incomplete" if rank in partial else
+                                 "known" if rank in valid else "not_observed"}
+                     for rank in sorted(set(expected_ranks) | set(values))},
+    }
+
+
+def _lane_complete(lane):
+    return lane.attributes.get("capture_status", "complete") == "complete"
+
+
+def _sampled(lane):
+    return lane.attributes.get("sampled", True) and lane.attributes.get("capture_status") != "not_sampled"
+
+
+def _stage_bytes(stage_id, lanes_with_samples, all_lanes, run, expected_ranks, partial_ranks):
+    """Keep byte and inclusive-time populations identical, including repeats."""
+    applicable = []
+    missing = False
+    not_applicable = []
+    rank_totals = {}
+    rank_invalid = set(partial_ranks)
+    for lane, interval_count, duration in lanes_with_samples.values():
+        metric = _metric_for_stage(lane, stage_id)
+        if metric is None:
+            missing = True
+            rank_invalid.add(lane.rank)
+            continue
+        if metric.attributes.get("status") == "not_applicable":
+            not_applicable.append(metric.attributes.get("reason", "Explicitly not applicable."))
+            continue
+        count = metric.bytes * interval_count if metric.scope == "per_interval" else metric.bytes
+        if count > (1 << 64) - 1:
+            raise ProfilingInputError("stage byte aggregation exceeds uint64 range")
+        applicable.append((metric, count, duration))
+        totals = rank_totals.setdefault(lane.rank, [0, 0.0, set()])
+        totals[0] += count
+        totals[1] += duration
+        totals[2].add(metric.byte_semantics)
+
+    # An absent interval is not proof that this lane was inapplicable. Require
+    # an explicit N/A declaration before excluding a sampled lane's workload.
+    for launch_id, lane in all_lanes:
+        metric = _metric_for_stage(lane, stage_id)
+        if (_sampled(lane) and (launch_id, lane.stream_id) not in lanes_with_samples
+                and (metric is None or metric.attributes.get("status") != "not_applicable")):
+            missing = True
+            rank_invalid.add(lane.rank)
+    semantics = {metric.byte_semantics for metric, _, _ in applicable}
+    conflict = len(semantics) > 1
+    rank_rates = {}
+    for rank, (count, duration, meanings) in rank_totals.items():
+        if len(meanings) == 1 and duration > 0 and not conflict:
+            rank_rates[rank] = count / duration / 1000.0
+        else:
+            rank_invalid.add(rank)
+    rank_declarations = {}
+    for _, lane in all_lanes:
+        if _sampled(lane):
+            rank_declarations.setdefault(lane.rank, []).append(_metric_for_stage(lane, stage_id))
+    inapplicable_ranks = {rank for rank, declarations in rank_declarations.items()
+                          if declarations and all(metric is not None and
+                              metric.attributes.get("status") == "not_applicable" for metric in declarations)}
+    rank_summary = _rank_distribution(rank_rates, set(expected_ranks) - inapplicable_ranks,
+                                      rank_invalid - inapplicable_ranks, bandwidth=True)
+    rank_summary["not_applicable_ranks"] = sorted(inapplicable_ranks)
+    rank_summary["planned_ranks"] = len(expected_ranks)
+    for rank in inapplicable_ranks:
+        rank_summary["per_rank"][str(rank)] = {"value": None, "state": "not_applicable"}
+    count = meaning = bandwidth = None
+    if not lanes_with_samples:
+        declarations = [_metric_for_stage(lane, stage_id) for _, lane in all_lanes if _sampled(lane)]
+        if declarations and all(metric is not None and metric.attributes.get("status") == "not_applicable"
+                                for metric in declarations):
+            state, reason = "not_applicable", "; ".join(sorted({metric.attributes["reason"] for metric in declarations}))
+        else:
+            state, reason = "not_observed", "No paired stage samples; declared bytes cannot imply measured traffic."
+    elif conflict:
+        state, reason = "incomplete", "Byte semantics differ across applicable lanes."
+    elif not_applicable and not applicable and not missing:
+        state, reason = "not_applicable", "; ".join(sorted(set(not_applicable)))
+    elif run.status != "complete":
+        state, reason = "incomplete", "Capture loss or missing lanes prevents pairing a full byte total with a full duration."
+    elif missing:
+        state, reason = "not_provided", "A metric or its matching intervals are missing for a participating lane."
+    elif applicable:
+        count = sum(value for _, value, _ in applicable)
+        if count > (1 << 64) - 1:
+            raise ProfilingInputError("stage byte aggregation exceeds uint64 range")
+        meaning = next(iter(semantics))
+        duration = sum(value for _, _, value in applicable)
+        state, reason = "known", "Declared bytes and paired inclusive durations cover the same lane intervals."
+        if duration > 0:
+            bandwidth = count / duration / 1000.0
+    else:
+        state, reason = "not_provided", "No stage byte metric was provided."
+    byte_state = {name: {"state": state, "reason": reason} for name in ("bytes", "byte_semantics", "bandwidth_gbps")}
+    if count is not None and bandwidth is None:
+        byte_state["bandwidth_gbps"] = {"state": "undefined_denominator", "reason": "Inclusive duration is zero."}
+    return count, meaning, bandwidth, byte_state, rank_summary
+
+
 def _require_finite_statistics(value, path="statistics") -> None:
     """Finite samples may still overflow sums, averages, or ratios."""
     if isinstance(value, float) and not math.isfinite(value):
@@ -170,6 +299,11 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
             invocation_durations.get(identity, 0.0), sample.duration_us
         )
     critical_durations = list(invocation_durations.values())
+    expected_ranks = (set(run.coverage["expected_ranks"]) if run.coverage.get("verified")
+                      else {lane.rank for _, lane in all_lanes if _sampled(lane)})
+    partial_ranks = {lane.rank for _, lane in all_lanes
+                     if _sampled(lane) and not _lane_complete(lane)}
+    partial_ranks.update(sid >> 16 for sid in run.coverage.get("unexpected_lanes", ()))
 
     critical_lane: Optional[CriticalLane] = None
     critical_lane_model: Optional[Lane] = None
@@ -198,6 +332,9 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
     for launch_id, lane in all_lanes:
         for sample in lane.samples:
             by_stage.setdefault(sample.stage_id, []).append((launch_id, lane, sample))
+    definitions = {stage.id: stage for stage in run.stages}
+    for stage_id in definitions:
+        by_stage.setdefault(stage_id, [])
 
     stage_summaries: Dict[int, StageSummary] = {}
     for stage_id in sorted(by_stage):
@@ -205,16 +342,22 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
         names = {sample.name for _, _, sample in entries}
         categories = {sample.category for _, _, sample in entries}
         parent_stage_ids = {sample.parent_stage_id for _, _, sample in entries}
+        if not entries:
+            definition = definitions[stage_id]
+            names = {definition.name}
+            categories = {definition.category}
+            parent_stage_ids = {definition.parent_stage_id}
         if len(names) != 1 or len(categories) != 1 or len(parent_stage_ids) != 1:
             raise ValueError(f"stage {stage_id} has conflicting metadata")
         durations = [sample.duration_us for _, _, sample in entries]
-        critical_lane_us = 0.0
+        critical_lane_us = None
         if critical_lane is not None:
-            critical_lane_us = sum(
+            critical_samples = [
                 sample.duration_us
                 for launch_id, lane, sample in entries
                 if launch_id == critical_lane.launch_id and lane.stream_id == critical_lane.stream_id
-            )
+            ]
+            critical_lane_us = sum(critical_samples) if critical_samples else None
 
         lane_keys = {(launch_id, lane.stream_id) for launch_id, lane, _ in entries}
         children = {sample.stage_id for _, lane in all_lanes for sample in lane.samples
@@ -231,42 +374,72 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
             union_cycles = _length(intervals)
             exclusive_cycles = union_cycles - _intersection_length(intervals, child_intervals)
             lane_coverage[key] = (union_cycles / cycles_per_us, exclusive_cycles / cycles_per_us)
-        known_coverage = all(value is not None for value in lane_coverage.values())
+        known_coverage = bool(lane_coverage) and all(value is not None for value in lane_coverage.values())
         union_us = sum(value[0] for value in lane_coverage.values()) if known_coverage else None
         exclusive_us = sum(value[1] for value in lane_coverage.values()) if known_coverage else None
         critical_coverage = None
         if critical_lane is not None:
-            critical_coverage = lane_coverage.get((critical_lane.launch_id, critical_lane.stream_id), (0.0, 0.0))
+            critical_coverage = lane_coverage.get((critical_lane.launch_id, critical_lane.stream_id))
         critical_union = critical_coverage[0] if critical_coverage is not None else None
         critical_exclusive = critical_coverage[1] if critical_coverage is not None else None
         denominator = critical_lane.duration_us if critical_lane is not None else 0.0
 
-        lanes_with_samples: Dict[int, Tuple[Lane, int, float]] = {}
-        for _, lane, sample in entries:
-            previous = lanes_with_samples.get(lane.stream_id, (lane, 0, 0.0))
-            lanes_with_samples[lane.stream_id] = (
+        lanes_with_samples = {}
+        for launch_id, lane, sample in entries:
+            key = (launch_id, lane.stream_id)
+            previous = lanes_with_samples.get(key, (lane, 0, 0.0))
+            lanes_with_samples[key] = (
                 lane,
                 previous[1] + 1,
                 previous[2] + sample.duration_us,
             )
-        covered_metrics = []
-        for lane, interval_count, covered_duration in lanes_with_samples.values():
-            metric = _metric_for_stage(lane, stage_id)
-            if metric is not None:
-                byte_count = metric.bytes * interval_count if metric.scope == "per_interval" else metric.bytes
-                covered_metrics.append((metric, byte_count, covered_duration))
-
-        byte_count = None
-        byte_semantics = None
-        bandwidth = None
-        if len(covered_metrics) == len(lanes_with_samples):
-            semantics = {metric.byte_semantics for metric, _, _ in covered_metrics}
-            if len(semantics) == 1:
-                byte_count = sum(item[1] for item in covered_metrics)
-                byte_semantics = next(iter(semantics))
-                metric_duration = sum(item[2] for item in covered_metrics)
-                if metric_duration > 0.0:
-                    bandwidth = byte_count / metric_duration / 1000.0
+        byte_count, byte_semantics, bandwidth, byte_state, rank_bandwidth = _stage_bytes(
+            stage_id, lanes_with_samples, all_lanes, run, expected_ranks, partial_ranks)
+        rank_unions = {}
+        stage_partial_ranks = set(partial_ranks)
+        for key, (lane, _, _) in lanes_with_samples.items():
+            value = lane_coverage.get(key)
+            if value is None:
+                stage_partial_ranks.add(lane.rank)
+            else:
+                rank_unions[lane.rank] = max(rank_unions.get(lane.rank, 0.0), value[0])
+        instances = {sample.instance_id for _, _, sample in entries if sample.instance_id is not None}
+        definition = definitions.get(stage_id)
+        configured_instances = definition.attributes.get("configured_instance_count", 0) if definition else 0
+        instance_count = len(instances) if instances or configured_instances else None
+        # The three output formats consume these reasons and never reconstruct them.
+        states = {}
+        timing_fields = {
+            "total_us": sum(durations) if durations else None,
+            "median_us": float(statistics.median(durations)) if durations else None,
+            "minimum_us": min(durations) if durations else None,
+            "maximum_us": max(durations) if durations else None,
+            "critical_lane_us": critical_lane_us,
+            "union_us": union_us, "exclusive_us": exclusive_us,
+            "critical_lane_union_us": critical_union,
+            "critical_lane_exclusive_us": critical_exclusive,
+        }
+        for name, value in timing_fields.items():
+            if value is None:
+                states[name] = {"state": "not_observed", "reason":
+                                "No paired stage samples or no unique critical interval in the required lane."}
+            elif run.status != "complete":
+                states[name] = {"state": "incomplete", "reason": "Observed samples only; capture coverage is incomplete."}
+            else:
+                states[name] = {"state": "known", "reason": "Computed from paired samples."}
+        for name, value in (("share_of_critical", critical_lane_us),
+                            ("union_share_of_critical", critical_union),
+                            ("exclusive_share_of_critical", critical_exclusive)):
+            states[name] = ({"state": "undefined_denominator", "reason": "A positive unique critical duration is required."}
+                            if denominator <= 0 else
+                            {"state": "not_observed", "reason": "No stage sample on the critical lane."}
+                            if value is None else
+                            {"state": "incomplete" if run.status != "complete" else "known",
+                             "reason": "Ratio uses the critical lane duration."})
+        states["sample_count"] = {"state": "known", "reason": "Number of observed paired samples."}
+        states["instance_count"] = {"state": "known" if instance_count is not None else "not_applicable",
+                                    "reason": "Observed explicit instance IDs only; ordinary repeats are not instances."}
+        states.update(byte_state)
 
         stage_summaries[stage_id] = StageSummary(
             stage_id=stage_id,
@@ -274,22 +447,16 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
             name=next(iter(names)),
             category=next(iter(categories)),
             sample_count=len(entries),
-            instance_count=len(
-                {
-                    sample.instance_id
-                    for _, _, sample in entries
-                    if sample.instance_id is not None
-                }
-            ),
-            total_us=sum(durations),
-            median_us=float(statistics.median(durations)),
-            minimum_us=min(durations),
-            maximum_us=max(durations),
+            instance_count=instance_count,
+            total_us=timing_fields["total_us"],
+            median_us=timing_fields["median_us"],
+            minimum_us=timing_fields["minimum_us"],
+            maximum_us=timing_fields["maximum_us"],
             critical_lane_us=critical_lane_us,
             share_of_critical=(
                 critical_lane_us / critical_lane.duration_us
-                if critical_lane is not None and critical_lane.duration_us > 0.0
-                else 0.0
+                if critical_lane_us is not None and denominator > 0.0
+                else None
             ),
             bytes=byte_count,
             byte_semantics=byte_semantics,
@@ -300,6 +467,10 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
             critical_lane_exclusive_us=critical_exclusive,
             union_share_of_critical=critical_union / denominator if denominator > 0 and critical_union is not None else None,
             exclusive_share_of_critical=critical_exclusive / denominator if denominator > 0 and critical_exclusive is not None else None,
+            states=states,
+            rank_latency=_rank_distribution(rank_unions, expected_ranks, stage_partial_ranks),
+            rank_bandwidth=rank_bandwidth,
+            instance_coverage={"configured": configured_instances or None, "observed": instance_count},
         )
 
     core_latencies = [sample.duration_us for _, _, sample in lane_entries]
@@ -400,6 +571,9 @@ def analyze_run(run: ProfileRun) -> AnalysisResult:
         rank_imbalance_ratio=rank_imbalance,
         core_imbalance_ratio=core_imbalance,
         wait_sync_pressure=wait_sync_share,
+        rank_coverage=_rank_distribution(
+            {rank: duration for (_, rank), duration in invocation_durations.items()},
+            expected_ranks, partial_ranks),
     )
     _require_finite_statistics(result)
     return result

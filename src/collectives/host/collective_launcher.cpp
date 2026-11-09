@@ -7,17 +7,26 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+/* 实现 collective Host launch，将执行计划交给 profiling producer，并在原有清理边界处理 capture 队列；依赖注册的外置 kernel 与 TileXR communicator。
+ * Launch collectives with registered external kernels and the TileXR communicator; pass execution plans to the profiling producer and drain captures at existing cleanup boundaries.
+ */
+
 #include "collective_launcher.h"
 
 #include <limits>
 #include <new>
 #include <utility>
 #include <vector>
+#if defined(__linux__)
+#include <unistd.h>
+#endif
 
 #include "acl/acl_rt.h"
 #include "alltoall_a5_common.h"
 #include "collective_kernel.h"
 #include "profiling_capture_queue.h"
+#include "profiling_producer.h"
+#include "collective_utils.h"
 #include "tilexr_internal.h"
 #include "tilexr_types.h"
 
@@ -26,6 +35,43 @@ namespace Host {
 namespace {
 
 constexpr uint64_t kA5WaitIterations = UINT64_C(100000000);
+
+TileXR::Profiling::Status RuntimeProducer(const CollectiveProfilingWorkload &workload,
+    TileXR::Profiling::ManifestProducer *producer)
+{
+    using namespace TileXR::Profiling;
+    const char *hash=std::getenv(workload.groupedA5 ? "TILEXR_PROFILING_A5_MAPPING_SHA256" :
+        "TILEXR_PROFILING_COARSE_MAPPING_SHA256");
+    if(!hash || !*hash) hash=std::getenv("TILEXR_PROFILING_MAPPING_SHA256");
+    if(!hash || !*hash) return {StatusCode::InvalidArgument,"manifest requires the canonical fingerprint of the actual clock-adjusted mapping"};
+    producer->mappingSha256=hash;
+    // The queue replaces this placeholder with the selected capture's shared
+    // UUID attempt before kernel enqueue, so preallocated shapes cannot mix.
+    producer->attemptId="planned-collective";
+    int32_t device=-1;
+    const aclError result=aclrtGetDevice(&device);
+    if(result!=ACL_SUCCESS) return {StatusCode::Acl,"aclrtGetDevice for profiling identity",int(result)};
+    if(device<0) return {StatusCode::InvalidState,"ACL returned an invalid device ordinal"};
+    producer->deviceId=std::to_string(device);
+#if defined(__linux__)
+    char host[256]={};
+    if(gethostname(host,sizeof(host)-1)!=0) return {StatusCode::Io,"gethostname for profiling identity"};
+    producer->host=host;
+#else
+    return {StatusCode::InvalidState,"collective profiling host identity requires the supported Linux runtime"};
+#endif
+    const char *soc=aclrtGetSocName();
+    if(soc && *soc) producer->environment["soc"]=soc;
+    const char *keys[]={"cann_version","driver_version","clock_basis"};
+    const char *variables[]={"TILEXR_PROFILING_CANN_VERSION","TILEXR_PROFILING_DRIVER_VERSION","TILEXR_PROFILING_CLOCK_BASIS"};
+    for(size_t i=0;i<3;++i) {
+        const char *value=std::getenv(variables[i]);
+        if(value && *value) producer->environment[keys[i]]=value;
+    }
+    producer->environment["identity_source"]="gethostname, aclrtGetDevice, aclrtGetSocName; versions/time basis explicitly supplied";
+    producer->versions["sdk_version"]="1.0.0";
+    return PopulateCollectiveProducer(workload,producer);
+}
 
 struct RetiredA5Resource {
     TileXRUDMAProfileHandle profile = 0U;
@@ -48,20 +94,28 @@ struct CommonCollectiveRuntime {
 };
 
 void *AcquireCapture(CommonCollectiveRuntime &runtime, aclrtStream stream,
-    uint32_t lanes, int rank, int rankSize) noexcept
+    const CollectiveProfilingWorkload &workload) noexcept
 {
 #if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
     const char *directory = std::getenv("TILEXR_PROFILING_OUTPUT_DIR");
     if (!directory || !*directory) return nullptr;
     try {
         if (!runtime.captures) runtime.captures = std::make_shared<ProfilingCaptureQueue>();
-        return runtime.captures->Acquire(stream, lanes, rank, rankSize);
+        TileXR::Profiling::ManifestProducer producer;
+        const auto status=RuntimeProducer(workload,&producer);
+        if(!status) {
+            std::cerr << "TileXR profiling producer metadata unavailable: " << status.message << "\n";
+            // Retain legacy provided-input capture when the caller has not
+            // supplied a trustworthy mapping fingerprint/environment identity.
+            return runtime.captures->Acquire(stream,workload.lanes,workload.rank,workload.rankSize);
+        }
+        return runtime.captures->Acquire(stream,workload.lanes,workload.rank,workload.rankSize,&producer);
     } catch (const std::exception &error) {
         std::cerr << "TileXR profiling skipped: " << error.what() << "\n";
         return nullptr;
     }
 #else
-    (void)runtime; (void)stream; (void)lanes; (void)rank; (void)rankSize;
+    (void)runtime; (void)stream; (void)workload;
     return nullptr;
 #endif
 }
@@ -402,12 +456,16 @@ int GetOrCreateA5Runtime(TileXRCommPtr comm, const HostLaunchContext &context,
 } // namespace
 
 void *AcquireCollectiveProfiling(TileXRCommPtr comm, const HostLaunchContext &context,
-    aclrtStream stream, uint32_t lanes)
+    aclrtStream stream, uint32_t lanes, TileXR::TileXRType type,
+    int64_t kernelCount, TileXR::TileXRDataType dataType, int reduction, int root)
 {
 #if !defined(TILEXR_ENABLE_PROFILING) || TILEXR_ENABLE_PROFILING == 0
-    (void)comm; (void)context; (void)stream; (void)lanes;
+    (void)comm; (void)context; (void)stream; (void)lanes; (void)type;
+    (void)kernelCount; (void)dataType; (void)reduction; (void)root;
     return nullptr;
 #else
+    if(!context.hostArgs || context.hostArgs->rankSize<=0 || context.hostArgs->rank<0 ||
+        context.hostArgs->rank>=context.hostArgs->rankSize) return nullptr;
     void *opaque = nullptr;
     if (TileXRCommGetInternalResource(comm, &opaque) != TileXR::TILEXR_SUCCESS) return nullptr;
     auto *runtime = static_cast<CommonCollectiveRuntime *>(opaque);
@@ -418,7 +476,24 @@ void *AcquireCollectiveProfiling(TileXRCommPtr comm, const HostLaunchContext &co
         runtime = candidate.release();
     }
     if (runtime->destroying) return nullptr;
-    return AcquireCapture(*runtime, stream, lanes, context.hostArgs->rank, context.hostArgs->rankSize);
+    const int64_t bytes=CountToBytes(kernelCount,dataType);
+    if(bytes<=0) return nullptr;
+    try {
+        CollectiveProfilingWorkload workload;
+        workload.rank=context.hostArgs->rank; workload.rankSize=context.hostArgs->rankSize; workload.lanes=lanes;
+        workload.inputBytes=uint64_t(bytes);
+        if(type==TileXR::TileXRType::REDUCE_SCATTER) {
+            if(workload.inputBytes>UINT64_MAX/workload.rankSize) return nullptr;
+            workload.inputBytes*=workload.rankSize;
+        }
+        workload.operation="TileXR collective type "+std::to_string(static_cast<int>(type));
+        workload.shape="type="+std::to_string(static_cast<int>(type))+",count="+std::to_string(kernelCount)+
+            ",dtype="+std::to_string(static_cast<int>(dataType))+",ranks="+std::to_string(workload.rankSize)+
+            ",reduction="+std::to_string(reduction)+",root="+std::to_string(root);
+        return AcquireCapture(*runtime,stream,workload);
+    } catch (...) {
+        return nullptr; // Optional metadata allocation must not fail the collective.
+    }
 #endif
 }
 
@@ -527,9 +602,20 @@ int LaunchA5AllToAll(TileXRCommPtr comm, const HostLaunchContext &context,
     args.secondaryWeight = TileXRGrouped::kRouteParts -
         TileXRGrouped::kPrimaryRouteParts;
     args.firstInvocation = runtime->launched ? 0U : 1U;
-    args.profilingGM = static_cast<uint8_t *>(AcquireCapture(*runtime, stream,
-        TileXRGrouped::kSendCoreCount + TileXRGrouped::kGroupWidth,
-        context.hostArgs->rank, context.hostArgs->rankSize));
+#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
+    try {
+        CollectiveProfilingWorkload workload;
+        workload.rank=uint32_t(context.hostArgs->rank); workload.rankSize=uint32_t(context.hostArgs->rankSize);
+        workload.lanes=TileXRGrouped::kSendCoreCount+TileXRGrouped::kGroupWidth;
+        workload.inputBytes=layout.bytesPerRank; workload.bytesPerPeer=layout.bytesPerPeer;
+        workload.groupedA5=true; workload.firstInvocation=args.firstInvocation!=0;
+        workload.operation="AIV URMA Grouped AllToAll";
+        workload.shape="elements_per_peer="+std::to_string(sendCount)+",dtype=int32,ranks="+std::to_string(workload.rankSize);
+        args.profilingGM = static_cast<uint8_t *>(AcquireCapture(*runtime,stream,workload));
+    } catch (...) {
+        args.profilingGM=nullptr; // Profiling is best effort; preserve the kernel launch.
+    }
+#endif
     for (uint32_t plane = 0U; plane < TileXRGrouped::kPlaneCount; ++plane) {
         args.payloadOffset[plane] = layout.payloadOffset[plane];
         args.signalOffset[plane] = layout.signalOffset[plane];

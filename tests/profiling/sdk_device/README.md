@@ -8,7 +8,8 @@ These tests compile the actual SDK device headers with a small Ascend C surface
 substitute. They exercise sparse/empty slots, slot replacement, compact counts,
 overflow, zero and maximum timestamps, initialization reuse, invalid IDs,
 single-lane ownership, repeated publication, saturated arithmetic, ABI validation,
-address alignment and overflow, and the 65535/65536 lane boundary.
+64-byte address/stride isolation, sparse logical IDs, generation rejection,
+address overflow, and the 65535/65536 lane boundary.
 
 From the repository root, using a C++14 compiler:
 
@@ -21,7 +22,7 @@ c++ -std=c++14 -Wall -Wextra -pedantic -D__CCE__ -D__CCE_IS_AICORE__ \
 ```
 
 The standalone SDK CMake registers only the device protocol check alongside
-three critical Host/ACL/queue checks. There is no switch-value test matrix or
+four critical Host/ACL/queue/workspace checks. There is no switch-value test matrix or
 profiling CI job; enable the manual suite with `TILEXR_PROFILING_BUILD_TESTS=ON`.
 
 The substitute provides CPU pointers and a controllable cycle intrinsic only.

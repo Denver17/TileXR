@@ -1,7 +1,10 @@
+# Purpose: Build consistent provenance shared by machine and human reports.
+# 用途与关系：为机器报表和人工报表生成一致的来源信息。
 """Bounded caller metadata and the common provenance for every report."""
 
 import json
 import math
+from dataclasses import asdict
 from collections.abc import Mapping
 from typing import Any, Dict
 
@@ -18,6 +21,8 @@ _FACT_KEYS = frozenset({
     "expected_stream_count", "present_stream_count", "usable_stream_count",
     "missing_stream_count", "dropped_stream_count", "overflowed_stream_count",
     "excluded_stream_count", "dropped_record_count", "analysis_version",
+    "health_status", "metadata_readiness", "coverage", "manifest_metadata",
+    "mapping_schema", "pairing_sha256",
 })
 
 STATISTICS = {
@@ -28,6 +33,8 @@ STATISTICS = {
     "wait_sync_pressure": "Union of all wait/sync intervals on the critical lane, clipped to critical; overlaps count once.",
     "instant": "Instant samples contribute zero interval length.",
     "sibling_overlap": "Sibling stages may overlap; exclusive shares need not sum to 100%.",
+    "bandwidth": "Lane-time effective bandwidth: sum(bytes) / sum(lane inclusive us) / 1000; not parallel wall-clock or physical network bandwidth. Partial captures suppress complete bandwidth.",
+    "lane_identity": "Profiling stream ID = (rank << 16) | logical lane; neither an ACL execution stream nor an automatically discovered physical core. Launch 0 denotes this one capture.",
 }
 
 
@@ -89,8 +96,14 @@ def build_provenance(run: ProfileRun) -> Dict[str, Any]:
         "producer": run.producer,
         "operator": run.operator,
         "status": run.status,
+        "health_status": run.health_status,
+        "metadata_readiness": run.metadata_readiness,
+        "coverage": run.coverage,
+        "manifest": run.manifest_metadata,
         "analysis_version": __version__,
         "protocol": "tilexr_profiling_records.v1",
+        "mapping_schema": run.mapping_schema,
+        "pairing_sha256": run.pairing_sha256,
         "sources": list(run.sources),
         "event_ids": sorted({record.event_id for launch in run.launches for lane in launch.lanes for record in lane.records}),
         "identity_source": "records capture UUID and stream IDs; operator from mapping",
@@ -107,11 +120,12 @@ def build_provenance(run: ProfileRun) -> Dict[str, Any]:
         },
         "completeness": {
             "scope": run.completeness_scope,
-            "boundary": "Internal completeness of provided inputs only; unprovided rank files and participants cannot be detected.",
+            "boundary": ("Expected participants checked against caller manifest; identity declarations are not hardware authentication."
+                         if run.manifest_metadata else "Internal completeness of provided inputs only; unprovided rank files and participants cannot be detected."),
             "expected_stream_count": run.expected_stream_count,
             "present_stream_count": run.present_stream_count,
             "usable_stream_count": run.usable_stream_count,
-            "missing_stream_count": run.missing_stream_count,
+            "missing_stream_count": run.missing_stream_count if run.manifest_metadata else None,
             "dropped_stream_count": run.dropped_stream_count,
             "overflowed_stream_count": run.overflowed_stream_count,
             "excluded_stream_count": run.excluded_stream_count,
@@ -122,6 +136,68 @@ def build_provenance(run: ProfileRun) -> Dict[str, Any]:
         "attributes": attributes,
         "statistics": dict(STATISTICS),
     }
+
+
+def report_payload(run, analysis):
+    """One lossless report view, shared by HTML, Markdown and trace metadata."""
+    return {
+        "provenance": build_provenance(run),
+        "analysis": asdict(analysis),
+        "lanes": [dict(launch_id=launch.id, stream_id=lane.stream_id,
+                       rank=lane.rank, host=lane.host, device=lane.device, logical_lane=lane.core,
+                       attributes=lane.attributes, stage_metrics=[asdict(m) for m in lane.stage_metrics])
+                  for launch in run.launches for lane in launch.lanes],
+        "health": {"capture_status": run.status, "health_status": run.health_status,
+                   "metadata_readiness": run.metadata_readiness,
+                   "diagnostics": [asdict(item) for item in run.diagnostics],
+                   "events": list(run.capture_events)},
+    }
+
+
+def metadata_summary(run):
+    """Eight default entries; complete provenance remains available separately."""
+    manifest = run.manifest_metadata
+    versions = manifest.get("versions", {})
+    environment = manifest.get("environment", {})
+    coverage = run.coverage
+    execution = manifest.get("execution", {})
+    execution_summary = "not provided; applicability unverified"
+    if execution.get("kind") == "compute":
+        execution_summary = "compute; communication backend/native status not applicable"
+    elif execution.get("kind") == "communication":
+        execution_summary = {
+            "kind": "communication", "rank/stage declarations": len(execution.get("stages", [])),
+            "framework profiler": execution.get("framework_profiler", "not provided"),
+            "stage barrier": execution.get("stage_barrier", "not provided"),
+            "detail": "per-rank/stage backend, native status and kernel in Provenance",
+        }
+    lower_bound = any(lane.attributes.get("dropped_count_is_lower_bound")
+                      for launch in run.launches for lane in launch.lanes)
+    def supplied(values, key):
+        return values.get(key, run.attributes.get(key, "not provided"))
+    return [
+        ("Capture / attempt", run.capture_id or manifest.get("attempt_id", "not collected")),
+        ("Operator", run.operator),
+        ("Versions", {"SDK": supplied(versions, "sdk_version"),
+                      "kernel": supplied(versions, "kernel_version"), "analyzer": __version__}),
+        ("Runtime target", {key: supplied(environment, key) for key in ("soc", "cann_version", "driver_version")}),
+        ("Time basis", {"source": run.timestamp_source, "cycles/us": run.cycles_per_us,
+                        "conversion": "mapping.cycles_per_us", "calibration": "not cross-device calibrated"}),
+        ("Coverage", {"scope": run.completeness_scope, "expected lanes": run.expected_stream_count if manifest else "unverified",
+                      "provided lanes": run.present_stream_count, "timing usable": run.usable_stream_count,
+                      "missing lanes": run.missing_stream_count if manifest else "unverified",
+                      "expected ranks": len(coverage.get("expected_ranks", [])) if manifest else "unverified",
+                      "provided ranks": len(coverage.get("present_ranks", [])) if manifest else "unverified",
+                      "timing usable ranks": len(coverage.get("usable_ranks", [])) if manifest else "unverified"}),
+        ("Capture health", {"health": run.health_status, "metadata": run.metadata_readiness,
+                            "dropped records": f"at least {run.dropped_record_count}" if lower_bound else run.dropped_record_count,
+                            "lanes with dropped records": run.dropped_stream_count,
+                            "overflow lanes": run.overflowed_stream_count,
+                            "unsubmitted lanes": len(coverage.get("unsubmitted_lanes", [])),
+                            "skipped lanes": len(coverage.get("skipped_lanes", [])) if manifest else "unverified",
+                            "diagnostics": len(run.diagnostics)}),
+        ("Execution", execution_summary),
+    ]
 
 
 def provenance_items(provenance: Dict[str, Any]):

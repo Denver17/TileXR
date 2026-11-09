@@ -1,3 +1,5 @@
+// 功能：验证 host.h 的布局、快照和文件发布合同，包含 odr.cpp 的跨编译单元接口。
+// Purpose: Verify host.h layout, snapshot and file publication contracts, including the cross-translation-unit interface in odr.cpp.
 #include <tilexr/profiling.h>
 #include <cstdlib>
 #include <iostream>
@@ -62,7 +64,7 @@ static void Files(const CaptureSnapshot &snapshot)
 #endif
 int main()
 {
-    CHECK(OtherTranslationUnit()==1);
+    CHECK(OtherTranslationUnit()==DEVICE_VIEW_ABI_VERSION);
     CaptureConfig c; c.logicalStreamCount=3; c.recordsPerStream=8; c.rank=65535;
     Layout l; CHECK(BuildLayout(c,&l)); CHECK(l.recordElements==48 && l.stateElements==48);
     CHECK(l.recordStride*sizeof(uint32_t)%64==0 && l.stateStride*sizeof(uint32_t)%64==0);

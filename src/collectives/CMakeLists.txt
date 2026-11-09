@@ -3,6 +3,8 @@
 # CMakeLists.txt for optional TileXR collectives library
 #
 
+# 构建可选 collectives Host 库和外置 kernel，并安装 profiling mapping 给离线分析器使用。
+# Build optional collective Host/kernel targets and install profiling mappings for the offline analyzer.
 include(GNUInstallDirs)
 
 if(TILEXR_BUILD_COLLECTIVES)
@@ -80,5 +82,6 @@ install(FILES
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_alltoall_a5.mapping.json
+        ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_collectives_coarse.mapping.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/profiling)
 endif()

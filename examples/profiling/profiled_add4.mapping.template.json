@@ -1,5 +1,5 @@
 {
-  "schema": "tilexr_profiling_mapping.v1",
+  "schema": "tilexr_profiling_mapping.v2",
   "operator": "Add4",
   "cycles_per_us": null,
   "stages": [
@@ -12,9 +12,9 @@
       "category": "compute",
       "parent": "accumulate_window",
       "instances": [
-        {"begin": 100, "end": 101},
-        {"begin": 110, "end": 111},
-        {"begin": 120, "end": 121}
+        {"begin": 20, "end": 201},
+        {"begin": 20, "end": 202},
+        {"begin": 20, "end": 203}
       ]
     }
   ]

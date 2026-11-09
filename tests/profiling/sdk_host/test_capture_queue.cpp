@@ -1,8 +1,12 @@
+// 功能：用 mock ACL 验证 collectives capture queue 的有界采集、共同清理与失败重试。
+// Purpose: Verify bounded collectives capture queues, coordinated cleanup and retries using mock ACL.
 #include "mock_acl_runtime.h"
 #include "../../../src/collectives/host/profiling_capture_queue.h"
 #include "../../../src/comm/tilexr_internal_resource_cleanup.h"
 #if defined(__linux__)
 #include <dirent.h>
+#include <fstream>
+#include <iterator>
 #endif
 using TileXRCollectives::Host::ProfilingCaptureQueue;
 static void CommonCleanupPhases()
@@ -53,7 +57,14 @@ int main()
  CommonCleanupPhases();
  Env("TILEXR_PROFILING_OUTPUT_DIR",nullptr);Env("TILEXR_PROFILING_CAPTURE_ID",nullptr);
  Mock::Reset(); {ProfilingCaptureQueue q;CHECK(!q.Acquire(Mock::expectedStream,48,0,1));CHECK(Mock::allocations.empty());CHECK(q.Drain());}
+#if defined(__linux__)
+ char outputRoot[]="/tmp/tilexr-profiling-queue-XXXXXX";
+ CHECK(mkdtemp(outputRoot));
+ const std::string initialDirectory=std::string(outputRoot)+"/initial";
+ Env("TILEXR_PROFILING_OUTPUT_DIR",initialDirectory.c_str());
+#else
  Env("TILEXR_PROFILING_OUTPUT_DIR","profiling-queue-unused");
+#endif
  Mock::Reset(); {ProfilingCaptureQueue q;CHECK(!q.Acquire(Mock::expectedStream,48,0,2));CHECK(Mock::allocations.empty());CHECK(q.Drain());}
  Env("TILEXR_PROFILING_CAPTURE_ID","01234567-89ab-4cde-8123-456789abcdef");
  Mock::Reset(); {
@@ -77,13 +88,33 @@ int main()
 #endif
  }CHECK(Mock::allocations.empty());
 #if defined(__linux__)
- const std::string directory="profiling-queue-"+std::to_string(getpid());
+ const std::string directory=std::string(outputRoot)+"/retry";
  Env("TILEXR_PROFILING_OUTPUT_DIR",directory.c_str());
  Mock::Reset();{
   ProfilingCaptureQueue q;void *args=q.Acquire(Mock::expectedStream,48,0,2);SubmitEmpty(args);
   Mock::failure="free";Mock::failureNth=1;CHECK(!q.Drain());CHECK(Mock::allocations.size()==1);
   const int copies=Mock::calls["d2h"],syncs=Mock::calls["sync"];
   Mock::failure="";CHECK(q.Drain());CHECK(Mock::calls["d2h"]==copies && Mock::calls["sync"]==syncs);CHECK(Mock::allocations.empty());
+ }
+ const std::string completionDirectory=std::string(outputRoot)+"/completion-retry";
+ Env("TILEXR_PROFILING_OUTPUT_DIR",completionDirectory.c_str());
+ Mock::Reset();{
+  ProfilingCaptureQueue q;
+  ManifestProducer producer;producer.attemptId="planned";producer.mappingSha256=std::string(64,'a');
+  producer.host="host";producer.deviceId="0";
+  SubmitEmpty(q.Acquire(Mock::expectedStream,1,0,1,&producer));
+  const std::string captureDirectory=completionDirectory+"/01234567-89ab-4cde-8123-456789abcdee";
+  CHECK(mkdir(completionDirectory.c_str(),0700)==0);CHECK(mkdir(captureDirectory.c_str(),0700)==0);
+  const std::string records=captureDirectory+"/rank-0.records.bin";
+  {std::ofstream collision(records+".completion.json");collision<<"existing target";}
+  CHECK(!q.Drain());
+  CHECK(unlink((records+".completion.json").c_str())==0);CHECK(q.Drain());
+  for(int revision=0;revision<2;++revision) {
+   std::ifstream input(records+".manifest-"+std::to_string(revision)+".json");CHECK(input.good());
+   const std::string manifest((std::istreambuf_iterator<char>(input)),std::istreambuf_iterator<char>());
+   const std::string event="\"operation_id\":\"completion_export\",\"retry\":0,\"resolved\":";
+   CHECK(manifest.find(event+(revision ? "true" : "false"))!=std::string::npos);
+  }
  }
  // Successful second Drain proves the published file was not exported again:
  // the no-overwrite writer would have rejected that existing target.

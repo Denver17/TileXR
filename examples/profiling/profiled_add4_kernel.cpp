@@ -1,10 +1,12 @@
+// 四个 AIV block 执行 Add4，以具名事件记录共享边界；Host 传入独立 SDK descriptor，mapping 定义离线配对。
+// Run Add4 on four AIV blocks and record named shared-boundary events; the Host supplies the SDK descriptor and the mapping defines offline pairing.
 #include "kernel_operator.h"
 #include <tilexr/profiling.h>
 
 namespace {
 
 constexpr uint32_t kElementsPerCore = 2048U;
-constexpr uint32_t kRecordCount = 20U;
+constexpr uint32_t kRecordCount = 17U;
 constexpr uint32_t kTileBytes = kElementsPerCore * sizeof(float);
 
 constexpr uint32_t kEventTotalBegin = 1U;
@@ -15,12 +17,9 @@ constexpr uint32_t kEventAccumulateBegin = 20U;
 constexpr uint32_t kEventAccumulateEnd = 21U;
 constexpr uint32_t kEventCopyOutBegin = 30U;
 constexpr uint32_t kEventCopyOutEnd = 31U;
-constexpr uint32_t kEventPartialSum0Begin = 100U;
-constexpr uint32_t kEventPartialSum0End = 101U;
-constexpr uint32_t kEventPartialSum1Begin = 110U;
-constexpr uint32_t kEventPartialSum1End = 111U;
-constexpr uint32_t kEventPartialSum2Begin = 120U;
-constexpr uint32_t kEventPartialSum2End = 121U;
+constexpr uint32_t kEventPartialSum0End = 201U;
+constexpr uint32_t kEventPartialSum1End = 202U;
+constexpr uint32_t kEventPartialSum2End = 203U;
 
 __aicore__ inline void WaitInputCopy()
 {
@@ -100,30 +99,28 @@ extern "C" __global__ __aicore__ void tilexr_profiled_add4_kernel(
     tilexrProfiler.RecordMarker<8U, kEventCopyInputEnd>();
 
     tilexrProfiler.RecordMarker<9U, kEventAccumulateBegin>();
-    tilexrProfiler.RecordMarker<10U, kEventPartialSum0Begin>();
-    tilexrProfiler.RecordMarker<11U, kEventPartialSum1Begin>();
-    tilexrProfiler.RecordMarker<12U, kEventPartialSum2Begin>();
+    // mapping.v2 shares event 20 across the parent and all partial sums.
 
     AscendC::Add(outputLocal, input0Local, input1Local, kElementsPerCore);
     AscendC::PipeBarrier<PIPE_V>();
-    tilexrProfiler.RecordMarker<13U, kEventPartialSum0End>();
+    tilexrProfiler.RecordMarker<10U, kEventPartialSum0End>();
 
     AscendC::Add(outputLocal, outputLocal, input2Local, kElementsPerCore);
     AscendC::PipeBarrier<PIPE_V>();
-    tilexrProfiler.RecordMarker<14U, kEventPartialSum1End>();
+    tilexrProfiler.RecordMarker<11U, kEventPartialSum1End>();
 
     AscendC::Add(outputLocal, outputLocal, input3Local, kElementsPerCore);
     AscendC::PipeBarrier<PIPE_V>();
-    tilexrProfiler.RecordMarker<15U, kEventPartialSum2End>();
-    tilexrProfiler.RecordMarker<16U, kEventAccumulateEnd>();
+    tilexrProfiler.RecordMarker<12U, kEventPartialSum2End>();
+    tilexrProfiler.RecordMarker<13U, kEventAccumulateEnd>();
 
-    tilexrProfiler.RecordMarker<17U, kEventCopyOutBegin>();
+    tilexrProfiler.RecordMarker<14U, kEventCopyOutBegin>();
     AscendC::SetFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(EVENT_ID0);
     AscendC::DataCopy(output, outputLocal, kElementsPerCore);
     WaitOutputCopy();
-    tilexrProfiler.RecordMarker<18U, kEventCopyOutEnd>();
-    tilexrProfiler.RecordMarker<19U, kEventTotalEnd>();
+    tilexrProfiler.RecordMarker<15U, kEventCopyOutEnd>();
+    tilexrProfiler.RecordMarker<16U, kEventTotalEnd>();
 
     tilexrProfiler.Flush(profileGM, core);
 }

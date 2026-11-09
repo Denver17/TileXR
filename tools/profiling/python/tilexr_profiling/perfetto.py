@@ -1,14 +1,18 @@
+# Purpose: Render paired capture samples and provenance as Perfetto trace events.
+# 用途与关系：将配对后的 capture 样本和来源信息渲染为 Perfetto 事件。
 """Perfetto/Chrome Trace Event rendering."""
 
-from typing import Any, Dict, List, Optional
+import json
+from typing import Any, Dict, Optional
+
+from .io import json_chunks
 
 from .analysis import AnalysisResult
 from .model import ProfileRun
-from .provenance import build_provenance
+from .provenance import build_provenance, report_payload
 
 
-def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]:
-    events: List[Dict[str, Any]] = []
+def _trace_events(run, analysis):
     lane_groups = [
         (launch.id, lane)
         for launch in run.launches
@@ -31,7 +35,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
     pids = {key: index for index, key in enumerate(process_keys)}
     for launch_id, rank, device in process_keys:
         pid = pids[(launch_id, rank, device)]
-        events.append(
+        yield (
             {
                 "name": "process_name",
                 "ph": "M",
@@ -51,7 +55,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
     grouped_tids: Dict[tuple, int] = {}
     next_sort_index: Dict[int, int] = {}
 
-    def add_track(pid: int, name: str, tid: Optional[int] = None) -> int:
+    def add_track(pid: int, name: str, tid: Optional[int] = None):
         if tid is None:
             tid = 0
             while tid in used_tids[pid]:
@@ -59,7 +63,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
             used_tids[pid].add(tid)
         sort_index = next_sort_index.get(pid, 0)
         next_sort_index[pid] = sort_index + 1
-        events.extend(
+        yield from (
             [
                 {
                     "name": "thread_name", "ph": "M", "pid": pid, "tid": tid,
@@ -76,8 +80,8 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
     for launch_id, lane in lane_groups:
         device = lane.device or "unknown"
         pid = pids[(launch_id, lane.rank, device)]
-        track_prefix = f"rank{lane.rank}/device{device}/core{lane.core}"
-        add_track(pid, f"{track_prefix}/stream{lane.stream_id}", lane.stream_id)
+        track_prefix = f"host{lane.host if lane.host is not None else 'unknown'}/rank{lane.rank}/device{device}/core{lane.core}"
+        yield from add_track(pid, f"{track_prefix}/stream{lane.stream_id}", lane.stream_id)
 
         grouped_tracks = sorted(
             {
@@ -88,7 +92,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
         )
         for track_name in grouped_tracks:
             grouped_key = (pid, lane.stream_id, track_name)
-            grouped_tids[grouped_key] = add_track(pid, f"{track_prefix}/{track_name}")
+            grouped_tids[grouped_key] = yield from add_track(pid, f"{track_prefix}/{track_name}")
 
         instance_tracks = sorted(
             {
@@ -100,7 +104,7 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
         )
         for stage_id, instance_id, stage_name in instance_tracks:
             instance_key = (pid, lane.stream_id, stage_id, instance_id)
-            instance_tids[instance_key] = add_track(
+            instance_tids[instance_key] = yield from add_track(
                 pid, f"{track_prefix}/{stage_name}[{instance_id}]"
             )
 
@@ -167,41 +171,14 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
                 event["s"] = "t"
             else:
                 event["dur"] = sample.duration_us
-            events.append(event)
+            yield event
 
-    diagnostic_pid = 0
-    diagnostic_tid = 0
-    if analysis.critical_lane is not None:
-        diagnostic_pid = pids.get(
-            (
-                analysis.critical_lane.launch_id,
-                analysis.critical_lane.rank,
-                analysis.critical_lane.device or "unknown",
-            ),
-            0,
-        )
-        diagnostic_tid = analysis.critical_lane.stream_id
-    for index, diagnostic in enumerate(run.diagnostics):
-        events.append(
-            {
-                "name": diagnostic.message,
-                "cat": "diagnostic",
-                "ph": "i",
-                "s": "g",
-                "pid": diagnostic_pid,
-                "tid": diagnostic_tid,
-                "ts": float(index),
-                "args": {
-                    "severity": diagnostic.severity,
-                    "code": diagnostic.code,
-                    "source": diagnostic.source,
-                    "details": diagnostic.details,
-                },
-            }
-        )
+    # Diagnostics retain their original clock domains in report metadata.
+    # Host and device timestamps must not be placed on an uncalibrated shared axis.
 
+
+def _perfetto_envelope(run, analysis):
     return {
-        "traceEvents": events,
         "displayTimeUnit": "us",
         "metadata": {
             "schema": "tilexr_perfetto_trace.v1",
@@ -219,11 +196,35 @@ def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]
             "expected_stream_count": run.expected_stream_count,
             "present_stream_count": run.present_stream_count,
             "usable_stream_count": run.usable_stream_count,
-            "missing_stream_count": run.missing_stream_count,
+            "missing_stream_count": run.missing_stream_count if run.manifest_metadata else None,
             "dropped_stream_count": run.dropped_stream_count,
             "overflowed_stream_count": run.overflowed_stream_count,
             "excluded_stream_count": run.excluded_stream_count,
             "dropped_record_count": run.dropped_record_count,
             "provenance": build_provenance(run),
+            "report": report_payload(run, analysis),
         },
     }
+
+
+def iter_perfetto(run, analysis):
+    yield '{"traceEvents":['
+    first = True
+    for event in _trace_events(run, analysis):
+        if not first:
+            yield ","
+        first = False
+        # Bound encoding to one event. Repeated iterencode calls create recursive
+        # closure cycles whose retention depends on the interpreter's GC timing.
+        yield json.dumps(event, ensure_ascii=False, allow_nan=False, sort_keys=True)
+    yield "]"
+    for key, value in _perfetto_envelope(run, analysis).items():
+        yield ","
+        yield from json_chunks(key)
+        yield ":"
+        yield from json_chunks(value)
+    yield "}\n"
+
+
+def render_perfetto(run: ProfileRun, analysis: AnalysisResult) -> Dict[str, Any]:
+    return dict(traceEvents=list(_trace_events(run, analysis)), **_perfetto_envelope(run, analysis))

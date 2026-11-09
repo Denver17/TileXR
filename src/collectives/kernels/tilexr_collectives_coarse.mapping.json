@@ -1,0 +1,8 @@
+{
+  "schema": "tilexr_profiling_mapping.v1",
+  "operator": "TileXR AIV collective",
+  "cycles_per_us": 1000.0,
+  "stages": [
+    {"name": "kernel_total", "category": "total", "critical": true, "begin": 1, "end": 2}
+  ]
+}

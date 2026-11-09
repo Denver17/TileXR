@@ -1,3 +1,5 @@
+# 功能：仅在独立 SDK 显式启用时构建 Host、workspace 与 device stub 关键检查。
+# Purpose: Build key Host, workspace and device stub checks only when explicitly enabled by the standalone SDK.
 function(add_profiling_host_test name)
     add_executable(${name} ${ARGN})
     target_link_libraries(${name} PRIVATE TileXR::profiling)
@@ -8,6 +10,8 @@ function(add_profiling_host_test name)
 endfunction()
 
 add_profiling_host_test(profiling_sdk_host test_host.cpp odr.cpp)
+add_profiling_host_test(profiling_workspace_mock test_workspace.cpp)
+target_include_directories(profiling_workspace_mock BEFORE PRIVATE mock)
 add_profiling_host_test(profiling_sdk_acl_mock test_acl.cpp)
 target_include_directories(profiling_sdk_acl_mock BEFORE PRIVATE mock)
 add_profiling_host_test(profiling_capture_queue_mock test_capture_queue.cpp)

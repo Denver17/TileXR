@@ -1,3 +1,5 @@
+# Purpose: Exercise public CLI capture status and atomic report publication.
+# 用途与关系：通过公共 CLI 验证 capture 状态和报表原子发布。
 import json
 import subprocess
 import sys
@@ -60,7 +62,11 @@ class ProfilingPipelineTests(unittest.TestCase):
             analysis = (output / "analysis.md").read_text(encoding="utf-8")
             self.assertIn("incomplete", analysis)
             self.assertIn(r"records\_dropped", analysis)
-            self.assertIn("missing `0`, dropped `1`, overflowed `1`, excluded `0`", analysis)
+            metadata = json.loads((output / "perfetto_trace.json").read_text(encoding="utf-8"))["metadata"]
+            self.assertIsNone(metadata["missing_stream_count"])
+            self.assertEqual(metadata["dropped_stream_count"], 1)
+            self.assertEqual(metadata["overflowed_stream_count"], 1)
+            self.assertEqual(metadata["excluded_stream_count"], 0)
 
     def test_invalid_mapping_returns_one_without_artifacts(self):
         mapping = mapping_document()

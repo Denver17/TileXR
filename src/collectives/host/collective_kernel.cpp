@@ -7,6 +7,10 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+/* 将 collective API 参数交给 Host launcher，传递算子名称供可选 profiling workload 声明使用；保持业务调度与错误返回。
+ * Forward collective API arguments to the Host launcher, including operation names for optional profiling workload declarations, preserving scheduling and error returns.
+ */
+
 /*
  * Host-side loading and launch entry points for Collective AICore kernels.
  * AllGather, AllToAll, AllReduce, ReduceScatter, and Broadcast use this layer to
@@ -270,7 +274,8 @@ int LaunchCollectiveKernel(TileXRCommPtr comm, TileXR::TileXRType type, const Ho
         ~ResourceLock() { if (locked) (void)TileXRCommUnlockInternalResource(comm); }
     } resourceLock(comm);
     if (!resourceLock.locked) return TileXR::TILEXR_ERROR_INTERNAL;
-    args.profilingGM = AcquireCollectiveProfiling(comm, context, stream, blockDim);
+    args.profilingGM = AcquireCollectiveProfiling(comm, context, stream, blockDim,
+        type, kernelCount, dataType, attrs.op, attrs.root);
 
     TileXRStragglerObservation observation {};
     if (type != TileXR::TileXRType::PROFILE_PROBE) {

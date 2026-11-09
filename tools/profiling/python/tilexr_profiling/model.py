@@ -1,3 +1,5 @@
+# Purpose: Define capture, lane and stage data shared by parsers and reports.
+# 用途与关系：定义解析器和报表共享的 capture、lane 与 stage 数据。
 """Immutable, producer-neutral profiling data structures."""
 
 from dataclasses import dataclass, field
@@ -6,6 +8,8 @@ from uuid import UUID
 
 
 MAPPING_SCHEMA = "tilexr_profiling_mapping.v1"
+MAPPING_SCHEMA_V2 = "tilexr_profiling_mapping.v2"
+SUPPORTED_MAPPING_SCHEMAS = frozenset({MAPPING_SCHEMA, MAPPING_SCHEMA_V2})
 RECORDS_SCHEMA = "tilexr_profiling_records.v1"
 RECORDS_MAGIC = b"TXRPRF1\0"
 
@@ -56,12 +60,18 @@ class EventDefinition:
     stage_id: int
     edge: str
     instance_id: Optional[int] = None
+    occurrence: Optional[int] = None
+
+    def selector(self):
+        if self.occurrence is None:
+            return self.id
+        return {"event": self.id, "occurrence": self.occurrence}
 
 
 @dataclass(frozen=True)
 class StageMetric:
     stage_id: int
-    bytes: int
+    bytes: Optional[int]
     byte_semantics: str
     scope: str
     attributes: Dict[str, Any] = field(default_factory=dict)
@@ -86,6 +96,7 @@ class ProfilingMapping:
     stages: Tuple[StageDefinition, ...]
     events: Tuple[EventDefinition, ...]
     source: str
+    schema: str = MAPPING_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -181,3 +192,11 @@ class ProfileRun:
     dropped_record_count: int
     display_origin: str = "per_launch_rank_device_minimum"
     completeness_scope: str = "provided_inputs_only"
+    stages: Tuple[StageDefinition, ...] = ()
+    health_status: str = "unverified"
+    metadata_readiness: str = "not_provided"
+    coverage: Dict[str, Any] = field(default_factory=dict)
+    capture_events: Tuple[Dict[str, Any], ...] = ()
+    manifest_metadata: Dict[str, Any] = field(default_factory=dict)
+    mapping_schema: str = MAPPING_SCHEMA
+    pairing_sha256: Optional[str] = None

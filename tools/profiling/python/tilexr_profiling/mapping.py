@@ -1,13 +1,19 @@
+# Purpose: Validate stage mappings consumed by record pairing.
+# 用途与关系：校验 stage mapping，为记录配对提供事件与阶段定义。
 """Strict parser for the human-authored TileXR profiling event mapping."""
 
 import json
+import hashlib
 import math
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple, Union
 
 from .model import (
     EventDefinition,
     MAPPING_SCHEMA,
+    MAPPING_SCHEMA_V2,
+    SUPPORTED_MAPPING_SCHEMAS,
     ProfilingInputError,
     ProfilingMapping,
     STAGE_CATEGORIES,
@@ -158,20 +164,31 @@ def _append_event(
     edge: str,
     instance_id: Any,
     where: str,
+    schema: str = MAPPING_SCHEMA,
+    occurrence: Any = None,
 ) -> None:
-    if event_id in event_ids:
+    if schema == MAPPING_SCHEMA and event_id in event_ids:
         raise ProfilingInputError(f"duplicate event ID {event_id} in {where}")
     if len(events) >= MAX_EVENTS:
         raise ProfilingInputError(f"profiling mapping exceeds {MAX_EVENTS} events")
     event_ids.add(event_id)
-    events.append(EventDefinition(event_id, stage_id, edge, instance_id))
+    events.append(EventDefinition(event_id, stage_id, edge, instance_id, occurrence))
+
+
+def _endpoint(value, where, schema):
+    if schema == MAPPING_SCHEMA_V2 and isinstance(value, dict):
+        _known_keys(value, {"event", "occurrence"}, where)
+        _required_keys(value, {"event", "occurrence"}, where)
+        return (_uint32(value["event"], f"{where}.event"),
+                _uint32(value["occurrence"], f"{where}.occurrence"))
+    return _uint32(value, where), None
 
 
 def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> ProfilingMapping:
     obj = _object(dict(raw), source)
     _known_keys(obj, _TOP_LEVEL_KEYS, source)
     _required_keys(obj, _TOP_LEVEL_KEYS, source)
-    if obj["schema"] != MAPPING_SCHEMA:
+    if not isinstance(obj["schema"], str) or obj["schema"] not in SUPPORTED_MAPPING_SCHEMAS:
         raise ProfilingInputError(f"unsupported mapping schema in {source}: {obj['schema']!r}")
 
     raw_stages = _array(obj["stages"], f"{source}.stages")
@@ -272,10 +289,21 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
 
     events: List[EventDefinition] = []
     event_ids = set()
+
+    def append_pair(begin_value, end_value, stage_id, instance_id, where):
+        begin, begin_occurrence = _endpoint(begin_value, f"{where}.begin", obj["schema"])
+        end, end_occurrence = _endpoint(end_value, f"{where}.end", obj["schema"])
+        if obj["schema"] == MAPPING_SCHEMA_V2 and begin == end:
+            raise ProfilingInputError(f"{where} begin/end must use distinct event IDs")
+        _append_event(events, event_ids, begin, stage_id, "begin", instance_id, source,
+                      obj["schema"], begin_occurrence)
+        _append_event(events, event_ids, end, stage_id, "end", instance_id, source,
+                      obj["schema"], end_occurrence)
+
     for stage_id, (stage_obj, _, _, _, _, where) in enumerate(stage_rows):
         if "instant" in stage_obj:
             event_id = _uint32(stage_obj["instant"], f"{where}.instant")
-            _append_event(events, event_ids, event_id, stage_id, "instant", None, source)
+            _append_event(events, event_ids, event_id, stage_id, "instant", None, source, obj["schema"])
             continue
         if "instances" in stage_obj:
             instances = _array(stage_obj["instances"], f"{where}.instances")
@@ -286,10 +314,7 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
                 instance = _object(raw_instance, instance_where)
                 _known_keys(instance, _INSTANCE_KEYS, instance_where)
                 _required_keys(instance, _INSTANCE_KEYS, instance_where)
-                begin = _uint32(instance["begin"], f"{instance_where}.begin")
-                end = _uint32(instance["end"], f"{instance_where}.end")
-                _append_event(events, event_ids, begin, stage_id, "begin", instance_id, source)
-                _append_event(events, event_ids, end, stage_id, "end", instance_id, source)
+                append_pair(instance["begin"], instance["end"], stage_id, instance_id, instance_where)
             continue
         if "instance_range" in stage_obj:
             range_where = f"{where}.instance_range"
@@ -307,13 +332,9 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
                 end = end_base + instance_id * stride
                 if begin > UINT32_MAX or end > UINT32_MAX:
                     raise ProfilingInputError(f"{range_where} event ID exceeds uint32")
-                _append_event(events, event_ids, begin, stage_id, "begin", instance_id, source)
-                _append_event(events, event_ids, end, stage_id, "end", instance_id, source)
+                append_pair(begin, end, stage_id, instance_id, range_where)
             continue
-        begin = _uint32(stage_obj["begin"], f"{where}.begin")
-        end = _uint32(stage_obj["end"], f"{where}.end")
-        _append_event(events, event_ids, begin, stage_id, "begin", None, source)
-        _append_event(events, event_ids, end, stage_id, "end", None, source)
+        append_pair(stage_obj["begin"], stage_obj["end"], stage_id, None, where)
 
     return ProfilingMapping(
         operator=_string(obj["operator"], f"{source}.operator"),
@@ -321,6 +342,7 @@ def parse_mapping_document(raw: Mapping[str, Any], source: str = "<memory>") -> 
         stages=tuple(stages),
         events=tuple(events),
         source=source,
+        schema=obj["schema"],
     )
 
 
@@ -330,3 +352,11 @@ def load_mapping(value: MappingInput) -> ProfilingMapping:
         return parse_mapping_document(value)
     path = Path(value)
     return parse_mapping_document(_load_json(path), path.as_posix())
+
+
+def pairing_fingerprint(mapping: ProfilingMapping) -> str:
+    """Identify boundaries independently of capture paths and clock conversion."""
+    contract = {"schema": mapping.schema, "stages": [asdict(stage) for stage in mapping.stages],
+                "events": [asdict(event) for event in mapping.events]}
+    encoded = json.dumps(contract, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()

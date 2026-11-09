@@ -1,3 +1,5 @@
+// 功能：通过 CPU stub 验证 device.h/direct.h 记录协议与 ABI；不证明真实 NPU 可见性。
+// Purpose: Verify device.h/direct.h record protocols and ABI through CPU stubs; this does not prove NPU visibility.
 // Executes the production device writer logic with CPU pointers and a fake
 // timestamp intrinsic. Actual CANN compilation and NPU runs are separate tests.
 #include <tilexr/profiling/device.h>
@@ -15,10 +17,10 @@ using namespace TileXR::Profiling;
 
 class AlignedBuffer {
 public:
-    explicit AlignedBuffer(size_t bytes) : storage_(new unsigned char[bytes + 31])
+    explicit AlignedBuffer(size_t bytes) : storage_(new unsigned char[bytes + 63])
     {
         data = reinterpret_cast<unsigned char *>((
-            reinterpret_cast<uintptr_t>(storage_.get()) + 31U) & ~uintptr_t(31U));
+            reinterpret_cast<uintptr_t>(storage_.get()) + 63U) & ~uintptr_t(63U));
         std::memset(data, 0, bytes);
     }
     unsigned char *data;
@@ -28,15 +30,17 @@ private:
 
 class Workspace {
 public:
+    static uint32_t PhysicalStride(uint32_t capacity)
+    { return (capacity + 15U) / 16U * 16U; }
     explicit Workspace(uint32_t lanes = 2U, uint32_t capacity = 8U)
-        : timestamps(size_t(lanes) * capacity * sizeof(uint64_t)),
-          ids(size_t(lanes) * capacity * sizeof(uint32_t)),
+        : timestamps(size_t(lanes) * PhysicalStride(capacity) * sizeof(uint64_t)),
+          ids(size_t(lanes) * PhysicalStride(capacity) * sizeof(uint32_t)),
           counts(size_t(lanes) * COUNT_STRIDE * sizeof(uint32_t)),
           dropped(size_t(lanes) * COUNT_STRIDE * sizeof(uint32_t)),
           states(size_t(lanes) * COUNT_STRIDE * sizeof(uint32_t))
     {
         view = {DEVICE_VIEW_ABI_VERSION, sizeof(DeviceView), 1U, lanes,
-            capacity, capacity, COUNT_STRIDE, 0U,
+            capacity, PhysicalStride(capacity), COUNT_STRIDE, 0U,
             reinterpret_cast<uint64_t>(timestamps.data),
             reinterpret_cast<uint64_t>(ids.data),
             reinterpret_cast<uint64_t>(counts.data),
@@ -162,15 +166,22 @@ static void InvalidDescriptorCases()
     w.view.recordsPerStream = 7; rejected();
     w.view.recordsPerStream = 65537; rejected();
     w.view.recordStride = 7; rejected();
+    w.view.recordStride = 8; rejected();
     w.view.recordStride = 9; rejected();
     w.view.stateStride = 0; rejected();
+    w.view.stateStride = 8; rejected();
     w.view.stateStride = 9; rejected();
     w.view.timestampsAddress = 0; rejected();
     w.view.eventIdsAddress += 1; rejected();
     w.view.countsAddress = 0; rejected();
     w.view.droppedAddress = 0; rejected();
     w.view.statesAddress = 0; rejected();
-    w.view.timestampsAddress = static_cast<uint64_t>(-32); rejected();
+    w.view.timestampsAddress += 32; rejected();
+    w.view.eventIdsAddress += 32; rejected();
+    w.view.countsAddress += 32; rejected();
+    w.view.droppedAddress += 32; rejected();
+    w.view.statesAddress += 32; rejected();
+    w.view.timestampsAddress = static_cast<uint64_t>(-64); rejected();
     direct.Initialize(w.Args(), 2); direct.Publish();
     CHECK(w.State() == Completion::EMPTY);
     direct.Initialize(reinterpret_cast<GM_ADDR>(&w.view) + 1, 0); direct.Publish();
@@ -204,10 +215,31 @@ static void InvalidDescriptorCases()
     CHECK(maxLanes.State(0) == Completion::EMPTY);
 }
 
+static void SparseGenerationCases()
+{
+    Workspace w(3); AlignedBuffer laneTable(64);
+    auto *logical=Workspace::Values(laneTable); logical[0]=2; logical[1]=9; logical[2]=65535;
+    w.view.logicalLaneIdsAddress=reinterpret_cast<uint64_t>(laneTable.data);
+    w.view.generation=5;
+    DirectWriter writer;
+    writer.Initialize(w.Args(),9,4); writer.RecordAt(77,10); writer.Publish();
+    CHECK(w.State(1)==Completion::EMPTY); // stale generation cannot touch a slot
+    writer.Initialize(w.Args(),3,5); writer.RecordAt(77,10); writer.Publish();
+    CHECK(w.State(0)==Completion::EMPTY && w.State(1)==Completion::EMPTY);
+    writer.Initialize(w.Args(),65535,5); writer.RecordAt(77,10); writer.Publish();
+    CHECK(w.State(2)==Completion::COMMITTED && w.Id(0,2)==77);
+    Recorder<2> recorder; recorder.RecordMarker<0,1>(); recorder.RecordMarker<1,2>();
+    recorder.Flush(w.Args(),2,4); CHECK(w.State(0)==Completion::EMPTY);
+    recorder.Flush(w.Args(),2,5); CHECK(w.State(0)==Completion::COMMITTED && w.Count(0)==2);
+    CHECK(w.State(1)==Completion::EMPTY);
+    w.view.logicalLaneIdsAddress+=4;
+    writer.Initialize(w.Args(),9,5); writer.Publish(); CHECK(w.State(1)==Completion::EMPTY);
+}
+
 int main()
 {
     static_assert(std::is_standard_layout<DeviceView>::value &&
         std::is_trivial<DeviceView>::value, "DeviceView must be POD");
-    RecorderCases(); DirectCases(); InvalidDescriptorCases();
+    RecorderCases(); DirectCases(); InvalidDescriptorCases(); SparseGenerationCases();
     std::puts("profiling CPU device protocol tests passed (not CANN/NPU evidence)");
 }

@@ -1,3 +1,5 @@
+# 使用独立 SDK 和 CANN 构建 Add4 Host 与外置 AICore binary；保持示例可安装和搬迁。
+# Build Add4 Host and external AICore binary with the standalone SDK and CANN, supporting installation and relocation.
 cmake_minimum_required(VERSION 3.16)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     project(TileXRProfiledAdd4 LANGUAGES CXX)
@@ -14,6 +16,7 @@ if(NOT TILEXR_PROFILING_SOC STREQUAL "Ascend950")
     message(FATAL_ERROR "Add4 currently supports explicit TILEXR_PROFILING_SOC=Ascend950 only")
 endif()
 set(TILEXR_PROFILING_CANN_ROOT "$ENV{ASCEND_HOME_PATH}" CACHE PATH "Active CANN toolkit root")
+option(TILEXR_ENABLE_PROFILING "Record and export Add4 profiling markers" ON)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
     set(add4_arch aarch64)
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
@@ -48,7 +51,8 @@ add_custom_command(OUTPUT "${add4_kernel}"
         -mllvm -cce-aicore-stack-size=0x8000 -mllvm -cce-aicore-function-stack-size=0x8000
         -mllvm -cce-aicore-record-overflow=true -mllvm -cce-aicore-addr-transform
         -mllvm -cce-aicore-dcci-insert-for-scalar=false
-        --cce-aicore-arch=dav-c310-vec --cce-aicore-only -std=gnu++17 -DTILEXR_ENABLE_PROFILING=1
+        --cce-aicore-arch=dav-c310-vec --cce-aicore-only -std=gnu++17
+        "-DTILEXR_ENABLE_PROFILING=$<BOOL:${TILEXR_ENABLE_PROFILING}>"
         "-I$<JOIN:${add4_sdk_include},;-I>"
         "-I${add4_cann}/compiler/tikcpp" "-I${add4_cann}/compiler/tikcpp/tikcfw"
         "-I${add4_cann}/compiler/tikcpp/tikcfw/impl" "-I${add4_cann}/compiler/tikcpp/tikcfw/interface"
@@ -74,6 +78,8 @@ target_link_libraries(tilexr_profiled_add4_demo PRIVATE TileXR::profiling "${add
 target_include_directories(tilexr_profiled_add4_demo PRIVATE "${add4_acl_include}" "${add4_runtime_include}"
     "${add4_cann}/${add4_arch}-linux/pkg_inc")
 target_compile_definitions(tilexr_profiled_add4_demo PRIVATE "TILEXR_ADD4_KERNEL_RELATIVE_PATH=\"${add4_kernel_relative}\"")
+target_compile_definitions(tilexr_profiled_add4_demo PRIVATE
+    "TILEXR_ENABLE_PROFILING=$<BOOL:${TILEXR_ENABLE_PROFILING}>")
 set_target_properties(tilexr_profiled_add4_demo PROPERTIES CXX_STANDARD 14 CXX_STANDARD_REQUIRED YES
     CXX_EXTENSIONS NO RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_INSTALL_BINDIR}")
 install(TARGETS tilexr_profiled_add4_demo RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

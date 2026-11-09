@@ -1,5 +1,7 @@
 /* Copyright (c) 2026 TileXR Project
  * Licensed under the CANN Open Software License Agreement Version 2.0. */
+// 功能：提供直接 GM 打点 API，使用 detail/device.h 的记录协议与完成状态。
+// Purpose: Expose direct GM markers using the record protocol and completion states in detail/device.h.
 #ifndef TILEXR_PROFILING_DIRECT_H
 #define TILEXR_PROFILING_DIRECT_H
 #include "detail/device.h"
@@ -9,7 +11,7 @@ namespace TileXR { namespace Profiling {
 class DirectWriter {
 public:
     TILEXR_PROFILE_DEVICE void Initialize(Detail::DeviceArgsAddress descriptor,
-        uint32_t logicalStream)
+        uint32_t logicalStream, uint64_t expectedGeneration = 0)
     {
 #if TILEXR_PROFILE_ACTIVE
         // Reset before validation: failed reuse can never write the old lane.
@@ -17,10 +19,11 @@ public:
         published_ = false;
         cursor_ = 0U;
         dropped_ = 0U;
-        enabled_ = lane_.Initialize(descriptor, logicalStream);
+        enabled_ = lane_.Initialize(descriptor, logicalStream, expectedGeneration);
 #else
         (void)descriptor;
         (void)logicalStream;
+        (void)expectedGeneration;
 #endif
     }
 

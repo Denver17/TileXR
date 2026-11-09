@@ -1,3 +1,5 @@
+// 功能：用 mock_acl_runtime.h 验证 AclCapture 同步、重试与 HostEvents 的资源生命周期。
+// Purpose: Verify AclCapture synchronization, retries and HostEvents resource lifecycle using mock_acl_runtime.h.
 #include "mock_acl_runtime.h"
 static CaptureConfig Config() { CaptureConfig c;c.recordsPerStream=8;c.logicalStreamCount=2;c.captureId[0]=1;return c; }
 static void Submit(AclCapture &capture) {
@@ -12,6 +14,16 @@ static void Submit(AclCapture &capture) {
 struct BrokenUuidSource { uint32_t operator()() { throw 1; } };
 int main()
 {
+ HostEvents events(2); events.Begin("host-test");
+ const Status failure(StatusCode::Acl,"D2H \"failed\"\n",73);
+ events.Observe("collect","d2h",failure); events.Observe("collect","d2h",failure);
+ CHECK(events.Snapshot().size()==2 && events.Snapshot()[1].retry==1);
+ events.Observe("close","close",failure);
+ CHECK(events.DroppedEvents()==1 && events.Snapshot().size()==2);
+ events.Observe("collect","collect",{});
+ CHECK(events.Snapshot()[0].resolved && events.Snapshot()[1].resolved);
+ CHECK(events.Json().find("\\\"failed\\\"\\u000a")!=std::string::npos);
+ CHECK(events.Json().find("\"dropped_events\":2")!=std::string::npos);
  std::array<uint8_t,16> failedId {}; CHECK(!Detail::NewCaptureId<BrokenUuidSource>(&failedId));
  CHECK(std::all_of(failedId.begin(),failedId.end(),[](uint8_t b){return b==0;}));
  static_assert(!std::is_copy_constructible<AclCapture>::value,"not copyable");
@@ -39,10 +51,24 @@ int main()
 #endif
   CHECK(c.Initialize(Config(),Mock::expectedStream));CHECK(!c.Snapshot());CHECK(c.Close());
  } CHECK(Mock::allocations.empty());
+ Mock::Reset(); {
+  HostEvents external;
+  {
+   AclCapture c(external); CHECK(c.Initialize(Config(),Mock::expectedStream));
+   Mock::failure="free"; Mock::failureNth=1;
+   CHECK(!c.Close()); CHECK(!external.Snapshot().back().resolved);
+   // The original destructor retry is the final ownership action. An external
+   // sink observes its success after the capture itself has gone out of scope.
+  }
+  CHECK(Mock::allocations.empty());
+  CHECK(std::all_of(external.Snapshot().begin(),external.Snapshot().end(),[](const HostEvent &e){return e.resolved;}));
+  CHECK(external.Snapshot().back().code=="close_succeeded");
+ }
  for(int nth=1;nth<=5;++nth) {
   Mock::Reset();AclCapture c;CHECK(c.Initialize(Config(),Mock::expectedStream));Submit(c);
   Mock::failure="d2h";Mock::failureNth=nth;CHECK(!c.Collect());CHECK(!c.Snapshot());CHECK(Mock::allocations.size()==1);
   Mock::failure="";CHECK(c.Collect());CHECK(c.Close());CHECK(Mock::allocations.empty());
+  CHECK(std::all_of(c.Events().Snapshot().begin(),c.Events().Snapshot().end(),[](const HostEvent &e){return e.resolved;}));
  }
  Mock::Reset();{
   AclCapture c;CHECK(c.Initialize(Config(),Mock::expectedStream));Submit(c);Mock::failure="sync";
@@ -53,6 +79,7 @@ int main()
  Mock::Reset();{
   AclCapture c;CHECK(c.Initialize(Config(),Mock::expectedStream));Mock::failure="free";CHECK(!c.Close());CHECK(Mock::allocations.size()==1);
   CHECK(c.WorkspaceBytes()>0);Mock::failure="";CHECK(c.Close());CHECK(c.WorkspaceBytes()==0);CHECK(c.Close());
+  CHECK(std::all_of(c.Events().Snapshot().begin(),c.Events().Snapshot().end(),[](const HostEvent &e){return e.resolved;}));
  } CHECK(Mock::allocations.empty());
  Mock::Reset("memset");{
   // The first failure must retain its error even when cleanup also fails.

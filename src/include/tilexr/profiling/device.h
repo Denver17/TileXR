@@ -1,5 +1,7 @@
 /* Copyright (c) 2026 TileXR Project
  * Licensed under the CANN Open Software License Agreement Version 2.0. */
+// 功能：提供设备打点生命周期 API，使用 detail/device.h 写入 Host 分配的记录区。
+// Purpose: Expose device marker lifecycle APIs using detail/device.h to write Host-allocated records.
 #ifndef TILEXR_PROFILING_DEVICE_H
 #define TILEXR_PROFILING_DEVICE_H
 #include "detail/device.h"
@@ -31,11 +33,12 @@ public:
 #endif
     }
 
-    TILEXR_PROFILE_DEVICE void Flush(Detail::DeviceArgsAddress descriptor, uint32_t logicalStream)
+    TILEXR_PROFILE_DEVICE void Flush(Detail::DeviceArgsAddress descriptor, uint32_t logicalStream,
+        uint64_t expectedGeneration = 0)
     {
 #if TILEXR_PROFILE_ACTIVE
         Detail::LaneWriter lane;
-        if (!lane.Initialize(descriptor, logicalStream)) {
+        if (!lane.Initialize(descriptor, logicalStream, expectedGeneration)) {
             return;
         }
         uint32_t count = 0U;
@@ -56,12 +59,20 @@ public:
 #else
         (void)descriptor;
         (void)logicalStream;
+        (void)expectedGeneration;
 #endif
     }
 private:
 #if TILEXR_PROFILE_ACTIVE
+#if defined(TILEXR_PROFILING_VOLATILE_LOCAL) && TILEXR_PROFILING_VOLATILE_LOCAL == 1
+    // Explicit benchmark control: keep local-only timestamp stores observable.
+    // Use the same setting for local and flush variants when comparing them.
+    volatile uint64_t timestamps_[RecordCapacity];
+    volatile uint32_t eventIds_[RecordCapacity];
+#else
     uint64_t timestamps_[RecordCapacity];
     uint32_t eventIds_[RecordCapacity];
+#endif
 #endif
 };
 

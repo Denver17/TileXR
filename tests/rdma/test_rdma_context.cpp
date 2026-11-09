@@ -185,9 +185,9 @@ static void ProfileAllEntries(const char* exportPath)
     alignas(64) std::array<uint64_t, 256> timestamps{};
     alignas(64) std::array<uint32_t, 256> events{};
     alignas(64) std::array<uint32_t, 16> counts{}, dropped{}, states{};
-    TileXR::Profiling::DeviceView descriptor{1, sizeof(TileXR::Profiling::DeviceView), 1, 1,
+    TileXR::Profiling::DeviceView descriptor{TileXR::Profiling::DEVICE_VIEW_ABI_VERSION, sizeof(TileXR::Profiling::DeviceView), 1, 1,
         256, 256, 16, 0, Address(timestamps.data()), Address(events.data()), Address(counts.data()),
-        Address(dropped.data()), Address(states.data())};
+        Address(dropped.data()), Address(states.data()), 0, 0};
     TileXR::Profiling::DirectWriter writer;
     writer.Initialize(reinterpret_cast<GM_ADDR>(&descriptor), 0);
     context.Trace().Attach(writer); context.Trace().Mark(TileXR::RDMAWriteEvent::TotalBegin);

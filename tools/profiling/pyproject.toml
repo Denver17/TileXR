@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tilexr-profiling"
 version = "0.1.0"
-description = "Producer-neutral offline analysis of TileXR profiling v1 captures"
+description = "Producer-neutral profiling analysis with v1 records and v1/v2 event mappings"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}

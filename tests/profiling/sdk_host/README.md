@@ -33,7 +33,11 @@ business execution and common cleanup/retry phases. The remaining device protoco
 check uses CPU substitutes as described in the
 [device README](../sdk_device/README.md).
 
-These four checks are explicit local opt-ins, independent of root test switches
+`profiling_workspace_mock` protects context-bound borrowed leases, sparse lane IDs,
+generations and safe retry after failed synchronization. The pool owns reservation
+metadata only; caller allocations outlive all outstanding or quarantined leases.
+
+These five checks are explicit local opt-ins, independent of root test switches
 and CI. Packaging, installed consumers, SDK/Python round trips, ACL compile-only
 checks and switch matrices have been removed. Use the Add4 example manually for
 real CANN compilation or NPU execution; Host mocks do not establish either.

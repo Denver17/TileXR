@@ -20,11 +20,12 @@ cmake --build build/profiling-host --parallel 2
 ctest --test-dir build/profiling-host --output-on-failure
 ```
 
-仅保留四项带 `profiling_host` 标签的关键回归：
+保留五项带 `profiling_host` 标签的关键回归：
 
 | 目标 | 保护的合同 |
 |---|---|
 | `profiling_sdk_host` | 布局与字节预算、快照完整性、编码；Linux 文件故障、不覆盖和并发单赢家发布 |
+| `profiling_workspace_mock` | 借用 lease 的 context、代次、稀疏 lane 与同步失败后的安全归还 |
 | `profiling_sdk_acl_mock` | context/stream 归属、部分初始化清理、同步/D2H/free 重试及移动后的所有权 |
 | `profiling_capture_queue_mock` | 有界队列、业务路径不插入等待、共同清理阶段和失败重试 |
 | `profiling_device_protocol` | CPU stub 下的记录槽、完成状态、地址/容量边界及 ABI |
@@ -68,3 +69,20 @@ timer 换算依据。没有注册 NPU CTest；测试列表为空不是硬件通�
 编译和 Host mock 不能证明多 rank 通信、UDMA 数据面、marker 开销或 spill。
 通信排错前复用同环境已留存的 HCCL Test 一次性资格记录，按 AGENTS 执行；
 纯离线/Host/Add4 不需要通信资格。MoonEP 的 profiler 和阶段 barrier 约束不变。
+
+SDK 构建入口保持 `src/profiling`，公共头文件保持 `src/include/tilexr/profiling`。
+这些源码位置不改变 SDK 的独立安装能力；安装后从仓外目录使用
+`find_package(TileXRProfiling)`，由消费者自行提供 CANN 依赖。
+
+借用 workspace 时，pool 仅管理 reservation，不拥有 ACL 分配。失败后保持 lease
+直到 `Close()` 成功；设备参数已暴露且析构同步仍失败的 slot 必须保持 busy，不能
+当作空闲内存复用。代次检查不替代 stream 完成。Host mock 覆盖这些所有权合同，
+不证明设备 cache 可见性；ABI 2 Host 与 kernel 必须一起重新编译。
+
+文件发布禁止覆盖已有输出，queue mock 每次运行使用独立临时目录。固定 UUID
+配固定目录会让第二次手动检查误报发布失败；验证重试时应复用同一 capture，
+验证新一轮检查时则隔离输出目录，不能放宽生产导出的 no-overwrite 合同。
+
+发布 SDK 时同时核对 `src/profiling/VERSION`、公共 ABI 常量与格式说明；版本元数据不会由编译自动更新。ABI 2 的 Host/CPU 检查通过不代表旧 kernel 二进制可继续使用。
+
+升级 DeviceView ABI 时也需检查新接入消费者的手写测试描述符：使用 `DEVICE_VIEW_ABI_VERSION` 并初始化全部字段，不能固定为旧版号。RDMA 的 `rdma_context_profile_cpu` 覆盖 DirectWriter 到 records 导出的 CPU 路径；它不证明 NIC 或 NPU 数据面。

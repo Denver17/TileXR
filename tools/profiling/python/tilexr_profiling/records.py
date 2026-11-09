@@ -1,5 +1,8 @@
+# Purpose: Decode bounded binary capture records for the pairing pipeline.
+# 用途与关系：在预算内解析二进制 capture 记录，供配对流程使用。
 """Bounded parser for tilexr_profiling_records.v1 binary files."""
 
+import io
 import struct
 from pathlib import Path
 from typing import Sequence, Tuple
@@ -32,27 +35,18 @@ STREAM_OVERFLOW = 1 << 1
 KNOWN_STREAM_FLAGS = STREAM_COMPLETE | STREAM_OVERFLOW
 
 
-def _read_record_bytes(path: Path) -> bytes:
-    source = path.as_posix()
-    try:
-        size = path.stat().st_size
-        if size > MAX_RECORD_FILE_BYTES:
-            raise ProfilingInputError(
-                f"profiling records {source} exceeds maximum size of {MAX_RECORD_FILE_BYTES} bytes"
-            )
-        with path.open("rb") as stream:
-            data = stream.read(MAX_RECORD_FILE_BYTES + 1)
-    except OSError as exc:
-        raise ProfilingInputError(f"cannot read records {source}: {exc}") from exc
-    if len(data) > MAX_RECORD_FILE_BYTES:
-        raise ProfilingInputError(
-            f"profiling records {source} exceeds maximum size of {MAX_RECORD_FILE_BYTES} bytes"
-        )
-    return data
+def parse_record_bytes(data: bytes, source: str = "<memory>", *, budget=None) -> RecordFile:
+    """Parse the same bounded stream contract used for disk input."""
+    return _parse_file(io.BytesIO(data), len(data), source, budget)
 
 
-def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
-    """Parse one complete records.v1 byte sequence."""
+def _parse_file(handle, size, source, budget=None, on_stream=None):
+    from .budgets import InputBudget
+    budget = budget or InputBudget()
+    if size > MAX_RECORD_FILE_BYTES:
+        raise ProfilingInputError(f"profiling records {source} exceeds maximum size")
+    budget.charge(files=1, bytes=size)
+    data = handle.read(FILE_HEADER_SIZE)
     if len(data) < FILE_HEADER_SIZE:
         raise ProfilingInputError(f"records file {source} is truncated before the file header")
     (
@@ -83,23 +77,23 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
         raise ProfilingInputError(f"unsupported records endianness {endianness} in {source}")
     if reserved != 0:
         raise ProfilingInputError(f"nonzero file-header reserved field in {source}")
-    if file_size != len(data):
+    if file_size != size:
         raise ProfilingInputError(
-            f"records file size mismatch in {source}: header={file_size}, actual={len(data)}"
+            f"records file size mismatch in {source}: header={file_size}, actual={size}"
         )
-    if stream_count > (len(data) - FILE_HEADER_SIZE) // STREAM_HEADER_SIZE:
+    if stream_count > (size - FILE_HEADER_SIZE) // STREAM_HEADER_SIZE:
         raise ProfilingInputError(f"stream count cannot fit in records file {source}")
 
     offset = FILE_HEADER_SIZE
     streams = []
     stream_ids = set()
     for block_index in range(stream_count):
-        if len(data) - offset < STREAM_HEADER_SIZE:
+        if size - offset < STREAM_HEADER_SIZE:
             raise ProfilingInputError(
                 f"records file {source} is truncated before stream block {block_index}"
             )
-        stream_id, record_count, dropped_count, flags, block_size = STREAM_HEADER.unpack_from(
-            data, offset
+        stream_id, record_count, dropped_count, flags, block_size = STREAM_HEADER.unpack(
+            _read_exact(handle, STREAM_HEADER_SIZE, source)
         )
         if stream_id in stream_ids:
             raise ProfilingInputError(f"duplicate stream ID {stream_id} in records file {source}")
@@ -113,14 +107,15 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
                 f"header={block_size}, expected={expected_block_size}"
             )
         block_end = offset + block_size
-        if block_end > len(data):
+        if block_end > size:
             raise ProfilingInputError(f"stream {stream_id} is truncated in {source}")
 
+        budget.charge(streams=1, records=record_count,
+                      memory_bytes=2048 + record_count * 768)
         records = []
-        record_offset = offset + STREAM_HEADER_SIZE
         previous_timestamp = None
         for record_index in range(record_count):
-            timestamp, event_id, record_reserved = RECORD.unpack_from(data, record_offset)
+            timestamp, event_id, record_reserved = RECORD.unpack(_read_exact(handle, RECORD_SIZE, source))
             if event_id == 0:
                 raise ProfilingInputError(
                     f"stream {stream_id} record {record_index} has reserved event ID 0 in {source}"
@@ -135,33 +130,62 @@ def parse_record_bytes(data: bytes, source: str = "<memory>") -> RecordFile:
                 )
             previous_timestamp = timestamp
             records.append(RawRecord(timestamp, event_id, source, record_index))
-            record_offset += RECORD_SIZE
 
-        streams.append(
-            RecordStream(
-                id=stream_id,
-                records=tuple(records),
-                dropped_count=dropped_count,
-                complete=bool(flags & STREAM_COMPLETE),
-                overflow=bool(flags & STREAM_OVERFLOW),
-                source=source,
-            )
+        parsed_stream = RecordStream(
+            id=stream_id,
+            records=tuple(records),
+            dropped_count=dropped_count,
+            complete=bool(flags & STREAM_COMPLETE),
+            overflow=bool(flags & STREAM_OVERFLOW),
+            source=source,
         )
+        if on_stream is None:
+            streams.append(parsed_stream)
+        else:
+            on_stream(UUID(bytes=capture_id_bytes), parsed_stream)
         offset = block_end
 
-    if offset != len(data):
+    if offset != size or handle.read(1):
         raise ProfilingInputError(f"trailing bytes after stream blocks in {source}")
     return RecordFile(UUID(bytes=capture_id_bytes), tuple(streams), source)
 
 
-def load_record_files(paths: Sequence[Path]) -> Tuple[RecordFile, ...]:
-    """Read and parse one or more bounded records.v1 files."""
+def _read_exact(handle, count, source):
+    data = handle.read(count)
+    if len(data) != count:
+        raise ProfilingInputError(f"records file {source} is truncated")
+    return data
+
+
+def load_record_files(paths: Sequence[Path], *, budget=None) -> Tuple[RecordFile, ...]:
+    """Read incrementally, without retaining encoded file copies."""
+    return _load_paths(paths, budget=budget)
+
+
+def visit_record_files(paths, on_stream, *, budget=None):
+    """Validate and consume each stream before decoding the next one.
+
+    Returned file headers retain provenance only. The callback uses the same
+    strict decoder as load_record_files; exceptions abort the whole input set.
+    """
+    return _load_paths(paths, budget=budget, on_stream=on_stream)
+
+
+def _load_paths(paths, *, budget=None, on_stream=None):
+    from .budgets import InputBudget
+    budget = budget or InputBudget()
     if not paths:
         raise ProfilingInputError("at least one profiling records file is required")
-    if len(paths) > MAX_RECORD_FILES:
+    if len(paths) > min(MAX_RECORD_FILES, budget.limits.max_files):
         raise ProfilingInputError(f"too many profiling record files: {len(paths)}")
     result = []
     for value in paths:
         path = Path(value)
-        result.append(parse_record_bytes(_read_record_bytes(path), path.as_posix()))
+        try:
+            with path.open("rb") as handle:
+                import os
+                size = os.fstat(handle.fileno()).st_size
+                result.append(_parse_file(handle, size, path.as_posix(), budget, on_stream))
+        except OSError as exc:
+            raise ProfilingInputError(f"cannot read records {path}: {exc}") from exc
     return tuple(result)
