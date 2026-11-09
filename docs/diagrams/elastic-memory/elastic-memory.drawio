@@ -1,0 +1,987 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram id="use-cases" name="01 用户场景">
+    <mxGraphModel adaptiveColors="auto" page="1" pageScale="1" pageWidth="1500" pageHeight="1120" background="#FFFFFF">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="&lt;b&gt;ElasticMemory · 主要用户场景&lt;/b&gt;" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=30;align=left;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="40" y="25" width="1420" height="55" />
+        </mxCell>
+        <mxCell id="sub" value="分段环形池｜真实输出大小 · Device 分配 · 弹性 HBM · 普通 Torch Tensor" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=17;align=left;fontColor=#64748B;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="40" y="85" width="1420" height="35" />
+        </mxCell>
+        <mxCell id="boundary" value="&lt;b&gt;TileXR ElasticMemory&lt;/b&gt;" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;rounded=1;arcSize=3;fillColor=#F8FAFC;strokeColor=#A7B7CB;verticalAlign=top;spacingTop=18;fontSize=23;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="250" y="150" width="1000" height="840" />
+        </mxCell>
+        <mxCell id="user" value="业务开发者&lt;br&gt;Torch 应用" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;fillColor=#EAF2FF;strokeColor=#3B69A3;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="80" y="450" width="95" height="110" />
+        </mxCell>
+        <mxCell id="device" value="算子开发者&lt;br&gt;AICore" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;fillColor=#EAF2FF;strokeColor=#3B69A3;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="1330" y="225" width="95" height="110" />
+        </mxCell>
+        <mxCell id="host" value="Host&lt;br&gt;后台服务" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=umlActor;verticalLabelPosition=bottom;verticalAlign=top;fillColor=#FFF1D6;strokeColor=#B67B1B;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="1330" y="570" width="95" height="110" />
+        </mxCell>
+        <mxCell id="init" value="按需创建池&lt;br&gt;初始数据 HBM = 0" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#EAF2FF;strokeColor=#6C8EBF;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="80" y="95" width="350" height="110" />
+        </mxCell>
+        <mxCell id="submit" value="提交动态 Dispatch&lt;br&gt;异步 handle / 便利接口" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#EAF2FF;strokeColor=#6C8EBF;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="80" y="280" width="350" height="110" />
+        </mxCell>
+        <mxCell id="tensor" value="取得实际形状 Tensor&lt;br&gt;stream 依赖后消费" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#E9F5ED;strokeColor=#72A986;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="80" y="465" width="350" height="110" />
+        </mxCell>
+        <mxCell id="trim" value="释放引用 / collect / trim&lt;br&gt;空 segment 归还 HBM" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#E9F5ED;strokeColor=#72A986;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="80" y="650" width="350" height="110" />
+        </mxCell>
+        <mxCell id="alloc" value="Device 按实际大小分配&lt;br&gt;池内命中直接继续" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#EAF2FF;strokeColor=#6C8EBF;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="570" y="95" width="350" height="110" />
+        </mxCell>
+        <mxCell id="grow" value="空间不足时同步扩容&lt;br&gt;当前 kernel 驻留等待" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#FFF2D8;strokeColor=#D3A246;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="570" y="335" width="350" height="110" />
+        </mxCell>
+        <mxCell id="fail" value="扩容失败报错退出&lt;br&gt;不重试、不重启、不回滚" vertex="1" parent="boundary" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;ellipse;fillColor=#FDECEC;strokeColor=#C67F7C;strokeWidth=1.5;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="570" y="575" width="350" height="110" />
+        </mxCell>
+        <mxCell id="user-0" value="" edge="1" parent="1" source="user" target="init" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="user-1" value="" edge="1" parent="1" source="user" target="submit" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="user-2" value="" edge="1" parent="1" source="user" target="tensor" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="user-3" value="" edge="1" parent="1" source="user" target="trim" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="dev-alloc" value="" edge="1" parent="1" source="device" target="alloc" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="host-grow" value="" edge="1" parent="1" source="host" target="grow" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="host-fail" value="" edge="1" parent="1" source="host" target="fail" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=none;endFill=0;dashed=0;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="grow-extend" value="«extend»&lt;br&gt;连续空间不足" edge="1" parent="boundary" source="grow" target="alloc" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=open;endFill=0;dashed=1;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="fail-extend" value="«extend»&lt;br&gt;Host 扩容失败" edge="1" parent="boundary" source="fail" target="grow" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=15;fontColor=#536176;strokeColor=#7C8CA4;strokeWidth=1.5;endArrow=open;endFill=0;dashed=1;labelBackgroundColor=#FFFFFF;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="footer" value="实线：参与关系　虚线：条件扩展　｜　FIFO：当前请求取得空间前，后续分配不能插队" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=16;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="40" y="1010" width="1420" height="40" />
+        </mxCell>
+        <mxCell id="limit" value="当前实现：CANN 9.2 / A5 实测；materialize 等待完整数据完成。metadata-only readiness 仍为设计目标。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=16;fontColor=#64748B;;fontFamily=WenQuanYi Zen Hei;">
+          <mxGeometry as="geometry" x="40" y="1055" width="1420" height="35" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="dispatch-sequence" name="02 Dispatch 主时序">
+    <mxGraphModel grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="0" page="0" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0" background="#FFFFFF" adaptiveColors="auto">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <UserObject label="用户 / Torch" mermaidId="n:U" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="用户 / Torch" id="2">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1779" width="150" x="25" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="Host 服务" mermaidId="n:H" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Host 服务" id="3">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1779" width="150" x="390" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="当前 AICore kernel" mermaidId="n:D" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="当前 AICore kernel" id="4">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1779" width="150" x="801" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <mxCell id="14" parent="4" style="html=1;points=[];perimeter=orthogonalPerimeter;outlineConnect=0;targetShapes=umlLifeline;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};fillColor=light-dark(#f4f4f4,#2a2a2a);strokeColor=light-dark(#666666,#cccccc);fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" value="" vertex="1">
+          <mxGeometry height="1218" width="10" x="70" y="326" as="geometry" />
+        </mxCell>
+        <UserObject label="HBM Runtime" mermaidId="n:R" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="HBM Runtime" id="5">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1779" width="150" x="1001" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="alt" mermaidId="n:f0" mermaidBaseStyle="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;" mermaidBaseValue="alt" id="6">
+          <mxCell parent="1" style="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="554" width="673" x="430" y="488" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <mxCell id="7" parent="6" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[池内连续区间足够]" vertex="1">
+          <mxGeometry height="16" width="619" x="54" y="2" as="geometry" />
+        </mxCell>
+        <mxCell id="8" parent="6" style="shape=line;dashed=1;fixDash=1;dashPattern=2 2;strokeColor=#6C8EBF;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+          <mxGeometry height="1" width="673" y="126" as="geometry" />
+        </mxCell>
+        <mxCell id="9" parent="6" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[需要扩容（成功分支）]" vertex="1">
+          <mxGeometry height="16" width="673" y="128" as="geometry" />
+        </mxCell>
+        <UserObject label="par" mermaidId="n:f1" mermaidBaseStyle="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;" mermaidBaseValue="par" id="10">
+          <mxCell parent="1" style="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="456" width="921" x="90" y="1098" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <mxCell id="11" parent="10" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[Host 物化 Tensor]" vertex="1">
+          <mxGeometry height="16" width="867" x="54" y="2" as="geometry" />
+        </mxCell>
+        <mxCell id="12" parent="10" style="shape=line;dashed=1;fixDash=1;dashPattern=2 2;strokeColor=#6C8EBF;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+          <mxGeometry height="1" width="921" y="294" as="geometry" />
+        </mxCell>
+        <mxCell id="13" parent="10" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[Device 继续传输]" vertex="1">
+          <mxGeometry height="16" width="921" y="296" as="geometry" />
+        </mxCell>
+        <UserObject label="dispatch_compact_async(inputs)" mermaidId="e:U-&gt;H#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="dispatch_compact_async(inputs)" id="15">
+          <mxCell edge="1" parent="1" source="2" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="283" y="158" />
+              </Array>
+              <mxPoint x="100" y="158" as="sourcePoint" />
+              <mxPoint x="465" y="158" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="16" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="1" vertex="1">
+          <mxGeometry height="20" width="20" x="90" y="148" as="geometry" />
+        </mxCell>
+        <UserObject label="pending handle（不等待实际大小）" mermaidId="e:H-&gt;U#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="pending handle（不等待实际大小）" id="17">
+          <mxCell edge="1" parent="1" source="3" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="2">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="283" y="204" />
+              </Array>
+              <mxPoint x="465" y="204" as="sourcePoint" />
+              <mxPoint x="100" y="204" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="18" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="2" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="194" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#0" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="19">
+          <mxCell edge="1" parent="1" source="3" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="500" y="250" />
+                <mxPoint x="504" y="262" />
+                <mxPoint x="500" y="274" />
+              </Array>
+              <mxPoint x="465" y="250" as="sourcePoint" />
+              <mxPoint x="465" y="274" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="20" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="FIFO 准入，保留输入依赖" vertex="1">
+          <mxGeometry height="18" width="200" x="365" y="224" as="geometry" />
+        </mxCell>
+        <mxCell id="21" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="3" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="240" as="geometry" />
+        </mxCell>
+        <UserObject label="提交 Dispatch 并安排完成事件" mermaidId="e:H-&gt;D#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="提交 Dispatch 并安排完成事件" id="22">
+          <mxCell edge="1" parent="1" source="3" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="668" y="326" />
+              </Array>
+              <mxPoint x="465" y="326" as="sourcePoint" />
+              <mxPoint x="871" y="326" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="23" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="4" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="316" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:D-&gt;D#0" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="24">
+          <mxCell edge="1" parent="1" source="14" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="916" y="372" />
+                <mxPoint x="920" y="384" />
+                <mxPoint x="916" y="396" />
+              </Array>
+              <mxPoint x="881" y="372" as="sourcePoint" />
+              <mxPoint x="881" y="396" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="25" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="统计路由，确定实际 padded rows" vertex="1">
+          <mxGeometry height="18" width="200" x="781" y="346" as="geometry" />
+        </mxCell>
+        <mxCell id="26" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="5" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="362" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:D-&gt;D#1" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="27">
+          <mxCell edge="1" parent="1" source="14" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="916" y="448" />
+                <mxPoint x="920" y="460" />
+                <mxPoint x="916" y="472" />
+              </Array>
+              <mxPoint x="881" y="448" as="sourcePoint" />
+              <mxPoint x="881" y="472" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="28" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="Allocate(actual_bytes, alignment)" vertex="1">
+          <mxGeometry height="18" width="200" x="781" y="422" as="geometry" />
+        </mxCell>
+        <mxCell id="29" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="6" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="438" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:D-&gt;D#2" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="30">
+          <mxCell edge="1" parent="1" source="14" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="916" y="569" />
+                <mxPoint x="920" y="581" />
+                <mxPoint x="916" y="593" />
+              </Array>
+              <mxPoint x="881" y="569" as="sourcePoint" />
+              <mxPoint x="881" y="593" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="31" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="分配成功，无 Host HBM 申请" vertex="1">
+          <mxGeometry height="18" width="200" x="781" y="543" as="geometry" />
+        </mxCell>
+        <mxCell id="32" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="7" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="559" as="geometry" />
+        </mxCell>
+        <UserObject label="mailbox: NEED_CAPACITY" mermaidId="e:D-&gt;H#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="mailbox: NEED_CAPACITY" id="33">
+          <mxCell edge="1" parent="1" source="14" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="668" y="690" />
+              </Array>
+              <mxPoint x="871" y="690" as="sourcePoint" />
+              <mxPoint x="465" y="690" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="34" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="8" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="680" as="geometry" />
+        </mxCell>
+        <UserObject label="申请 segment；必要时映射 / 注册" mermaidId="e:H-&gt;R#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="申请 segment；必要时映射 / 注册" id="35">
+          <mxCell edge="1" parent="1" source="3" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="771" y="800" />
+              </Array>
+              <mxPoint x="465" y="800" as="sourcePoint" />
+              <mxPoint x="1076" y="800" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="36" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="9" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="790" as="geometry" />
+        </mxCell>
+        <UserObject label="可被当前 kernel 访问的新空间" mermaidId="e:R-&gt;H#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="可被当前 kernel 访问的新空间" id="37">
+          <mxCell edge="1" parent="1" source="5" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="771" y="846" />
+              </Array>
+              <mxPoint x="1076" y="846" as="sourcePoint" />
+              <mxPoint x="465" y="846" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="38" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="10" vertex="1">
+          <mxGeometry height="20" width="20" x="1066" y="836" as="geometry" />
+        </mxCell>
+        <UserObject label="mailbox: GROW_OK(segment)" mermaidId="e:H-&gt;D#1" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="mailbox: GROW_OK(segment)" id="39">
+          <mxCell edge="1" parent="1" source="3" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="668" y="892" />
+              </Array>
+              <mxPoint x="465" y="892" as="sourcePoint" />
+              <mxPoint x="871" y="892" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="40" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="11" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="882" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:D-&gt;D#3" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="41">
+          <mxCell edge="1" parent="1" source="14" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="916" y="938" />
+                <mxPoint x="920" y="950" />
+                <mxPoint x="916" y="962" />
+              </Array>
+              <mxPoint x="881" y="938" as="sourcePoint" />
+              <mxPoint x="881" y="962" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="42" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="owner 安装新 segment，取得空间" vertex="1">
+          <mxGeometry height="18" width="200" x="781" y="912" as="geometry" />
+        </mxCell>
+        <mxCell id="43" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="12" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="928" as="geometry" />
+        </mxCell>
+        <UserObject label="METADATA_READY：地址、shape、generation" mermaidId="e:D-&gt;H#1" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="METADATA_READY：地址、shape、generation" id="44">
+          <mxCell edge="1" parent="1" source="14" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="668" y="1088" />
+              </Array>
+              <mxPoint x="871" y="1088" as="sourcePoint" />
+              <mxPoint x="465" y="1088" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="45" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="13" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="1078" as="geometry" />
+        </mxCell>
+        <UserObject label="pending.materialize(consumer_stream)" mermaidId="e:U-&gt;H#1" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="pending.materialize(consumer_stream)" id="46">
+          <mxCell edge="1" parent="1" source="2" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="283" y="1179" />
+              </Array>
+              <mxPoint x="100" y="1179" as="sourcePoint" />
+              <mxPoint x="465" y="1179" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="47" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="14" vertex="1">
+          <mxGeometry height="20" width="20" x="90" y="1169" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#1" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="48">
+          <mxCell edge="1" parent="1" source="3" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="500" y="1225" />
+                <mxPoint x="504" y="1237" />
+                <mxPoint x="500" y="1249" />
+              </Array>
+              <mxPoint x="465" y="1225" as="sourcePoint" />
+              <mxPoint x="465" y="1249" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="49" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="建立 Storage lease，包装 NPU Tensor" vertex="1">
+          <mxGeometry height="18" width="200" x="365" y="1199" as="geometry" />
+        </mxCell>
+        <mxCell id="50" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="15" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="1215" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#2" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="51">
+          <mxCell edge="1" parent="1" source="3" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="500" y="1301" />
+                <mxPoint x="504" y="1313" />
+                <mxPoint x="500" y="1325" />
+              </Array>
+              <mxPoint x="465" y="1301" as="sourcePoint" />
+              <mxPoint x="465" y="1325" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="52" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="在消费者 stream 建立数据完成依赖" vertex="1">
+          <mxGeometry height="18" width="200" x="365" y="1275" as="geometry" />
+        </mxCell>
+        <mxCell id="53" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="16" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="1291" as="geometry" />
+        </mxCell>
+        <UserObject label="result.hidden + ready_event" mermaidId="e:H-&gt;U#1" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="result.hidden + ready_event" id="54">
+          <mxCell edge="1" parent="1" source="3" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="2">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="283" y="1377" />
+              </Array>
+              <mxPoint x="465" y="1377" as="sourcePoint" />
+              <mxPoint x="100" y="1377" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="55" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="17" vertex="1">
+          <mxGeometry height="20" width="20" x="455" y="1367" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:D-&gt;D#4" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="56">
+          <mxCell edge="1" parent="1" source="14" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="14">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="916" y="1468" />
+                <mxPoint x="920" y="1480" />
+                <mxPoint x="916" y="1492" />
+              </Array>
+              <mxPoint x="881" y="1468" as="sourcePoint" />
+              <mxPoint x="881" y="1492" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="57" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="搬运并写输出，不等待 Host 包装" vertex="1">
+          <mxGeometry height="18" width="200" x="781" y="1442" as="geometry" />
+        </mxCell>
+        <mxCell id="58" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="18" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="1458" as="geometry" />
+        </mxCell>
+        <UserObject label="kernel / 通信访问完成，数据事件就绪" mermaidId="e:D-&gt;H#2" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="kernel / 通信访问完成，数据事件就绪" id="59">
+          <mxCell edge="1" parent="1" source="14" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="668" y="1544" />
+              </Array>
+              <mxPoint x="871" y="1544" as="sourcePoint" />
+              <mxPoint x="465" y="1544" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="60" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="19" vertex="1">
+          <mxGeometry height="20" width="20" x="866" y="1534" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:U-&gt;U#0" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="61">
+          <mxCell edge="1" parent="1" source="2" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="2">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="135" y="1600" />
+                <mxPoint x="139" y="1612" />
+                <mxPoint x="135" y="1624" />
+              </Array>
+              <mxPoint x="100" y="1600" as="sourcePoint" />
+              <mxPoint x="100" y="1624" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="62" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="stream 依赖满足后消费 Tensor" vertex="1">
+          <mxGeometry height="18" width="200" y="1574" as="geometry" />
+        </mxCell>
+        <mxCell id="63" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="20" vertex="1">
+          <mxGeometry height="20" width="20" x="90" y="1590" as="geometry" />
+        </mxCell>
+        <UserObject label="ElasticMemory · Dispatch 异步接口目标" mermaidId="n:note0" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="ElasticMemory · Dispatch 主时序（设计提案）" id="64">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="1026" x="75" y="75" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="当前 kernel 保留状态并同步等待&#10;FIFO 队首不变，后续分配不能插队" mermaidId="n:note1" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="当前 kernel 保留状态并同步等待&#10;FIFO 队首不变，后续分配不能插队" id="65">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="54" width="461" x="440" y="700" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="同一 kernel 原地继续&#10;不退出、不重放已执行操作" mermaidId="n:note2" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="同一 kernel 原地继续&#10;不退出、不重放已执行操作" id="66">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="54" width="192" x="901" y="978" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="本页的元数据提前物化是接口目标；当前 materialize 等待完整数据完成&#10;当前 kernel 驻留等待 Host 增长已在 CANN 9.2 实测；不会退出后重跑" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="materialize 等元数据；数据读取等完成事件&#10;Host 扩容必须可与驻留 kernel 并发推进，仍需实机验证" id="67">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="54" width="1026" x="75" y="1640" as="geometry" />
+          </mxCell>
+        </UserObject>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="failure-sequence" name="03 扩容失败时序">
+    <mxGraphModel grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="0" page="0" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0" background="#FFFFFF" adaptiveColors="auto">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <UserObject label="用户 / Torch" mermaidId="n:U" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="用户 / Torch" id="2">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="939" width="150" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="Host 服务" mermaidId="n:H" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Host 服务" id="3">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="939" width="150" x="320" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="当前 AICore kernel" mermaidId="n:D" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="当前 AICore kernel" id="4">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="939" width="150" x="656" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="HBM Runtime" mermaidId="n:R" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="HBM Runtime" id="5">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="939" width="150" x="856" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="其他 ranks" mermaidId="n:P" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="其他 ranks" id="6">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="939" width="150" x="1056" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="mailbox: NEED_CAPACITY" mermaidId="e:D-&gt;H#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="mailbox: NEED_CAPACITY" id="7">
+          <mxCell edge="1" parent="1" source="4" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="563" y="205" />
+              </Array>
+              <mxPoint x="731" y="205" as="sourcePoint" />
+              <mxPoint x="395" y="205" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="8" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="1" vertex="1">
+          <mxGeometry height="20" width="20" x="721" y="195" as="geometry" />
+        </mxCell>
+        <UserObject label="申请真实 HBM" mermaidId="e:H-&gt;R#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="申请真实 HBM" id="9">
+          <mxCell edge="1" parent="1" source="3" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="663" y="298" />
+              </Array>
+              <mxPoint x="395" y="298" as="sourcePoint" />
+              <mxPoint x="931" y="298" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="10" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="2" vertex="1">
+          <mxGeometry height="20" width="20" x="385" y="288" as="geometry" />
+        </mxCell>
+        <UserObject label="失败 / OOM（超预算也直接失败）" mermaidId="e:R-&gt;H#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="失败 / OOM（超预算也直接失败）" id="11">
+          <mxCell edge="1" parent="1" source="5" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="663" y="344" />
+              </Array>
+              <mxPoint x="931" y="344" as="sourcePoint" />
+              <mxPoint x="395" y="344" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="12" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="3" vertex="1">
+          <mxGeometry height="20" width="20" x="921" y="334" as="geometry" />
+        </mxCell>
+        <UserObject label="mailbox: GROW_FAILED(error_code)" mermaidId="e:H-&gt;D#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="mailbox: GROW_FAILED(error_code)" id="13">
+          <mxCell edge="1" parent="1" source="3" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="4">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="563" y="390" />
+              </Array>
+              <mxPoint x="395" y="390" as="sourcePoint" />
+              <mxPoint x="731" y="390" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="14" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="4" vertex="1">
+          <mxGeometry height="20" width="20" x="385" y="380" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:D-&gt;D#0" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="15">
+          <mxCell edge="1" parent="1" source="4" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="4">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="766" y="436" />
+                <mxPoint x="770" y="448" />
+                <mxPoint x="766" y="460" />
+              </Array>
+              <mxPoint x="731" y="436" as="sourcePoint" />
+              <mxPoint x="731" y="460" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="16" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="分配返回致命错误，不写未分配地址" vertex="1">
+          <mxGeometry height="18" width="200" x="631" y="410" as="geometry" />
+        </mxCell>
+        <mxCell id="17" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="5" vertex="1">
+          <mxGeometry height="20" width="20" x="721" y="426" as="geometry" />
+        </mxCell>
+        <UserObject label="经现有通信 / 作业错误路径通知失败" mermaidId="e:H-&gt;P#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="经现有通信 / 作业错误路径通知失败" id="18">
+          <mxCell edge="1" parent="1" source="3" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="6">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="763" y="512" />
+              </Array>
+              <mxPoint x="395" y="512" as="sourcePoint" />
+              <mxPoint x="1131" y="512" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="19" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="6" vertex="1">
+          <mxGeometry height="20" width="20" x="385" y="502" as="geometry" />
+        </mxCell>
+        <UserObject label="当前 kernel 错误退出" mermaidId="e:D-&gt;H#1" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="当前 kernel 错误退出" id="20">
+          <mxCell edge="1" parent="1" source="4" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="563" y="558" />
+              </Array>
+              <mxPoint x="731" y="558" as="sourcePoint" />
+              <mxPoint x="395" y="558" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="21" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="7" vertex="1">
+          <mxGeometry height="20" width="20" x="721" y="548" as="geometry" />
+        </mxCell>
+        <UserObject label="结束相关等待与访问，或由作业失败机制终止" mermaidId="e:P-&gt;H#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="结束相关等待与访问，或由作业失败机制终止" id="22">
+          <mxCell edge="1" parent="1" source="6" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="763" y="604" />
+              </Array>
+              <mxPoint x="1131" y="604" as="sourcePoint" />
+              <mxPoint x="395" y="604" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="23" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="8" vertex="1">
+          <mxGeometry height="20" width="20" x="1121" y="594" as="geometry" />
+        </mxCell>
+        <UserObject label="materialize / synchronize 抛出错误" mermaidId="e:H-&gt;U#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="materialize / synchronize 抛出错误" id="24">
+          <mxCell edge="1" parent="1" source="3" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="2">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="235" y="650" />
+              </Array>
+              <mxPoint x="395" y="650" as="sourcePoint" />
+              <mxPoint x="75" y="650" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="25" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="9" vertex="1">
+          <mxGeometry height="20" width="20" x="385" y="640" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#0" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="26">
+          <mxCell edge="1" parent="1" source="3" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="430" y="760" />
+                <mxPoint x="434" y="772" />
+                <mxPoint x="430" y="784" />
+              </Array>
+              <mxPoint x="395" y="760" as="sourcePoint" />
+              <mxPoint x="395" y="784" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="27" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="确认访问停止后清理本调用资源" vertex="1">
+          <mxGeometry height="18" width="200" x="295" y="734" as="geometry" />
+        </mxCell>
+        <mxCell id="28" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="10" vertex="1">
+          <mxGeometry height="20" width="20" x="385" y="750" as="geometry" />
+        </mxCell>
+        <UserObject label="ElasticMemory · 扩容失败（设计提案）" mermaidId="n:note0" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="ElasticMemory · 扩容失败（设计提案）" id="29">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="1106" x="50" y="75" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="本次调用可能已经操作过内存；不能假设可回滚" mermaidId="n:note1" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="本次调用可能已经操作过内存；不能假设可回滚" id="30">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="450" x="706" y="122" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="当前 kernel 原地同步等待" mermaidId="n:note2" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="当前 kernel 原地同步等待" id="31">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="386" x="370" y="215" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="整个通信调用失败，排队请求一并失败&#10;不重试、不重启、不回滚；本次结果无效" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="整个通信调用失败，排队请求一并失败&#10;不重试、不重启、不回滚；本次结果无效" id="32">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="54" width="1106" x="50" y="660" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="资源清理不表示恢复执行&#10;复用现有错误路径，不引入额外恢复系统" mermaidId="n:note4" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="资源清理不表示恢复执行&#10;复用现有错误路径，不引入额外恢复系统" id="33">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="54" width="786" x="370" y="800" as="geometry" />
+          </mxCell>
+        </UserObject>
+      </root>
+    </mxGraphModel>
+  </diagram>
+  <diagram id="reclaim-sequence" name="04 释放回收时序">
+    <mxGraphModel grid="0" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="0" page="0" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0" background="#FFFFFF" adaptiveColors="auto">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <UserObject label="用户 / Torch" mermaidId="n:U" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="用户 / Torch" id="2">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1435" width="150" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="Tensor Storage" mermaidId="n:S" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Tensor Storage" id="3">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1435" width="150" x="237" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="Device / 通信访问" mermaidId="n:D" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Device / 通信访问" id="4">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1435" width="150" x="437" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="Host 回收服务" mermaidId="n:H" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="Host 回收服务" id="5">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1435" width="150" x="695" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="HBM Runtime" mermaidId="n:R" mermaidBaseStyle="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="HBM Runtime" id="6">
+          <mxCell parent="1" style="html=1;shape=umlLifeline;perimeter=lifelinePerimeter;whiteSpace=wrap;container=1;dropTarget=0;collapsible=0;recursiveResize=0;outlineConnect=0;portConstraint=eastwest;newEdgeStyle={&quot;edgeStyle&quot;:&quot;sequenceEdgeStyle&quot;,&quot;libavoidRouting&quot;:0,&quot;curved&quot;:0,&quot;rounded&quot;:0};lifelineDashed=0;strokeWidth=2;rounded=1;absoluteArcSize=1;arcSize=6;lifelineColor=#6C8EBF;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontColor=#243247;size=65;lifelineMirror=1;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1435" width="150" x="963" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="alt" mermaidId="n:f0" mermaidBaseStyle="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;" mermaidBaseValue="alt" id="7">
+          <mxCell parent="1" style="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="1118" width="791" x="277" y="168" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <mxCell id="8" parent="7" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[仍有 view 持有 Storage]" vertex="1">
+          <mxGeometry height="16" width="737" x="54" y="2" as="geometry" />
+        </mxCell>
+        <mxCell id="9" parent="7" style="shape=line;dashed=1;fixDash=1;dashPattern=2 2;strokeColor=#6C8EBF;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+          <mxGeometry height="1" width="791" y="143" as="geometry" />
+        </mxCell>
+        <mxCell id="10" parent="7" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[最后一个 Storage 引用释放]" vertex="1">
+          <mxGeometry height="16" width="791" y="145" as="geometry" />
+        </mxCell>
+        <UserObject label="alt" mermaidId="n:f1" mermaidBaseStyle="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;" mermaidBaseValue="alt" id="11">
+          <mxCell parent="1" style="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="634" width="429" x="630" y="642" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <mxCell id="12" parent="11" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[segment 内仍有活跃分配]" vertex="1">
+          <mxGeometry height="16" width="375" x="54" y="2" as="geometry" />
+        </mxCell>
+        <mxCell id="13" parent="11" style="shape=line;dashed=1;fixDash=1;dashPattern=2 2;strokeColor=#6C8EBF;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+          <mxGeometry height="1" width="429" y="126" as="geometry" />
+        </mxCell>
+        <mxCell id="14" parent="11" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[segment 全空]" vertex="1">
+          <mxGeometry height="16" width="429" y="128" as="geometry" />
+        </mxCell>
+        <UserObject label="alt" mermaidId="n:f2" mermaidBaseStyle="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;" mermaidBaseValue="alt" id="15">
+          <mxCell parent="1" style="html=1;shape=umlFrame;dashed=1;fixDash=1;dashPattern=2 2;strokeWidth=2;pointerEvents=0;dropTarget=0;fillColor=#EAF2FF;strokeColor=#6C8EBF;fontSize=16;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;height=20;width=50;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="458" width="409" x="640" y="808" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <mxCell id="16" parent="15" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[超空闲缓存预算，或用户显式 trim]" vertex="1">
+          <mxGeometry height="16" width="355" x="54" y="2" as="geometry" />
+        </mxCell>
+        <mxCell id="17" parent="15" style="shape=line;dashed=1;fixDash=1;dashPattern=2 2;strokeColor=#6C8EBF;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+          <mxGeometry height="1" width="409" y="312" as="geometry" />
+        </mxCell>
+        <mxCell id="18" parent="15" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[允许保留少量缓存]" vertex="1">
+          <mxGeometry height="16" width="409" y="314" as="geometry" />
+        </mxCell>
+        <UserObject label="删除 result / Tensor 引用" mermaidId="e:U-&gt;S#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="删除 result / Tensor 引用" id="19">
+          <mxCell edge="1" parent="1" source="2" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="3">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="194" y="158" />
+              </Array>
+              <mxPoint x="75" y="158" as="sourcePoint" />
+              <mxPoint x="312" y="158" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="20" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="1" vertex="1">
+          <mxGeometry height="20" width="20" x="65" y="148" as="geometry" />
+        </mxCell>
+        <UserObject label="lease 仍存活，保持 live 状态" mermaidId="e:S-&gt;H#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="lease 仍存活，保持 live 状态" id="21">
+          <mxCell edge="1" parent="1" source="3" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="541" y="249" />
+              </Array>
+              <mxPoint x="312" y="249" as="sourcePoint" />
+              <mxPoint x="770" y="249" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="22" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="2" vertex="1">
+          <mxGeometry height="20" width="20" x="302" y="239" as="geometry" />
+        </mxCell>
+        <UserObject label="deleter 提交退休请求" mermaidId="e:S-&gt;H#1" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="deleter 提交退休请求" id="23">
+          <mxCell edge="1" parent="1" source="3" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="541" y="387" />
+              </Array>
+              <mxPoint x="312" y="387" as="sourcePoint" />
+              <mxPoint x="770" y="387" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="24" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="3" vertex="1">
+          <mxGeometry height="20" width="20" x="302" y="377" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#0" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="25">
+          <mxCell edge="1" parent="1" source="5" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="805" y="433" />
+                <mxPoint x="809" y="445" />
+                <mxPoint x="805" y="457" />
+              </Array>
+              <mxPoint x="770" y="433" as="sourcePoint" />
+              <mxPoint x="770" y="457" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="26" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="记录 / 跟踪已登记消费者 stream 事件" vertex="1">
+          <mxGeometry height="18" width="200" x="670" y="407" as="geometry" />
+        </mxCell>
+        <mxCell id="27" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="4" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="423" as="geometry" />
+        </mxCell>
+        <UserObject label="必需事件及通信完成条件满足" mermaidId="e:D-&gt;H#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="必需事件及通信完成条件满足" id="28">
+          <mxCell edge="1" parent="1" source="4" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="641" y="556" />
+              </Array>
+              <mxPoint x="512" y="556" as="sourcePoint" />
+              <mxPoint x="770" y="556" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="29" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="5" vertex="1">
+          <mxGeometry height="20" width="20" x="502" y="546" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#1" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="30">
+          <mxCell edge="1" parent="1" source="5" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="805" y="602" />
+                <mxPoint x="809" y="614" />
+                <mxPoint x="805" y="626" />
+              </Array>
+              <mxPoint x="770" y="602" as="sourcePoint" />
+              <mxPoint x="770" y="626" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="31" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="安全退休后推进连续前缀&#10;调用间发布紧凑回收水位" vertex="1">
+          <mxGeometry height="18" width="200" x="670" y="576" as="geometry" />
+        </mxCell>
+        <mxCell id="32" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="6" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="592" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#2" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="33">
+          <mxCell edge="1" parent="1" source="5" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="805" y="723" />
+                <mxPoint x="809" y="735" />
+                <mxPoint x="805" y="747" />
+              </Array>
+              <mxPoint x="770" y="723" as="sourcePoint" />
+              <mxPoint x="770" y="747" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="34" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="活跃前缀仍阻塞后续空间&#10;可用容量按 ring 水位计算" vertex="1">
+          <mxGeometry height="18" width="200" x="670" y="697" as="geometry" />
+        </mxCell>
+        <mxCell id="35" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="7" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="713" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#3" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="36">
+          <mxCell edge="1" parent="1" source="5" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="805" y="907" />
+                <mxPoint x="809" y="919" />
+                <mxPoint x="805" y="931" />
+              </Array>
+              <mxPoint x="770" y="907" as="sourcePoint" />
+              <mxPoint x="770" y="931" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="37" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="确认无引用及在途访问&#10;从后续 snapshot 排除该段" vertex="1">
+          <mxGeometry height="18" width="200" x="670" y="881" as="geometry" />
+        </mxCell>
+        <mxCell id="38" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="8" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="897" as="geometry" />
+        </mxCell>
+        <UserObject label="必要时注销注册，再释放 HBM" mermaidId="e:H-&gt;R#0" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="必要时注销注册，再释放 HBM" id="39">
+          <mxCell edge="1" parent="1" source="5" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="6">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="904" y="983" />
+              </Array>
+              <mxPoint x="770" y="983" as="sourcePoint" />
+              <mxPoint x="1038" y="983" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="40" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="9" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="973" as="geometry" />
+        </mxCell>
+        <UserObject label="释放完成" mermaidId="e:R-&gt;H#0" mermaidBaseStyle="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="释放完成" id="41">
+          <mxCell edge="1" parent="1" source="6" style="dashed=1;fixDash=1;dashPattern=3 3;endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="904" y="1029" />
+              </Array>
+              <mxPoint x="1038" y="1029" as="sourcePoint" />
+              <mxPoint x="770" y="1029" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="42" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="10" vertex="1">
+          <mxGeometry height="20" width="20" x="1028" y="1019" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#4" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="43">
+          <mxCell edge="1" parent="1" source="5" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="805" y="1075" />
+                <mxPoint x="809" y="1087" />
+                <mxPoint x="805" y="1099" />
+              </Array>
+              <mxPoint x="770" y="1075" as="sourcePoint" />
+              <mxPoint x="770" y="1099" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="44" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="committed_bytes 下降" vertex="1">
+          <mxGeometry height="18" width="200" x="670" y="1049" as="geometry" />
+        </mxCell>
+        <mxCell id="45" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="11" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="1065" as="geometry" />
+        </mxCell>
+        <UserObject label="" mermaidId="e:H-&gt;H#5" mermaidBaseStyle="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="" id="46">
+          <mxCell edge="1" parent="1" source="5" style="edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=1;endArrow=block;endSize=9;verticalAlign=bottom;align=center;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
+            <mxGeometry relative="1" as="geometry">
+              <Array as="points">
+                <mxPoint x="805" y="1196" />
+                <mxPoint x="809" y="1208" />
+                <mxPoint x="805" y="1220" />
+              </Array>
+              <mxPoint x="770" y="1196" as="sourcePoint" />
+              <mxPoint x="770" y="1220" as="targetPoint" />
+            </mxGeometry>
+          </mxCell>
+        </UserObject>
+        <mxCell id="47" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="保留空 segment，供下一次热命中" vertex="1">
+          <mxGeometry height="18" width="200" x="670" y="1170" as="geometry" />
+        </mxCell>
+        <mxCell id="48" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="12" vertex="1">
+          <mxGeometry height="20" width="20" x="760" y="1186" as="geometry" />
+        </mxCell>
+        <UserObject label="ElasticMemory · 释放与真实 HBM 归还（设计提案）" mermaidId="n:note0" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="ElasticMemory · 释放与真实 HBM 归还（设计提案）" id="49">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="1013" x="50" y="75" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="不能回收对应区间；trim 也不强制释放" mermaidId="n:note1" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="不能回收对应区间；trim 也不强制释放" id="50">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="508" x="287" y="259" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="等生产者、消费者与远端访问全部结束" mermaidId="n:note2" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="等生产者、消费者与远端访问全部结束" id="51">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="37" width="308" x="487" y="473" as="geometry" />
+          </mxCell>
+        </UserObject>
+        <UserObject label="collect 非阻塞；trim(wait=True) 等已退休对象的访问结束&#10;池内 free 不等于已归还 HBM，活跃别名仍可能保留整段内存" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="collect 非阻塞；trim(wait=True) 等已退休对象的访问结束&#10;池内 free 不等于已归还 HBM，活跃别名仍可能保留整段内存" id="52">
+          <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
+            <mxGeometry height="54" width="1013" x="50" y="1296" as="geometry" />
+          </mxCell>
+        </UserObject>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

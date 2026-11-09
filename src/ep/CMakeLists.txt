@@ -1,3 +1,5 @@
+# 构建 EP Host 库及独立 AICore binary，并将 binary 安装到 Host 库相对路径。
+# 可选 compact Dispatch 链接 ElasticMemory；各 kernel target 分别设置架构和诊断选项。
 include(GNUInstallDirs)
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXREpCoreConfig.cmake)
 set(TILEXR_EP_SERVER_DEDUP_ENABLE "auto" CACHE STRING "Server dedup policy (auto, 0 or 1)")
@@ -18,6 +20,11 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/cce")
 enable_language(CCE)
 
 option(TILEXR_EP_ENABLE_PROFILING "Enable generic fixed-slot EP captures" OFF)
+set(TILEXR_EP_COMPACT_PROFILING "OFF" CACHE STRING "Compact SDK diagnosis: OFF, TOTAL, or STAGES")
+set_property(CACHE TILEXR_EP_COMPACT_PROFILING PROPERTY STRINGS OFF TOTAL STAGES)
+if(NOT TILEXR_EP_COMPACT_PROFILING MATCHES "^(OFF|TOTAL|STAGES)$")
+    message(FATAL_ERROR "TILEXR_EP_COMPACT_PROFILING must be OFF, TOTAL, or STAGES")
+endif()
 
 option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
     "Enable per-AIV profiling in the EP Combine Memory kernel" OFF)
@@ -304,3 +311,32 @@ install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_ep.h
 
 install(FILES profiling/server_dedup.mapping.json profiling/server_dedup_combine.mapping.json
     DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr/profiling)
+
+if(TILEXR_BUILD_ELASTIC_MEMORY)
+    set(TILEXR_EP_COMPACT_OP "${CMAKE_CURRENT_BINARY_DIR}/tilexr_ep_dispatch_compact_kernel.o")
+    tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_compact_kernel
+        "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_compact_kernel.cpp"
+        "${TILEXR_EP_COMPACT_OP}"
+        DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h"
+            "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_compact_layout.h"
+            "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_elastic_memory_device.h"
+            "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_elastic_memory_profile.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr_elastic_memory_abi.h"
+            "${CMAKE_SOURCE_DIR}/src/elastic_memory/allocator.h")
+    if(NOT TILEXR_EP_COMPACT_PROFILING STREQUAL "OFF")
+        target_compile_definitions(tilexr_ep_dispatch_compact_kernel_tmp PRIVATE TILEXR_ENABLE_PROFILING=1)
+        target_compile_definitions(tilexr-ep PRIVATE TILEXR_ELASTIC_PROFILE_ENABLED=1)
+        if(TILEXR_EP_COMPACT_PROFILING STREQUAL "STAGES")
+            target_compile_definitions(tilexr_ep_dispatch_compact_kernel_tmp PRIVATE TILEXR_ELASTIC_PROFILE_DETAIL=1)
+        endif()
+    endif()
+    target_include_directories(tilexr_ep_dispatch_compact_kernel_tmp PRIVATE ${CMAKE_SOURCE_DIR}/src/elastic_memory)
+    target_compile_options(tilexr_ep_dispatch_compact_kernel_tmp PRIVATE
+        "SHELL:-mllvm -cce-aicore-stack-size=0x8000"
+        "SHELL:-mllvm -cce-aicore-function-stack-size=0x8000")
+    target_sources(tilexr-ep PRIVATE host/tilexr_ep_dispatch_compact.cpp)
+    target_link_libraries(tilexr-ep PRIVATE tilexr-elastic-memory)
+    tilexr_attach_kernel_artifacts(tilexr-ep FILES "${TILEXR_EP_COMPACT_OP}"
+        TARGETS tilexr_ep_dispatch_compact_kernel)
+    install(FILES ${CMAKE_SOURCE_DIR}/src/include/tilexr_elastic_ep.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+endif()

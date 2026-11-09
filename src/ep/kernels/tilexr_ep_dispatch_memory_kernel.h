@@ -1,3 +1,10 @@
+/*
+ * 功能：执行 Memory Dispatch 的 token 发送、接收计数和 staging 数据到 output 的复制。
+ * 调用关系：普通及 compact AICore 入口实例化 MoeDispatchMemory。compact 模式由最终
+ * 计数核申请实际大小的 bundle，发布本地地址并汇聚 rank 错误；output 核读取地址后复制。
+ * 资源与生命周期：入口提供 TPipe 和 communicator window；普通模式由调用者提供 output，
+ * compact 模式的 output 由 ElasticMemory Pool 持有。本类使用并 reset TPipe 中的 scratch。
+ */
 #ifndef TILEXR_EP_KERNELS_TILEXR_EP_DISPATCH_MEMORY_KERNEL_H
 #define TILEXR_EP_KERNELS_TILEXR_EP_DISPATCH_MEMORY_KERNEL_H
 
@@ -10,10 +17,17 @@
 #include "kernel_operator.h"
 #include "tilexr_ep_mxfp8_quant.h"
 #include "tilexr_types.h"
+#ifdef TILEXR_EP_COMPACT_ENABLED
+#include "ep_compact_layout.h"
+#include "device/tilexr_elastic_memory_device.h"
+#endif
 
 #define FLOAT_OVERFLOW_MODE_CTRL 60
 
 namespace Mc2Kernel {
+#ifdef TILEXR_EP_COMPACT_ENABLED
+namespace ElasticProfile = TileXR::Elastic::Profile;
+#endif
 constexpr uint64_t CUMSUM_CAL_OFFSET = TileXREp::kEpMemoryDispatchCumsumOffset;
 constexpr uint64_t CUMSUM_FLAG_OFFSET = TileXREp::kEpMemoryDispatchCumsumFlagOffset;
 constexpr uint64_t SPLIT_BLOCK_SIZE = 512UL;
@@ -115,6 +129,10 @@ public:
         int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
         int64_t expandXOutDtype, int64_t magic, TPipe *pipe);
     __aicore__ inline void Run();
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    __aicore__ inline void SetCompactView(TileXR::Elastic::DeviceView view) { compactView_ = view; }
+    __aicore__ inline void SetCompactProfiler(ElasticProfile::Recorder* profiler) { compactProfiler_ = profiler; }
+#endif
 
 private:
     __aicore__ inline void ExpIdsCopyAndMaskCal();
@@ -185,6 +203,14 @@ private:
         return ctx_.GetWindStateAddrByRankId(rankId);
     }
 
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    __aicore__ inline bool PrepareCompactOutput();
+    __aicore__ inline bool WaitCompactOutput();
+    TileXR::Elastic::DeviceView compactView_ {};
+    ElasticProfile::Recorder* compactProfiler_ = nullptr;
+    uint64_t compactMagic_ = 0;
+    int32_t compactRows_ = 0;
+#endif
     TPipe *tpipe_{nullptr};
     GlobalTensor<XType> xGMTensor_;
     GlobalTensor<int32_t> expertIdsGMTensor_;
@@ -580,6 +606,9 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     originalOverflowMode_ = AscendC::GetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>();
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
     tpipe_ = pipe;
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    compactMagic_ = static_cast<uint64_t>(magic);
+#endif
     (void)quantMode;
     (void)expandXOutDtype;
     tpipe_->InitBuffer(calBeginBuf_, UB_ALIGN);
@@ -1176,8 +1205,11 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::BufferIni
     uint64_t gatherMaskOutSize = (recStatusNumPerCoreSpace > recvWinBlockNumSpace) ? recStatusNumPerCoreSpace : recvWinBlockNumSpace;
     uint64_t sumContinueAlignSize = Ceil((aivNum_ * sizeof(float)), UB_ALIGN) * UB_ALIGN;
     tpipe_->InitBuffer(gatherMaskOutBuf_, gatherMaskOutSize);
-    tpipe_->InitBuffer(sumCoreBuf_, aivNum_ * UB_ALIGN);
-    tpipe_->InitBuffer(sumLocalBuf_, aivNum_ * UB_ALIGN);
+    // Duplicate emits complete 256B vector repeats, including for blockDim 2/4
+    // or a non-multiple of eight. Reserve its full span, not just the copied rows.
+    const uint32_t coreFlagBytes = Ceil(aivNum_, 8U) * SIZE_ALIGN_256;
+    tpipe_->InitBuffer(sumCoreBuf_, coreFlagBytes);
+    tpipe_->InitBuffer(sumLocalBuf_, coreFlagBytes);
     tpipe_->InitBuffer(sumContinueBuf_, sumContinueAlignSize);
     tpipe_->InitBuffer(scalarBuf_, UB_ALIGN * 3);
     uint32_t tokenNumBufSize = Ceil(moeExpertNumPerRank_ * sizeof(int64_t), UB_ALIGN) * UB_ALIGN;
@@ -1349,6 +1381,9 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalRecvAn
         curCnt += count;
         outCountLocal.SetValue(i, curCnt);
     }
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    if (endStatusIndex_ == rscvStatusNum_) compactRows_ = static_cast<int32_t>(curCnt);
+#endif
     SyncFunc<AscendC::HardEvent::S_V>();
     GM_ADDR wAddr = (__gm__ uint8_t*)(recvCntWorkspaceGM_);
     GlobalTensor<int32_t> sendCountsGlobal, workspaceGlobal;
@@ -1357,11 +1392,17 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalRecvAn
     DataCopyExtParams dataCopyOutParams{1U, static_cast<uint32_t>(recStatusNumPerCore_ * sizeof(int32_t)), 0U, 0U, 0U};
     DataCopyPad(sendCountsGlobal[startStatusIndex_], outCountLocal, dataCopyOutParams);
 
-    for (uint32_t index = 0; index < aivNum_; index++) {
+    uint32_t outputCores = aivNum_;
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    // SplitToCore(..., true) assigns output only to this leading prefix. Do not
+    // produce count rows/flags for lanes that will never consume them.
+    outputCores = rscvStatusNum_ < aivNum_ ? rscvStatusNum_ : aivNum_;
+#endif
+    for (uint32_t index = 0; index < outputCores; index++) {
         DataCopyPad(workspaceGlobal[index * rscvStatusNum_ + startStatusIndex_], outCountLocal, dataCopyOutParams);
     }
-    uint8_t repeatTimes = Ceil(aivNum_, 8);
-    DataCopyParams sumIntriParams{static_cast<uint16_t>(aivNum_), 1, 0, static_cast<uint16_t>(aivUsedCumSum_ - 1)};
+    uint8_t repeatTimes = Ceil(outputCores, 8);
+    DataCopyParams sumIntriParams{static_cast<uint16_t>(outputCores), 1, 0, static_cast<uint16_t>(aivUsedCumSum_ - 1)};
     LocalTensor<int32_t> syncOnCoreTensor = sumCoreBuf_.Get<int32_t>();
     LocalTensor<float> syncOnCoreFP32Tensor = sumCoreBuf_.Get<float>();
 
@@ -1724,6 +1765,14 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWindowCopy()
 {
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    ElasticProfile::Mark<ElasticProfile::OutputSetupBegin>(compactProfiler_);
+    if (aivId_ >= rscvStatusNum_) {
+        // Count producers omit these lanes, so there is no round flag to consume.
+        ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
+        return;
+    }
+#endif
     tpipe_->Reset();
     TBuf<> cumSumBuf;
     TBuf<> statusWaitBuf;
@@ -1738,8 +1787,17 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWind
     statusCleanFp32Tensor_ = statusCleanBuf.Get<float>();
     sendCntTensor_ = cumSumBuf.Get<int32_t>();
     SplitToCore(rscvStatusNum_, aivNum_, startId_, endId_, sendNum_, true);
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    ElasticProfile::Mark<ElasticProfile::CountWaitBegin>(compactProfiler_);
+#endif
     WaitCumSumFlag();
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    ElasticProfile::Mark<ElasticProfile::CountWaitEnd>(compactProfiler_);
+#endif
     if (sendNum_ == 0U) {
+#ifdef TILEXR_EP_COMPACT_ENABLED
+        ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
+#endif
         RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
         RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
         return;
@@ -1767,13 +1825,29 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWind
     profileValidExperts_ = validNum;
 #endif
     if (validNum == 0U) {
+#ifdef TILEXR_EP_COMPACT_ENABLED
+        ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
+#endif
         RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
         RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
         return;
     }
 
     SyncFunc<AscendC::HardEvent::V_S>();
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    // Prefix loading, expert-map construction and count output do not depend on
+    // the allocation. Finish them while the owner allocates; wait only before copy.
+    if (aivId_ != aivNum_ - 1U && !WaitCompactOutput()) {
+        ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
+        return;
+    }
+    ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
+    ElasticProfile::Mark<ElasticProfile::LocalOutputCopyBegin>(compactProfiler_);
+#endif
     WaitAndFormatOutput(tBuf, validNum);
+#ifdef TILEXR_EP_COMPACT_ENABLED
+    ElasticProfile::Mark<ElasticProfile::LocalOutputCopyEnd>(compactProfiler_);
+#endif
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1884,10 +1958,134 @@ MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SyncBeforeSendRound(uint32_t cur
     }
 }
 
+#ifdef TILEXR_EP_COMPACT_ENABLED
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline bool MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::PrepareCompactOutput()
+{
+    // Only the last count core enters here, after its own send/count work. It
+    // already owns the final prefix, so it can allocate without
+    // waiting for unrelated senders. LocalWindowCopy retains the original per-core
+    // count and per-payload waits; no producer is cancelled on allocation failure.
+    uint64_t localError = TileXR::Elastic::Success;
+    uint64_t hidden = 0;
+    uint64_t rows = 0;
+    const int32_t signedRows = compactRows_;
+    rows = signedRows > 0 ? static_cast<uint64_t>(signedRows) : 0;
+    uint64_t offset = 0;
+    uint64_t bytes = 0;
+    const uint64_t limit = ~uint64_t(0);
+    if (signedRows < 0 || uint64_t(axisH_) > limit / 2 ||
+        (rows != 0 && uint64_t(axisH_) * 2 > (limit - 63) / rows)) {
+        localError = TileXR::Elastic::Invalid;
+    } else {
+        offset = (rows * uint64_t(axisH_) * 2 + 63) & ~uint64_t(63);
+        if (rows > (limit - offset) / 12) localError = TileXR::Elastic::Invalid;
+        else bytes = offset + rows * 12;
+    }
+    // Run completed this core's count/workspace/flag MTE3 before this Reset.
+    tpipe_->Reset();
+    if (localError == TileXR::Elastic::Success) {
+        localError = TileXR::Elastic::AllocateBundle<128>(
+            compactView_, bytes, 64, rows, &hidden, compactProfiler_);
+    }
+    ElasticProfile::Mark<ElasticProfile::RankGateBegin>(compactProfiler_);
+    tpipe_->Reset();
+    TBuf<> gateBuffer;
+    tpipe_->InitBuffer(gateBuffer, 64);
+    LocalTensor<uint64_t> words = gateBuffer.Get<uint64_t>();
+    for (uint32_t i = 0; i < 8; ++i) words.SetValue(i, 0);
+    words.SetValue(0, localError);
+    words.SetValue(1, hidden);
+    words.SetValue(2, rows);
+    words.SetValue(4, compactMagic_);
+    GlobalTensor<uint64_t> localGate;
+    localGate.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(
+        GetWindStateAddrByRankId(epRankId_) + TileXREp::kCompactGateOffset));
+    SyncFunc<HardEvent::S_MTE3>();
+    DataCopy(localGate, words, 4);
+    SyncFunc<HardEvent::MTE3_S>();
+    DataCopy(localGate[4], words[4], 4);
+    SyncFunc<HardEvent::MTE3_S>();
+    // This descriptor remains immutable for the round, including on peer
+    // failure. Other cores can copy local output while this owner checks peers.
+    uint64_t finalError = localError;
+    for (uint32_t peer = 0; peer < epWorldSize_; ++peer) {
+        if (peer == epRankId_) continue;
+        GlobalTensor<uint64_t> peerGate;
+        peerGate.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(
+            GetWindStateAddrByRankId(peer) + TileXREp::kCompactGateOffset));
+        do {
+            DataCopy(words[4], peerGate[4], 4);
+            SyncFunc<HardEvent::MTE2_S>();
+        } while (words.GetValue(4) != compactMagic_);
+        DataCopy(words, peerGate, 4);
+        SyncFunc<HardEvent::MTE2_S>();
+        if (finalError == TileXR::Elastic::Success && words.GetValue(0) != TileXR::Elastic::Success)
+            finalError = words.GetValue(0);
+    }
+    if (finalError != TileXR::Elastic::Success) {
+        // Only the Host final status changes. It cannot export a Tensor until
+        // every core completes, so partially copied output is never successful.
+        GlobalTensor<uint64_t> header;
+        header.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(compactView_.mailbox +
+            offsetof(TileXR::Elastic::Mailbox, requestId)));
+        DataCacheCleanAndInvalid<uint64_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(header);
+        GlobalTensor<uint64_t> output;
+        output.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(compactView_.mailbox +
+            offsetof(TileXR::Elastic::Mailbox, output)));
+        DataCopy(words, output, 8);
+        SyncFunc<HardEvent::MTE2_S>();
+        uint64_t failure[8];
+        for (uint32_t i = 0; i < 8; ++i) failure[i] = words.GetValue(i);
+        failure[1] = finalError;
+        TileXR::Elastic::DeviceDetail::Publish(compactView_.mailbox +
+            offsetof(TileXR::Elastic::Mailbox, output), failure, header.GetValue(0), words);
+    }
+    ElasticProfile::Mark<ElasticProfile::RankGateEnd>(compactProfiler_);
+    if (localError != TileXR::Elastic::Success) return false;
+    expandXOutGM_ = reinterpret_cast<GM_ADDR>(hidden);
+    assistInfoForCombineOutGM_ = reinterpret_cast<GM_ADDR>(hidden +
+        ((rows * uint64_t(axisH_) * 2 + 63) & ~uint64_t(63)));
+    return true;
+}
+
+template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
+__aicore__ inline bool MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitCompactOutput()
+{
+    // Called after count flags are consumed, and only by lanes assigned output.
+    ElasticProfile::Mark<ElasticProfile::LocalReadyWaitBegin>(compactProfiler_);
+    auto words = statusFp32Tensor_.ReinterpretCast<uint64_t>();
+    GlobalTensor<uint64_t> localGate;
+    localGate.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(
+        GetWindStateAddrByRankId(epRankId_) + TileXREp::kCompactGateOffset));
+    do {
+        DataCopy(words, localGate[4], 4);
+        SyncFunc<HardEvent::MTE2_S>();
+    } while (words.GetValue(0) != compactMagic_);
+    // Observe the release flag before fetching its immutable body; a single
+    // 64B DMA is not assumed to take an atomic flag+body snapshot.
+    DataCopy(words, localGate, 4);
+    SyncFunc<HardEvent::MTE2_S>();
+    const uint64_t localError = words.GetValue(0);
+    const uint64_t hidden = words.GetValue(1);
+    const uint64_t rows = words.GetValue(2);
+    ElasticProfile::Mark<ElasticProfile::LocalReadyWaitEnd>(compactProfiler_);
+    if (localError != TileXR::Elastic::Success) return false;
+    expandXOutGM_ = reinterpret_cast<GM_ADDR>(hidden);
+    assistInfoForCombineOutGM_ = reinterpret_cast<GM_ADDR>(hidden +
+        ((rows * uint64_t(axisH_) * 2 + 63) & ~uint64_t(63)));
+    return true;
+}
+
+#endif
+
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Run()
 {
     if ASCEND_IS_AIV {
+#ifdef TILEXR_EP_COMPACT_ENABLED
+        ElasticProfile::Mark<ElasticProfile::SendAndCountBegin>(compactProfiler_);
+#endif
         if (aivId_ < aivUsedAllToAll_) {
             AllToAllDispatch();
         } else {
@@ -1895,7 +2093,15 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Run()
         }
 
         PipeBarrier<PIPE_ALL>();
+#ifdef TILEXR_EP_COMPACT_ENABLED
+        ElasticProfile::Mark<ElasticProfile::SendAndCountEnd>(compactProfiler_);
+        if (aivId_ != aivNum_ - 1U || PrepareCompactOutput()) {
+            // Only output lanes receive count flags and wait for their local allocation.
+            LocalWindowCopy();
+        }
+#else
         LocalWindowCopy();
+#endif
 #if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
         SyncFunc<AscendC::HardEvent::MTE3_S>();
 #endif

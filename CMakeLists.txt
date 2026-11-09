@@ -8,8 +8,8 @@
 # See LICENSE in the root of the software repository for the full text of the License.
 # -----------------------------------------------------------------------------------------------------------
 
-# Configure the core runtime and opt-in libraries, tests and install components.
-# TileLang/Relay consume prebuilt device artifacts; this build does not run TVM.
+# 配置 CANN include/library 路径，构建核心 runtime，并按选项启用组件和测试。
+# 各组件负责自己的 Host library、独立 AICore binary 及安装规则。
 cmake_minimum_required(VERSION 3.16)
 
 project(tilexr LANGUAGES CXX)
@@ -17,6 +17,7 @@ set(CMAKE_CXX_STANDARD 14)
 option(TILEXR_BUILD_COLLECTIVES "Build optional TileXR collectives library" OFF)
 option(TILEXR_BUILD_DIAGNOSTICS "Build common TileXR clock and straggler diagnostics" OFF)
 option(TILEXR_BUILD_RELAY "Build optional generic TileRelay runtime" OFF)
+option(TILEXR_BUILD_ELASTIC_MEMORY "Build the Device-driven elastic output pool" OFF)
 option(TILEXR_BUILD_EP "Build TileXR EP communication library" OFF)
 option(TILEXR_BUILD_UNITEST "Build and install the TileXR operator correctness tool" ON)
 option(TILEXR_BUILD_MOONEP_PLANNER "Build A5-only MoonEP Planner library" OFF)
@@ -71,6 +72,9 @@ include_directories(
         ${CMAKE_SOURCE_DIR}/3rdparty/spdlog/include
         ${CMAKE_SOURCE_DIR}/3rdparty/
 )
+if(TILEXR_BUILD_ELASTIC_MEMORY)
+    add_subdirectory(src/elastic_memory)
+endif()
 add_subdirectory(src/profiling)
 add_subdirectory(src/comm)
 if(TILEXR_BUILD_DIAGNOSTICS OR TILEXR_BUILD_COLLECTIVES OR TILEXR_BUILD_EP OR TILEXR_BUILD_MOONEP OR TILEXR_BUILD_UNITEST)
@@ -125,4 +129,8 @@ if(TILEXR_BUILD_CHECKER)
 endif()
 if(TILEXR_BUILD_UNITEST)
     add_subdirectory(tools/unitest)
+endif()
+
+if(TILEXR_BUILD_ELASTIC_MEMORY AND (BUILD_TESTING OR TILEXR_BUILD_TESTS))
+    add_subdirectory(tests/elastic_memory)
 endif()

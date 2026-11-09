@@ -1,3 +1,8 @@
+/*
+ * 功能：为 Memory Dispatch/Combine 校验 shape、dtype 和 blockDim，计算 peer window、
+ * workspace 与 UB 容量，拒绝算术溢出或超出限制的配置。
+ * 调用关系：Host launcher 使用这些结果准备 kernel 参数；本文件只计算布局，不分配 buffer。
+ */
 #include "ep_memory_layout.h"
 
 #include <algorithm>
@@ -320,7 +325,8 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
         !AddInt64(countUbBytes, recvStatusScalarBytes, &countUbBytes) ||
         !MulInt64(recvStatusPerCore, kEpMemoryWindowAlignmentBytes, &term) ||
         !AddInt64(countUbBytes, term, &countUbBytes) ||
-        !MulInt64(2 * static_cast<int64_t>(blockDim), kEpMemoryWindowAlignmentBytes, &term) ||
+        !MulInt64(blockDim, kEpMemoryWindowAlignmentBytes, &term) ||
+        !AlignUpInt64(term, 256, &term) || !MulInt64(2, term, &term) ||
         !AddInt64(countUbBytes, term, &countUbBytes) ||
         !AddInt64(countUbBytes, sumContinueBytes, &countUbBytes) ||
         !AddInt64(countUbBytes, 3 * kEpMemoryWindowAlignmentBytes, &countUbBytes) ||

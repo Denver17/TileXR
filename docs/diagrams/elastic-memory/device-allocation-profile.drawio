@@ -1,0 +1,153 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram id="device-allocation-profile" name="Device 池化分配 · 当前实测">
+    <mxGraphModel adaptiveColors="auto" page="1" pageScale="1" pageWidth="1720" pageHeight="1770" background="#FFFFFF" grid="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="&lt;b&gt;ElasticMemory · Device 池化分配流程与耗时&lt;/b&gt;" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=36;fontColor=#18324B;align=left;">
+          <mxGeometry x="45" y="25" width="1630" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="CANN 9.2 / Ascend950DT · BF16 / bs16 / h128 / topK2 · 2 ranks × 64 AIV&lt;br&gt;流程阶段标注为 rank 0 / rank 1 中位数 ≈µs；SDK STAGES 每 rank 20 次暖机 + 20 次采样。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=21;fontColor=#60758A;align=left;">
+          <mxGeometry x="45" y="96" width="1630" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="entry" value="&lt;b&gt;最终计数核持有实际 rows&lt;/b&gt;&lt;br&gt;Device 算出 bundle bytes；本组 owner = AIV 63" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#EDF5FF;strokeColor=#7FA9D6;spacing=10;">
+          <mxGeometry x="205" y="205" width="480" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="hot" value="&lt;b&gt;AllocateBundle&amp;lt;128&amp;gt; · owner AIV 63&lt;/b&gt;&lt;br&gt;总区间 1.451 / 1.431 ≈µs；包含以下子阶段" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#E8F7F2;strokeColor=#5FA68E;spacing=10;swimlane;startSize=75;horizontal=1;rounded=0;verticalAlign=top;spacingTop=9;fontSize=21;fontSize=20;">
+          <mxGeometry x="45" y="315" width="800" height="735" as="geometry" />
+        </mxCell>
+        <mxCell id="load" value="&lt;b&gt;① 读取紧凑状态 · 0.381 / 0.356&lt;/b&gt;&lt;br&gt;128B MTE2：64B header + 64B RingState" vertex="1" parent="hot" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#E8F7F2;strokeColor=#5FA68E;spacing=10;">
+          <mxGeometry x="160" y="100" width="480" height="92" as="geometry" />
+        </mxCell>
+        <mxCell id="calc" value="&lt;b&gt;② TryAllocateRing · 0.315 / 0.321&lt;/b&gt;&lt;br&gt;连续前缀水位、对齐、容量与绕回 padding" vertex="1" parent="hot" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#E8F7F2;strokeColor=#5FA68E;spacing=10;">
+          <mxGeometry x="160" y="225" width="480" height="92" as="geometry" />
+        </mxCell>
+        <mxCell id="fit" value="当前段可容纳&lt;br&gt;完整连续 bundle？" vertex="1" parent="hot" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#E8F7F2;strokeColor=#5FA68E;spacing=10;rhombus;rounded=0;">
+          <mxGeometry x="250" y="350" width="300" height="94" as="geometry" />
+        </mxCell>
+        <mxCell id="commit" value="&lt;b&gt;③ 提交 64B RingState · 0.177 / 0.177&lt;/b&gt;&lt;br&gt;成功且非空；UB → mailbox committed&lt;br&gt;等待 MTE3 完成" vertex="1" parent="hot" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#E8F7F2;strokeColor=#5FA68E;spacing=10;">
+          <mxGeometry x="160" y="480" width="480" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="publish" value="&lt;b&gt;④ 有序发布 64B Output · 0.334 / 0.334&lt;/b&gt;&lt;br&gt;payload/sequence=0 → 发布本轮 sequence" vertex="1" parent="hot" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#E8F7F2;strokeColor=#5FA68E;spacing=10;">
+          <mxGeometry x="160" y="600" width="480" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="start" value="" edge="1" parent="1" source="entry" target="load" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="readcalc" value="" edge="1" parent="hot" source="load" target="calc" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="calcfit" value="" edge="1" parent="hot" source="calc" target="fit" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fits" value="是" edge="1" parent="hot" source="fit" target="commit" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="committed" value="" edge="1" parent="hot" source="commit" target="publish" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="estimate" value="&lt;b&gt;完整分配热路径 · 160 个 owner 样本&lt;/b&gt;&lt;br&gt;两 shape × 两 rank；普通命中 / 非空绕回&lt;br&gt;&lt;b&gt;约 1.301–1.671µs；本组无超过 2.5µs&lt;/b&gt;&lt;br&gt;20 次暖机 + 20 次采样 / rank / 组；无增长&lt;br&gt;&lt;br&gt;&lt;b&gt;完整 Dispatch · OFF 跨 rank 中位数&lt;/b&gt;&lt;br&gt;bs16/h128：pool 13.905 / 最大预分配 19.503µs&lt;br&gt;bs256/h4096：pool 92.332 / 最大预分配 93.645µs&lt;br&gt;每 rank 20 次暖机 + 100 次采样；growth=1→1" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#F6F8FB;strokeColor=#B5C2D0;spacing=10;align=left;spacing=20;fontSize=19;">
+          <mxGeometry x="930" y="205" width="730" height="270" as="geometry" />
+        </mxCell>
+        <mxCell id="slowtitle" value="&lt;b&gt;容量慢路径 · 虚线表示条件分支&lt;/b&gt;&lt;br&gt;本组热采样未测段切换或增长时延；不表示 0µs。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=21;fontColor=#9A6C22;align=left;">
+          <mxGeometry x="965" y="490" width="690" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="switch" value="&lt;b&gt;Capacity：读取其他 segment 并尝试&lt;/b&gt;&lt;br&gt;有空间：采用该 ring 的连续区间&lt;br&gt;仍不足：向 Host 发布一次扩容请求" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;">
+          <mxGeometry x="1030" y="625" width="550" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="notfit" value="否" edge="1" parent="1" source="fit" target="switch" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="reuse" value="其他段成功：提交选中 ring" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;fontSize=18;">
+          <mxGeometry x="1155" y="565" width="300" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="reuse1" value="" edge="1" parent="1" source="switch" target="reuse" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="reuse2" value="" edge="1" parent="1" source="reuse" target="commit" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;exitX=0;exitY=0.5;entryX=1;entryY=0.5;">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="880" y="582.5" />
+              <mxPoint x="880" y="837.5" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="wait" value="&lt;b&gt;原 kernel 驻留等待回复&lt;/b&gt;&lt;br&gt;volatile + DCCI 读取本轮 sequence&lt;br&gt;FIFO 队首不变；不重启、不重放" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;">
+          <mxGeometry x="1030" y="765" width="550" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="needgrow" value="无可用段" edge="1" parent="1" source="switch" target="wait" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="hostgrow" value="&lt;b&gt;Host：真实申请独立 HBM segment&lt;/b&gt;&lt;br&gt;检查预算、申请 HBM、回复地址/大小或错误&lt;br&gt;新空间先满足当前请求；不搬迁活跃 output" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;">
+          <mxGeometry x="1030" y="900" width="550" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="hostreq" value="" edge="1" parent="1" source="wait" target="hostgrow" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="reply" value="Host 扩容成功？" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;rhombus;rounded=0;">
+          <mxGeometry x="1155" y="1030" width="300" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="response" value="" edge="1" parent="1" source="hostgrow" target="reply" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="install" value="&lt;b&gt;owner 在新段申请一次&lt;/b&gt;&lt;br&gt;取得本次区间并提交&lt;br&gt;原 kernel 从分配点继续" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;fontSize=20;">
+          <mxGeometry x="875" y="1158" width="310" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="okgrow" value="是" edge="1" parent="1" source="reply" target="install" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="installed" value="" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;ellipse;">
+          <mxGeometry x="800" y="1198" width="20" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="installedtop" value="" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FFF3DF;strokeColor=#D3A24D;spacing=10;ellipse;">
+          <mxGeometry x="800" y="950" width="20" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="newsegment" value="" edge="1" parent="1" source="install" target="installed" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="installedlink" value="" edge="1" parent="1" source="installed" target="installedtop" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="newpublish" value="" edge="1" parent="1" source="installedtop" target="publish" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="fail" value="&lt;b&gt;发布错误，整调用失败&lt;/b&gt;&lt;br&gt;无有效结果；不重试、不回滚&lt;br&gt;本地成功的核可能已写 output" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#FDEDEC;strokeColor=#CE7973;spacing=10;fontSize=20;">
+          <mxGeometry x="1270" y="1158" width="390" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="failgrow" value="否" edge="1" parent="1" source="reply" target="fail" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="continue" value="&lt;b&gt;本地地址发布 / peer 错误汇聚&lt;/b&gt;&lt;br&gt;rank gate 2.083 / 2.097 ≈µs，与复制可重叠&lt;br&gt;Host 等完整完成后才返回 Tensor" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#EDF5FF;strokeColor=#7FA9D6;spacing=10;fontSize=20;fontSize=19;">
+          <mxGeometry x="205" y="1170" width="480" height="95" as="geometry" />
+        </mxCell>
+        <mxCell id="ready" value="" edge="1" parent="1" source="publish" target="continue" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="kernelbound" value="&lt;b&gt;完整算子边界：&lt;/b&gt;只有实际 output 核等待本地地址；prefix / expert-map 准备与分配重叠。rank gate 与复制可重叠。&lt;br&gt;大 shape rank1：pool P95 101.574µs，对照 89.976µs；中位数改善不等于每个样本均改善。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=20;fontColor=#566B80;align=left;">
+          <mxGeometry x="70" y="1290" width="1580" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="retiretitle" value="&lt;b&gt;安全回收 · 位于调用之间，热路径只应用连续前缀水位&lt;/b&gt;" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=25;fontColor=#18324B;align=left;">
+          <mxGeometry x="45" y="1370" width="1630" height="45" as="geometry" />
+        </mxCell>
+        <mxCell id="lease" value="&lt;b&gt;Host 确认 lease 已安全退休&lt;/b&gt;&lt;br&gt;Storage / view 引用消失&lt;br&gt;生产者、通信和登记 stream 使用结束" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#F6F8FB;strokeColor=#B5C2D0;spacing=10;fontSize=20;">
+          <mxGeometry x="45" y="1440" width="465" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="prefix" value="&lt;b&gt;Host 整理连续退休前缀&lt;/b&gt;&lt;br&gt;A 活跃、B/C 已退休：不能越过 A&lt;br&gt;调用间准备 snapshot，不并发改写游标" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#F6F8FB;strokeColor=#B5C2D0;spacing=10;fontSize=20;">
+          <mxGeometry x="630" y="1440" width="465" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="apply" value="&lt;b&gt;下一次 owner 使用已发布水位&lt;/b&gt;&lt;br&gt;未退休引用 / padding 仍占容量&lt;br&gt;空段可在安全边界归还 Runtime" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#F6F8FB;strokeColor=#B5C2D0;spacing=10;fontSize=20;">
+          <mxGeometry x="1210" y="1440" width="465" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="retire1" value="" edge="1" parent="1" source="lease" target="prefix" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="retire2" value="" edge="1" parent="1" source="prefix" target="apply" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="footer" value="&lt;b&gt;证据：&lt;/b&gt;kernel-increment-20261109 / stages-verified-* 与 delivery-off-*；实测源码 d847c229，CANN 9.2。&lt;br&gt;SDK 1000.8934 ticks/µs 为经验拟合；阶段为嵌套区间，不能相加，不能与 OFF 批次直接相减；无跨 lane 时间戳相减。&lt;br&gt;保留短阶段精度与插桩扰动边界；metadata-only materialize 尚未实现。分布、原始 records、binary 见验证文档。&lt;br&gt;图示有效请求容量分支；非 Capacity 错误直接发布失败，零尺寸跳过 ring 提交。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=19;fontColor=#60758A;align=left;">
+          <mxGeometry x="45" y="1600" width="1630" height="110" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

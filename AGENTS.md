@@ -63,10 +63,22 @@ setup; Paramiko is used only by that setup mode.
 
 ## PR File Headers
 
-- Before submitting a PR, ensure every first-party code file added or modified by that PR has a file-level comment near the top, after existing license notices (and shebang/encoding declarations where applicable). Include source files, headers, scripts, and code templates; exclude vendored third-party code, generated outputs, and comparison-only `reference/` files.
-- Describe the purpose and relationships in both Chinese and English: responsibilities and main interfaces, callers or consumers, dependencies, and relevant data/control flow or ownership boundaries. Name concrete repository paths or symbols rather than merely repeating the filename or listing includes. Use the language's native comment syntax.
-- Keep both versions consistent with the implementation and update them in the same PR when responsibilities or relationships change. Consolidate existing summaries instead of duplicating them; preserve license notices. Headers guide navigation and do not replace API contracts or validation; avoid claims broader than the implementation or validation supports.
-- Check headers during final PR diff review. Document untouched historical files incrementally; an example PR does not require a repository-wide rewrite. Examples: `src/include/tilexr_api.h`, `src/comm/comm_wrap.cpp`, and `src/include/comm_args.h`.
+- 为本 PR 新增或修改的 first-party 代码文件编写简洁的文件头说明，包括 source、header、script 和代码模板；不批量改写无关历史文件，不处理 vendored、generated 或 `reference/` 文件。
+- 先阅读实现，再面向维护者说明文件职责、主要调用关系，以及确有必要的资源所有权或生命周期。不要根据文件名猜测，不虚构同步、执行顺序或 cleanup 成功的保证。
+- 使用具体动作，例如“校验参数”“创建 communicator”“等待 stream 完成”“调用 cleanup”“释放 buffer”；避免“协调资源”“赋能”“统一管理”等空泛表述。
+- 技术术语和标识符保留英文原文，如 token、opaque handle、communicator、rank、stream；需要时用自然中文解释，不逐词翻译。
+- 不添加“中文：”“English:”等语言标签。可只写中文；若保留双语，两者含义一致即可，不必逐句对应。
+- 不堆砌函数名，不复述显而易见的代码，不加入开发历史、提交号或验收记录。只保留帮助理解文件的信息，文件头不能替代接口契约。
+- 保留现有版权和许可证声明。职责说明放在其后，遵守语言注释语法；script 的 shebang/encoding 声明仍在前。更新说明时不修改代码行为。
+- 最终 PR review 时核对文件头与实现一致。可采用以下格式，按实际需要删减：
+
+```cpp
+/*
+ * 功能：文件负责什么，解决什么问题。
+ * 调用关系：谁调用它，它依赖哪些主要模块。
+ * 资源与生命周期：谁创建和持有资源，何时释放；仅写实现中确认的事实。
+ */
+```
 
 ## Continuous Improvement
 

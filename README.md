@@ -424,6 +424,7 @@ bash scripts/driver_fix.sh
 
 ## Documentation
 
+- ElasticMemory design: [中文](docs/elastic-memory.md) · [English](docs/elastic-memory.en.md)
 - [scripts/README.md](scripts/README.md): script reference and workflows
 - [docs/BUILD_VERIFICATION.md](docs/BUILD_VERIFICATION.md): current build and verification checklist
 - [docs/UDMA_INTEGRATION_SUMMARY.md](docs/UDMA_INTEGRATION_SUMMARY.md): current UDMA architecture summary

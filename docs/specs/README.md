@@ -31,6 +31,13 @@ for UDMA data-plane claims. Sources under `reference/` are comparison-only.
 | Windows cluster SSH tool | [tssh.md](tssh.md) |
 | NPU script scheduler | [npu-scheduler.md](npu-scheduler.md) |
 
+## Related design documents
+
+The ElasticMemory design is maintained directly under `docs/`:
+[中文](../elastic-memory.md) · [English](../elastic-memory.en.md).
+It defines its own validated platform scope and separates current behavior from
+unimplemented interface goals.
+
 ## Maintenance Rules
 
 - Keep one current specification per feature. Extend the existing document when
