@@ -1,6 +1,6 @@
 """通过 _C 扩展封装 ElasticMemory pool 与 compact EP，返回推理用的普通 NPU Tensor。
 
-Pending.materialize 等待完整数据并缓存结果；DeepEPBuffer 每次持有一个可消费的路由
+Pending.materialize 等待元数据并在消费 stream 排入 producer 完成依赖，缓存结果；DeepEPBuffer 每次持有一个可消费的路由
 handle，下一轮 Dispatch 前须 Combine 或 discard。Storage 的 allocation lease 与
 路由 handle 分开持有，view 可跨 pool 关闭存活。额外消费 stream 须显式登记，调用者
 保持设备及 stream 存活至退休；pool 统计不包括 communicator 的 staging。
@@ -69,7 +69,8 @@ class DispatchResult:
         return self._native.allocation_address
 
     def synchronize(self):
-        # Native materialization already checked complete producer execution.
+        """Wait for producer completion and raise any late execution error."""
+        self._native.synchronize()
         return self
 
     @contextmanager
@@ -92,7 +93,7 @@ class DispatchResult:
                 self._native.record_current(True)
 
     def discard(self):
-        """Release this routing handle's communicator turn without Combine."""
+        """Wait/check the producer, then release its turn without Combine."""
         self._native.discard()
 
 
@@ -105,7 +106,11 @@ class Pending:
         self._result = None
 
     def materialize(self, stream=None):
-        """Wait for complete data in this initial version, releasing the GIL."""
+        """Wait for metadata, then enqueue data readiness on the consumer stream.
+
+        This may return before Dispatch completes. Call synchronize() to check
+        late runtime/protocol failures; failed output contents are invalid.
+        """
         if stream is not None and stream.device != self.device:
             raise ValueError("materialization stream must belong to the pool NPU")
         if stream is None:
@@ -118,7 +123,7 @@ class Pending:
         return self._result
 
     def synchronize(self):
-        return self.materialize()
+        return self.materialize().synchronize()
 
 
 class DeepEPBuffer:

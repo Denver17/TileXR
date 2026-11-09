@@ -2024,22 +2024,15 @@ __aicore__ inline bool MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::PrepareCo
             finalError = words.GetValue(0);
     }
     if (finalError != TileXR::Elastic::Success) {
-        // Only the Host final status changes. It cannot export a Tensor until
-        // every core completes, so partially copied output is never successful.
-        GlobalTensor<uint64_t> header;
-        header.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(compactView_.mailbox +
-            offsetof(TileXR::Elastic::Mailbox, requestId)));
-        DataCacheCleanAndInvalid<uint64_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(header);
-        GlobalTensor<uint64_t> output;
-        output.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(compactView_.mailbox +
-            offsetof(TileXR::Elastic::Mailbox, output)));
-        DataCopy(words, output, 8);
-        SyncFunc<HardEvent::MTE2_S>();
-        uint64_t failure[8];
-        for (uint32_t i = 0; i < 8; ++i) failure[i] = words.GetValue(i);
-        failure[1] = finalError;
+        // Metadata may already back an ordinary Tensor. Preserve it and report
+        // the peer error separately for the final producer completion check.
+        TileXR::Elastic::DeviceDetail::Invalidate(compactView_.mailbox,
+            offsetof(TileXR::Elastic::Mailbox, requestId) / sizeof(uint64_t));
+        const uint64_t sequence = TileXR::Elastic::DeviceDetail::ReadWord(
+            compactView_.mailbox, offsetof(TileXR::Elastic::Mailbox, requestId) / sizeof(uint64_t));
+        uint64_t failure[8] = {0, finalError, 0, 0, 0, 0, 0, 0};
         TileXR::Elastic::DeviceDetail::Publish(compactView_.mailbox +
-            offsetof(TileXR::Elastic::Mailbox, output), failure, header.GetValue(0), words);
+            offsetof(TileXR::Elastic::Mailbox, finalStatus), failure, sequence, words);
     }
     ElasticProfile::Mark<ElasticProfile::RankGateEnd>(compactProfiler_);
     if (localError != TileXR::Elastic::Success) return false;

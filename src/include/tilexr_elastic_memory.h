@@ -1,7 +1,8 @@
 /*
  * 声明供原生 EP 和 Torch 适配层使用的 Pool、Pending、Allocation 接口，实现在
  * src/elastic_memory/pool.cpp。Submit 接收输入 stream 和 Device 启动回调，Pending::Wait
- * 返回完成后的分配；Allocation 持有内存使用权，消费者须登记 stream/event 后才能退休。
+ * 等待数据完成，WaitMetadata 仅等待不可变元数据；Allocation 持有内存使用权和 producer
+ * 完成状态，消费者须建立 stream 依赖并登记 stream/event 后才能退休。
  * Close 停止接收请求并尝试回收，仍存活的 Allocation 可继续保持 segment 和 Core。
  */
 #ifndef TILEXR_ELASTIC_MEMORY_H
@@ -33,6 +34,11 @@ public:
     uint64_t Bytes() const;
     uint64_t Rows() const;
     Handle Identity() const;
+    // Enqueue producer completion dependency and register the consumer stream.
+    // Keep that stream alive until this lease retires, including zero-byte allocations.
+    void WaitOnStream(aclrtStream stream);
+    // Wait for final producer completion and report late runtime/protocol errors.
+    void Synchronize();
     // Register every consumer stream; it must remain valid until this lease retires.
     void RecordStream(aclrtStream stream);
     // Transfer an already-recorded event to the lease; the pool queries and destroys it.
@@ -49,6 +55,9 @@ class Pending {
 public:
     // Throws std::runtime_error on runtime/protocol failure; returns only after data completion.
     std::shared_ptr<Allocation> Wait();
+    // Returns immutable address/shape before data completion when observed early.
+    // Consumers must call WaitOnStream; Synchronize checks late execution errors.
+    std::shared_ptr<Allocation> WaitMetadata();
 private:
     friend class Core;
     struct Impl;

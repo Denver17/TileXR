@@ -1,7 +1,8 @@
 /*
  * 将 ElasticMemory Pool 和紧凑 Memory EP 接入 Python。Dispatch 的 Frame 保持输入、
- * token 计数和 communicator；materialize 等待 Pending 完成，再用 at_npu::native::from_blob
- * 包装 hidden/assist，共享 Allocation lease。消费者 stream 登记后，Storage 释放交由
+ * token 计数和 communicator；materialize 等待不可变元数据，再用 at_npu::native::from_blob
+ * 包装 hidden/assist，共享 Allocation lease，并在消费者 stream 排入 producer event 依赖。
+ * synchronize 检查完整完成与晚到错误；消费者登记后，Storage 释放交由
  * pool.cpp 的退休流程处理。Combine 等待完成 event；无法确认访问结束时保留相关 owner。
  * Buffer 同时只保留一个未消费的路由 handle；适配层用于无梯度推理，hidden 支持 FP16/BF16。
  */
@@ -150,7 +151,6 @@ struct TorchLease {
         } catch (...) { Quarantine(allocation); }
     }
     void RecordCurrent(bool seal) {
-        if (!allocation->Bytes()) return;
         c10::DeviceGuard guard(Device(device));
         const auto stream = c10_npu::getCurrentNPUStream(device);
         aclrtStream raw = nullptr;
@@ -159,10 +159,10 @@ struct TorchLease {
         std::lock_guard<std::mutex> lock(mutex);
         if (std::find(consumers.begin(), consumers.end(), stream) == consumers.end()) {
             TORCH_CHECK(consumers.size() < 128, "ElasticMemory consumer stream metadata is full");
-            allocation->RecordStream(raw);
+            allocation->WaitOnStream(raw);
             consumers.push_back(stream);
         }
-        if (seal) {
+        if (seal && allocation->Bytes()) {
             aclrtEvent event = nullptr;
             Check(aclrtCreateEvent(&event), "aclrtCreateEvent consumer");
             const int recorded = aclrtRecordEvent(event, raw);
@@ -181,7 +181,13 @@ struct Result {
     std::shared_ptr<TorchLease> lease;
     at::Tensor hidden, assist;
     void RecordCurrent(bool seal) { lease->RecordCurrent(seal); }
+    void Synchronize() {
+        try { lease->allocation->Synchronize(); }
+        catch (...) { frame->buffer->Fail(); throw; }
+    }
     void Discard() {
+        // Do not release the communicator turn before late producer errors are known.
+        Synchronize();
         std::lock_guard<std::mutex> lock(frame->useMutex);
         frame->buffer->Release(frame->call);
         frame->combined = true;
@@ -197,7 +203,7 @@ struct TorchPending {
         c10::DeviceGuard guard(Device(frame->buffer->pool->device));
         if (!result) {
             std::shared_ptr<E::Allocation> allocation;
-            try { allocation = pending->Wait(); }
+            try { allocation = pending->WaitMetadata(); }
             catch (...) { frame->buffer->Fail(); throw; }
             auto next = std::make_shared<Result>();
             next->frame = frame;
@@ -272,6 +278,7 @@ at::Tensor Combine(const std::shared_ptr<BufferState>& buffer, const std::shared
     auto frame = result->frame;
     std::lock_guard<std::mutex> useLock(frame->useMutex);
     TORCH_CHECK(frame->buffer == buffer && !frame->combined, "invalid or consumed compact Combine handle");
+    result->Synchronize();
     const int device = buffer->pool->device;
     c10::DeviceGuard guard(Device(device));
     CheckTensor(expertOutput, device, "expert_output");
@@ -344,6 +351,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
         .def_property_readonly("allocation_address", [](const Result& self) {
             return reinterpret_cast<uint64_t>(self.lease->allocation->Data());
         })
+        .def("synchronize", &Result::Synchronize, py::call_guard<py::gil_scoped_release>())
         .def("record_current", &Result::RecordCurrent, py::call_guard<py::gil_scoped_release>())
         .def("discard", &Result::Discard, py::call_guard<py::gil_scoped_release>());
 }

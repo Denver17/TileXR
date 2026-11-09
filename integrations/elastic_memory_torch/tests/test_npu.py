@@ -4,6 +4,7 @@
 # 同一个 communicator 按顺序完成各轮；--failure 单独注入 rank0 预算不足，检查两 rank
 # 报错及失败后的准入拒绝。每个进程由参数选择 rank、设备和通信域。
 #
+# materialize 仅保证元数据可用；立即提交普通 Torch 运算检查 producer event 依赖。
 # 生命周期用例主动丢弃输入或 Pending，保留 Storage view，并在显式登记的 stream 上
 # 放置延迟消费者，检查扩容、trim 和 close 不提前回收仍被使用的输出。回读比较前等待
 # 相应工作完成，释放引用后通过 collect 等待退休；测试依赖真实 torch_npu 与 NPU 环境。
@@ -96,7 +97,8 @@ def run(args):
         hidden, routes = inputs(args.rank, 16)
         pending = buffer.dispatch_compact_async(hidden, topk_experts=routes, num_experts=4)
         try:
-            pending.materialize()
+            # The locally successful rank can expose metadata before its peer fails.
+            pending.synchronize()
         except RuntimeError as error:
             print(json.dumps(dict(rank=args.rank, expected_failure=str(error))), flush=True)
         else:
@@ -108,6 +110,9 @@ def run(args):
             pass
         else:
             raise AssertionError("poisoned communicator admitted another call")
+        del pending
+        retire(pool)
+        require(pool.trim()["committed_bytes"] == 0, "failed output must retire after its last owner")
         pool.close()
         report(args.rank, "rank_failure_propagation", pool)
         return
@@ -126,13 +131,20 @@ def run(args):
     for index, bs in enumerate((16, 16, 64, 16)):
         hidden, routes = inputs(args.rank, bs)
         pending = buffer.dispatch_compact_async(hidden, topk_experts=routes, num_experts=4)
-        # Native progression must not require a Python callback or materialize to start.
-        time.sleep(0.02)
         result = pending.materialize()
-        require(pending.materialize().hidden.untyped_storage().data_ptr()
+        # No sleep, CPU read or synchronize between materialize and the expert op.
+        expert = result.hidden * 2
+        repeated_stream = torch.npu.Stream(device=args.device)
+        with torch.npu.stream(repeated_stream):
+            repeated = pending.materialize(stream=repeated_stream)
+            repeated_value = repeated.hidden + 3
+        require(repeated is result, "repeated materialize changed the cached result")
+        require(repeated.hidden.untyped_storage().data_ptr()
                 == result.hidden.untyped_storage().data_ptr(), "materialize changed Storage")
         verify(result, args.rank, bs)
-        expert = result.hidden * 2  # Ordinary Torch operator on external NPU Storage.
+        repeated_stream.synchronize()
+        torch.testing.assert_close(repeated_value.cpu(), oracle(args.rank, bs)[0] + 3, rtol=0, atol=0)
+        result.synchronize()  # Explicit final-error check remains distinct from metadata readiness.
         weights = torch.full((bs, 2), 0.5, device="npu", dtype=torch.float32)
         combined = buffer.combine_compact(result.handle, expert, topk_weights=weights)
         torch.testing.assert_close(combined.cpu(), hidden.cpu() * 2, rtol=0, atol=0)
@@ -142,9 +154,10 @@ def run(args):
         if index == 2:
             require(growth > prior_growth, "larger output must grow the initially small segments")
         prior_growth = growth
-        del result, pending, expert, weights, combined
+        del result, pending, repeated, repeated_value, expert, weights, combined
         retire(pool)
-        report(args.rank, ("cold", "hot", "growth", "fall_back")[index], pool)
+        report(args.rank, ("cold", "hot", "growth", "fall_back")[index], pool,
+               immediate_expert_verified=True, repeated_materialize_cross_stream=True)
 
     # Vary both count-flag dimensions across completed calls on the same communicator:
     # 32 experts / bs256 uses two count cores; blocks 2/4/9 make the owner copy.
@@ -213,16 +226,28 @@ def run(args):
     report(args.rank, "dropped_pending_before_materialize", pool)
 
     hidden, routes = inputs(args.rank, 16, zero=True)
-    result = buffer.dispatch_compact(hidden, topk_experts=routes, num_experts=4)
+    pending = buffer.dispatch_compact_async(hidden, topk_experts=routes, num_experts=4)
+    count_stream = torch.npu.Stream(device=args.device)
+    with torch.npu.stream(count_stream):
+        result = pending.materialize(stream=count_stream)
+        # Empty hidden Storage must not bypass readiness for its nonempty count tensors.
+        copied_send_counts = result.send_counts.clone()
+        copied_expert_counts = result.expert_counts.clone()
+        zero_expert = result.hidden * 2
+    count_stream.synchronize()
+    expected_zero = oracle(args.rank, 16, zero=True)
+    torch.testing.assert_close(copied_send_counts.cpu(), expected_zero[2], rtol=0, atol=0)
+    torch.testing.assert_close(copied_expert_counts.cpu(), expected_zero[3], rtol=0, atol=0)
     verify(result, args.rank, 16, zero=True)
     if args.rank == 1:
         require(result.hidden.shape == (0, 128), "rank without incoming tokens must expose zero rows")
+    pending.synchronize()
     weights = torch.full((16, 2), 0.5, device="npu", dtype=torch.float32)
-    combined = buffer.combine_compact(result.handle, result.hidden * 2, topk_weights=weights)
+    combined = buffer.combine_compact(result.handle, zero_expert, topk_weights=weights)
     torch.testing.assert_close(combined.cpu(), hidden.cpu() * 2, rtol=0, atol=0)
-    del result, weights, combined
+    del result, pending, weights, combined, copied_send_counts, copied_expert_counts, zero_expert
     retire(pool)
-    report(args.rank, "zero_receive", pool, combine_verified=True)
+    report(args.rank, "zero_receive", pool, combine_verified=True, count_stream_dependency_verified=True)
 
     hidden, routes = inputs(args.rank, 16)
     result = buffer.dispatch_compact(hidden, topk_experts=routes, num_experts=4)

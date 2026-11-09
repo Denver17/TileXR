@@ -4,13 +4,13 @@
 
 ElasticMemory 为执行期间才能确定输出大小的算子提供 Device 侧分配。它以独立 HBM segment 组成单 owner 分段环形池：Device 算出实际大小后取得连续区间，容量不足时由原 kernel 同步等待 Host 申请真实 HBM，再从分配点继续。最终输出导出为普通 NPU Tensor，引用和 stream 完成条件共同决定何时复用或归还内存。
 
-本文规定架构、所有权和失败契约。当前实现范围与尚未实现的接口目标在第 11 节区分；环境、性能数值、源码与 binary 对应关系及测试命令集中在验证记录中。本功能不改变现有 EP V1/V2、MoonEP 或上游 DeepEP 的接口契约，也不要求独立 Planner。
+本文规定架构、所有权和失败契约。当前实现范围与验证边界在第 11 节区分；环境、性能数值、源码与 binary 对应关系及测试命令集中在验证记录中。本功能不改变现有 EP V1/V2、MoonEP 或上游 DeepEP 的接口契约，也不要求独立 Planner。
 
 ## 1. 适用场景与约束
 
 [![图 1：ElasticMemory 用户场景](diagrams/elastic-memory/use-cases.drawio.png)](diagrams/elastic-memory/use-cases.drawio.png)
 
-图 1 展示 Device 分配、Host 增长、Torch 消费与整段归还的关系。当前 materialize 等待完整数据完成。
+图 1 展示 Device 分配、Host 增长、Torch 消费与整段归还的关系。materialize 等待稳定元数据，在消费 stream 排入 producer 完成依赖后即可返回；本轮异步实现已通过 CANN 9.2 功能测试，时延与边界见验证记录。
 
 - 动态申请用于算子级 output；同生命周期的多个输出可合为一个 bundle。一个算子内不反复申请释放，不面向大量微小对象或任意碎片管理。“通常较大”不是最小尺寸限制，零尺寸、对齐和边界请求仍须正确处理。
 - 每个 pool 同时只有一个 Device allocator owner。申请和释放相关 Device 元数据操作只由该 core 执行；不要求跨 kernel 使用同一个物理 core，不支持多核并发 malloc。
@@ -26,9 +26,9 @@ ElasticMemory 为执行期间才能确定输出大小的算子提供 Device 侧�
 |---|---|---|
 | HBM segment | 保存连续 output 区间 | Host Runtime 创建和释放；Device 访问 |
 | PoolState snapshot | 本轮请求头、当前段和有界段目录 | Host 在调用间准备，运行中的 kernel 只读 |
-| RingState commit | 所选段的分配与回收游标 | Device owner 提交；Host 在完成后校验并保存镜像 |
+| RingState commit | 所选段的分配与回收游标 | Device owner 提交；Host 在元数据发布后校验并保存镜像 |
 | Host reservation 队列 | 分配顺序、padding、lease/event 和安全退休前缀 | Host 持有，不放入 Device 热路径扫描 |
-| Host-visible mailbox | 增长请求、响应、commit 和输出描述符 | 各槽单写者，按本轮 sequence 配对 |
+| Host-visible mailbox | 增长请求、响应、commit、不可变输出描述符和最终状态 | 各槽单写者，按本轮 sequence 配对 |
 | Native service | FIFO 准入、增长、完成检查和退休 | 使用 pool 捕获的设备 context；不依赖 Python 回调 |
 | Allocation lease | 保持生产者、通信和 Storage 使用权 | native Runtime 与 Torch adapter 共享 |
 | Kernel 执行状态 | 已完成计数、布局及已有内存副作用 | 等待增长期间保持在原 kernel 内 |
@@ -39,7 +39,7 @@ Host 根据 pool/device、segment ID、offset、bytes 和 generation 校验 hand
 
 [![图 2：单 owner 分段环形池分配与回收流程](diagrams/elastic-memory/segmented-ring-allocation.drawio.png)](diagrams/elastic-memory/segmented-ring-allocation.drawio.png)
 
-图 2 将正常命中、容量慢路径与调用间退休分开。图中耗时为已记录条件下的实测，适用边界见第 10 节。
+图 2 将正常命中、容量慢路径与调用间退休分开。图中耗时为本轮异步改动前的实测基线，不能据此推断异步收益；适用边界见第 10 节。
 
 ### 3.1 连续区间与绕回
 
@@ -61,13 +61,13 @@ Host 根据 Storage 引用及生产者、通信、登记 consumer stream 的完�
 
 ### 3.3 ABI 与数据搬运
 
-当前 ABI 使用 64B `RingState`：`Segment{id,address,bytes}` 和 `head/tail/reclaim/tailOffset/alignment`。非零请求序号用作非空 allocation 的 generation，`alignment` 供 Host 完成后校验。
+当前 ABI v3 使用 64B `RingState`：`Segment{id,address,bytes}` 和 `head/tail/reclaim/tailOffset/alignment`。非零请求序号用作非空 allocation 的 generation，`alignment` 供 Host 在元数据发布后校验。
 
 Host 将上一次 Device commit 的镜像和安全退休水位组成本轮只读 `PoolState`，在 launch 前复制到 HBM；当前段排在首位。Device 热路径用一次 MTE2 读取 64B header 和 64B 当前 RingState。其他段仅在容量不足时读取。Host 不预先决定本次 output bytes 或分配 offset；收到 Device commit 后重算并校验结果。
 
-成功且非空时，Device 将所选段的 64B 状态通过 MTE3 写入独立 `committed` 槽，等待写回完成，再有序发布 64B Output。输出发布先写 sequence 为零的完整 payload，再携本轮 sequence 发布完整描述符。失败清空有效 handle/address 并发布错误；参数入口非法时直接返回错误，由调用者处理。
+成功且非空时，Device 将所选段的 64B 状态通过 MTE3 写入独立 `committed` 槽，等待写回完成，再有序发布 64B Output。输出发布先写 sequence 为零的完整 payload，再携本轮 sequence 发布完整描述符。分配失败清空有效 handle/address 并发布错误；参数入口非法时直接返回错误，由调用者处理。Output 一旦发布便不可改写。后续 peer 或数据校验错误写入独立 64B `finalStatus` 槽（mailbox offset 320），不能覆盖已交付的地址或 shape。Host 在 producer 完整完成后检查最终状态：sequence 为零表示未另报状态；非零必须匹配本次请求，匹配且 error 非零则整次调用失败。
 
-当前结构上限为 32 个 segment、128 个 outstanding reservation，以及每个 lease 分别最多 128 个登记 stream 和 128 个 event。reservation 上限包含已退休但仍被活跃前缀阻塞的记录；控制容量耗尽必须明确失败，不能只统计 live lease 后无界增长。ABI 变更时 native 库、外置 kernel 和 Torch extension 必须一起重建。
+当前结构上限为 32 个 segment、128 个 outstanding reservation，以及每个 lease 分别最多 128 个登记 stream 和 128 个 event。reservation 上限包含已退休但仍被活跃前缀阻塞的记录；控制容量耗尽必须明确失败，不能只统计 live lease 后无界增长。producer event 与 wait-boundary event 也受有界控制容量限制，耗尽时拒绝新增请求或 wait。ABI v3 变更要求 native 库、外置 kernel 和 Torch extension 一起重建。
 
 ## 4. Dispatch、增长与 FIFO
 
@@ -77,7 +77,7 @@ Dispatch 在同一次 kernel 内完成最终接收计数，计算 hidden 和辅�
 
 当前 Memory 实现由最终计数核执行分配。只有实际 output 核接收和清除计数 flags；prefix、expert-map 和 count-output 准备与 owner 分配重叠。output 核在复制前等待本地不可变地址描述符，读取顺序为发布 magic 后的完整 body。跨核发布必须使用目标平台已验证的可见性协议，不能假设任意 block 都会同时驻留并用普通全局自旋屏障同步。
 
-owner 的 peer 错误汇聚可与其他核的本地复制重叠。Host 在完整完成并检查状态后才导出 Tensor，因此失败的调用可能已写过部分 output，但不会交付有效结果。
+owner 的 peer 错误汇聚可与其他核的本地复制重叠。Host 可在元数据稳定后导出 Tensor，但 producer event 只保证访问顺序，不表示最终成功。晚到错误使该 Tensor 及基于失败数据的下游结果无效；调用者须通过 synchronize、Combine 或 discard 检查最终状态。
 
 ### 4.2 原 kernel 等待真实 HBM 增长
 
@@ -99,19 +99,19 @@ FIFO 只决定本池分配次序，不能代替通信协议的地址就绪、cre
 
 ## 5. Mailbox 与可见性
 
-请求、响应、commit 和输出使用独立单写者槽，并通过 ABI version、请求 sequence 和 allocation generation 拒绝重复或过期消息。Host 包装前检查 pool/device 归属、segment 边界和 shape 所需字节数。
+请求、响应、commit、不可变 Output 和 finalStatus 使用独立单写者槽，并通过 ABI version、请求 sequence 和 allocation generation 拒绝重复或过期消息。Host 包装前检查 pool/device 归属、segment 边界和 shape 所需字节数。
 
 先写完整描述符，再以平台认可的顺序发布 sequence；读取侧观察发布后取得一致快照。C++ `volatile` 或 CPU 原子操作本身不能证明跨设备 release/acquire。当前 Device 增长等待组合 volatile GM reload 与 DCCI，并校验本轮 sequence；请求/结果使用 UB 到 GM 的有序写回。字段宽度、缓存处理、槽复用和双向运行中可见性必须以适用 CANN/硬件证据验证。
 
-Host 服务不依赖持有 Python GIL 的调用者，也不依赖用户调用 `materialize` 才推进。Host 轮询、排队和 CPU 占用应单列测量；不承诺尚未验证的设备通知或唤醒机制。
+Host 服务不依赖持有 Python GIL 的调用者，也不依赖用户调用 `materialize` 才推进。当前 active poll 每轮请求 `sleep_for(5µs)`，不保证操作系统在 5µs 后唤醒，也不代表端到端延迟。Host 轮询、排队和 CPU 占用应单列测量。
 
 ## 6. 接口与异步语义
 
-下图展示异步接口的设计目标：**元数据提前物化尚未实现，当前 materialize 等待完整数据完成。**
+下图区分元数据就绪和数据完成。代码已实现提前物化；实机验证与性能结论须独立记录。
 
-[![图 3：Dispatch 异步接口目标时序](diagrams/elastic-memory/dispatch-sequence.drawio.png)](diagrams/elastic-memory/dispatch-sequence.drawio.png)
+[![图 3：Dispatch 异步接口时序](diagrams/elastic-memory/dispatch-sequence.drawio.png)](diagrams/elastic-memory/dispatch-sequence.drawio.png)
 
-当前 C++14 native API 由 `Pool`、`Pending` 和 `Allocation` 组成。`Pool::Submit` 接收 Device launch 回调及输入 stream，在 native service 上运行回调；调用者通过回调持有输入 owners。`Pending::Wait` 返回完成后的 allocation 或抛出运行时/协议错误。Device 入口为：
+C++14 native API 由 `Pool`、`Pending` 和 `Allocation` 组成。`Pool::Submit` 记录输入 stream 依赖并在 native service 执行 launch 回调；回调持有输入 owners 直到 producer 完整结束。`Pending::Wait()` 保持原完整完成语义，返回 allocation 或抛出最终错误。`Pending::WaitMetadata()` 在不可变地址/shape 校验通过且 producer 完成事件已经 record 后即可返回 allocation；使用它的消费者须调用 `Allocation::WaitOnStream(stream)` 建立依赖，并用 `Allocation::Synchronize()` 检查最终结果。Device 入口为：
 
 ```cpp
 // 单 owner 调用；当前声明以公共头为准。
@@ -121,19 +121,19 @@ uint64_t AllocateBundle(DeviceView view, uint64_t bytes, uint64_t alignment,
                         Profile::Recorder* profiler = nullptr);
 ```
 
-Torch adapter 提供 `dispatch_compact_async`、`pending.materialize` 和 `combine_compact`。异步提交保留输入 Storage，记录输入 stream 就绪依赖，返回 pending 后由 native service 独立推进。具体可执行示例见 [adapter README](../integrations/elastic_memory_torch/README.md)，不将概念接口当作上游 DeepEP 已有 API。
-
-**当前 `Pending::Wait/materialize` 等待完整数据完成；Combine 也等待完成后返回。** 等待期间释放 Python GIL；重复 materialize 保持同一 Storage。丢弃 pending 不撤销设备任务，Runtime 仍须跟踪至安全完成并回收未导出的输出；不提供执行中的强制取消。
-
-元数据提前物化是尚未实现的接口目标，需要严格区分：
+Torch 的 `pending.materialize(stream=None)` 调用 WaitMetadata，为当前或指定 stream 排入 producer 依赖后返回普通 Tensor，可能早于数据完成。重复物化保持同一结果和 Storage，并为新增消费 stream 建立依赖。等待期间释放 Python GIL；native service 不需要 Python 回调。具体示例见 [adapter README](../integrations/elastic_memory_torch/README.md)。
 
 | 状态 | 语义 |
 |---|---|
-| METADATA_READY | 最终地址/shape 稳定，分配成功，输出 lease 可交付，数据完成事件已提交并可安全等待 |
-| DATA_READY | 生产者写入及必要通信访问完成 |
-| FAILED | 本次结果无效；停止相关访问后清理，不恢复执行 |
+| METADATA_READY | 最终地址/shape 稳定，分配成功，lease 可交付，producer 完成事件已录制；不承诺最终执行成功 |
+| DATA_READY | 生产者写入及必要通信访问完成；最终状态仍须检查 |
+| FAILED | 本次结果及基于失败数据的下游结果无效；停止相关访问后清理，不恢复执行 |
 
-提前物化若实现，Host 仅等待元数据和可等待事件，在消费者 stream 建立依赖后返回普通 Tensor，不必等待所有数据。但不能对尚未录制的普通事件执行 wait 并假定其代表未来完成。`ready_event` 只保证执行顺序，不能代替运行时/协议错误检查；元数据已发布仍可能发生 peer 失败，异步消费不保证 Host 在下游开始前获知所有错误。当前实现不声明这种 metadata-only wait 语义。
+`pending.synchronize()` 或 `result.synchronize()` 等待完整 producer 完成并报告晚到错误。`combine_compact()` 和 `result.discard()` 也先检查 producer 最终状态；Combine 等自身完成后返回，成功的 Combine/discard 才释放本轮 communicator 使用权。失败会 poison 该域，不能通过下一次提交继续使用。
+
+producer event 只保证 stream 执行顺序，不能代替错误检查，也不保证 Host 在下游工作开始前获知所有 peer 错误。Runtime 保持 event 到引用和已排入 wait 的安全边界之后，零 bytes 输出也保留该依赖，因为计数 Tensor 仍可能需要它。元数据提前返回不改变同池 FIFO：service 仍等待本轮完整结束才准入下一请求。
+
+丢弃 pending 不撤销设备任务；Runtime 继续保持输入 owners 和早期 lease 至安全完成，再按 Storage/consumer 条件退休。不提供执行中的强制取消。
 
 ## 7. Tensor、stream 与容量归还
 
@@ -143,7 +143,7 @@ adapter 使用匹配安装版本的 `torch_npu` 外部内存工厂创建 NPU Ten
 
 自定义 Storage deleter 捕获 native lease。最后一个 Storage 引用消失时只提交退休请求，不直接释放 HBM；view、detach 和重复物化共享存储所有权。Python finalizer 不能替代 Storage 持有。训练还需要独立 autograd 和 backward stream 适配，当前拒绝 `requires_grad`。
 
-materialize 使用的 stream 自动登记；额外 consumer stream 使用 `result.use_on_stream(stream)` 显式登记。Torch 的 `record_stream` 不自动证明自定义 segment 的安全性，未登记 stream 的消费不属于支持契约。
+materialize 使用的 stream 自动登记并排入 producer event 依赖；在新 stream 重复 materialize 保留同一 Storage，并为该 stream 建立依赖。额外 consumer stream 也可使用 `result.use_on_stream(stream)` 显式登记并建立依赖。Torch 的 `record_stream` 不自动证明自定义 segment 的安全性，未登记 stream 的消费不属于支持契约。
 
 Torch CPU 提交队列中的任务可能晚于 Python 引用消失。native 退休 hook 在 service 线程、pool mutex 外刷新登记队列，再记录最终 stream-tail 事件。不能在可能运行于 Torch 队列 worker 的 Storage deleter 中同步刷新该队列。设备 context 和登记 stream 必须保持有效直至 lease 退休。
 
@@ -177,7 +177,7 @@ Torch CPU 提交队列中的任务可能晚于 Python 引用消失。native 退�
 | largest_free_range | 满足环形水位和连续性限制的最大可分配区间 |
 | metadata_bytes | 已计入的控制存储；必须说明是否包含 Host 容器和线程开销 |
 
-记账满足 `committed_bytes = live_bytes + pending_retire_bytes + free_bytes`，分类不重复。生产者实际大小尚未发布时保守保留未分配 committed 空间，不能将其报告为可回收；allocator 在途时 `reclaimable_segment_bytes` 为零。完成后的 snapshot 按 Device commit 校验 reservation。
+记账满足 `committed_bytes = live_bytes + pending_retire_bytes + free_bytes`，分类不重复。生产者实际大小尚未发布时保守保留未分配 committed 空间，不能将其报告为可回收；allocator 在途时 `reclaimable_segment_bytes` 为零。元数据发布后按 Device commit 校验并一次性登记 reservation；提前导出 lease 不重复记账，也不提前解除 producer 的回收保护。
 
 当前 metadata 计数包含映射 mailbox 和 Device PoolState，不包含 Host map/deque、lease/event 或 service-thread 对象开销。Torch allocator 不自动统计这些外部 segment，不能单凭 `torch.npu.memory_allocated()` 推断总 HBM，也不自动清空 Torch cache。
 
@@ -211,9 +211,11 @@ Torch CPU 提交队列中的任务可能晚于 Python 引用消失。native 退�
 - [Device profiling draw.io](diagrams/elastic-memory/device-allocation-profile.drawio) · [阶段口径与证据](diagrams/elastic-memory/device-allocation-profile.md)
 - [场景、Dispatch、失败和回收四页 draw.io](diagrams/elastic-memory/elastic-memory.drawio)
 
-维护时同步更新图源、PNG 和中英文正文。当前实现与接口目标必须在图旁明确标注，不能用目标流程掩盖当前完成等待语义。
+维护时同步更新图源、PNG 和中英文正文。在图旁区分元数据就绪、producer 完成和已验证的行为，不能把 event 排序当作错误检查或把设计实现当作硬件验证。
 
 ## 10. 性能与验证要求
+
+图 6 及先前的分配/Dispatch 实测数值属于本轮 metadata-only / 5µs poll 改动前的基线。本轮功能测试与同条件流水线 profiling 已单独记录在验证文档，不能据旧数据宣称新的异步加速或延迟保证。
 
 [![图 6：Device 分配流程与逐 rank profiling 耗时](diagrams/elastic-memory/device-allocation-profile.drawio.png)](diagrams/elastic-memory/device-allocation-profile.drawio.png)
 
@@ -229,7 +231,7 @@ Torch CPU 提交队列中的任务可能晚于 Python 引用消失。native 退�
 
 报告还须包含 backend、native status、kernel 版本、数据量、适用带宽、实际 output bytes、committed/peak/trim、blocked/padding 和仍保留的 staging。Host 提交/排队、materialize、CPU 占用及增长/注册/trim 延迟作为辅助观测，不计核心 kernel 性能。
 
-功能验证覆盖真实增长时 kernel 尚未结束、前序副作用恰好一次、新地址读写、失败退出不重放、FIFO 队首优先使用新空间、初始零数据 HBM、绕回/段切换/溢出/零尺寸、生命周期与整段归还，以及真实多 rank Dispatch/Combine。Host 模型和 M0 可行性实验不能替代完整接入测试。
+功能验证覆盖真实增长时 kernel 尚未结束、前序副作用恰好一次、新地址读写、失败退出不重放、FIFO 队首优先使用新空间、初始零数据 HBM、绕回/段切换/溢出/零尺寸、生命周期与整段归还，以及真实多 rank Dispatch/Combine。Host 模型和 M0 可行性实验不能替代完整接入测试。异步验收还须单独保持 producer 在途以证明元数据提前返回，确认完整 Wait 语义，并覆盖立即 Torch 消费、跨 stream 重复物化、零输出依赖、晚到错误及提前删除引用。
 
 每次硬件 launch 前重新检查所有目标物理卡的 proc-mem 和 identity mapping；busy、query/parse 失败或 mapping 不明均拒绝，不以 `fuser` 为空放行，不 kill/reset 外部任务。相同环境已有 HCCL qualification 必须复用，证据不全按边界记录，不按任务重跑。
 
@@ -241,7 +243,7 @@ Torch CPU 提交队列中的任务可能晚于 Python 引用消失。native 退�
 | 编译与部署 | native C++14；Torch extension 匹配安装 Torch 的 C++17/ABI；纯 AICore 外置 binary 注册启动，不在 Host 库嵌入 kernel |
 | EP | 本地输出池化的 Memory Dispatch/Combine；无独立 Planner |
 | Torch | 普通 FP16/BF16 连续 ND Tensor，int32 routes、FP32 Combine weights；inference-only |
-| 异步 | native 提交独立推进；materialize/Combine 当前等待完整完成，metadata-only readiness 未实现 |
+| 异步 | 已实现 metadata-only materialize、consumer event 依赖和显式最终错误检查；native Wait 与 Combine 保持完整完成语义，本轮 CANN 9.2 功能验证已通过，时延与边界见验证记录 |
 | 生命周期 | Storage/view、登记 stream、pending input owner、close 保持活跃 Storage |
 | 未覆盖扩展 | autograd/backward、graph capture、UDMA 直接写输出、multi-host、量化、shared-expert 和 TP 路径 |
 

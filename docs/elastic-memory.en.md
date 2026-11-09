@@ -4,13 +4,13 @@
 
 ElasticMemory provides Device-side allocation for operators whose output size becomes known only during execution. Independent HBM segments form a single-owner segmented ring pool: the Device computes the actual size and obtains a contiguous range. If capacity is insufficient, the original kernel waits synchronously for the Host to allocate real HBM, then resumes at the allocation point. The final output is exported as an ordinary NPU Tensor. References and stream completion jointly determine when its memory can be reused or returned.
 
-This document defines the architecture, ownership, and failure contracts. Section 11 distinguishes the current implementation scope from interface goals that remain unimplemented. Environment details, performance measurements, source-to-binary provenance, and test commands belong in the validation record. This feature does not change the interface contracts of existing EP V1/V2, MoonEP, or upstream DeepEP, and does not require a separate Planner.
+This document defines the architecture, ownership, and failure contracts. Section 11 distinguishes the current implementation scope from its validation boundaries. Environment details, performance measurements, source-to-binary provenance, and test commands belong in the validation record. This feature does not change the interface contracts of existing EP V1/V2, MoonEP, or upstream DeepEP, and does not require a separate Planner.
 
 ## 1. Use cases and constraints
 
 [![Figure 1: ElasticMemory user scenarios](diagrams/elastic-memory/use-cases.drawio.png)](diagrams/elastic-memory/use-cases.drawio.png)
 
-Figure 1 connects Device allocation, Host growth, Torch consumption, and whole-segment return. Materialization currently waits for full data completion.
+Figure 1 connects Device allocation, Host growth, Torch consumption, and whole-segment return. Materialization waits for stable metadata and enqueues producer completion on the consumer stream before returning. CANN 9.2 functional validation passed; measured pipeline behavior and limits are in the validation record.
 
 - Dynamic allocation serves operator-level outputs. Multiple outputs with the same lifetime may share one bundle. An operator does not repeatedly allocate and free memory internally; this allocator is not intended for large numbers of tiny objects or arbitrary fragmentation management. “Usually large” does not impose a minimum allocation size: zero-size, alignment, and boundary requests must still be handled correctly.
 - Each pool has only one active Device allocator owner. Only that core performs Device metadata operations associated with allocation and release. The physical core need not remain the same across kernels; concurrent multi-core malloc is unsupported.
@@ -26,9 +26,9 @@ Figure 1 connects Device allocation, Host growth, Torch consumption, and whole-s
 |---|---|---|
 | HBM segment | Holds contiguous output ranges | Created and freed by the Host Runtime; accessed by the Device |
 | PoolState snapshot | Request header, current segment, and bounded segment directory for this call | Prepared by the Host between calls; read-only to the running kernel |
-| RingState commit | Allocation and reclaim cursors for the selected segment | Committed by the Device owner; validated and mirrored by the Host after completion |
+| RingState commit | Allocation and reclaim cursors for the selected segment | Committed by the Device owner; validated and mirrored by the Host after metadata publication |
 | Host reservation queue | Allocation order, padding, lease/event state, and safe retirement prefix | Owned by the Host; not scanned in the Device hot path |
-| Host-visible mailbox | Growth request, response, commit, and output descriptor | One writer per slot; paired by the current sequence |
+| Host-visible mailbox | Growth request, response, commit, immutable output descriptor, and final status | One writer per slot; paired by the current sequence |
 | Native service | FIFO admission, growth, completion checks, and retirement | Uses the device context captured by the pool; independent of Python callbacks |
 | Allocation lease | Retains producer, communication, and Storage usage rights | Shared by the native Runtime and Torch adapter |
 | Kernel execution state | Completed counting, layout, and existing memory side effects | Preserved inside the original kernel while waiting for growth |
@@ -39,7 +39,7 @@ The Host validates a handle against the pool/device, segment ID, offset, bytes, 
 
 [![Figure 2: Single-owner segmented ring allocation and reclamation](diagrams/elastic-memory/segmented-ring-allocation.drawio.png)](diagrams/elastic-memory/segmented-ring-allocation.drawio.png)
 
-Figure 2 separates normal hits, capacity slow paths, and retirement between calls. Timings are measurements under the recorded conditions; Section 10 defines their limits.
+Figure 2 separates normal hits, capacity slow paths, and retirement between calls. Timings are measured baselines from before this asynchronous change and do not establish its benefits; Section 10 defines their limits.
 
 ### 3.1 Contiguous ranges and wraparound
 
@@ -61,13 +61,13 @@ The single-core constraint applies only to Device allocator writers. The Host re
 
 ### 3.3 ABI and data movement
 
-The current ABI uses a 64B `RingState`: `Segment{id,address,bytes}` plus `head/tail/reclaim/tailOffset/alignment`. A nonzero request sequence is the generation of a nonempty allocation; `alignment` lets the Host validate the result after completion.
+The current ABI v3 uses a 64B `RingState`: `Segment{id,address,bytes}` plus `head/tail/reclaim/tailOffset/alignment`. A nonzero request sequence is the generation of a nonempty allocation; `alignment` lets the Host validate the result after metadata publication.
 
 The Host combines its mirror of the previous Device commit with the safe retirement watermark into a read-only `PoolState` for the current call, then copies it to HBM before launch. The current segment is first. The Device hot path uses one MTE2 transfer to read the 64B header and 64B current RingState. Other segments are read only when capacity is insufficient. The Host does not decide this call's output bytes or allocation offset in advance; after receiving the Device commit, it recomputes and validates the result.
 
-For a successful nonempty allocation, the Device writes the selected segment's 64B state through MTE3 to a separate `committed` slot, waits for writeback completion, then publishes the 64B Output in order. Output publication first writes the complete payload with sequence zero, then publishes the complete descriptor with the current sequence. Failure clears the valid handle/address and publishes an error. Invalid entry parameters return an error directly for the caller to handle.
+For a successful nonempty allocation, the Device writes the selected segment's 64B state through MTE3 to a separate `committed` slot, waits for writeback completion, then publishes the 64B Output in order. Output publication first writes the complete payload with sequence zero, then publishes the complete descriptor with the current sequence. Allocation failure clears the valid handle/address and publishes an error. Invalid entry parameters return an error directly for the caller to handle. Once published, Output is immutable. Later peer or data-validation errors use a separate 64B `finalStatus` slot at mailbox offset 320, without overwriting an exported address or shape. After full producer completion, the Host checks final status: sequence zero means no separate status was reported; a nonzero sequence must match this request, and a matching nonzero error fails the entire call.
 
-Current structural limits are 32 segments, 128 outstanding reservations, and separate limits of 128 registered streams and 128 events per lease. The reservation limit includes retired records still blocked by a live prefix. Exhausting control capacity must fail explicitly; counting only live leases must not permit unbounded growth. ABI changes require rebuilding the native libraries, external kernels, and Torch extension together.
+Current structural limits are 32 segments, 128 outstanding reservations, and separate limits of 128 registered streams and 128 events per lease. The reservation limit includes retired records still blocked by a live prefix. Exhausting control capacity must fail explicitly; counting only live leases must not permit unbounded growth. Producer events and wait-boundary events also have bounded control capacity; exhaustion rejects new submissions or waits. ABI v3 requires rebuilding the native libraries, external kernels, and Torch extension together.
 
 ## 4. Dispatch, growth, and FIFO
 
@@ -77,7 +77,7 @@ Within the same kernel, Dispatch completes the final receive counts, computes th
 
 In the current Memory implementation, the final count core performs allocation. Only actual output cores receive and clear count flags. Prefix, expert-map, and count-output preparation overlaps owner allocation. Before copying, an output core waits for the immutable local address descriptor, observing the published magic before reading the complete body. Cross-core publication must use a visibility protocol validated for the target platform. It must not assume arbitrary blocks are simultaneously resident and synchronize them through an ordinary global spin barrier.
 
-The owner's aggregation of peer errors may overlap local copies on other cores. The Host exports a Tensor only after full completion and status checks. A failed call may therefore have written part of the output, but it does not deliver a valid result.
+The owner's aggregation of peer errors may overlap local copies on other cores. The Host may export a Tensor once metadata is stable, but the producer event guarantees ordering rather than final success. A late error invalidates that Tensor and downstream results derived from failed data. Callers check final status through synchronize, Combine, or discard.
 
 ### 4.2 The original kernel waits for real HBM growth
 
@@ -99,19 +99,19 @@ FIFO determines only allocation order within the pool. It does not replace addre
 
 ## 5. Mailbox and visibility
 
-Requests, responses, commits, and outputs use separate single-writer slots. ABI version, request sequence, and allocation generation reject duplicate or stale messages. Before wrapping output, the Host checks pool/device ownership, segment bounds, and the bytes required by the shape.
+Requests, responses, commits, immutable Output, and finalStatus use separate single-writer slots. ABI version, request sequence, and allocation generation reject duplicate or stale messages. Before wrapping output, the Host checks pool/device ownership, segment bounds, and the bytes required by the shape.
 
 Write the complete descriptor before publishing its sequence in the platform-approved order. After observing publication, the reader obtains a consistent snapshot. C++ `volatile` or CPU atomics alone do not establish cross-device release/acquire semantics. The current Device growth wait combines volatile GM reloads with DCCI and checks the current sequence. Requests/results use ordered UB-to-GM writeback. Field widths, cache handling, slot reuse, and bidirectional visibility during execution must be validated with evidence for the applicable CANN/hardware combination.
 
-The Host service does not depend on a caller holding the Python GIL, nor on a user calling `materialize` to make progress. Host polling, queueing, and CPU utilization should be measured separately. No unverified device-notification or wakeup mechanism is promised.
+The Host service does not depend on a caller holding the Python GIL, nor on a user calling `materialize` to make progress. The active poll loop requests `sleep_for(5µs)` each iteration; this is neither an operating-system wakeup guarantee nor an end-to-end latency bound. Measure Host polling, queueing, and CPU utilization separately.
 
 ## 6. Interfaces and asynchronous semantics
 
-The following sequence illustrates the asynchronous-interface goal: **early metadata materialization is unimplemented; materialize currently waits for full data completion.**
+The sequence distinguishes metadata readiness from data completion. Early materialization is implemented; hardware validation and performance conclusions must be recorded separately.
 
-[![Figure 3: Dispatch asynchronous-interface target sequence](diagrams/elastic-memory/dispatch-sequence.drawio.png)](diagrams/elastic-memory/dispatch-sequence.drawio.png)
+[![Figure 3: Dispatch asynchronous-interface sequence](diagrams/elastic-memory/dispatch-sequence.drawio.png)](diagrams/elastic-memory/dispatch-sequence.drawio.png)
 
-The current C++14 native API consists of `Pool`, `Pending`, and `Allocation`. `Pool::Submit` takes a Device launch callback and an input stream, and runs the callback on the native service. Callers retain input owners through the callback. `Pending::Wait` returns the completed allocation or throws a runtime/protocol error. The Device entry point is:
+The C++14 native API consists of `Pool`, `Pending`, and `Allocation`. `Pool::Submit` records the input-stream dependency and executes the launch callback on the native service; the callback retains input owners until the producer fully finishes. `Pending::Wait()` preserves its original full-completion semantics, returning an allocation or throwing the final error. `Pending::WaitMetadata()` may return once immutable address/shape validation succeeds and the producer completion event has been recorded. Consumers must call `Allocation::WaitOnStream(stream)` to establish a dependency and use `Allocation::Synchronize()` to check the final result. The Device entry point is:
 
 ```cpp
 // Called by a single owner; the public header is authoritative for the declaration.
@@ -121,19 +121,19 @@ uint64_t AllocateBundle(DeviceView view, uint64_t bytes, uint64_t alignment,
                         Profile::Recorder* profiler = nullptr);
 ```
 
-The Torch adapter provides `dispatch_compact_async`, `pending.materialize`, and `combine_compact`. Asynchronous submission retains input Storage, records the input stream's readiness dependency, and returns a pending object while the native service progresses independently. See the [adapter README](../integrations/elastic_memory_torch/README.md) for executable examples; these interfaces are not presented as existing upstream DeepEP APIs.
-
-**Currently, `Pending::Wait/materialize` waits for full data completion; Combine also waits for completion before returning.** These waits release the Python GIL. Repeated materialization preserves the same Storage. Dropping a pending object does not cancel the device task: the Runtime must still track it to safe completion and reclaim outputs that were not exported. Forced cancellation during execution is not provided.
-
-Early metadata materialization is an unimplemented interface goal that requires a strict distinction between these states:
+Torch's `pending.materialize(stream=None)` uses WaitMetadata, enqueues the producer dependency on the current or specified stream, and returns ordinary Tensors, potentially before data completion. Repeated materialization preserves the same result and Storage and establishes dependencies for additional consumer streams. Waiting releases the Python GIL; the native service needs no Python callback. See the [adapter README](../integrations/elastic_memory_torch/README.md) for examples.
 
 | State | Meaning |
 |---|---|
-| METADATA_READY | Final address/shape is stable, allocation succeeded, the output lease can be delivered, and a data-completion event has been submitted and can safely be waited on |
-| DATA_READY | Producer writes and required communication accesses are complete |
-| FAILED | This result is invalid; clean up after associated accesses stop, without resuming execution |
+| METADATA_READY | Final address/shape is stable, allocation succeeded, the lease can be delivered, and the producer completion event is recorded; final execution success is not promised |
+| DATA_READY | Producer writes and required communication accesses are complete; final status must still be checked |
+| FAILED | This result and downstream results derived from failed data are invalid; clean up after associated accesses stop, without resuming execution |
 
-If early materialization is implemented, the Host waits only for metadata and a waitable event, establishes a dependency on the consumer stream, and returns an ordinary Tensor without waiting for all data. It must not wait on an ordinary event that has not been recorded and assume that it represents future completion. A `ready_event` guarantees execution ordering only; it does not replace runtime/protocol error checks. Peer failure may occur after metadata publication, so asynchronous consumption does not guarantee the Host learns of every error before downstream work starts. The current implementation does not claim metadata-only wait semantics.
+`pending.synchronize()` or `result.synchronize()` waits for full producer completion and reports late errors. `combine_compact()` and `result.discard()` also check final producer status first. Combine returns after its own completion; successful Combine/discard releases the communicator turn. Failure poisons that domain, so it cannot be reused by another submission.
+
+The producer event guarantees stream ordering only. It does not replace error checking or guarantee that the Host learns of every peer error before downstream work starts. The Runtime retains the event through reference and queued-wait safety boundaries. Zero-byte outputs retain this dependency too, because count Tensors may still need it. Early metadata return does not change same-pool FIFO: the service admits the next request only after the current call fully finishes.
+
+Dropping a pending object does not cancel the device task. The Runtime retains input owners and any early lease until safe completion, then retires it according to Storage and consumer conditions. Forced cancellation during execution is not provided.
 
 ## 7. Tensors, streams, and capacity return
 
@@ -143,7 +143,7 @@ The adapter creates NPU Tensors through the external-memory factory matching the
 
 A custom Storage deleter captures the native lease. When the last Storage reference disappears, it submits a retirement request rather than freeing HBM directly. Views, detach, and repeated materialization share storage ownership. A Python finalizer cannot replace Storage retention. Training also requires separate autograd and backward-stream integration; `requires_grad` is currently rejected.
 
-The stream used for materialization is registered automatically. Additional consumer streams must be registered explicitly through `result.use_on_stream(stream)`. Torch's `record_stream` does not automatically establish safety for a custom segment; consumption on unregistered streams is outside the supported contract.
+The materialization stream is registered automatically and receives a producer-event dependency. Repeating materialization on a new stream preserves Storage and establishes that dependency there. Additional consumer streams can also be registered with their dependency through `result.use_on_stream(stream)`. Torch's `record_stream` does not automatically establish safety for a custom segment; consumption on unregistered streams is outside the supported contract.
 
 Tasks in Torch's CPU submission queue may outlive Python references. The native retirement hook flushes registered queues on the service thread, outside the pool mutex, then records final stream-tail events. A Storage deleter that may run on a Torch queue worker must not synchronously flush that queue. The device context and registered streams must remain valid until lease retirement.
 
@@ -177,7 +177,7 @@ Figure 4 distinguishes loss of Storage references, completion of accesses, reuse
 | largest_free_range | Largest allocatable range under ring-watermark and contiguity constraints |
 | metadata_bytes | Control storage included in accounting; whether Host container and thread overhead is included must be stated |
 
-Accounting satisfies `committed_bytes = live_bytes + pending_retire_bytes + free_bytes`, with no overlapping categories. Before a producer publishes its actual size, unassigned committed space is conservatively reserved and must not be reported as reclaimable. `reclaimable_segment_bytes` is zero while allocator work is in flight. After completion, the snapshot accounts for reservations validated against the Device commit.
+Accounting satisfies `committed_bytes = live_bytes + pending_retire_bytes + free_bytes`, with no overlapping categories. Before a producer publishes its actual size, unassigned committed space is conservatively reserved and must not be reported as reclaimable. `reclaimable_segment_bytes` is zero while allocator work is in flight. After metadata publication, reservations are validated against the Device commit and registered exactly once. Early lease export neither double-counts them nor removes producer reclamation protection.
 
 The current metadata counter includes the mapped mailbox and Device PoolState, but excludes Host map/deque, lease/event, and service-thread object overhead. The Torch allocator does not automatically account for these external segments. Total HBM usage must not be inferred from `torch.npu.memory_allocated()` alone, and the Torch cache is not automatically emptied.
 
@@ -211,9 +211,11 @@ The figures are embedded in the relevant sections throughout this document. Each
 - [Device profiling draw.io](diagrams/elastic-memory/device-allocation-profile.drawio) · [Stage definitions and evidence](diagrams/elastic-memory/device-allocation-profile.md)
 - [Four-page scenario, Dispatch, failure, and reclamation draw.io](diagrams/elastic-memory/elastic-memory.drawio)
 
-Keep diagram sources, PNGs, and both language versions synchronized. Label current behavior and interface goals beside the figures; a target flow must not obscure the current full-completion wait semantics. The shared diagram labels are in Chinese; the accompanying English sections describe the same contracts.
+Keep diagram sources, PNGs, and both language versions synchronized. Distinguish metadata readiness, producer completion, and validated behavior beside the figures. Event ordering must not be presented as error checking, nor implementation as hardware validation. The shared diagram labels are in Chinese; the accompanying English sections describe the same contracts.
 
 ## 10. Performance and validation requirements
+
+Figure 6 and earlier allocation/Dispatch measurements are baselines from before this metadata-only / 5µs poll change. The new functional tests and matched pipeline profiles are recorded separately in the validation record; prior measurements establish neither an asynchronous speedup nor a latency guarantee.
 
 [![Figure 6: Device allocation flow and per-rank profiling times](diagrams/elastic-memory/device-allocation-profile.drawio.png)](diagrams/elastic-memory/device-allocation-profile.drawio.png)
 
@@ -229,7 +231,7 @@ Formal comparisons remove Device diagnostic instrumentation, retain identical Ho
 
 Reports must also include backend, native status, kernel version, data volume, applicable bandwidth, actual output bytes, committed/peak/trim, blocked/padding, and retained staging. Host submission/queueing, materialization, CPU utilization, and growth/registration/trim latency are auxiliary observations, excluded from core kernel performance.
 
-Functional validation covers real growth before kernel completion, preceding side effects exactly once, reads/writes at the new address, failure exit without replay, FIFO head priority over newly grown space, initially zero data HBM, wraparound/segment switch/overflow/zero size, lifetimes and whole-segment return, and real multi-rank Dispatch/Combine. Host models and the M0 feasibility experiment do not replace full integration tests.
+Functional validation covers real growth before kernel completion, preceding side effects exactly once, reads/writes at the new address, failure exit without replay, FIFO head priority over newly grown space, initially zero data HBM, wraparound/segment switch/overflow/zero size, lifetimes and whole-segment return, and real multi-rank Dispatch/Combine. Host models and the M0 feasibility experiment do not replace full integration tests. Async validation must separately hold a producer in flight to prove early metadata return, confirm full Wait semantics, and cover immediate Torch consumption, repeated materialization on another stream, zero-output dependencies, late errors, and early reference drops.
 
 Before every hardware launch, recheck proc-mem and identity mapping for all target physical cards. Reject busy devices, query/parse failures, and unknown mapping. An empty `fuser` result does not permit launch. Do not kill/reset external tasks. Reuse existing HCCL qualification for the same environment; record incomplete evidence as a qualification boundary rather than rerunning it per task.
 
@@ -241,7 +243,7 @@ Before every hardware launch, recheck proc-mem and identity mapping for all targ
 | Compilation and deployment | Native C++14; Torch extension uses C++17/ABI matching installed Torch; pure AICore external binaries are registered and launched, without embedding kernels in Host libraries |
 | EP | Memory Dispatch/Combine with pooled local outputs; no separate Planner |
 | Torch | Ordinary FP16/BF16 contiguous ND Tensors, int32 routes, and FP32 Combine weights; inference only |
-| Asynchrony | Native submission progresses independently; materialize/Combine currently wait for full completion; metadata-only readiness is unimplemented |
+| Asynchrony | Metadata-only materialize, consumer event dependencies, and explicit final-error checks are implemented; native Wait and Combine retain full-completion semantics; CANN 9.2 functional validation passed; see the validation record for timing and limits |
 | Lifetimes | Storage/views, registered streams, pending input owners, and live Storage retained across close |
 | Extensions not covered | Autograd/backward, graph capture, UDMA direct output writes, multi-host, quantization, shared-expert, and TP paths |
 

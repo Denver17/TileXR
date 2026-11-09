@@ -13,7 +13,7 @@
 4. 当前段不足则尝试其他 segment；仍不足时发布一次增长请求，原 kernel 驻留等待 Host 真实申请独立 HBM。
    owner 在新段取得本次区间后原地继续；错误使整调用退出，不重试、不重放、不回滚。
 5. 实际 output 核在复制前等待本地描述符。prefix/expert-map 准备与分配重叠，peer 错误汇聚与复制可重叠。
-   Host 等完整数据完成后才返回 Tensor；metadata-only materialize 尚未实现。
+   Host 可在元数据发布后包装 Tensor，并在 consumer stream 排入数据依赖；`synchronize` 检查最终完成和晚到错误。下文时延仍为异步改造前测量。
 
 Host 在调用间根据 Storage/view 和登记 stream 生命周期整理每段的安全退休前缀。
 A 活跃而 B/C 已释放时，不能越过 A 回收；这部分阻塞空间及 padding 仍占容量。

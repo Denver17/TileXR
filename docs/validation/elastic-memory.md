@@ -18,19 +18,229 @@ and reproduction commands are in the November 9 section below.
 | Original kernel waits for real Host growth | M0 resident-kernel experiment and production allocator hardware tests; current kernel consumes a new HBM address without replay. |
 | Failed growth terminates the call | Budget failure reaches both ranks; Host bookkeeping fault after successful HBM allocation returns Device RuntimeFailure, frees the unpublished block and does not replay. Runtime/device failures without confirmed completion quarantine ownership; no recovery/retry. |
 | FIFO | One native service stream and admission queue per pool; multiple submitted allocation calls complete in order. One active routing handle per Torch buffer. |
-| Initial data HBM zero | Pool starts with control metadata only (6,208 reported bytes with ring ABI v2). First nonempty call creates a segment. Zero-sized output does not allocate data. |
+| Initial data HBM zero | Pool starts with control metadata only (6,208 reported bytes with mailbox ABI v3). First nonempty call creates a segment. Zero-sized output does not allocate data. |
 | Dynamic return | Hot calls reuse; larger calls grow; cache-budget collection and explicit trim invoke real segment free after lease/events finish. Live views keep stable addresses. |
 | Ordinary Tensor / Storage | Installed torch_npu `from_blob`, ordinary FP16/BF16 ND tensors, no output copy; alias, registered stream, pending input owners and close-with-live-Storage tests. Inference only; `requires_grad` rejected. |
 | Dispatch + Combine | Real two-rank Memory transport and existing Combine with independent routing/value oracle. UDMA direct output, multi-host, quantized/shared-expert/TP paths are outside this implementation. |
-| Asynchronous API | Submit runs independently of Python GIL. **Pending::Wait/materialize waits full data completion**, not metadata-only readiness; Combine also completes before returning. Early metadata materialization is deferred. |
+| Asynchronous API | Submit runs independently of Python GIL. `WaitMetadata` / Torch `materialize` return stable metadata and establish consumer stream dependencies. Native `Wait` and explicit `synchronize` check full completion/late failures. Combine/discard check the producer before releasing its turn. See the November 9 async validation below. |
 | Version support | Native C++14; Torch extension C++17 from installed Torch. This feature is validated on CANN **9.2.0**, A5/Ascend950DT, satisfying the user-scoped version acceptance. Other CANN versions are not promised and are not outstanding requirements. 910B, training/autograd and graph capture are not supported by this delivery. |
-| Performance | Final owner allocation approximately 1.301–1.671 us; OFF complete pool Dispatch 13.905 / 92.332 us versus maximum output 19.503 / 93.645 us. Full distributions, clock uncertainty and tails are below; Host/growth are separate. |
+| Prior performance baseline | Before the metadata-ready change: owner allocation approximately 1.301–1.671 us; OFF complete pool Dispatch 13.905 / 92.332 us versus maximum output 19.503 / 93.645 us. Full distributions, clock uncertainty and tails are below; Host/growth are separate. |
 
 Core limits are 32 segments, 128 outstanding reservation records (including
 retired records blocked behind a live prefix), and 128 registered consumer
 streams/events per lease. Exceeding metadata capacity fails explicitly. The
 allocator does not relocate live segments to compact memory.
 The caller must keep device context and registered streams alive through retirement.
+
+## Metadata-ready materialization and 5 us active polling (November 9)
+
+The new implementation is based on merged PR #212 (`5836b343`). Native
+`Pending::Wait()` remains data-complete. `WaitMetadata()` publishes a validated
+immutable allocation only after recording the producer event; Torch `materialize`
+queues that event on its consumer stream and returns ordinary Tensor Storage.
+Explicit `synchronize()` checks late runtime/protocol errors. Output metadata is
+never rewritten: ABI3 adds a separate 64B finalStatus at offset 320. Rebuild the
+Host libraries, external kernels, and Torch extension together. Same-pool FIFO
+still waits for full producer completion; this is not concurrent Device allocation.
+
+The active service loop requests `sleep_for(5us)` instead of 50us. This is an OS
+sleep request, **not a 5us wakeup guarantee**. A short Dispatch may complete before
+the Host observes its metadata; early return is permitted, not guaranteed on every
+call. A producer event establishes ordering, not a promise that no late error will
+occur. Failed outputs and downstream results derived from them are invalid.
+
+Environment: A5 `rack08os2`, physical 0/1 identity mapping, Ascend950DT,
+CANN 9.2.0, driver 26.2.0.b020, Torch 2.10.0+cpu with torch_npu 2.10.0.post7.
+Each launch uses a fresh combined proc-mem/mapping gate. Busy snapshots at
+08:04, 08:28 and 08:33 UTC rejected launches; no external process was killed,
+reset or remapped. Native tests ran after the 08:25 and subsequent fresh idle
+gates; paired Torch normal tests followed the 08:30:11 idle gate. HCCL was not
+rerun; the retained qualification limitations below still apply.
+
+Evidence root on A5:
+`/home/h30059441/elastic-memory-dev-20261106/async-materialize-20261109/`.
+Local evidence root:
+`/workspace/TileXR-worktrees/elastic-memory/.elastic-memory-evidence/async-materialize-20261109/`.
+
+| Check | Result / retained log |
+|---|---|
+| CANN 9.2 OFF build, install and real Torch extension build | PASS; `build-updated.log`, `build-close-fix.log`, `build-final-tests.log`, `torch-build.log` |
+| C++14 allocator, `-O2 -Wall -Wextra -Werror` | PASS ABI3; `allocator-strict-final.log` |
+| Native metadata and existing pool contracts | PASS; `pool-final.log`, 20 calls / 20 side effects, FIFO leader 3872B / follower 128B, hot reuse/wrap/segment switch/trim |
+| Actual early readiness | Held producer confirms metadata while producerDone=0; consumer stays blocked until release, then verifies payload. Four cases cover 704B, early drop, zero bytes and late error; 129 repeated same-stream waits are idempotent |
+| Zero-output Close | No external allocation: Close waits delayed consumer boundary and metadata becomes 0. Live zero allocation: Close returns with 6208B control metadata; final drop/Close clears it |
+| Host bookkeeping failure after growth | PASS; `growth-fault.log`: allocations=1 / injected=1 / frees=1 / side_effect=1 |
+| Real paired Torch Dispatch/Combine | PASS both ranks exit0; `torch-normal2-rank{0,1}.log`: immediate ordinary ops, repeated materialize/new stream, zero count dependencies, FP16/BF16, aliases, old view across growth, delayed consumers, close |
+| Single-rank failure | PASS both ranks exit0; `torch-failure-final-rank{0,1}.log`: rank0 allocation error 2, rank1 finalStatus error 2, domain rejects later requests; dropping failed owners and Close leaves committed/metadata0 |
+
+Maintainer lesson: producer completion is not sufficient to destroy its event.
+The installed CANN 9.2 `acl_rt.h` requires the associated StreamWaitEvent tasks to
+have completed. Retain per-stream wait-boundary events, including zero-byte
+allocations, and drain unowned boundaries in waiting trim/Close. Keep live zero
+allocations valid across Close. Also preserve immutable early metadata and report
+late errors through a separate slot. The held-producer and delayed-zero-boundary
+regressions exercise these distinct boundaries directly.
+
+Pipeline timing and final artifact provenance are recorded with this section's
+result package; earlier allocation/Dispatch numbers below are separate baseline
+measurements and must not be claimed as the async change's speedup.
+
+### Matched pipeline profiles
+
+The same binary compares `pending.synchronize()` (full_wait) with
+`pending.materialize()` (metadata). Both use BF16/topK2/two ranks, routing
+`(token*2+k+source_rank)%4`, ordinary Memory backend, native
+`tilexr_ep_dispatch_compact_kernel` (ABI3, Device diagnostics OFF), an immediate
+ordinary Torch mul, CANN 9.2/torch_npu Level0 CPU+NPU profiling, and the identical
+pre-round device synchronization plus CPU Gloo stage barrier. Each rank/mode has
+20 warmups and 100 measured rounds. CPU correctness checks and retirement occur
+outside the timed pipeline. These are separate process runs with the same
+configuration, not a randomized old/new-version or 50us/5us polling A/B.
+
+All times below are **us**. Each metric cell is **median / min / max / P95**
+for 100 measured samples on that rank. Dispatch and mul timestamps come from
+hardware tasks on the same device; gap is mul start minus Dispatch end; span is
+Dispatch start to mul end. No Host/device clock subtraction or cycle-frequency
+assumption is used.
+
+| Shape | Mode | Rank | Dispatch kernel | Dispatch→mul gap | Device pipeline span |
+|---|---|---:|---|---|---|
+| 16/128 | full_wait | 0 | 22.747 / 10.167 / 53.901 / 34.697 | 202.995 / 169.031 / 236.842 / 218.838 | 226.530 / 207.927 / 252.326 / 240.389 |
+| 16/128 | full_wait | 1 | 10.537 / 9.972 / 59.307 / 23.436 | 206.790 / 170.138 / 225.597 / 219.505 | 219.718 / 209.308 / 274.306 / 233.405 |
+| 16/128 | metadata | 0 | 24.137 / 10.500 / 74.012 / 39.870 | 182.205 / 152.862 / 202.855 / 196.602 | 208.131 / 190.759 / 245.165 / 220.104 |
+| 16/128 | metadata | 1 | 10.784 / 10.118 / 35.386 / 11.219 | 186.293 / 153.374 / 206.793 / 199.354 | 198.792 / 165.742 / 219.124 / 211.424 |
+| 256/4096 | full_wait | 0 | 91.523 / 77.157 / 128.297 / 97.999 | 207.822 / 186.387 / 251.090 / 236.887 | 302.533 / 284.806 / 353.580 / 323.737 |
+| 256/4096 | full_wait | 1 | 91.439 / 77.472 / 170.165 / 132.826 | 194.474 / 164.143 / 276.927 / 220.116 | 293.663 / 274.601 / 401.937 / 351.976 |
+| 256/4096 | metadata | 0 | 90.539 / 76.904 / 98.098 / 97.114 | 114.063 / 92.145 / 182.848 / 143.152 | 207.967 / 194.521 / 284.609 / 232.482 |
+| 256/4096 | metadata | 1 | 93.902 / 80.635 / 158.575 / 122.914 | 147.830 / 107.125 / 194.308 / 174.323 | 255.496 / 198.369 / 321.910 / 288.031 |
+
+Cross-rank gap: rank medians aggregated as **median [min,max]**; pooled P95
+uses all 200 measured rank samples and is distinct from the rank-median aggregate.
+
+| Shape | Mode | Rank-median gap [min,max] | Pooled gap median/P95 | Rank-median pipeline span |
+|---|---|---|---|---|
+| small | full_wait | 204.892 [202.995,206.790] | 205.321/219.211 | 223.124 |
+| small | metadata | 184.249 [182.205,186.293] | 184.098/199.354 | 203.462 |
+| large | full_wait | 201.148 [194.474,207.822] | 202.455/231.350 | 298.098 |
+| large | metadata | 130.946 [114.063,147.830] | 123.220/170.565 | 231.731 |
+
+The observed rank-median gap decreases by 20.643us (small) and 70.202us (large).
+This includes full_wait's extra Python/native Synchronize and scheduling costs;
+**it does not establish a pure kernel speedup, isolated polling benefit, or a
+universal asynchronous-overlap saving**. In all 100 measured samples for each
+rank/mode/shape, CPU `aten::mul` begins after Dispatch hardware completion. This
+does not exclude earlier overlap of metadata retrieval or Tensor construction,
+but it does not show early downstream operator submission either. The held
+producer test, separately, proves that metadata may actually return while the
+producer remains resident. There is no per-call early-return latency guarantee.
+
+Both shapes grow once during cold startup; every measured round is growth 1→1.
+Each rank retains 16MiB committed/peak pool HBM during the measurements and
+returns all 16MiB at final trim. Small output: hidden 8192B, pooled hidden+assist
+bundle 8576B, plus 32B of separately allocated counts (all output tensors 8608B).
+Large output: hidden 4194304B, pooled bundle 4200448B, plus 32B counts
+(all output tensors 4200480B). Pool output savings are not total-HBM savings:
+each rank still has 2GiB peer data staging, 4MiB flags and 1MiB guard, as well as
+inputs, Torch allocations and 6208B pool control metadata before final Close.
+
+Effective hidden-output throughput (hidden bytes / Dispatch kernel duration)
+is an output-rate metric, not wire or HBM traffic bandwidth. At per-rank medians:
+- small: full_wait rank0 0.360 GB/s, rank1 0.777 GB/s; metadata rank0 0.339 GB/s, rank1 0.760 GB/s.
+- large: full_wait rank0 45.828 GB/s, rank1 45.870 GB/s; metadata rank0 46.326 GB/s, rank1 44.667 GB/s.
+
+Cold ordinal 0 contains growth and is excluded from the hot tables. Raw cold/hot
+samples and Host enqueue/completion distributions remain in `rounds.jsonl` and
+`result.json`; Host intervals include Python, allocation, queueing and completion
+and are not kernel durations. `pipeline-{small,large}/{full_wait,metadata}/`
+contains per-rank raw CANN records, framework trace, kernel CSV, environment and
+binary hashes. Independent `independent-audit.md/json` recomputes counts, pairing,
+units and distributions:120 Dispatch + 120 mul per trace, 20 excluded warmups,
+no missing target task or ambiguous pairing; CSV units agree with trace. Profiler
+logs warn that the CPU Gloo group has no NPU backend for parallel-group metadata;
+the device trace still contains the complete target tasks. No HCCL qualification
+was launched by this benchmark.
+
+Cold ordinal0 is a single observation per rank, includes growth and framework
+first-use work, and is not a distribution or a steady-state latency estimate.
+
+| Shape | Mode | Rank | Cold Dispatch kernel us | Cold Dispatch→mul gap us | Cold Host-complete us |
+|---|---|---:|---:|---:|---:|
+| small | full_wait | 0 | 2879.010 | 2765.075 | 228292.450 |
+| small | full_wait | 1 | 2963.314 | 2753.655 | 228284.000 |
+| small | metadata | 0 | 2363.186 | 3082.258 | 223994.140 |
+| small | metadata | 1 | 2547.203 | 2904.780 | 223796.200 |
+| large | full_wait | 0 | 2465.514 | 2963.327 | 226685.630 |
+| large | full_wait | 1 | 2877.470 | 2959.172 | 226699.160 |
+| large | metadata | 0 | 2543.294 | 2801.608 | 224015.680 |
+| large | metadata | 1 | 3104.952 | 2740.795 | 223960.950 |
+
+### Async artifacts and reproduction
+
+The PR commit contains the final source; `final-code-sha256.json` pins 749
+non-documentation files and is checked against the remote source used for these
+artifacts. Manifest SHA-256: `cb65ce42e8c36e7887bca95267b7d18fa07878461ee326f5de5d3a191e909372`. The original broader build
+snapshot is retained separately as `source-code-sha256.json`. The benchmark
+runner recorded in each result is preserved as `measured-benchmark_pipeline.py`;
+the final runner only clarifies its module docstring about caller-selected devices.
+An AST comparison excluding that docstring confirms identical executable Python.
+
+These final artifact hashes match the libraries/kernel recorded in all eight
+per-rank pipeline profiles:
+
+| Artifact | SHA-256 |
+|---|---|
+| `install/lib64/libtilexr-elastic-memory.so` | `bb820fd86b973951f20a5342fc0f4ba23c56968f6cf6dd12124aba321d3f3cad` |
+| `install/lib64/libtilexr-ep.so` | `bfa3aad0e335d82f500a02970c9f0f5a906e0e4c12474f32ff788f6c3d79e39e` |
+| `install/lib64/libtile-comm.so` | `8f6e585988308213e9c22a33e075cb355d8c0b63633710aa13e653212931c961` |
+| `install/lib64/tilexr/kernels/tilexr_ep_dispatch_compact_kernel.o` | `6e46c01ec1258b8adab56300d2695bf87b96dcd359cd9b017b199137e4b5993c` |
+| `install/lib64/tilexr/kernels/tilexr_ep_combine_memory_kernel.o` | `e77def8099fc6014327f31cb037060353489d5b77e3eb7d23aa7ac7392a7cc7b` |
+| `build/tests/elastic_memory/test_elastic_pool` | `d40f9e50c9454dcbd05a5ba5984b0428b110678a09b280d0402b57f735af69db` |
+| `build/tests/elastic_memory/elastic_pool_kernel.o` | `02ce6bc31d100e5c9b673a76e635045fd041c31facd6d813fd7b79af2b698a21` |
+| `build/tests/elastic_memory/test_elastic_growth_fault` | `1784fe8b1003b206687cf2a2f55af89baf2e4591156ff8855b4626721664ed3f` |
+| `build/tests/elastic_memory/libelastic_growth_fault.so` | `cf4e51025f3f9f8700da950d5421d92c9a2a219e3485d1ba31ca9aaaecb22f3e` |
+| `source/integrations/elastic_memory_torch/tilexr_elastic/_C.cpython-312-aarch64-linux-gnu.so` | `28360b328f183f99681feadad286cf7d780018a6f22f36d94b5253e6bc8782a4` |
+
+Exact local logs, raw traces, source manifests, independent review and audit are
+under the evidence root above. The native and Torch builds use the same separate
+remote source/build/install tree; no old installation is substituted. A final
+read-only handoff snapshot at08:51:39 UTC showed0/1 idle. It is not authorization
+for another launch: rerun the full gate immediately before every test.
+
+Reproduction uses the retained A5 tree and environment; choose unused ports and
+communicator domains for paired runs. Do not run these commands on busy cards:
+
+```bash
+source /home/pkg/b070/cann-9.2.0/set_env.sh
+export PATH=/home/g00623548/test20261102/tools/cmake/bin:$PATH
+cd /home/h30059441/elastic-memory-dev-20261106/async-materialize-20261109
+cmake -S source -B build -DTILEXR_BUILD_ELASTIC_MEMORY=ON -DTILEXR_BUILD_EP=ON \
+  -DTILEXR_BUILD_UNITEST=OFF -DBUILD_TESTING=ON -DTILEXR_EP_COMPACT_PROFILING=OFF \
+  -DTILEXR_DIAGNOSTICS_SOC_TYPE=Ascend950DT -DCMAKE_INSTALL_LIBDIR=lib64 \
+  -DCMAKE_INSTALL_PREFIX="$PWD/install"
+cmake --build build -j6
+cmake --install build
+export LD_LIBRARY_PATH="$PWD/install/lib64:$LD_LIBRARY_PATH"
+export TILEXR_INSTALL_PREFIX="$PWD/install"
+export PYTHONPATH="$PWD/source/integrations/elastic_memory_torch"
+(cd source/integrations/elastic_memory_torch && MAX_JOBS=2 \
+  /home/l00984991/envs/py312_lzy/bin/python setup.py build_ext --inplace)
+ctest --test-dir build -R '^elastic_allocator$' --output-on-failure
+python3 ../idle_gate.py 0 1 && timeout 90 build/tests/elastic_memory/test_elastic_pool \
+  0 "$PWD/build/tests/elastic_memory/elastic_pool_kernel.o"
+python3 ../idle_gate.py 0 1 && env TILEXR_TEST_GROWTH_FAULT_BYTES=1048593 \
+  LD_PRELOAD="$PWD/build/tests/elastic_memory/libelastic_growth_fault.so" \
+  timeout 90 build/tests/elastic_memory/test_elastic_growth_fault \
+  0 "$PWD/build/tests/elastic_memory/elastic_pool_kernel.o"
+```
+
+For paired Torch, after a combined0/1 gate, set `TILEXR_COMM_ID=127.0.0.1:PORT`
+and launch `test_npu.py --rank RANK --device RANK --comm-domain DOMAIN` once for
+each rank concurrently with the real Python environment above. Repeat with a
+fresh domain/port and `--failure`. Require both exit codes and per-rank PASS
+records; failure tests finish with committed/metadata0 after dropping owners.
+The [pipeline benchmark commands](../../integrations/elastic_memory_torch/README.md#pipeline-profiling)
+retain the matched framework profiler and stage barrier. Do not compare their
+Host wall times against the complete-kernel-only baseline below.
 
 ## Device header layout and file descriptions
 
@@ -78,8 +288,9 @@ preparation overlaps allocation. A copy lane waits for the immutable local
 address descriptor immediately before output copy. The owner publishes the body,
 completes MTE3, then publishes the round magic; readers observe magic before
 fetching the body. Peer failure aggregation overlaps other lanes' local copies.
-A peer failure patches only the final Host error, preserving the allocation handle;
-Host still waits for complete kernel completion before exporting any Tensor.
+In this earlier measured revision, a peer failure patches the Host output error and
+Host waits for complete kernel completion before exporting a Tensor. The later ABI3
+async revision separates immutable Output from finalStatus, as documented above.
 No Host size Planner, precomputed output address, growth replay or retry was added.
 The two preallocated reference entries retain their scheduling behavior.
 

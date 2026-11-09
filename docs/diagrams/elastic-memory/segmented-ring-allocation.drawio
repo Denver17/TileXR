@@ -117,7 +117,7 @@
         <mxCell id="failgrow" value="否" edge="1" parent="1" source="reply" target="fail" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#BC8A34;dashed=1;">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="continue" value="&lt;b&gt;本地描述符发布后，output 核复制&lt;/b&gt;&lt;br&gt;owner 同时汇聚各 rank 错误&lt;br&gt;Host 等完整完成后才返回 Tensor" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#EDF5FF;strokeColor=#7FA9D6;spacing=10;fontSize=20;fontSize=19;">
+        <mxCell id="continue" value="&lt;b&gt;本地描述符发布后，output 核复制&lt;/b&gt;&lt;br&gt;owner 同时汇聚各 rank 错误&lt;br&gt;Host 可提前包装 Tensor；synchronize 检查晚到错误" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;rounded=1;arcSize=12;fillColor=#EDF5FF;strokeColor=#7FA9D6;spacing=10;fontSize=20;fontSize=19;">
           <mxGeometry x="205" y="1170" width="480" height="95" as="geometry" />
         </mxCell>
         <mxCell id="ready" value="" edge="1" parent="1" source="publish" target="continue" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
@@ -144,7 +144,7 @@
         <mxCell id="retire2" value="" edge="1" parent="1" source="prefix" target="apply" style="html=1;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;edgeStyle=orthogonalEdgeStyle;rounded=1;endArrow=block;endFill=1;fontSize=18;labelBackgroundColor=#FFFFFF;strokeColor=#5F7893;">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="footer" value="&lt;b&gt;证据：&lt;/b&gt;kernel-increment-20261109 / stages-verified-* 与 delivery-off-*；实测源码 d847c229，CANN 9.2。&lt;br&gt;SDK 1000.8934 ticks/µs 为经验拟合；阶段为嵌套区间，不能相加，不能与 OFF 批次直接相减；无跨 lane 时间戳相减。&lt;br&gt;保留短阶段精度与插桩扰动边界；metadata-only materialize 尚未实现。分布、原始 records、binary 见验证文档。&lt;br&gt;图示有效请求容量分支；非 Capacity 错误直接发布失败，零尺寸跳过 ring 提交。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=19;fontColor=#60758A;align=left;">
+        <mxCell id="footer" value="&lt;b&gt;证据：&lt;/b&gt;kernel-increment-20261109 / stages-verified-* 与 delivery-off-*；实测源码 d847c229，CANN 9.2。&lt;br&gt;SDK 1000.8934 ticks/µs 为经验拟合；阶段为嵌套区间，不能相加，不能与 OFF 批次直接相减；无跨 lane 时间戳相减。&lt;br&gt;保留短阶段精度与插桩扰动边界；图中数值为异步改造前测量，不代表提前 materialize 的收益。分布、原始 records、binary 见验证文档。&lt;br&gt;图示有效请求容量分支；非 Capacity 错误直接发布失败，零尺寸跳过 ring 提交。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=21;fontColor=#18324B;strokeWidth=1.6;shape=text;strokeColor=none;fillColor=none;fontSize=19;fontColor=#60758A;align=left;">
           <mxGeometry x="45" y="1600" width="1630" height="110" as="geometry" />
         </mxCell>
       </root>

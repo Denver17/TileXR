@@ -23,8 +23,9 @@ export PYTHONPATH="$PWD${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
 The extension uses the installed Torch C++ ABI and C++17. The native pool remains
-C++14. Ring ABI v2 changes both the internal state and public statistics layout;
-rebuild the native libraries, external kernels and this extension together. It links installed Host libraries and uses their external AICore binaries;
+C++14. Mailbox ABI v3 adds a separate final-status slot while keeping published
+Output metadata immutable. Rebuild the native libraries, external kernels and
+this extension together. It links installed Host libraries and uses their external AICore binaries;
 it does not embed kernel objects. Runtime library paths must resolve the actual
 NPU driver rather than CANN driver stubs. A tested Torch/CANN version must be
 recorded separately; this source alone is not compatibility evidence.
@@ -45,23 +46,44 @@ buffer = DeepEPBuffer(output_pool=pool, rank=rank, world_size=world_size,
                       comm_domain=domain)
 pending = buffer.dispatch_compact_async(
     hidden, topk_experts=routes, num_experts=num_experts)
-result = pending.materialize()
-expert_output = result.hidden * 2
+result = pending.materialize()  # Metadata ready; current stream waits for producer data.
+expert_output = result.hidden * 2  # May be submitted immediately, without a Host wait.
 combined = buffer.combine_compact(result.handle, expert_output,
                                  topk_weights=weights)
 ```
 
-`materialize()` currently waits for complete producer execution while releasing
-the Python GIL; the native service progresses without Python callbacks. Repeated
-materialization preserves the same tensor storage. `combine_compact()` currently
-waits for its recorded completion event before returning. A buffer permits one
-active routing handle: combine it or call `result.discard()` before submitting
-another Dispatch. Discarding the handle does not invalidate retained output
-Tensors. Any communication failure poisons that domain; create a fresh domain
-only after the failed execution has safely ended.
+`materialize(stream=None)` waits for immutable address/shape metadata, then
+enqueues an already-recorded producer completion event on the current or specified
+NPU stream. It may return before Dispatch finishes. Native progression needs no
+Python callbacks; waiting releases the GIL. Repeated materialization preserves the
+same result and tensor Storage and establishes the dependency on each new stream.
 
-The materialization stream is registered automatically. Use a scope for every
-additional consumer stream:
+The event guarantees execution order, not successful execution. Use
+`pending.synchronize()` or `result.synchronize()` to wait for final producer status
+and report late peer/runtime errors. A late error invalidates the output and any
+results derived from failed data. `combine_compact()` and `result.discard()` also
+check producer status before proceeding; successful Combine/discard releases the
+communicator turn, and Combine waits for its own completion before returning.
+A buffer permits one active routing handle. Discarding it preserves retained
+output Tensors. Failure poisons the communication domain; it cannot accept the
+next Dispatch.
+
+For native callers, `Pending::Wait()` retains full-completion semantics;
+`Pending::WaitMetadata()` returns the early allocation. Pair the latter with
+`Allocation::WaitOnStream()` for each consumer and `Allocation::Synchronize()`
+for final errors. The service still waits for full completion before admitting
+the next same-pool FIFO request. It checks the independent ABI v3 `finalStatus`
+after completion: zero sequence means no separate status, a nonzero sequence
+must match the request, and a matching nonzero error fails the call. Published
+Output is never overwritten to report a late error.
+
+Zero-byte outputs retain the producer event too: their nonempty count Tensors
+still need the stream dependency. The Runtime retains events until references
+and queued waits can safely retire. Dropping Pending early does not cancel the
+producer or release its input owners before completion.
+
+The materialization stream is registered automatically. Use a scope to establish
+the producer dependency and register every additional consumer stream:
 
 ```python
 consumer = torch.npu.Stream(device=result.hidden.device)
@@ -113,9 +135,40 @@ python tests/test_npu.py --rank 0 --device DEVICE0 --comm-domain DOMAIN
 python tests/test_npu.py --rank 1 --device DEVICE1 --comm-domain DOMAIN
 ```
 
-The test checks Dispatch/Combine against an independent routing oracle, normal
-Torch consumption without output copies, hot reuse, growth, zero receive rows,
-view ownership, cross-stream retirement, and close with live Storage. Run a
-separate paired invocation with `--failure` to verify that rank-0 allocation
-failure also terminates rank 1. These are hardware tests; Python syntax checks
-or successfully building the extension do not establish these contracts.
+The test checks Dispatch/Combine against an independent routing oracle, ordinary
+Torch operations submitted immediately after materialization, repeated
+materialization on another stream, zero-output count dependencies, hot reuse,
+growth, view ownership, cross-stream retirement, and close with live Storage.
+Run a separate paired invocation with `--failure` to check late rank failure
+through `pending.synchronize()`. The native held-producer test separately checks
+that metadata can return before producer completion. These are hardware tests;
+Python syntax checks or a successful build do not establish these contracts.
+
+CANN 9.2 functional validation of this asynchronous change passed. The
+[validation record](../../docs/validation/elastic-memory.md) separates the new
+matched pipeline profiles from earlier allocation/kernel baselines. Neither
+establishes a universal asynchronous speedup. The active Host poll loop
+now requests a 5µs sleep; operating-system scheduling may delay wakeup, so this
+value does not guarantee polling latency or end-to-end performance.
+
+## Pipeline profiling
+
+After a fresh combined idle/mapping gate, run two ranks of
+`tests/benchmark_pipeline.py` with the same `TILEXR_COMM_ID` and a separate Gloo
+`--rendezvous tcp://HOST:PORT`. For example, each rank supplies:
+
+```bash
+python tests/benchmark_pipeline.py --rank RANK --device DEVICE \
+  --comm-domain DOMAIN --rendezvous tcp://HOST:PORT --mode metadata \
+  --bs 16 --h 128 --warmup 20 --samples 100 --output /absolute/evidence/path
+```
+
+Repeat with `--mode full_wait` in the same evidence root; use a fresh root for
+`--bs 256 --h 4096`. Both modes keep the framework profiler and the same Host
+stage barrier enabled. The script checks ordinary Torch mul correctness and no
+pool growth in measured samples, retains raw profiler records and loaded-library
+hashes, and reports per-rank and cross-rank device Dispatch duration and
+Dispatch-to-mul gap. Missing or ambiguous hardware tasks are reported as
+unavailable. Host times are separate auxiliary observations. This compares two
+waiting APIs in the same build, not old versus new binaries or isolated 50us
+versus 5us polling; lower gaps alone do not prove earlier metadata observation.

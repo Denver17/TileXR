@@ -8,7 +8,7 @@
 #define TILEXR_ELASTIC_MEMORY_ABI_H
 #include <stdint.h>
 namespace TileXR { namespace Elastic {
-constexpr uint64_t kAbiVersion = 2;
+constexpr uint64_t kAbiVersion = 3;
 constexpr uint32_t kMaxSegments = 32;
 constexpr uint32_t kMaxAllocations = 128;
 enum Error : uint64_t { Success=0, Invalid=1, Capacity=2, MetadataFull=3, StaleHandle=4,
@@ -32,16 +32,19 @@ struct alignas(64) Output {
     Handle handle;
     uint64_t address, rows;
 };
+// Output is immutable after publication; late execution failures use this separate slot.
+struct alignas(64) FinalStatus { uint64_t sequence, error, reserved[6]; };
 struct alignas(64) Mailbox {
     GrowRequest request;
     GrowReply reply;
     Output output;
     uint64_t version, requestId, poolId, reserved[5];
     RingState committed; // Device writes before output.sequence publication
+    FinalStatus finalStatus; // optional late error, checked after producer completion
 };
 struct DeviceView { uint64_t state, mailbox; };
 static_assert(sizeof(GrowRequest)==64 && sizeof(GrowReply)==64 && sizeof(Output)==64,"mailbox lines");
 static_assert(sizeof(RingState)==64 && sizeof(PoolState)==64*(kMaxSegments+1),"ring snapshot layout");
-static_assert(sizeof(Mailbox)==320,"ring mailbox layout");
+static_assert(sizeof(FinalStatus)==64 && sizeof(Mailbox)==384,"ring mailbox layout");
 } }
 #endif

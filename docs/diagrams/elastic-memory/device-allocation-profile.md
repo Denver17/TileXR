@@ -58,7 +58,7 @@ peer 错误汇聚与本地复制重叠，因此失败时本地成功的核可能
 
 Host 在调用间依据 Storage/view 引用及生产者、通信、登记 stream 的完成状态整理连续退休前缀，
 Device 应用已发布水位。A 活跃而 B/C 已退休时不能越过 A；padding 和被队头阻塞的空间仍占容量。
-空段只在安全边界实际归还。`Pending::Wait/materialize` 当前等待完整数据完成，尚不支持 metadata-only readiness。
+空段只在安全边界实际归还。`Pending::Wait` 等待完整完成；`materialize` 等元数据并建立消费 stream 依赖，最终错误由 `synchronize` 检查。图中性能为异步改造前批次，不证明新增异步收益。
 
 ## 证据与维护
 

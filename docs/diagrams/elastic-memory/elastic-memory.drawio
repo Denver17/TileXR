@@ -73,7 +73,7 @@
         <mxCell id="footer" value="实线：参与关系　虚线：条件扩展　｜　FIFO：当前请求取得空间前，后续分配不能插队" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=16;;fontFamily=WenQuanYi Zen Hei;">
           <mxGeometry as="geometry" x="40" y="1010" width="1420" height="40" />
         </mxCell>
-        <mxCell id="limit" value="当前实现：CANN 9.2 / A5 实测；materialize 等待完整数据完成。metadata-only readiness 仍为设计目标。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=16;fontColor=#64748B;;fontFamily=WenQuanYi Zen Hei;">
+        <mxCell id="limit" value="CANN 9.2 / A5；materialize 等元数据并排入 consumer stream 依赖，synchronize 检查最终完成与错误。" vertex="1" parent="1" style="html=1;whiteSpace=wrap;fontFamily=WenQuanYi Zen Hei;fontSize=18;fontColor=#243247;shape=text;strokeColor=none;fillColor=none;fontSize=16;fontColor=#64748B;;fontFamily=WenQuanYi Zen Hei;">
           <mxGeometry as="geometry" x="40" y="1055" width="1420" height="35" />
         </mxCell>
       </root>

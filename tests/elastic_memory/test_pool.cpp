@@ -1,12 +1,17 @@
 /*
  * 通过 ACL 注册外置 ElasticPoolTest，检查 Pool 的增长、FIFO、复用和失败准入。
  * 回读数据及分配前副作用计数，核对新地址可用且调用未重放。
+ * 用映射 gate 保持 producer 驻留，检查早期元数据、consumer 依赖和 finalStatus 迟到错误。
+ * 零输出通过独立 predecessor 延迟 consumer boundary，区分有无活跃引用时的 Close 行为。
  * 保留 Allocation 引用来检查环绕、乱序退休后的队头阻塞和 trim/close；
  * 正常路径等待退休后释放辅助内存、stream 和 kernel 注册。Torch 与多 rank EP 另有测试。
  */
 #include "tilexr_elastic_memory.h"
 #include <runtime/kernel.h>
 #include <chrono>
+#include <cstdlib>
+#include <cstring>
+#include <exception>
 #include <atomic>
 #include <fstream>
 #include <iostream>
@@ -108,6 +113,207 @@ static void CheckRingBehavior(aclrtStream stream,void* side,uint64_t& calls) {
              <<" wrap_padding="<<wrapPadding<<" last_view_valid=1 blocked_growth=1 prefix_release=1"
              <<" segment_switch=1 growth_on_switch=0 trim=0\n";
 }
+// Fixture-only flags mirror pool_kernel.cpp and preserve its registered signature.
+static constexpr uint64_t kHeldProducer=uint64_t(1)<<63;
+static constexpr uint64_t kConsumer=uint64_t(1)<<62;
+static constexpr uint64_t kLateFailure=uint64_t(1)<<61;
+static constexpr uint64_t kHeldPredecessor=uint64_t(1)<<60;
+struct HeldControl {
+    uint64_t* host=nullptr;
+    void* device=nullptr;
+    bool unsafe=false;
+    explicit HeldControl(void* side) {
+        void* memory=nullptr;
+        if(posix_memalign(&memory,4096,4096)) throw std::bad_alloc();
+        host=static_cast<uint64_t*>(memory);
+        std::memset(host,0,4096);
+        host[32]=reinterpret_cast<uint64_t>(side);
+        const int status=aclrtHostRegister(host,4096,ACL_HOST_REGISTER_MAPPED,&device);
+        if(status) { std::free(host); host=nullptr; Check(status,"held control register"); }
+    }
+    ~HeldControl() {
+        // A failed stream completion is not permission to unmap a Device input.
+        if(!unsafe && host && aclrtHostUnregister(host)==ACL_SUCCESS) std::free(host);
+    }
+    uint64_t Read(size_t word) const { return __atomic_load_n(host+word,__ATOMIC_ACQUIRE); }
+    void Release() { __atomic_store_n(host,1,__ATOMIC_RELEASE); }
+};
+struct HeldWatchdog {
+    std::shared_ptr<HeldControl> gate;
+    std::atomic<bool> stopped{false},forced{false};
+    std::thread thread;
+    explicit HeldWatchdog(std::shared_ptr<HeldControl> value) : gate(std::move(value)) {
+        thread=std::thread([this] {
+            const auto end=std::chrono::steady_clock::now()+std::chrono::seconds(3);
+            while(!stopped.load() && std::chrono::steady_clock::now()<end)
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            if(!stopped.load()) { forced.store(true); gate->Release(); }
+        });
+    }
+    void Release() { gate->Release(); stopped.store(true); }
+    ~HeldWatchdog() { Release(); if(thread.joinable()) thread.join(); }
+};
+struct HeldConsumer {
+    std::shared_ptr<HeldControl> gate;
+    aclrtStream stream=nullptr;
+    aclrtEvent done=nullptr;
+    explicit HeldConsumer(std::shared_ptr<HeldControl> value) : gate(std::move(value)) {
+        Check(aclrtCreateStream(&stream),"held consumer stream");
+        const int status=aclrtCreateEvent(&done);
+        if(status) { aclrtDestroyStream(stream); stream=nullptr; Check(status,"held consumer event"); }
+    }
+    ~HeldConsumer() {
+        if(!stream) return;
+        if(aclrtSynchronizeStream(stream)!=ACL_SUCCESS) { gate->unsafe=true; return; }
+        if(done) aclrtDestroyEvent(done);
+        aclrtDestroyStream(stream);
+    }
+};
+static std::shared_ptr<Pending> SubmitHeld(Pool& pool,aclrtStream input,
+                                         const std::shared_ptr<HeldControl>& gate,
+                                         uint64_t seed,bool lateFailure) {
+    return pool.Submit([gate,seed,lateFailure](DeviceView view,aclrtStream runStream) {
+        struct { uint64_t state,mailbox,seed; void* side; } args{
+            view.state,view.mailbox,seed|kHeldProducer|(lateFailure?kLateFailure:0),gate->device};
+        rtArgsEx_t info{}; info.args=&args; info.argsSize=sizeof(args);
+        rtTaskCfgInfo_t cfg{}; cfg.schemMode=1;
+        return int(rtKernelLaunchWithFlagV2(signature,1,&info,nullptr,runStream,0,&cfg));
+    },input);
+}
+static void CheckMetadataEarly(aclrtStream input,void* side,uint64_t& calls,
+                               uint64_t seed,bool earlyDrop,bool lateFailure) {
+    Config config; config.segmentBytes=4096; config.maxCachedFreeBytes=0;
+    auto pool=Pool::Create(config);
+    auto gate=std::make_shared<HeldControl>(side);
+    HeldConsumer consumer(gate);
+    // Declared after consumer so assertion unwinding releases the producer gate before
+    // the consumer destructor waits for its stream. The watchdog also bounds WaitMetadata.
+    HeldWatchdog watchdog(gate);
+    auto pending=SubmitHeld(*pool,input,gate,seed,lateFailure); ++calls;
+    auto allocation=pending->WaitMetadata();
+    const auto reachedDeadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    while(!gate->Read(8) && std::chrono::steady_clock::now()<reachedDeadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(!watchdog.forced.load() && gate->Read(8)==1 && gate->Read(0)==0 && gate->Read(16)==0,
+            "metadata must return while producer remains held");
+    const uint64_t expectedBytes=seed?(seed*3+1)*32:0;
+    Require(allocation->Bytes()==expectedBytes,"early actual bytes");
+    Require((allocation->Data()!=nullptr)==(expectedBytes!=0),"early output address");
+    const Handle metadataHandle=allocation->Identity();
+    Require(pending->WaitMetadata().get()==allocation.get(),"metadata returns stable allocation");
+    for(int repeat=0;repeat<129;++repeat) allocation->WaitOnStream(consumer.stream);
+    struct { uint64_t state,mailbox,seed; void* side; } args{
+        reinterpret_cast<uint64_t>(allocation->Data()),allocation->Bytes(),seed|kConsumer,gate->device};
+    rtArgsEx_t info{}; info.args=&args; info.argsSize=sizeof(args);
+    rtTaskCfgInfo_t cfg{}; cfg.schemMode=1;
+    Check(rtKernelLaunchWithFlagV2(signature,1,&info,nullptr,consumer.stream,0,&cfg),"held consumer launch");
+    Check(aclrtRecordEvent(consumer.done,consumer.stream),"held consumer record");
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    aclrtEventRecordedStatus state;
+    Check(aclrtQueryEventStatus(consumer.done,&state),"held consumer query");
+    Require(!watchdog.forced.load() && state!=ACL_EVENT_RECORDED_STATUS_COMPLETE && gate->Read(24)==0,
+            "consumer must remain blocked until producer release");
+    const Stats held=pool->Snapshot(); CheckAccounting(held);
+    Require(held.reclaimableSegmentBytes==0,"held producer is not reclaimable");
+    if(!expectedBytes) Require(held.committedBytes==0,"zero metadata must not allocate data HBM");
+    if(earlyDrop) { pending.reset(); allocation.reset(); }
+    watchdog.Release();
+    if(!earlyDrop) {
+        bool syncFailed=false,waitFailed=false;
+        try { allocation->Synchronize(); } catch(const std::exception&) { syncFailed=true; }
+        std::shared_ptr<Allocation> completed;
+        try { completed=pending->Wait(); } catch(const std::exception&) { waitFailed=true; }
+        Require(syncFailed==lateFailure && waitFailed==lateFailure,"late status must reach both explicit waits");
+        if(!waitFailed) Require(completed.get()==allocation.get(),"full wait preserves metadata allocation");
+        const Handle after=allocation->Identity();
+        Require(after.segmentId==metadataHandle.segmentId && after.offset==metadataHandle.offset &&
+                after.bytes==metadataHandle.bytes && after.generation==metadataHandle.generation,
+                "late status must preserve published allocation identity");
+    }
+    Check(aclrtSynchronizeEvent(consumer.done),"held consumer complete");
+    Require(gate->Read(16)==1 && gate->Read(24)==1,"consumer must observe completed producer data");
+    Require(!watchdog.forced.load(),"watchdog release is a test failure");
+    if(allocation && !lateFailure) Validate(allocation,seed);
+    if(lateFailure) {
+        bool rejected=false;
+        try { Submit(*pool,input,side,1); } catch(const std::exception&) { rejected=true; }
+        Require(rejected,"late failure poisons subsequent submissions");
+    }
+    allocation.reset(); pending.reset();
+    const Stats retired=pool->Trim(); CheckAccounting(retired);
+    Require(retired.committedBytes==0,"early metadata outputs retire after producer and consumer");
+    pool->Close();
+    std::cout<<"METADATA_EARLY_PASS bytes="<<expectedBytes<<" producer_held=1 consumer_blocked=1"
+             <<" repeated_waits=129 early_drop="<<earlyDrop<<" late_failure="<<lateFailure<<" identity_stable=1 trim=0\n";
+}
+static void CheckZeroBoundaryClose(aclrtStream input,void* side,uint64_t& calls,bool keepLive) {
+    auto pool=Pool::Create();
+    auto producerGate=std::make_shared<HeldControl>(side);
+    auto predecessorGate=std::make_shared<HeldControl>(side);
+    HeldConsumer consumer(predecessorGate);
+    // Both watchdogs unwind before the consumer stream; even failed assertions release
+    // its predecessor and producer before attempting stream completion.
+    HeldWatchdog producerWatchdog(producerGate);
+    HeldWatchdog predecessorWatchdog(predecessorGate);
+    auto pending=SubmitHeld(*pool,input,producerGate,0,false); ++calls;
+    auto allocation=pending->WaitMetadata();
+    Require(allocation->Bytes()==0 && !allocation->Data(),"zero boundary fixture output");
+    struct { uint64_t state,mailbox,seed; void* side; } args{
+        0,0,kHeldPredecessor,predecessorGate->device};
+    rtArgsEx_t info{}; info.args=&args; info.argsSize=sizeof(args);
+    rtTaskCfgInfo_t cfg{}; cfg.schemMode=1;
+    Check(rtKernelLaunchWithFlagV2(signature,1,&info,nullptr,consumer.stream,0,&cfg),
+          "zero boundary predecessor launch");
+    // Producer is still held, so this must enqueue a dependency rather than take
+    // WaitOnStream's already-completed fast path.
+    allocation->WaitOnStream(consumer.stream);
+    Check(aclrtRecordEvent(consumer.done,consumer.stream),"zero boundary consumer record");
+    producerWatchdog.Release();
+    allocation->Synchronize();
+    const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+    while(!predecessorGate->Read(8) && std::chrono::steady_clock::now()<deadline)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    Require(!producerWatchdog.forced.load() && !predecessorWatchdog.forced.load() &&
+            predecessorGate->Read(8)==1 && predecessorGate->Read(0)==0,
+            "zero boundary predecessor must still be held");
+    aclrtEventRecordedStatus state;
+    Check(aclrtQueryEventStatus(consumer.done,&state),"zero boundary consumer query");
+    Require(state!=ACL_EVENT_RECORDED_STATUS_COMPLETE,"zero boundary must remain pending");
+    pending.reset();
+    if(!keepLive) allocation.reset();
+
+    std::atomic<bool> returned{false},returnedBeforeRelease{false};
+    std::thread release([&] {
+        const auto end=std::chrono::steady_clock::now()+std::chrono::milliseconds(200);
+        while(!returned.load() && std::chrono::steady_clock::now()<end)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        returnedBeforeRelease.store(returned.load());
+        predecessorGate->Release();
+    });
+    Stats closed{};
+    std::exception_ptr closeError;
+    try { closed=pool->Close(); }
+    catch(...) { closeError=std::current_exception(); }
+    returned.store(true);
+    release.join();
+    predecessorWatchdog.Release();
+    if(closeError) std::rethrow_exception(closeError);
+    Require(!producerWatchdog.forced.load() && !predecessorWatchdog.forced.load(),
+            "zero boundary watchdog release is a failure");
+    Require(returnedBeforeRelease.load()==keepLive,
+            "Close must drain unowned zero boundaries but preserve live zero allocations");
+    Require(closed.committedBytes==0 && (closed.metadataBytes!=0)==keepLive,
+            "Close must retain Core only for the live zero allocation");
+    Check(aclrtSynchronizeEvent(consumer.done),"zero boundary consumer complete");
+    Require(predecessorGate->Read(16)==1,"zero boundary predecessor finished");
+    allocation.reset();
+    const Stats final=pool->Close();
+    Require(final.committedBytes==0 && final.metadataBytes==0,"zero boundary final cleanup");
+    std::cout<<"ZERO_BOUNDARY_CLOSE_PASS live_allocation="<<keepLive
+             <<" returned_before_release="<<returnedBeforeRelease.load()
+             <<" producer_complete=1 consumer_boundary_delayed=1 metadata_after_close="
+             <<closed.metadataBytes<<" final_metadata=0\n";
+}
 int main(int argc,char** argv) {
     if(argc!=3) { std::cerr<<"usage: test_elastic_pool DEVICE KERNEL\n"; return 2; }
     try {
@@ -191,6 +397,12 @@ int main(int argc,char** argv) {
                  <<" follower_offset="<<nextHandle.offset<<'\n';
         leader.reset(); follower.reset(); firstRange.reset(); nextRange.reset(); fifoPool->Close();
         CheckRingBehavior(stream,side,calls);
+        CheckMetadataEarly(stream,side,calls,7,false,false);
+        CheckMetadataEarly(stream,side,calls,7,true,false);
+        CheckMetadataEarly(stream,side,calls,0,false,false);
+        CheckMetadataEarly(stream,side,calls,7,false,true);
+        CheckZeroBoundaryClose(stream,side,calls,false);
+        CheckZeroBoundaryClose(stream,side,calls,true);
         Config small; small.segmentBytes=256; small.maxCommittedBytes=256;
         auto failPool=Pool::Create(small);
         bool failed=false; auto fail=Submit(*failPool,stream,side,71); ++calls;
@@ -200,7 +412,7 @@ int main(int argc,char** argv) {
         Require(rejected,"failure poisons queued domain");
         fail.reset(); failPool->Close();
         uint64_t sideCount=0; Check(aclrtMemcpy(&sideCount,8,side,8,ACL_MEMCPY_DEVICE_TO_HOST),"side read");
-        Require(sideCount==calls,"one side effect per launch, no replay");
+        Require(sideCount==calls,"one side effect per producer launch, no replay");
         std::cout<<"POOL_PASS calls="<<calls<<" side_effect="<<sideCount<<" hot_growth_count="<<grows<<'\n';
         Check(aclrtFree(side),"free side"); Check(aclrtDestroyStream(stream),"destroy stream");
         Check(rtDevBinaryUnRegister(registered),"unregister"); Check(aclFinalize(),"finalize");

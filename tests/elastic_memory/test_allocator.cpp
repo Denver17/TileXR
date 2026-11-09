@@ -186,5 +186,6 @@ int main()
 {
     ZeroAndIdentity(); WrapAndPrefixRetirement(); BaseAlignmentAndCapacity();
     InvalidAndOverflow(); RandomizedByteOracle();
-    std::puts("ElasticMemory allocator behavioral tests passed (segmented ring ABI v2)");
+    std::printf("ElasticMemory allocator behavioral tests passed (segmented ring ABI v%llu)\n",
+                static_cast<unsigned long long>(kAbiVersion));
 }

@@ -1,7 +1,9 @@
 /*
  * 实现 tilexr_elastic_memory.h 的 Pool、Pending 和 Allocation。Core 在 service stream
  * 按 FIFO 启动调用，发布只读环快照，并通过 mapped mailbox 向驻留 kernel 回复 HBM 扩容。
- * Pending::Wait 等待调用完成；Allocation 保持 Core 存活，最后一个引用释放后，服务线程
+ * WaitMetadata 只等待不可变地址和 shape；Wait/Synchronize 继续报告完整调用的最终结果。
+ * 消费者 stream 等待保留的 producer event；FIFO 下一请求和回收仍在完整完成后推进。
+ * Allocation 保持 Core 存活，最后一个引用释放后，服务线程
  * 检查登记的 stream/event、推进连续退休前缀并尝试归还空 segment。无法确认设备访问结束时
  * 保留资源和输入 owner，拒绝后续请求，避免提前释放。
  */
@@ -46,15 +48,27 @@ constexpr size_t kMaxConsumerStreams = 128;
 std::atomic<uint64_t> nextPoolId{1};
 }
 
+// No Allocation/Pending back-reference: completion can outlive either without a cycle.
+struct ProducerState {
+    std::mutex mutex;
+    std::condition_variable changed;
+    aclrtEvent event = nullptr;
+    std::vector<aclrtEvent> waitBoundaries;
+    std::vector<aclrtStream> waitStreams;
+    bool recorded = false, done = false;
+    std::string error;
+};
 struct Pending::Impl {
     std::mutex mutex;
     std::condition_variable changed;
     bool done = false;
     std::string error;
+    std::shared_ptr<ProducerState> producer = std::make_shared<ProducerState>();
     std::shared_ptr<Allocation> allocation;
 };
 struct Allocation::Impl {
     std::shared_ptr<Core> core;
+    std::shared_ptr<ProducerState> producer;
     Handle handle{};
     void* address = nullptr;
     uint64_t rows = 0;
@@ -134,6 +148,8 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (closed_) throw std::runtime_error("ElasticMemory pool is closed");
             if (!failure_.empty()) throw std::runtime_error(failure_);
+            if (producers_.size() + pendingCount_ >= size_t(config_.maxPending) + kMaxAllocations)
+                throw std::runtime_error("ElasticMemory retained producer event metadata is full");
             if (pendingCount_ >= config_.maxPending) throw std::runtime_error("ElasticMemory pending queue is full");
         }
         Work work;
@@ -194,7 +210,7 @@ public:
         const Stats stats = result.get();
         if (close) {
             std::unique_lock<std::mutex> lock(mutex_);
-            if (leases_.empty()) changed_.wait(lock, [this] { return stopped_; });
+            if (leases_.empty() && producers_.empty()) changed_.wait(lock, [this] { return stopped_; });
             return StatisticsLocked();
         }
         return stats;
@@ -232,6 +248,39 @@ public:
         if (found->second.beforeEvents) throw std::runtime_error("ElasticMemory retirement hook is already set");
         found->second.beforeEvents = std::move(hook);
     }
+    void WaitOnProducer(const Handle& handle, const std::shared_ptr<ProducerState>& producer, aclrtStream stream) {
+        aclrtContext current = nullptr;
+        Check(aclrtGetCurrentContext(&current), "aclrtGetCurrentContext consumer wait");
+        if (current != context_) throw std::runtime_error("ElasticMemory consumer wait requires the pool ACL context");
+        Record(handle, stream);
+        std::lock_guard<std::mutex> lock(producer->mutex);
+        if (!producer->error.empty()) throw std::runtime_error(producer->error);
+        if (producer->done) return;
+        if (!producer->recorded) throw std::runtime_error("ElasticMemory producer event is not recorded");
+        if (std::find(producer->waitStreams.begin(), producer->waitStreams.end(), stream) !=
+            producer->waitStreams.end()) return;
+        if (producer->waitBoundaries.size() >= kMaxConsumerStreams)
+            throw std::runtime_error("ElasticMemory producer wait metadata is full");
+        // Retain the producer event until every queued wait has actually passed, including
+        // zero-byte output whose separately-owned count tensors still need this dependency.
+        aclrtEvent boundary = nullptr;
+        Check(aclrtCreateEvent(&boundary), "aclrtCreateEvent consumer wait boundary");
+        try {
+            producer->waitStreams.push_back(stream);
+            try { producer->waitBoundaries.push_back(boundary); }
+            catch (...) { producer->waitStreams.pop_back(); throw; }
+        } catch (...) { aclrtDestroyEvent(boundary); throw; }
+        try {
+            Check(aclrtStreamWaitEvent(stream, producer->event), "aclrtStreamWaitEvent producer");
+            Check(aclrtRecordEvent(boundary, stream), "aclrtRecordEvent consumer wait boundary");
+        } catch (...) {
+            // A submitted wait may still refer to the producer event.
+            unsafe_ = true;
+            producer->error = "ElasticMemory consumer wait submission failed; resources quarantined";
+            Poison(producer->error);
+            throw;
+        }
+    }
     void Retire(const Handle& handle) noexcept {
         if (!handle.bytes) return;
         std::lock_guard<std::mutex> lock(mutex_);
@@ -268,14 +317,9 @@ private:
             result.freeBytes = result.blockedFreeBytes = 0;
             return result;
         }
-        if (producerActive_) {
-            result.liveBytes += producerReservedBytes_;
-            result.paddingBytes += producerReservedBytes_ - producerHandle_.bytes;
-        }
         result.freeBytes = result.committedBytes - result.liveBytes - result.pendingRetireBytes;
         for (const auto& segment : segments_) {
-            const RingState& ring = producerActive_ && producerHandle_.bytes &&
-                producerHandle_.segmentId == segment.first ? producerRing_ : segment.second.ring;
+            const RingState& ring = segment.second.ring;
             const uint64_t used = ring.tail - ring.reclaim;
             const uint64_t available = segment.second.bytes - used;
             uint64_t largest = available;
@@ -292,9 +336,6 @@ private:
     }
     void ClearProducerLocked() {
         producerActive_ = producerKnown_ = false;
-        producerHandle_ = Handle{};
-        producerRing_ = RingState{};
-        producerReservedBytes_ = 0;
     }
     bool ValidateCommittedLocked(const Output& output, const RingState& committed,
                                  uint64_t requestId, uint64_t* reserved) const {
@@ -314,26 +355,16 @@ private:
         *reserved = committed.tail - (before.reclaim == before.tail ? 0 : before.tail);
         return *reserved >= output.handle.bytes;
     }
-    void ObserveOutput(uint64_t requestId) {
-        if (Load(&mailbox_->output.sequence) != requestId) return;
-        const Output output = mailbox_->output;
-        const RingState committed = mailbox_->committed;
-        if (output.error != Success) return;
-        std::lock_guard<std::mutex> lock(mutex_);
-        uint64_t reserved = 0;
-        if (output.handle.bytes) {
-            if (!ValidateCommittedLocked(output, committed, requestId, &reserved)) return;
-        } else if (output.address || output.handle.segmentId || output.handle.offset || output.handle.generation) return;
-        producerKnown_ = true;
-        producerHandle_ = output.handle;
-        producerRing_ = committed;
-        producerReservedBytes_ = reserved;
-    }
-    void Finish(const std::shared_ptr<Pending::Impl>& pending, const std::string& error,
-                std::shared_ptr<Allocation> allocation = {}) {
+    void Finish(const std::shared_ptr<Pending::Impl>& pending, const std::string& error) {
         std::lock_guard<std::mutex> lock(pending->mutex);
         pending->error = error;
-        pending->allocation = std::move(allocation);
+        {
+            std::lock_guard<std::mutex> producerLock(pending->producer->mutex);
+            if (pending->error.empty()) pending->error = pending->producer->error;
+            pending->producer->error = pending->error;
+            pending->producer->done = true;
+            pending->producer->changed.notify_all();
+        }
         pending->done = true;
         pending->changed.notify_all();
     }
@@ -377,7 +408,6 @@ private:
                     stats_.committedBytes += bytes;
                     ++stats_.growthCount;
                     stats_.peakCommittedBytes = std::max(stats_.peakCommittedBytes, stats_.committedBytes);
-                    producerReservedBytes_ = required;
                 } catch (...) {
                     // Insertion has the strong exception guarantee. No Device address was
                     // published and no accounting changed; the failed allocation stays private.
@@ -396,17 +426,18 @@ private:
         // cleanup that waits for Device work must not prevent the failure response.
         if (unpublished) Check(aclrtFree(unpublished), "aclrtFree rejected growth");
     }
-    std::shared_ptr<Allocation> Export(uint64_t requestId) {
+    std::shared_ptr<Allocation> Export(uint64_t requestId, const std::shared_ptr<ProducerState>& producer) {
         if (Load(&mailbox_->output.sequence) != requestId)
             throw std::runtime_error("ElasticMemory kernel did not publish matching output");
         const Output output = mailbox_->output;
         if (output.error != Success)
             throw std::runtime_error("ElasticMemory Device call failed: " + std::to_string(output.error));
-        // output.sequence is published after this 64B committed slot; completion also proves
-        // the Device is no longer writing it. No full metadata table D2H transfer is needed.
+        // Output and committed are immutable after output.sequence, even while the kernel
+        // writes payload. Final errors use finalStatus; no data completion is implied here.
         const RingState committed = mailbox_->committed;
         std::unique_ptr<Allocation::Impl> impl(new Allocation::Impl);
         impl->core = shared_from_this();
+        impl->producer = producer;
         impl->address = reinterpret_cast<void*>(output.address);
         impl->rows = output.rows;
         auto allocation = std::shared_ptr<Allocation>(new Allocation(std::move(impl)));
@@ -435,7 +466,9 @@ private:
             throw std::runtime_error("ElasticMemory invalid zero-size output");
         }
         allocation->impl_->handle = output.handle;
-        ClearProducerLocked();
+        // Reservation now belongs to the lease, so do not count it a second time. Keep
+        // producerActive until completion: the segment cannot yet be reclaimed or trimmed.
+        producerKnown_ = true;
         return allocation;
     }
     void Execute(Work& work) {
@@ -483,8 +516,13 @@ private:
         }
         __atomic_thread_fence(__ATOMIC_RELEASE);
         Check(aclrtStreamWaitEvent(stream_, work.input), "aclrtStreamWaitEvent input");
-        aclrtEvent done = nullptr;
-        Check(aclrtCreateEvent(&done), "aclrtCreateEvent completion");
+        const auto producer = work.pending->producer;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            producers_.push_back(producer);
+        }
+        Check(aclrtCreateEvent(&producer->event), "aclrtCreateEvent completion");
+        const aclrtEvent done = producer->event;
         try {
             const int status = work.launch(DeviceView{reinterpret_cast<uint64_t>(state_),
                                                       reinterpret_cast<uint64_t>(mapped_)}, stream_);
@@ -497,10 +535,24 @@ private:
             unsafe_ = true;
             Check(recorded, "aclrtRecordEvent completion");
         }
+        {
+            std::lock_guard<std::mutex> lock(producer->mutex);
+            producer->recorded = true;
+        }
+        bool exported = false;
+        auto publishMetadata = [&] {
+            if (exported || !error.empty() || Load(&mailbox_->output.sequence) != requestId ||
+                mailbox_->output.error != Success) return;
+            auto allocation = Export(requestId, producer);
+            std::lock_guard<std::mutex> lock(work.pending->mutex);
+            work.pending->allocation = std::move(allocation);
+            exported = true;
+            work.pending->changed.notify_all();
+        };
         uint64_t serviced = 0;
         try {
             while (!Complete(done)) {
-                ObserveOutput(requestId);
+                publishMetadata();
                 const uint64_t request = Load(&mailbox_->request.sequence);
                 if (request && request != serviced) {
                     if (serviced) error = "ElasticMemory kernel requested more than one growth";
@@ -508,16 +560,55 @@ private:
                     Grow(request, error);
                     serviced = request;
                 }
-                std::this_thread::sleep_for(std::chrono::microseconds(50));
+                std::this_thread::sleep_for(std::chrono::microseconds(5));
             }
         } catch (...) { unsafe_ = true; throw; }
         work.inputsSafe = true;
-        Check(aclrtDestroyEvent(done), "aclrtDestroyEvent completion");
         Check(aclrtDestroyEvent(work.input), "aclrtDestroyEvent input");
         work.input = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (error.empty()) error = failure_;
+        }
         if (!error.empty()) throw std::runtime_error(error);
-        auto allocation = Export(requestId);
-        Finish(work.pending, {}, std::move(allocation));
+        if (Load(&mailbox_->output.sequence) != requestId)
+            throw std::runtime_error("ElasticMemory kernel did not publish matching output");
+        if (mailbox_->output.error != Success)
+            throw std::runtime_error("ElasticMemory Device call failed: " + std::to_string(mailbox_->output.error));
+        const uint64_t finalSequence = Load(&mailbox_->finalStatus.sequence);
+        if (finalSequence != 0 && finalSequence != requestId)
+            throw std::runtime_error("ElasticMemory final status request ID mismatch");
+        if (finalSequence == requestId && mailbox_->finalStatus.error != Success)
+            throw std::runtime_error("ElasticMemory Device final failure: " + std::to_string(mailbox_->finalStatus.error));
+        publishMetadata();
+        Finish(work.pending, {});
+    }
+    void ReapProducers(bool wait = false) {
+        if (unsafe_) return;
+        for (size_t index = 0; ; ) {
+            std::shared_ptr<ProducerState> producer;
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (index == producers_.size()) break;
+                if (producers_[index].use_count() != 1) { ++index; continue; }
+                producer = producers_[index];
+            }
+            // Sole external holder is this worker; no new stream waits can be submitted.
+            bool ready = producer->done;
+            for (aclrtEvent event : producer->waitBoundaries) {
+                if (wait) Check(aclrtSynchronizeEvent(event), "aclrtSynchronizeEvent consumer wait boundary");
+                else if (!Complete(event)) ready = false;
+            }
+            if (!ready) { ++index; continue; }
+            for (aclrtEvent& event : producer->waitBoundaries) {
+                Check(aclrtDestroyEvent(event), "aclrtDestroyEvent consumer wait boundary");
+                event = nullptr;
+            }
+            if (producer->event) Check(aclrtDestroyEvent(producer->event), "aclrtDestroyEvent producer");
+            producer->event = nullptr;
+            std::lock_guard<std::mutex> lock(mutex_);
+            producers_.erase(producers_.begin() + index);
+        }
     }
     void Reclaim(bool wait, bool trim) {
         if (unsafe_) return;
@@ -609,7 +700,7 @@ private:
                 try {
                     if (work.control) {
                         if (!unsafe_) {
-                            try { Reclaim(work.wait, true); }
+                            try { Reclaim(work.wait, true); ReapProducers(work.wait); }
                             catch (...) { unsafe_ = true; throw; }
                         }
                         work.control->set_value(Snapshot());
@@ -632,11 +723,11 @@ private:
                 }
                 if (unsafe_ && work.launch && !work.inputsSafe) quarantined_.push_back(std::move(work));
             }
-            try { Reclaim(false, false); }
+            try { Reclaim(false, false); ReapProducers(); }
             catch (const std::exception& exception) { unsafe_ = true; Poison(exception.what()); }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                if (closed_ && queue_.empty() && (leases_.empty() || unsafe_)) { stopping_ = true; break; }
+                if (closed_ && queue_.empty() && ((leases_.empty() && producers_.empty()) || unsafe_)) { stopping_ = true; break; }
             }
         }
         if (unsafe_) {
@@ -679,16 +770,15 @@ private:
     std::map<uint64_t, SegmentRecord> segments_;
     std::map<uint64_t, LeaseRecord> leases_;
     std::vector<Work> quarantined_;
+    std::vector<std::shared_ptr<ProducerState>> producers_;
     Stats stats_;
     std::string failure_;
     uint64_t nextRequestId_ = 1, nextSegmentId_ = 1, currentSegmentId_ = 0;
     uint32_t pendingCount_ = 0;
     bool producerActive_ = false, producerKnown_ = false;
-    Handle producerHandle_{};
-    RingState producerRing_{};
-    uint64_t producerReservedBytes_ = 0;
     bool workerStarted_ = false;
-    bool closed_ = false, stopping_ = false, stopped_ = false, unsafe_ = false;
+    bool closed_ = false, stopping_ = false, stopped_ = false;
+    std::atomic<bool> unsafe_{false};
 };
 
 Allocation::Allocation(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
@@ -697,6 +787,14 @@ void* Allocation::Data() const { return impl_->address; }
 uint64_t Allocation::Bytes() const { return impl_->handle.bytes; }
 uint64_t Allocation::Rows() const { return impl_->rows; }
 Handle Allocation::Identity() const { return impl_->handle; }
+void Allocation::WaitOnStream(aclrtStream stream) {
+    impl_->core->WaitOnProducer(impl_->handle, impl_->producer, stream);
+}
+void Allocation::Synchronize() {
+    std::unique_lock<std::mutex> lock(impl_->producer->mutex);
+    impl_->producer->changed.wait(lock, [this] { return impl_->producer->done; });
+    if (!impl_->producer->error.empty()) throw std::runtime_error(impl_->producer->error);
+}
 void Allocation::RecordStream(aclrtStream stream) { impl_->core->Record(impl_->handle, stream); }
 void Allocation::RecordEvent(aclrtEvent event) { impl_->core->RecordEvent(impl_->handle, event); }
 void Allocation::SetRetireHook(std::function<void()> hook) { impl_->core->SetRetireHook(impl_->handle, std::move(hook)); }
@@ -704,6 +802,12 @@ Pending::Pending(std::shared_ptr<Impl> impl) : impl_(std::move(impl)) {}
 std::shared_ptr<Allocation> Pending::Wait() {
     std::unique_lock<std::mutex> lock(impl_->mutex);
     impl_->changed.wait(lock, [this] { return impl_->done; });
+    if (!impl_->error.empty()) throw std::runtime_error(impl_->error);
+    return impl_->allocation;
+}
+std::shared_ptr<Allocation> Pending::WaitMetadata() {
+    std::unique_lock<std::mutex> lock(impl_->mutex);
+    impl_->changed.wait(lock, [this] { return impl_->allocation || impl_->done; });
     if (!impl_->error.empty()) throw std::runtime_error(impl_->error);
     return impl_->allocation;
 }
