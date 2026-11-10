@@ -13,7 +13,7 @@
 | 选择测试、复现、记录结论 | [TESTING.md](../../tools/profiling/TESTING.md) |
 | 查阅历史迁移与整改背景 | [统一计划](../plans/profiling.md)、[整改计划](../plans/PROFILING_CLEANUP.md) |
 
-当前交付包含：header-only C++ SDK、可独立安装的 Python 包、collectives 调用方迁移、独立 Add4 示例。SDK 不管理 communicator、业务 kernel 启动、rank 协调或测量轮次；离线分析器不依赖 CANN、设备或 TileXR 动态库。
+当前交付包含：header-only C++ SDK、可独立安装的 Python 包、collectives 与 EP 调用方接入、独立 Add4 示例。SDK 不管理 communicator、业务 kernel 启动、rank 协调或测量轮次；离线分析器不依赖 CANN、设备或 TileXR 动态库。
 
 工具定位为 CANN 应用的独立 profiling SDK，不要求安装 TileXR 通信运行时、collectives
 或 EP。公共命名空间/头文件中的 TileXR 名称不是运行时依赖。SDK 没有 Ascend950
@@ -59,7 +59,7 @@ flowchart LR
 
 ### 3.1 布局与身份
 
-`DeviceArgs()` 返回 GM 描述符地址。不得传 Host 栈上的 `DeviceView`；也不得把旧 `CommArgs` 中的 profiling 槽位当作描述符。
+`DeviceArgs()` 返回 GM 描述符地址。不得传 Host 栈上的 `DeviceView`。EP 的 `CommArgs.profilingDescriptorsGM` 是描述符地址表；kernel 按本次 magic 选取表项后才取得 SDK DeviceView，不能把表地址当作单个描述符。
 
 | 对象 | 当前约束 |
 |---|---|
@@ -138,11 +138,11 @@ reservation，不释放业务分配。调用方须保留分配、pool、context 
 `EMPTY` / `WRITING` 不能作为 kernel 已启动的证据。元数据、records 发布和资源清理
 各有独立重试边界。完整签名见 [API](../../tools/profiling/docs/API_REFERENCE.md)。
 
-## 5. collectives 与 Add4 的接入策略
+## 5. collectives、EP 与 Add4 的接入策略
 
 ### 5.1 collectives
 
-业务资源 owner 持有 `ProfilingCaptureQueue`，普通/A5 Host 参数携带独立 `profilingGM`，配套 kernel 消费同一 DeviceView。这一 collectives 路径不依赖 comm 的采集 owner。公共 `tilexr_profiling.h` 保留兼容 include 入口；main 中 EP 的 `ep_profiling_compat` 与 UniTest 的 `profilingDescriptorsGM` / lane-count 接入继续保留，不能把这些 CommArgs 字段视为空槽。
+业务资源 owner 持有 `ProfilingCaptureQueue`，普通/A5 Host 参数携带独立 `profilingGM`，配套 kernel 消费同一 DeviceView。这一 collectives 路径独立于 EP 的 communicator invocation slots；两者都使用公共 `<tilexr/profiling.h>` 和 SDK capture 生命周期，没有旧 writer、encoder 或 include 兼容层。
 
 - 构建开关：`TILEXR_COLLECTIVES_ENABLE_PROFILING=ON`。运行时设置 `TILEXR_PROFILING_OUTPUT_DIR`；多 rank 使用同一 fresh `TILEXR_PROFILING_CAPTURE_ID` seed。
 - 首次 Acquire 准备最多 4 个 capture、总计最多 64 MiB，可能分配并上传描述符；不等待业务 stream 或 Drain。后续使用已准备项时不 Collect、不 D2H、不导出、不 free。
@@ -152,9 +152,37 @@ reservation，不释放业务分配。调用方须保留分配、pool、context 
 - 普通路径 lane 数为实际参与 AIV block 数；A5 为 48 个逻辑 lane（32 send + 16 receive），不能用 blockDim=33 代替。Host/Kernel 参数必须成对构建部署。
 - 仅在原有安全完成/资源清理点 Drain；逐项失败保留，已发布/已关闭项重试时跳过。逐项 Drain 不做 rank collective；固定共同清理阶段汇合状态，某 rank 没有可选 owner 也必须参与共同阶段。
 
-采样预算耗尽可跳过；清理失败需要保留资源并返回失败供重试，两者不可混为“任何 profiling 错误都忽略”。warmup 不采集，perf driver 已处理输出环境变量抑制。collectives 独立采集路径不使用旧 `TILEXR_PROFILING_RECORDS_PATH` 或 communicator 多 launch 聚合；EP 兼容路径不在此变更范围。
+采样预算耗尽可跳过；清理失败需要保留资源并返回失败供重试，两者不可混为“任何 profiling 错误都忽略”。warmup 不采集，perf driver 已处理输出环境变量抑制。collectives 独立采集路径不使用 EP invocation-slot plan，也不将多个 launch 合并到同一个 capture。
 
-### 5.2 独立 Add4
+### 5.2 EP 的 SDK invocation slots
+
+普通 Memory Dispatch/Combine 与 ServerDedup 共用 `TILEXR_EP_ENABLE_PROFILING=ON`，
+设备实现直接使用公共 `<tilexr/profiling.h>`。普通 Memory 每个参与 lane 记录 body
+begin/end 两个事件（ID 1/2），ServerDedup 用 `DirectWriter` 记录现有业务 event catalog，
+每 lane 在末尾 Publish 一次。不能把普通 Memory 的两点格式当作所有 EP capture 的限制。
+
+communicator 的 `profilingDescriptorsGM`、magic base、slot count 和 lane-count 表是保留的
+SDK 接入。调用方在 communicator 初始化前设置 `TILEXR_PROFILING_SLOTS_FILE`，由 managed
+invocation plan 指定总调用数、预算及选中调用的 UUID/输出路径；每个选中调用拥有独立
+`AclCapture`。未选中的槽为空，不复用 latest capture，不再调用旧 Reserve API。
+UniTest 可生成普通 Memory 的计划；其他调用方须自行保证所有 rank 的调用顺序、共享 UUID、
+选中轮次及对应 mapping 一致。warmup 消耗计划中的调用序号，但不选择为采样槽。
+
+`TILEXR_PROFILING_RECORDS_PER_STREAM` 控制此接入每 lane 容量，默认 **8**；启用 plan 时
+严格接受十进制 **8…65536，且为 8 的倍数**，非法值在初始化时拒绝。ServerDedup 详细事件
+从 **512 或更大**的有效容量开始预算，并检查实际 count/dropped；512 不是无丢点保证。
+这与独立 SDK `CaptureConfig.recordsPerStream=4096` 的默认值不同。
+
+调用数必须与 plan 一致。安全完成后 communicator 通过 SDK 收集实际参与 lanes，拒绝
+未完成、丢点或空记录的已启动 lane，再按计划导出 `records.v1`。普通两点 mapping 不能解释
+ServerDedup 的事件；后者使用对应业务 catalog/mapping。不要跨 UUID 合并分析。
+
+删除旧记录域、tiling enable/latest 字段及公共 reserve 入口改变了共享 `CommArgs`/tiling
+布局：Host、所有消费这些结构的 kernel 及下游须配套重编译。公共 include 仅用
+`<tilexr/profiling.h>`；旧 512B dump、兼容 owner/writer/encoder 和旧环境配置不再提供。
+业务 timeout 即使读取同一 timer 也属于失败控制，不能随 profiling 删除或用 marker 替代。
+
+### 5.3 独立 Add4
 
 Add4 当前只支持显式 Ascend950/Linux。Host 为 C++14，现有设备编译路径为 `dav-c310-vec`、`gnu++17`；不能据此声称已验证设备 C++14 或其他 SoC。
 

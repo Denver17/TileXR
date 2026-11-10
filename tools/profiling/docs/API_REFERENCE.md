@@ -201,11 +201,46 @@ Ordinary kernels use the actual participating AIV block count.
 
 Warmup must run without a capture. The perf driver suppresses the profiling
 output setting during warmup. One report consumes one capture directory; do not
-merge several UUIDs or infer iterations from event order. This collectives path does not use communicator auto-aggregation or
-`TILEXR_PROFILING_RECORDS_PATH`. Main's EP `ep_profiling_compat` and UniTest
-`profilingDescriptorsGM` / lane-count integration remain supported; their
-CommArgs fields retain their existing collection semantics. The standalone
-collectives capture owner does not replace those integration paths.
+merge several UUIDs or infer iterations from event order. Collectives does not
+use the EP invocation-slot plan; each path owns distinct SDK captures.
+
+### EP invocation-slot integration
+
+Ordinary Memory and ServerDedup use `TILEXR_EP_ENABLE_PROFILING=ON`. Both include
+`<tilexr/profiling.h>`; the forwarding include, old reserve APIs, compatibility
+writer/owner/encoder and private 512B dump format have been removed. Ordinary
+Memory emits two `Recorder<2>` body events (IDs 1/2) per participating lane.
+ServerDedup uses `DirectWriter` with its existing Dispatch/Combine business event
+catalogs and one terminal Publish per lane. Its record count depends on the path;
+it is not constrained to two events.
+
+The communicator's `profilingDescriptorsGM`, magic base, slot count and lane-count
+table are the retained SDK integration. Before communicator initialization,
+set `TILEXR_PROFILING_SLOTS_FILE` to a managed invocation plan. The first line is
+`total_invocations workspace_budget_bytes`; each selected line is
+`one_based_ordinal uuid32hex "output_path"`. Total count includes unselected calls
+and warmup. Each selected ordinal gets its own AclCapture; unselected entries are
+null. Distribute matching invocation order and UUIDs across ranks, with separate
+rank output paths. Do not reuse a committed descriptor for the next invocation.
+UniTest prepares plans for its ordinary Memory capture flow; another driver owns
+its own plan and the mapping appropriate to its operator.
+
+`TILEXR_PROFILING_RECORDS_PER_STREAM` configures this integration, default **8**.
+With a plan enabled, values are strictly decimal, **8…65536**, and multiples of
+**8**; invalid values fail initialization. This is distinct from the standalone
+CaptureConfig default of 4096. Detailed ServerDedup can start with **512 or more**
+records/lane, subject to the workspace budget. Check observed valid counts,
+complete lanes and zero dropped records; 512 is not a completeness guarantee.
+Setting capacity alone does not enable a capture.
+
+The owner checks the consumed invocation count and waits for safe device completion
+before collecting/exporting through SDK APIs. It uses actual launched lane counts,
+requires complete nonempty records with no drops for each participating lane,
+and writes independent records.v1 files to the planned paths. This is a table of
+one-invocation captures, not latest-slot aggregation. Changed CommArgs/tiling layouts
+require a coordinated rebuild of Host, all consuming kernels and downstream code.
+Old runner `profile`/`breakdown` modes are rejected; normal perf keeps warmup,
+stage barriers and external profiler measurement.
 
 ## Machine outputs, budgets and measurements
 

@@ -1,11 +1,13 @@
+/*
+ * 定义 ServerDedup Dispatch 的阶段及操作 event ID；kernel 将这些 ID 交给 SDK DirectWriter。
+ */
 #ifndef TILEXR_EP_MEMORY_SERVER_DEDUP_PROFILE_H
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_PROFILE_H
 
 #include <cstdint>
 
 namespace TileXREp {
-// Numeric catalog only. Storage and publication belong to ep_profiling_compat.h.
-constexpr uint32_t kEpServerDedupProfilingRecordsPerLaunch = 65536U;
+// Business event catalog; the standalone profiling SDK owns storage and publication.
 constexpr uint32_t kEpServerDedupMainEventBase = 0x53000001U;
 constexpr uint32_t kEpServerDedupDetailEventBase = 0x53000100U;
 constexpr uint32_t kEpServerDedupOperationEventBase = 0x53000200U;

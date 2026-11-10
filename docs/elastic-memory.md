@@ -225,7 +225,11 @@ Torch CPU 提交队列中的任务可能晚于 Python 引用消失。native 退�
 
 核心算子性能只比较设备 kernel 执行时间：在相同 shape、输入、路由、dtype、rank、通信路径、编译和诊断配置下，池空间充分且测量期间 growthCount 不变，比较最大容量预分配、Host 实际大小参考和 Device pool。Host 参考仅用于对照，不进入生产路径作为 size Planner。
 
-诊断使用仓库 `TileXR::Profiling` SDK 的真实 service-stream capture；Collect 在完成之后执行，不能阻塞增长服务。验证 timer 换算、全 lane/关键 owner marker、overflow/drop 和插桩扰动，不把 HWTS/AIV/sysClock 频率直接当作 GetSystemCycle 频率，也不未经证明跨 lane 时间戳相减。
+诊断使用仓库 `TileXR::Profiling` SDK 的真实 service-stream capture；Collect 在完成之后执行，不能阻塞增长服务。
+
+当前接入使用 standalone SDK 1.0.0 / DeviceView ABI 2；Host 与 kernel 必须成对重编译。`tests/elastic_memory/profile_compact.py` 在 launch 前声明参与者和工作量，完成后合并 rank-owned manifest、completion 与 Host events，再由公共 capture-set API 生成重复采样报告。mapping 模板保留空时钟换算，必须显式填写有证据的 scale 和依据；allocator 结果取 owner lane，不能用最慢 lane 的空阶段代替。
+
+验证 timer 换算、全 lane/关键 owner marker、overflow/drop 和插桩扰动，不把 HWTS/AIV/sysClock 频率直接当作 GetSystemCycle 频率，也不未经证明跨 lane 时间戳相减。
 
 正式对照移除设备诊断插桩，保持相同 Host stage barrier/framework profiler，以命名 Dispatch/Combine kernel 的 msprof Task Duration 测量。保留算子内分配、同步和跨 rank 等待，不用 Host wall 或 Task Wait Time 替代。至少覆盖 bs16/h128 和 bs256/h4096、BF16/topK2/2 ranks，保留暖机、足够样本及逐 rank/跨 rank 分布；中位数改善不能代替尾延迟结论。
 

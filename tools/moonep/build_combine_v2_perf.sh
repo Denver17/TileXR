@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 构建或启动 Combine V2 性能探针，向 tools/moonep 和 tests/moonep_combine_v2 传递运行参数。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,7 +8,6 @@ BUILD_DIR="${SOURCE_DIR}/build-combine-v2-perf"
 INSTALL_DIR="${SOURCE_DIR}/install-combine-v2-perf"
 CANN_PATH="${ASCEND_HOME_PATH:-/usr/local/Ascend/ascend-toolkit/latest}"
 JOBS="$(nproc)"
-ENABLE_PROFILING=0
 
 usage() {
     cat <<'EOF'
@@ -19,7 +19,6 @@ Options:
   --install-dir PATH   Staged runtime directory
   --cann-path PATH     CANN root containing aarch64-linux
   --jobs N             Parallel build jobs (default: nproc)
-  --enable-profiling   Enable per-AIV Combine V2 kernel profiling
   --help               Show this help
 EOF
 }
@@ -31,7 +30,6 @@ while [[ $# -gt 0 ]]; do
         --install-dir) INSTALL_DIR="$2"; shift 2 ;;
         --cann-path) CANN_PATH="$2"; shift 2 ;;
         --jobs) JOBS="$2"; shift 2 ;;
-        --enable-profiling) ENABLE_PROFILING=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -52,10 +50,6 @@ fi
 mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}/bin" "${INSTALL_DIR}/lib64"
 export ASCEND_HOME_PATH="${CANN_PATH}"
 export ASCEND_DRIVER_PATH="${ASCEND_DRIVER_PATH:-/usr/local/Ascend/driver}"
-profiling_cmake_value=OFF
-if (( ENABLE_PROFILING )); then
-    profiling_cmake_value=ON
-fi
 
 cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE=Release \
@@ -63,7 +57,6 @@ cmake -S "${SOURCE_DIR}" -B "${BUILD_DIR}" \
     -DTILEXR_BUILD_TESTS=OFF \
     -DTILEXR_BUILD_MOONEP=ON \
     -DTILEXR_BUILD_MOONEP_PLANNER=OFF \
-    -DTILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING="${profiling_cmake_value}" \
     -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
 cmake --build "${BUILD_DIR}" --target tilexr_moonep_combine_v2_perf \
     --parallel "${JOBS}"

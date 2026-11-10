@@ -1,3 +1,4 @@
+# 构建 MoonEP 的独立 Host 库与外置 AICore kernel；注册和安装由 MoonEpKernel.cmake 管理。
 include(GNUInstallDirs)
 
 find_program(BISHENG_EXECUTABLE bisheng)
@@ -7,15 +8,8 @@ endif()
 include(${CMAKE_SOURCE_DIR}/src/moonep/cmake/MoonEpKernel.cmake)
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
 
-option(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING
-    "Enable per-AIV profiling in the URMA MoonEP Dispatch kernel" OFF)
 option(TILEXR_MOONEP_DISPATCH_ENABLE_DFX
     "Enable detailed per-AIV DFX in the URMA MoonEP Dispatch kernel" OFF)
-if(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING AND
-    NOT TILEXR_MOONEP_DISPATCH_ENABLE_DFX)
-    message(FATAL_ERROR
-        "TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING requires TILEXR_MOONEP_DISPATCH_ENABLE_DFX")
-endif()
 set(TILEXR_MOONEP_DISPATCH_SYSTEM_CYCLES_PER_SECOND "1000000000" CACHE STRING
     "Ascend950 GetSystemCycle ticks per second for the URMA Dispatch timeout")
 if(NOT "${TILEXR_MOONEP_DISPATCH_SYSTEM_CYCLES_PER_SECOND}" MATCHES "^[1-9][0-9]*$")
@@ -95,10 +89,6 @@ if(TILEXR_MOONEP_DISPATCH_ENABLE_DFX)
     list(APPEND TILEXR_MOONEP_DISPATCH_URMA_KERNEL_OPTIONS
         -DTILEXR_MOONEP_DISPATCH_ENABLE_DFX=1)
 endif()
-if(TILEXR_MOONEP_DISPATCH_ENABLE_PROFILING)
-    list(APPEND TILEXR_MOONEP_DISPATCH_URMA_KERNEL_OPTIONS
-        -DTILEXR_MOONEP_DISPATCH_ENABLE_PROFILING=1)
-endif()
 set(TILEXR_MOONEP_DISPATCH_URMA_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/compiler/tikcpp
     -I${ASCEND_HOME_PATH}/compiler/tikcpp/tikcfw
@@ -122,9 +112,8 @@ tilexr_add_moonep_kernel(tilexr_moonep_dispatch_urma_kernel
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_common.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_credit.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_profile.h"
+        "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_diagnostics.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_schedule.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_trace.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/urma/common/dispatch_wqe_batch.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_udma.h"

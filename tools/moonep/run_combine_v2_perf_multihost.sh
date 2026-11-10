@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 构建或启动 Combine V2 性能探针，向 tools/moonep 和 tests/moonep_combine_v2 传递运行参数。
 set -euo pipefail
 
 HOSTFILE=""
@@ -16,7 +17,6 @@ COMM_DOMAIN=141
 COMM_ID=""
 TIMEOUT_SECONDS=600
 LOG_FILE=""
-PROFILE=0
 REDUCE_HIDDEN=0
 FUSED_WEIGHT=0
 
@@ -40,7 +40,6 @@ Options:
   --log-file PATH        Controller log path on the primary host
   --skip-iteration-barriers
                          Deprecated no-op; launches are always continuous
-  --profile              Capture per-AIV kernel cycle timestamps
   --reduce-hidden        Include BF16 TopK hidden reduction in the kernel
   --fused-weight         Transfer and validate FP32 route weights in the same launch
   --help                 Show this help
@@ -65,7 +64,6 @@ while [[ $# -gt 0 ]]; do
         --timeout) TIMEOUT_SECONDS="$2"; shift 2 ;;
         --log-file) LOG_FILE="$2"; shift 2 ;;
         --skip-iteration-barriers) shift ;;
-        --profile) PROFILE=1; shift ;;
         --reduce-hidden) REDUCE_HIDDEN=1; shift ;;
         --fused-weight) FUSED_WEIGHT=1; shift ;;
         --help|-h) usage; exit 0 ;;
@@ -219,9 +217,6 @@ if [[ -n "${BS}" ]]; then
     benchmark_args+=(--bs "${BS}")
 elif [[ -n "${BS_LIST}" ]]; then
     benchmark_args+=(--bs-list "${BS_LIST}")
-fi
-if (( PROFILE )); then
-    benchmark_args+=(--profile)
 fi
 if (( REDUCE_HIDDEN )); then
     benchmark_args+=(--reduce-hidden)

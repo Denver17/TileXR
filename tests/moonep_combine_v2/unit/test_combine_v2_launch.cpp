@@ -1,3 +1,7 @@
+/*
+ * 拦截 Runtime launch，验证 Combine V2 参数 ABI、动态 UB 配置及错误拒绝。
+ */
+
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -24,7 +28,8 @@ int registrationCalls = 0;
 int launchCalls = 0;
 uint32_t capturedBlockDim = 0;
 std::size_t capturedArgsSize = 0;
-uint64_t capturedArgs[29] = {};
+constexpr std::size_t kKernelArgCount = 28U;
+uint64_t capturedArgs[kKernelArgCount] = {};
 rtTaskCfgInfo_t capturedCfg {};
 
 void Check(bool condition, const char *message)
@@ -111,15 +116,15 @@ void TestConfiguresDynamicUb()
         "configured launch did not pass the device UB size");
     Check(capturedArgsSize == sizeof(capturedArgs),
         "configured launch used the wrong kernel ABI size");
-    Check(capturedArgs[7] == 0U && capturedArgs[10] == 0U &&
-        capturedArgs[11] == 0U &&
-        capturedArgs[12] == context.layout.collectiveStatusOffset &&
-        capturedArgs[13] == context.layout.outputOffset &&
-        capturedArgs[18] == context.layout.rowBytes &&
-        capturedArgs[19] == 1U &&
-        capturedArgs[20] == static_cast<uint64_t>(context.magic) &&
-        capturedArgs[21] == 0U && capturedArgs[22] == 0U &&
-        capturedArgs[23] == 0U && capturedArgs[28] == 0U,
+    Check(capturedArgs[6] == 0U && capturedArgs[9] == 0U &&
+        capturedArgs[10] == 0U &&
+        capturedArgs[11] == context.layout.collectiveStatusOffset &&
+        capturedArgs[12] == context.layout.outputOffset &&
+        capturedArgs[17] == context.layout.rowBytes &&
+        capturedArgs[18] == 1U &&
+        capturedArgs[19] == static_cast<uint64_t>(context.magic) &&
+        capturedArgs[20] == 0U && capturedArgs[21] == 0U &&
+        capturedArgs[22] == 0U && capturedArgs[27] == 0U,
         "configured launch did not pass kernel arguments");
     Check(activeOutputOffset == context.layout.scratchOffset[1],
         "configured launch did not publish the active epoch");
@@ -188,7 +193,7 @@ rtError_t rtKernelLaunchWithFlagV2(const void *, uint32_t blockDim,
         if (argsInfo->args != nullptr && argsInfo->argsSize ==
                 sizeof(capturedArgs)) {
             const uint64_t *args = static_cast<const uint64_t *>(argsInfo->args);
-            for (std::size_t index = 0; index < 29U; ++index) {
+            for (std::size_t index = 0; index < kKernelArgCount; ++index) {
                 capturedArgs[index] = args[index];
             }
         }

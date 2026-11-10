@@ -1,10 +1,13 @@
+/*
+ * 按 source token 读取 ServerDedup Combine 的 partial 数据并累加输出；scratch 和可选 SDK writer 均由调用者提供。
+ */
 #ifndef TILEXR_EP_SERVER_DEDUP_SOURCE_AGGREGATE_H
 #define TILEXR_EP_SERVER_DEDUP_SOURCE_AGGREGATE_H
 
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_combine_profile.h"
 #if defined(TILEXR_ENABLE_PROFILING)
-#include "ep_profiling_compat.h"
+#include <tilexr/profiling.h>
 #endif
 #include "ep_memory_server_dedup_combine_config.h"
 #include "tilexr_types.h"
@@ -17,7 +20,7 @@ using namespace AscendC;
 class ServerDedupSourceAggregate {
 public:
 #if defined(TILEXR_ENABLE_PROFILING)
-    __aicore__ inline void SetProfiling(TileXR::DirectProfilingWriter *writer)
+    __aicore__ inline void SetProfiling(TileXR::Profiling::DirectWriter *writer)
     {
         profile_ = writer;
     }
@@ -204,14 +207,14 @@ private:
     {
 #if defined(TILEXR_ENABLE_PROFILING)
         if (profile_ != nullptr) {
-            profile_->Record(event);
+            profile_->RecordAt(event, static_cast<uint64_t>(AscendC::GetSystemCycle()));
         }
 #else
         (void)event;
 #endif
     }
 #if defined(TILEXR_ENABLE_PROFILING)
-    TileXR::DirectProfilingWriter *profile_ = nullptr;
+    TileXR::Profiling::DirectWriter *profile_ = nullptr;
 #endif
     template <class T>
     __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)

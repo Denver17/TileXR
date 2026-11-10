@@ -1,6 +1,6 @@
 #
 # Copyright (c) 2024-2026 TileXR Project
-# CMakeLists.txt for TileXR EP tests
+# 构建 EP Host/stub 行为测试及可选硬件 demo；仅硬件程序运行能证明 NPU 数据面。
 #
 
 cmake_minimum_required(VERSION 3.16)
@@ -26,9 +26,6 @@ endif()
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
 if(Python3_Interpreter_FOUND)
-    add_test(NAME test_dispatch_memory_trace
-        COMMAND "${Python3_EXECUTABLE}"
-            "${CMAKE_CURRENT_SOURCE_DIR}/python/test_dispatch_memory_trace.py")
     add_test(NAME test_msprof_kernel_stats
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/python/test_msprof_kernel_stats.py")

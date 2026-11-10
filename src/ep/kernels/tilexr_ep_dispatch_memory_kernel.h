@@ -12,7 +12,6 @@
 
 #include "adv_api/reduce/sum.h"
 #include "comm_args.h"
-#include "ep_dispatch_memory_profile.h"
 #include "ep_memory_window.h"
 #include "kernel_operator.h"
 #include "tilexr_ep_mxfp8_quant.h"
@@ -98,14 +97,6 @@ public:
         return GetPeerStateBase(rankId);
     }
 
-    __aicore__ inline GM_ADDR ProfileRecordBase(uint32_t core) const
-    {
-        return TileXREp::TileXREpMemoryRoundDataBase(
-            args_->peerMems[rank_], TileXREp::kEpMemoryDispatchProfileBuffer) +
-            TileXREp::kEpMemoryDispatchDfxOffset +
-            static_cast<uint64_t>(core) * TileXREp::kEpMemoryDispatchDfxStride;
-    }
-
 private:
     __aicore__ inline GM_ADDR GetPeerStateBase(int32_t rankId)
     {
@@ -178,10 +169,6 @@ private:
         uint32_t srcExpertId, uint32_t localExpertNum);
     __aicore__ inline void ClearLocalWindowDataFlags(
         TBuf<> tBuf, uint32_t validNum, uint32_t localExpertNum);
-    __aicore__ inline void InitProfile(uint64_t startCycles, int64_t magic);
-    __aicore__ inline void RecordProfilePoint(uint32_t index);
-    __aicore__ inline void RecordTransferEnd(bool senderRole);
-    __aicore__ inline void WriteProfile();
     __aicore__ inline void SplitToCore(uint32_t curSendCnt, uint32_t curUseAivNum, uint32_t &startTokenId,
                                        uint32_t &endTokenId, uint32_t &sendTokenNum, bool isFront = true);
     __aicore__ inline void FillTriple(LocalTensor<uint8_t> &xOutTensor, uint32_t tokenIndex, uint32_t k);
@@ -331,178 +318,7 @@ private:
     TileXRDispatchMemoryContext ctx_;
 
     DataCopyParams hCopyParams_;
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    uint64_t profileGeneration_{0U};
-    uint64_t profileAssignedRoutes_{0U};
-    uint64_t profileIssuedRoutes_{0U};
-    uint64_t profileCountRecords_{0U};
-    uint64_t profileStatusPollAttempts_{0U};
-    uint64_t profileStatusPollMisses_{0U};
-    uint64_t profileCumsumPollAttempts_{0U};
-    uint64_t profileCumsumGateAttempts_{0U};
-    uint64_t profileValidExperts_{0U};
-    uint64_t profileReceiveBatches_{0U};
-    uint64_t profileReceiveTokens_{0U};
-    uint64_t profilePayloadPollAttempts_{0U};
-    uint64_t profilePayloadPollMisses_{0U};
-    uint64_t profileMaxCopyTokenCount_{0U};
-    uint64_t profileTimePoint_[TileXREp::kEpDispatchMemoryProfileTimePointCapacity];
-#endif
 };
-
-static_assert(sizeof(TileXREp::EpDispatchMemoryProfileRecord) ==
-        TileXREp::kEpMemoryDispatchDfxStride,
-    "EP Dispatch Memory profile record must match the DFX stride");
-static_assert(TileXREp::kEpMemoryDispatchDfxOffset +
-        static_cast<uint64_t>(TileXREp::kEpMemoryMaxVectorCoreNum) *
-            TileXREp::kEpMemoryDispatchDfxStride <=
-        TileXREp::kEpMemoryDispatchCumsumOffset,
-    "EP Dispatch Memory profile records overlap cumsum state");
-
-template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
-__aicore__ inline void
-MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::InitProfile(
-    uint64_t startCycles, int64_t magic)
-{
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    profileGeneration_ = static_cast<uint64_t>(magic);
-    profileAssignedRoutes_ = 0U;
-    profileIssuedRoutes_ = 0U;
-    profileCountRecords_ = 0U;
-    profileStatusPollAttempts_ = 0U;
-    profileStatusPollMisses_ = 0U;
-    profileCumsumPollAttempts_ = 0U;
-    profileCumsumGateAttempts_ = 0U;
-    profileValidExperts_ = 0U;
-    profileReceiveBatches_ = 0U;
-    profileReceiveTokens_ = 0U;
-    profilePayloadPollAttempts_ = 0U;
-    profilePayloadPollMisses_ = 0U;
-    profileMaxCopyTokenCount_ = 0U;
-    for (uint32_t index = 0U; index < TileXREp::kEpDispatchMemoryProfileTimePointCapacity; ++index) {
-        profileTimePoint_[index] = 0U;
-    }
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_BEGIN] = startCycles;
-#else
-    (void)startCycles;
-    (void)magic;
-#endif
-}
-
-template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
-__aicore__ inline void
-MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::RecordProfilePoint(
-    uint32_t index)
-{
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    if (index < TileXREp::kEpDispatchMemoryProfileTimePointCapacity) {
-        profileTimePoint_[index] = static_cast<uint64_t>(GetSystemCycle());
-    }
-#else
-    (void)index;
-#endif
-}
-
-template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
-__aicore__ inline void
-MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::RecordTransferEnd(bool senderRole)
-{
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    const uint64_t transferEndCycles = static_cast<uint64_t>(GetSystemCycle());
-    if (profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END] == 0U) {
-        profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END] =
-            transferEndCycles;
-    }
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_END] = transferEndCycles;
-    if (senderRole) {
-        profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_END] = transferEndCycles;
-    }
-#else
-    (void)senderRole;
-#endif
-}
-
-template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
-__aicore__ inline void
-MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WriteProfile()
-{
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    if (profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_END] == 0U) {
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_END);
-    }
-    uint64_t lastPoint = profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_BEGIN];
-    for (uint32_t index = 1U; index < TileXREp::kEpDispatchMemoryProfileTimePointCount; ++index) {
-        if (profileTimePoint_[index] == 0U) {
-            profileTimePoint_[index] = lastPoint;
-        } else {
-            lastPoint = profileTimePoint_[index];
-        }
-    }
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_ASSIGNED_ROUTES] =
-        profileAssignedRoutes_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_ISSUED_ROUTES] =
-        profileIssuedRoutes_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_COUNT_RECORDS] =
-        profileCountRecords_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT] =
-        aivUsedAllToAll_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_BUFFER_NUM] =
-        sendTokenBufNum_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_STATUS_POLL_ATTEMPTS] =
-        profileStatusPollAttempts_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_STATUS_POLL_MISSES] =
-        profileStatusPollMisses_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_CUMSUM_POLL_ATTEMPTS] =
-        profileCumsumPollAttempts_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_CUMSUM_GATE_ATTEMPTS] =
-        profileCumsumGateAttempts_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_VALID_EXPERTS] =
-        profileValidExperts_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_RECEIVE_BATCHES] =
-        profileReceiveBatches_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_RECEIVE_TOKENS] =
-        profileReceiveTokens_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_PAYLOAD_POLL_ATTEMPTS] =
-        profilePayloadPollAttempts_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_PAYLOAD_POLL_MISSES] =
-        profilePayloadPollMisses_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_MAX_COPY_TOKEN_COUNT] =
-        profileMaxCopyTokenCount_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_BLOCKS_PER_TOKEN] =
-        blockCntPerToken_;
-    profileTimePoint_[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT] =
-        sendRoundNum_;
-
-    __gm__ TileXREp::EpDispatchMemoryProfileRecord *record =
-        reinterpret_cast<__gm__ TileXREp::EpDispatchMemoryProfileRecord *>(
-            ctx_.ProfileRecordBase(aivId_));
-    record->marker = TileXREp::kEpDispatchMemoryProfileMarker;
-    record->version = TileXREp::kEpDispatchMemoryProfileVersion;
-    record->recordBytes = sizeof(TileXREp::EpDispatchMemoryProfileRecord);
-    record->rank = static_cast<uint32_t>(epRankId_);
-    record->core = aivId_;
-    record->blockDim = aivNum_;
-    record->coreRole = aivId_ < aivUsedAllToAll_ ?
-        TileXREp::EP_DISPATCH_MEMORY_ROLE_SENDER :
-        TileXREp::EP_DISPATCH_MEMORY_ROLE_COUNT_CUMSUM;
-    record->timePointCount = TileXREp::kEpDispatchMemoryProfileTimePointCount;
-    record->metricCount = TileXREp::kEpDispatchMemoryProfileMetricCount;
-    record->generation = profileGeneration_;
-    for (uint32_t index = 0U; index < TileXREp::kEpDispatchMemoryProfileTimePointCapacity; ++index) {
-        record->timePoint[index] = profileTimePoint_[index];
-    }
-    for (uint32_t index = 0U; index < TileXREp::kEpDispatchMemoryProfileMetricCapacity; ++index) {
-        record->metric[index] = 0U;
-    }
-
-    GlobalTensor<uint8_t> recordGlobal;
-    recordGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(record), sizeof(*record));
-    for (uint32_t offset = 0U; offset < sizeof(*record); offset += 64U) {
-        DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-            recordGlobal[offset]);
-    }
-#endif
-}
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
 __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SetTilingDataAndCal()
@@ -597,12 +413,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     int64_t expertTokenNumsType, int64_t activeMaskType, int64_t quantMode,
     int64_t expandXOutDtype, int64_t magic, TPipe *pipe)
 {
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    const uint64_t profileStartCycles = static_cast<uint64_t>(GetSystemCycle());
-#else
-    const uint64_t profileStartCycles = 0U;
-#endif
-    InitProfile(profileStartCycles, magic);
     originalOverflowMode_ = AscendC::GetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>();
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(0);
     tpipe_ = pipe;
@@ -643,7 +453,7 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Init(GM_A
     expandXOutGM_ = expandXOut;
     assistInfoForCombineOutGM_ = assistInfoForCombineOut;
     sendCountsOutGM_ = sendCountsOut;
-    recvCntWorkspaceGM_ = statusDataSpaceGM_ + TileXREp::kEpMemoryDispatchDfxOffset - workspaceBytes;
+    recvCntWorkspaceGM_ = statusDataSpaceGM_ + TileXREp::kEpMemoryRecvCountWorkspaceEnd - workspaceBytes;
     statusSpaceGM_ = GetWindStateAddrByRankId(epRankId_);
     windowInstatusFp32Tensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(statusSpaceGM_));
     selfRankWinInGMTensor_.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(statusDataSpaceGM_));
@@ -711,9 +521,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(syncFlagId_ % sendTokenBufNum_);
     DataCopy(dstWinGMTensor, outTensor_[(syncFlagId_ % sendTokenBufNum_) * axisHCommu_], axisHCommu_);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(syncFlagId_ % sendTokenBufNum_);
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    ++profileIssuedRoutes_;
-#endif
     ++syncFlagId_;
 }
 
@@ -744,9 +551,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::TokenToEx
     AscendC::WaitFlag<AscendC::HardEvent::V_MTE3>(syncFlagId_ % sendTokenBufNum_);
     DataCopy(dstWinGMTensor, outTensor_[(syncFlagId_ % sendTokenBufNum_) * axisHCommu_], axisHCommu_);
     AscendC::SetFlag<AscendC::HardEvent::MTE3_V>(syncFlagId_ % sendTokenBufNum_);
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    ++profileIssuedRoutes_;
-#endif
     syncFlagId_ ++;
 }
 
@@ -787,9 +591,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SendToSha
     uint32_t startTokenId, endTokenId, sendTokenNum;
     uint32_t curSendCnt = activeMaskBsCnt_ * sharedExpertNum_;
     SplitToCore(curSendCnt, sharedUsedAivNum_, startTokenId, endTokenId, sendTokenNum, false);
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    profileAssignedRoutes_ = sendTokenNum;
-#endif
     if (startTokenId >= curSendCnt) {return;}
 
     GlobalTensor<uint8_t> dstWinGMTensor;
@@ -845,11 +646,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SendToMoe
     for (uint32_t curRound = 0U; curRound < sendRoundNum_; ++curRound) {
         SyncBeforeSendRound(curRound);
         for (int32_t index = aivId_; index < validTokenNum; index += moeUsedAivNum_) {
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-            if (curRound == 0U) {
-                ++profileAssignedRoutes_;
-            }
-#endif
             const uint32_t activeTokenIndex = index / axisK_;
             int32_t tokenId = isTokenMaskFlag_ ?
                 static_cast<int32_t>(validBsIndexTensor_.GetValue(activeTokenIndex)) :
@@ -950,7 +746,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::AllToAllD
     workLocalTensor_ = calTempBuf.Get<float>();
     ExpIdsCopyAndMaskCal();
     CalSendRound();
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_END);
     if (useAllCoreCount_) {
         tpipe_->InitBuffer(statusBuf_, statusBufSize_);
         statusTensor_ = statusBuf_.Get<int32_t>();
@@ -960,11 +755,9 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::AllToAllD
         for (uint32_t curRound = 0U; curRound < sendRoundNum_; ++curRound) {
             SyncBeforeSendRound(curRound);
         }
-        RecordTransferEnd(true);
         return;
     }
     AllToAllDispatchA5(inQueue, outBuf);
-    RecordTransferEnd(true);
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>
@@ -1087,9 +880,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalAndSen
         }
         return;
     }
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    profileCountRecords_ += sendExpertNum;
-#endif
 
     uint32_t maskCnt = isTokenMaskFlag_ ? activeMaskBsCnt_ * axisK_ : expertIdsCnt_;
     bool useVectorRange = false;
@@ -1298,9 +1088,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::GetCumSum
         Sum(recvCntSumOutTensor, sumContinueTensor, sumParams);
         SyncFunc<AscendC::HardEvent::V_S>();
         cumSumFlag = static_cast<int32_t>(recvCntSumOutTensor.GetValue(0));
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-        ++profileCumsumPollAttempts_;
-#endif
         if (cumSumFlag == aivUsedCumSum_) {
             break;
         }
@@ -1352,12 +1139,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitDispa
             mask, recStatusNumPerCore_, 1U);
         SyncFunc<AscendC::HardEvent::V_S>();
         sumOfFlag = statusSumOutTensor.GetValue(0);
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-        ++profileStatusPollAttempts_;
-        if (sumOfFlag != compareTarget) {
-            ++profileStatusPollMisses_;
-        }
-#endif
     }
 
     WaitDispatchClearStatus();
@@ -1427,14 +1208,11 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::CalCumSum
     statusTensor_ = statusBuf_.Get<int32_t>();
     ExpIdsCopyAndMaskCal();
     CalSendRound();
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_END);
     CalAndSendCnt();
-    RecordTransferEnd(false);
     SplitToCore(rscvStatusNum_, aivUsedCumSum_, startStatusIndex_, endStatusIndex_, recStatusNumPerCore_, false);
     BufferInit();
     WaitDispatch();
     CalRecvAndSetFlag();
-    RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_END);
 
 }
 
@@ -1455,9 +1233,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitCumSu
         Sum(statusSumOutTensor, statusFp32Tensor_, sumFlagParams);
         SyncFunc<AscendC::HardEvent::V_S>();
         cumSumFlag = statusSumOutTensor.ReinterpretCast<int32_t>().GetValue(0);
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-        ++profileCumsumGateAttempts_;
-#endif
         if (cumSumFlag == targetFlag) {
             break;
         }
@@ -1534,12 +1309,6 @@ __aicore__ inline uint32_t MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Check
     ReduceSum(flagSumOutTensor, flagRecvTensor_, flagReduceWorkTensor_, 1U, flagNum, 1U);
     SyncFunc<AscendC::HardEvent::V_S>();
     const bool arrived = flagSumOutTensor.GetValue(0) == 1.0f * flagNum;
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    ++profilePayloadPollAttempts_;
-    if (!arrived) {
-        ++profilePayloadPollMisses_;
-    }
-#endif
     return arrived ? static_cast<uint32_t>(copyCnt) : 0U;
 }
 
@@ -1688,9 +1457,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
         }
         --maxCopyTokenCnt;
     }
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    profileMaxCopyTokenCount_ = maxCopyTokenCnt;
-#endif
 
     LocalTensor<uint8_t> xTmpPingTensor =
         tBuf.GetWithOffset<uint8_t>(dataBufferSize, 0U);
@@ -1717,13 +1483,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
         uint32_t arriveCount = CheckDataArriveWithFlag(
             srcDataBlockIdx, expertFinishNumTensor_(index), copyCnt);
         if (arriveCount == copyCnt) {
-            if (copyBatchId == 0U) {
-                RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
-            }
-            if (expertLeftNumTensor_(index) == arriveCount &&
-                finishNum + 1U == validNum) {
-                RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
-            }
             uint32_t dstPosition =
                 srcExpertId != 0U ? sendCntTensor_(srcExpertId - 1U) : 0U;
             dstPosition += expertFinishNumTensor_(index);
@@ -1735,10 +1494,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::WaitAndFo
             CopyInAndOut(xTmpTensor, wAddr, index, dstPosition, arriveCount,
                 dataBufferId, copyBatchId >= LOCAL_COPY_BUFFER_NUM);
             ++copyBatchId;
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-            ++profileReceiveBatches_;
-            profileReceiveTokens_ += arriveCount;
-#endif
             expertFinishNumTensor_(index) += arriveCount;
             expertLeftNumTensor_(index) -= arriveCount;
             if (expertLeftNumTensor_(index) == 0U) {
@@ -1798,8 +1553,6 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWind
 #ifdef TILEXR_EP_COMPACT_ENABLED
         ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
 #endif
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
         return;
     }
 
@@ -1821,15 +1574,10 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::LocalWind
     expertFinishNumTensor_ = expertFinishBuf.Get<uint32_t>();
     expertLeftNumTensor_ = expertLeftBuf.Get<uint32_t>();
     SetValidExpertInfo(expInfoSize, validNum);
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    profileValidExperts_ = validNum;
-#endif
     if (validNum == 0U) {
 #ifdef TILEXR_EP_COMPACT_ENABLED
         ElasticProfile::Mark<ElasticProfile::OutputSetupEnd>(compactProfiler_);
 #endif
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FIRST_PAYLOAD_READY);
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_LAST_PAYLOAD_READY);
         return;
     }
 
@@ -1954,7 +1702,6 @@ MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::SyncBeforeSendRound(uint32_t cur
     if (sendRoundNum_ > 1U && curRound > 0U) {
         PipeBarrier<PIPE_ALL>();
         SyncAll();
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END);
     }
 }
 
@@ -2095,15 +1842,8 @@ __aicore__ inline void MoeDispatchMemory<XType, IsMxfp8, IsMxfp8E4M3>::Run()
 #else
         LocalWindowCopy();
 #endif
-#if defined(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-        SyncFunc<AscendC::HardEvent::MTE3_S>();
-#endif
     }
     AscendC::SetCtrlSpr<FLOAT_OVERFLOW_MODE_CTRL, FLOAT_OVERFLOW_MODE_CTRL>(originalOverflowMode_);
-    if ASCEND_IS_AIV {
-        RecordProfilePoint(TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_END);
-        WriteProfile();
-    }
 }
 
 template <typename XType, bool IsMxfp8, bool IsMxfp8E4M3>

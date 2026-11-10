@@ -1,4 +1,7 @@
-﻿#include "combine_v2_launch.h"
+/*
+ * 将已校验的 MoonEP Host 参数打包为外置 kernel ABI，通过注册后的 runtime 入口提交。
+ */
+#include "combine_v2_launch.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +22,6 @@ struct CombineV2KernelArgs {
     GM_ADDR commArgs;
     GM_ADDR registeredWorkspace;
     GM_ADDR dstLocal;
-    uint64_t profileOffset;
     uint64_t scratchEpoch0Offset;
     uint64_t scratchEpoch1Offset;
     uint64_t doneOffset;
@@ -47,7 +49,7 @@ struct CombineV2KernelArgs {
     uint64_t hasRouteWeight;
 };
 
-static_assert(sizeof(CombineV2KernelArgs) == 29U * sizeof(uint64_t),
+static_assert(sizeof(CombineV2KernelArgs) == 28U * sizeof(uint64_t),
     "Combine V2 kernel argument ABI changed");
 
 int ConfigureCombineV2SimtMemory(rtTaskCfgInfo_t &cfgInfo)
@@ -80,7 +82,6 @@ int TileXRMoonEpLaunchCombineV2Kernel(
         context.devArgs,
         static_cast<GM_ADDR>(params.registeredWorkspace),
         reinterpret_cast<GM_ADDR>(const_cast<int32_t *>(params.dstLocal)),
-        context.layout.profileOffset,
         context.layout.scratchOffset[0],
         context.layout.scratchOffset[1],
         context.layout.doneOffset,

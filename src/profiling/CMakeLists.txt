@@ -20,7 +20,6 @@ target_include_directories(tilexr_profiling INTERFACE
 set(profiling_cmake_dir "${CMAKE_INSTALL_LIBDIR}/cmake/TileXRProfiling")
 install(TARGETS tilexr_profiling EXPORT TileXRProfilingTargets)
 install(FILES ../include/tilexr/profiling.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tilexr)
-install(FILES ../include/tilexr_profiling.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(DIRECTORY ../include/tilexr/profiling DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/tilexr)
 install(FILES LICENSE VERSION DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr-profiling)
 install(DIRECTORY ../../examples/profiling/ DESTINATION ${CMAKE_INSTALL_DATADIR}/tilexr-profiling/examples/add4

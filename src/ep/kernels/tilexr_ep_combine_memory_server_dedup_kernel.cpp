@@ -1,3 +1,6 @@
+/*
+ * 读取 Host 提供的 Combine tiling，调用 ServerDedup Combine 实现；capture 描述符按本轮 magic 从 SDK slot 获取。
+ */
 #include "tilexr_ep_combine_memory_server_dedup_kernel.h"
 #include "ep_memory_server_dedup_combine_tiling.h"
 
@@ -18,12 +21,8 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_combine_memory_ser
     const uint8_t topK = tiling->topK;
     const uint8_t dtype = tiling->dtype;
     const uint8_t quantMode = tiling->quantMode;
-    uint8_t profilingEnabled = 0;
-#if defined(TILEXR_ENABLE_PROFILING)
-    profilingEnabled = tiling->profilingEnabled;
-#endif
     TileXREp::CombineMemoryServerDedupKernel kernel;
     kernel.Init(commArgs, expertOut, assistInfoForCombine, sendCounts, expertScales, tokenType, relayReadIndex,
-        sourceMask, yOut, bs, h, topK, experts, dtype, quantMode, magic, profilingEnabled);
+        sourceMask, yOut, bs, h, topK, experts, dtype, quantMode, magic);
     kernel.Process();
 }

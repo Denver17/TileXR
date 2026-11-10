@@ -1,23 +1,12 @@
+/*
+ * 定义 ServerDedup Combine 的业务 event ID，供 kernel marker 和离线 mapping 配对；记录存储由 SDK 提供。
+ */
 #ifndef TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_PROFILE_H
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_COMBINE_PROFILE_H
 #include <cstdint>
 #include "ep_memory_server_dedup_combine_config.h"
 namespace TileXREp {
-// Latest capture only. Dedup token intervals and M3 (<=10000 total rows)
-// fit the floor. Non-dedup M6 needs 8 records/token plus 4/top-k member.
-// Keep Host reservation, device writer and runner allocation identical.
-constexpr uint32_t kEpServerDedupCombineProfilingRecordsPerLaunch = 65536U;
-#if defined(__CCE__) && defined(__CCE_IS_AICORE__)
-__aicore__ inline
-#endif
-    constexpr uint32_t
-    EpCombineProfilingRecordsPerLaunch(uint32_t bs, uint32_t k)
-{
-    const uint32_t required =
-        EpServerDedupEnabled(bs) ? 0U : EpCombineAlign(EpCombineM5TokenCount(bs) * (8U + 4U * k) + 128U, 16U);
-    return required > kEpServerDedupCombineProfilingRecordsPerLaunch ? required :
-                                                                       kEpServerDedupCombineProfilingRecordsPerLaunch;
-}
+// Business event catalog for SDK DirectWriter captures.
 constexpr uint32_t kEpServerDedupCombineProfileStart = 0x3001U;
 constexpr uint32_t kEpServerDedupCombineProfileEnd = 0x3002U;
 constexpr uint32_t kEpServerDedupCombineProfileInitBegin = 0x3003U;

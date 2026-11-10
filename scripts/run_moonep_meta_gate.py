@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# 构建并编排 MoonEP 元数据门禁，通过 tools/moonep 测试入口验证路由和算子契约。
 
 from __future__ import annotations
 
@@ -313,8 +314,6 @@ def _build_current_source(
         "-DTILEXR_BUILD_TESTS=OFF",
         "-DBUILD_TESTING=OFF",
         "-DTILEXR_MOONEP_DISPATCH_ENABLE_DFX=OFF",
-        "-DTILEXR_MOONEP_DISPATCH_ENABLE_PROFILING=OFF",
-        "-DTILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING=OFF",
     ]
     jobs = str(max(1, os.cpu_count() or 1))
     for command in (

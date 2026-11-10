@@ -1,9 +1,11 @@
-﻿#include "combine_v2_layout.h"
+/*
+ * 计算 MoonEP payload、scratch 与控制区的有界工作区布局，供 Host 参数校验与 kernel launch 使用。
+ */
+#include "combine_v2_layout.h"
 
 #include <cstddef>
 #include <limits>
 
-#include "combine_v2_profile.h"
 #include "comm_args.h"
 #include "tilexr_moonep.h"
 
@@ -56,8 +58,6 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
         sizeof(uint16_t) : sizeof(float);
     uint64_t rowBytes = 0;
     uint64_t expertBytes = 0;
-    uint64_t profileOffset = 0;
-    uint64_t profileBytes = 0;
     uint64_t scratch0Offset = 0;
     uint64_t scratch1Offset = 0;
     uint64_t requiredBytes = 0;
@@ -75,11 +75,7 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
 
     if (!CheckedMultiply(static_cast<uint64_t>(h), elementBytes, &rowBytes) ||
         !CheckedMultiply(slots, rowBytes, &expertBytes) ||
-        !CheckedAlign(expertBytes, kCombineV2ScratchAlignmentBytes, &profileOffset) ||
-        !CheckedMultiply(kMoonEpCombineV2CoreCount,
-            sizeof(MoonEpCombineV2ProfileRecord), &profileBytes) ||
-        !CheckedAlign(profileBytes, kCombineV2ScratchAlignmentBytes, &profileBytes) ||
-        !CheckedAdd(profileOffset, profileBytes, &scratch0Offset) ||
+        !CheckedAlign(expertBytes, kCombineV2ScratchAlignmentBytes, &scratch0Offset) ||
         !CheckedAdd(scratch0Offset, expertBytes, &scratch1Offset) ||
         !CheckedAdd(scratch1Offset, expertBytes, &requiredBytes) ||
         !CheckedAlign(requiredBytes, kMoonEpCombineV2TokenStrideBytes, &doneOffset) ||
@@ -115,8 +111,6 @@ int TileXRMoonEpBuildCombineV2Layout(int64_t bs, int64_t h,
     next.slots = slots;
     next.rowBytes = rowBytes;
     next.expertBytes = expertBytes;
-    next.profileOffset = profileOffset;
-    next.profileBytes = profileBytes;
     next.scratchOffset[0] = scratch0Offset;
     next.scratchOffset[1] = scratch1Offset;
     next.scratchBytes = expertBytes;

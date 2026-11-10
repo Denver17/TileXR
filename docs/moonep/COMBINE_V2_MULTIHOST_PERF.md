@@ -1,6 +1,8 @@
+> 当前版本已删除私有 profiling 构建/运行开关与 record。本文保留的旧 profiling 数值是历史证据，不能视为当前支持的采集接口；当前边界见 [profiling](COMBINE_V2_PROFILING_TRACE.md)。
+
 # MoonEP Combine V2 多机性能测试流程
 
-本文只记录可复用的部署、编译、空闲检测、测试和结果判定流程。profiling 构建与
+本文记录部署、编译、空闲检测、测试和结果判定流程。当前设备计时边界见
 Chrome Trace JSON 导出见
 [COMBINE_V2_PROFILING_TRACE.md](COMBINE_V2_PROFILING_TRACE.md)。
 
@@ -338,7 +340,7 @@ COMBINE_V2_PERF ... max_ms=<slowest-rank-mean> max_alg_bw_GBps=<bandwidth> ...
 COMBINE_V2_RANK_PERF: 128 条
 ```
 
-关闭 profiling 时不输出 `COMBINE_V2_SAMPLE`。开启 profiling 时每个 rank 只为最后
+旧私有 profiling 已删除。以下旧版采样说明仅用于解释历史日志：每个 rank 只为最后
 一轮输出一条 `timing_source=kernel_profile` 的 sample，供最快/P50/最慢卡选择使用。
 
 快速计数：

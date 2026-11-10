@@ -32,7 +32,7 @@ EP 打包在 configure 阶段不依赖具体 SoC。普通 Dispatch/Combine、Mem
 - Combine 完成 staging/readiness、DIRECT 返回、加权 partial 返回及源端归约（M1–M5）；
   非去重模式使用直接返回与 M6 归约。两算子复用 magic 选取的双窗口，同一 communicator
   须在同一 stream 串行提交，且所有 rank 使用一致的模式、shape/layout 与核分配。
-- 独立 GM tiling 由 communicator 缓存到销毁；Dispatch/Combine profiling 使用独立记录区域。
+- 独立 GM tiling 由 communicator 缓存到销毁；选中调用使用独立 SDK capture。
   必须配套部署 `libtile-comm`、EP Host 库和外置 kernel，不能只替换一个算子二进制。
 - 最大 rank 从 128 扩至 256 改变了 `CommArgs` 的数组尺寸、后续字段偏移和相关 credit 布局。
   所有消费这些公共结构的 Host/kernel（包括其他通信后端、collectives 和下游）均须重新编译，
@@ -65,7 +65,7 @@ generation 和 peer window 所有权模型，同时将 Dispatch 与 Combine buff
 ## 窗口与轮次所有权
 
 `src/ep/common/ep_memory_window.h` 和 Host 布局 helper 定义了权威的窗口分区。
-Payload、status、count、同步、profiling 和 scratch 区域互不重叠。
+Payload、status、count、同步和 scratch 区域互不重叠；SDK capture 使用独立工作区，不占用通信窗口。
 只有所有生产者和消费者都越过该轮次的完成边界后，轮次资源才可复用；
 新 generation 用于区分过期状态，无需批量清空共享窗口。
 
@@ -74,24 +74,27 @@ payload 和已注册 workspace 契约要求使用 UDMA 时，才选择 UDMA。
 
 ## Profiling
 
-普通 Memory Dispatch 和 Combine 使用各自独立的定长 profiling record，分别声明于
-`src/ep/common/ep_dispatch_memory_profile.h` 和
-`src/ep/common/ep_combine_memory_profile.h`。
-Profiling 在编译期显式启用，不改变公共 ABI，每个核只写自己拥有的 record。
-每次 profiling 调用引用的时间戳或指标都必须存在于对应的 record 定义中，
-且在相同功能配置下具有有效的起始值。因此，删除 profiling 字段时必须同时删除其生产端调用；
-对此类清理，至少需要完成默认关闭 profiling 的 CCE 构建验证。
+普通 Memory Dispatch/Combine 与 ServerDedup 使用公共 `<tilexr/profiling.h>`，由
+`TILEXR_EP_ENABLE_PROFILING=ON` 启用。普通 Memory 用 `Recorder<2>` 记录每 lane 的
+kernel body begin/end（ID 1/2）；ServerDedup 用 `DirectWriter` 和现有业务 event catalog
+记录阶段，保留条件事件及末尾 Publish。私有 512B dump、旧兼容 writer/owner、Reserve API
+和旧 profiling 开关已删除。
 
-Server Dedup 使用 `src/ep/common/ep_profiling_compat.h` 与
-`src/comm/ep_profiling_compat/` 的 EP 专用兼容实现，保留 communicator 所有的独立
-Dispatch/Combine 记录域、兼容环境变量和 latest-capture 语义。它不替换独立
-`TileXR::Profiling` SDK；公共 `tilexr_profiling.h` 仍仅转发 SDK 入口。
-两者导出的 `records.v1` 可由同一 `tilexr_profiling` 离线包读取，但不得混用捕获生命周期。
-具体配置与边界见[算子 profiling 指南](../../tools/profiling/OPERATOR_PROFILING_GUIDE.md)。
+communicator 的 SDK invocation slots 保留：初始化前提供 `TILEXR_PROFILING_SLOTS_FILE`
+managed plan，按通信 magic 为选中调用取得独立 capture。容量由
+`TILEXR_PROFILING_RECORDS_PER_STREAM` 配置，默认 8，严格为 8…65536 且是 8 的倍数；
+详细 ServerDedup capture 可从 512 或更大容量开始，并验证所有 lane 完成且 dropped=0。
+未选中调用不采样；warmup 和正式测量的调用序号仍须符合 plan。不要将每个 capture 限制为两条记录。
+配置、所有权与 mapping 见[算子 profiling 指南](../../tools/profiling/OPERATOR_PROFILING_GUIDE.md)。
 
-通用 profiling 报告流程消费带版本的阶段时间戳和累积指标。
-不完整的 rank 或 record 必须明确标注。
-64-rank runner 统一了功能、性能和 breakdown 模式，但 profiler/诊断配置不属于正常算子语义。
+共享 `CommArgs` 与 ServerDedup tiling 布局变更要求 Host、kernel 和 consumer 配套重编译。
+记录的是源码定义的到达/完成边界，marker 本身不增加业务同步；完整任务延迟使用外部 msprof。
+64-rank runner 只提供 functional/performance，旧 breakdown 和节点 profile 模式返回参数错误。
+perf 暖机、Host barrier 和 msprof 测量保持启用，不因删除设备诊断而移除。
+
+维护边界：旧 DFX 地址同时曾用作 recv-count workspace 末端。当前
+`kEpMemoryRecvCountWorkspaceEnd` 保持原 **768KiB** 地址及 workspace 容量检查，删除 dump
+不移动业务区域。业务 timeout/首错传播同样必须保留，不能因其含计时代码而当作 profiling 删除。
 
 ## 失败行为与兼容性
 

@@ -1,7 +1,9 @@
+/*
+ * 为 ServerDedup Combine 准备 tiling 快照和通信 magic，校验 SDK capture slot 后在调用者 stream 提交 kernel。
+ */
 #include "ep_memory_server_dedup_combine_launch.h"
 #include "acl/acl_rt.h"
 #include "ep_kernel_launch.h"
-#include "ep_memory_server_dedup_combine_profile.h"
 #include "../../comm/tilexr_internal.h"
 
 namespace TileXREp {
@@ -34,14 +36,6 @@ int TileXREpLaunchCombineMemoryServerDedupKernel(const EpMemoryServerDedupCombin
     tiling.topK = static_cast<uint8_t>(p.topK);
     tiling.dtype = static_cast<uint8_t>(p.dtype);
     tiling.quantMode = static_cast<uint8_t>(p.quantMode);
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    uint32_t profilingSlot = UINT32_MAX;
-    // Independent latest state: Dispatch's reservation width never constrains
-    // Combine. Capture failure is retained by the runtime for export validation.
-    TileXRProfilingReserveLatestCombineLaunch(
-        p.comm, EpCombineProfilingRecordsPerLaunch(tiling.bs, tiling.topK), &profilingSlot);
-    tiling.profilingEnabled = profilingSlot == 0U ? 1U : 0U;
-#endif
     // The communicator owns immutable GM snapshots; never overwrite a tiling
     // buffer that an earlier asynchronous Dispatch or Combine may still read.
     GM_ADDR tilingData = nullptr;
@@ -54,6 +48,8 @@ int TileXREpLaunchCombineMemoryServerDedupKernel(const EpMemoryServerDedupCombin
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
+    ret = TileXREpValidateProfilingCapture(*context.hostArgs, magic, kEpServerDedupCombineCoreNum);
+    if (ret != TileXR::TILEXR_SUCCESS) return ret;
 
     EpServerDedupCombineKernelArgs args {context.devArgs, static_cast<GM_ADDR>(p.expertOut),
         reinterpret_cast<GM_ADDR>(p.assistInfoForCombine), reinterpret_cast<GM_ADDR>(p.epRecvCounts),

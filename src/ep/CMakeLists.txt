@@ -26,12 +26,6 @@ if(NOT TILEXR_EP_COMPACT_PROFILING MATCHES "^(OFF|TOTAL|STAGES)$")
     message(FATAL_ERROR "TILEXR_EP_COMPACT_PROFILING must be OFF, TOTAL, or STAGES")
 endif()
 
-option(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING
-    "Enable per-AIV profiling in the EP Combine Memory kernel" OFF)
-option(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING
-    "Enable per-AIV profiling in the EP Dispatch Memory kernel" OFF)
-option(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    "Enable standard GM event capture in the Server Dedup kernel" OFF)
 
 # EP is distributed as one package. All kernels are A5-only binaries;
 # unsupported devices are rejected by libtilexr-ep.so at runtime.
@@ -140,19 +134,17 @@ set(_tilexr_dispatch_memory_definitions)
 if(TILEXR_EP_ENABLE_PROFILING)
     list(APPEND _tilexr_dispatch_memory_definitions TILEXR_ENABLE_PROFILING=1)
 endif()
-if(TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING)
-    list(APPEND _tilexr_dispatch_memory_definitions
-        TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING=1)
-endif()
 tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_kernel
     "${TILEXR_EP_DISPATCH_MEMORY_KERNEL_SOURCE}" "${TILEXR_EP_DISPATCH_MEMORY_OP}"
     DEFINITIONS ${_tilexr_dispatch_memory_definitions}
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_dispatch_memory_profile.h"
-        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
+        "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_ep_profiling.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/types.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/direct.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
@@ -161,19 +153,17 @@ set(_tilexr_combine_memory_definitions)
 if(TILEXR_EP_ENABLE_PROFILING)
     list(APPEND _tilexr_combine_memory_definitions TILEXR_ENABLE_PROFILING=1)
 endif()
-if(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    list(APPEND _tilexr_combine_memory_definitions
-        TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING=1)
-endif()
 tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_kernel
     "${TILEXR_EP_COMBINE_MEMORY_KERNEL_SOURCE}" "${TILEXR_EP_COMBINE_MEMORY_OP}"
     DEFINITIONS ${_tilexr_combine_memory_definitions}
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_combine_memory_profile.h"
-        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
+        "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_ep_profiling.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/types.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/direct.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
@@ -187,7 +177,7 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
     DISABLE_OVERFLOW_RECORDING
     DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
         TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
-        $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
+        $<$<BOOL:${TILEXR_EP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_dispatch_memory_server_dedup_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_counts.h"
@@ -198,7 +188,10 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_dispatch_memory_server_dedup_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_receive_tasks.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_receive_packet.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_profile.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_profiling_compat.h"
+        "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_ep_profiling.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/types.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/direct.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_mxfp8_quant.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_mode.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
@@ -216,7 +209,7 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
     DISABLE_OVERFLOW_RECORDING
     DEFINITIONS TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
         TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
-        $<$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
+        $<$<BOOL:${TILEXR_EP_ENABLE_PROFILING}>:TILEXR_ENABLE_PROFILING=1>
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_combine_memory_server_dedup_kernel.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_select.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_ep_server_dedup_partial.h"
@@ -227,7 +220,10 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_server_dedup_kernel
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_count_layout.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_tiling.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_server_dedup_combine_profile.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_profiling_compat.h"
+        "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_ep_profiling.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/types.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/direct.h"
+        "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h")
 
 set(TILEXR_EP_KERNEL_TARGETS
@@ -267,17 +263,13 @@ add_library(tilexr-ep SHARED
     ${CMAKE_SOURCE_DIR}/src/common/tilexr_kernel_binary_loader.cpp
 )
 
-if(TILEXR_EP_ENABLE_PROFILING)
-    target_compile_definitions(tilexr-ep PRIVATE TILEXR_EP_ENABLE_PROFILING=1)
-endif()
-
 add_dependencies(tilexr-ep ${TILEXR_EP_KERNEL_TARGETS})
 target_compile_definitions(tilexr-ep PUBLIC
     ${TILEXR_EP_CORE_DEFINITIONS}
     TILEXR_EP_SERVER_DEDUP_ENABLE=${TILEXR_EP_SERVER_DEDUP_LAYOUT_ENABLE}
     TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE=${TILEXR_EP_SERVER_DEDUP_AUTO_ENABLE}
     PRIVATE
-    TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING}>)
+    TILEXR_EP_ENABLE_PROFILING=$<BOOL:${TILEXR_EP_ENABLE_PROFILING}>)
 tilexr_attach_kernel_artifacts(tilexr-ep
     FILES ${TILEXR_EP_KERNEL_OBJECTS}
     TARGETS ${TILEXR_EP_KERNEL_TARGETS})
@@ -321,6 +313,10 @@ if(TILEXR_BUILD_ELASTIC_MEMORY)
             "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_compact_layout.h"
             "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_elastic_memory_device.h"
             "${CMAKE_SOURCE_DIR}/src/include/device/tilexr_elastic_memory_profile.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/types.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
+            "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/detail/device.h"
             "${CMAKE_SOURCE_DIR}/src/include/tilexr_elastic_memory_abi.h"
             "${CMAKE_SOURCE_DIR}/src/elastic_memory/allocator.h")
     if(NOT TILEXR_EP_COMPACT_PROFILING STREQUAL "OFF")

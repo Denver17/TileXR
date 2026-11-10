@@ -22,7 +22,7 @@ root@141.61.94.18:/home/h00580772/combine_test
 ```bash
 bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
   --op dispatch|combine|both \
-  --mode functional|performance|breakdown
+  --mode functional|performance
 ```
 
 不带参数时默认为：
@@ -47,7 +47,6 @@ bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
 | --- | --- | --- | --- | --- |
 | `--mode functional` | 关闭 | 关闭 | 1轮 | 功能PASS/FAIL |
 | `--mode performance` | 开启 | 关闭 | 50轮热身+150轮测试 | 最后50轮的min/max/avg |
-| `--mode breakdown` | 关闭 | 开启 | 50轮热身+150轮测试 | 最快/P50/最慢卡的耗时和Trace JSON |
 
 性能模式的统计规则固定为：
 
@@ -59,8 +58,8 @@ bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
 性能模式最终打印统计数字并生成汇总JSON。节点之间用于保存单机400个样本均值的
 `*_internal.json`属于脚本内部汇总文件。
 
-耗时拆解模式不启动msprof。固定DFX区域只保留最后一次Kernel记录，因此Trace对应
-第149个测试轮次。每个算子生成最快、P50和最慢rank三个Chrome Trace JSON。
+旧私有 dump 的 `--mode breakdown` 和节点脚本 `profile` 模式已删除，传入时返回参数错误；
+没有兼容别名。当前性能路径保留暖机、测量前后 Host barrier 和外部 msprof 采集。
 
 ## 3. 测试前准备
 
@@ -93,7 +92,7 @@ TILEXR_EP_CLUSTER_ACTIVE_MASK_TYPE
 TILEXR_EP_CLUSTER_EXPERT_MODE
 ```
 
-Dispatch和Combine配置文件默认使用50轮热身和150轮测试；performance和breakdown模式均读取
+Dispatch和Combine配置文件默认使用50轮热身和150轮测试；performance模式读取
 `TILEXR_EP_CLUSTER_WARMUP`和`TILEXR_EP_CLUSTER_PERF_LOOPS`作为轮次配置。
 
 ### 3.2 选择128P或其他规模
@@ -222,63 +221,29 @@ maximum_us=77.812
 average_us=75.977
 ```
 
-### 4.3 Kernel耗时拆解
+### 4.3 SDK 诊断入口
 
-只拆解Dispatch：
+本 cluster runner 不导出设备阶段记录。需要 SDK 诊断时，使用
+[算子 profiling 指南](../../../tools/profiling/OPERATOR_PROFILING_GUIDE.md) 中的独立调用方或
+managed invocation plan 流程，并另建 `TILEXR_EP_ENABLE_PROFILING=ON` 产物。
+普通 Memory 每 lane 只有 body begin/end 两个 SDK marker；ServerDedup 使用对应的
+`DirectWriter` 业务事件目录，不能用旧 dump parser 或普通两点 mapping 解释。
 
-```bash
-ssh root@141.61.94.18 \
-  'cd /home/h00580772/combine_test && \
-   bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
-     --op dispatch --mode breakdown'
-```
+在 communicator 初始化前提供 `TILEXR_PROFILING_SLOTS_FILE`；各 rank 保持相同调用顺序和
+采样 UUID。`TILEXR_PROFILING_RECORDS_PER_STREAM` 默认 8，严格接受 8…65536 内的
+十进制 8 的倍数。详细 ServerDedup 可从 512 或更大容量开始，实际仍须验证所有参与 lane
+完整且 dropped=0。SDK 采样计划包含 warmup 的调用序号，但不选择 warmup 为采样槽。
 
-只拆解Combine：
+## 5. 编译配置
 
-```bash
-ssh root@141.61.94.18 \
-  'cd /home/h00580772/combine_test && \
-   bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
-     --op combine --mode breakdown'
-```
+脚本检查 `build_ep/CMakeCache.txt` 中 `TILEXR_EP_ENABLE_PROFILING=OFF` 和 demo 是否存在。
+不满足时执行 `tests/ep/build.sh full`，然后分发 `install/` 和 `tests/ep/install/`。
+该构建脚本为普通功能/性能基线关闭 SDK 插桩；旧 Dispatch/Combine 私有 profiling 开关已删除。
 
-顺序拆解两个算子：
-
-```bash
-ssh root@141.61.94.18 \
-  'cd /home/h00580772/combine_test && \
-   bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
-     --op both --mode breakdown'
-```
-
-终端会分别打印三张代表卡的信息：
-
-```text
-role=fastest rank=<rank> elapsed_us=<time> output=<trace.json>
-role=p50     rank=<rank> elapsed_us=<time> output=<trace.json>
-role=slowest rank=<rank> elapsed_us=<time> output=<trace.json>
-```
-
-JSON不包含`displayTimeUnit`，可以直接导入`chrome://tracing`。
-
-新版Trace只展示相邻timepoint之间的阶段事件，以及每个AIV核的累计metric即时事件；
-不再生成覆盖所有阶段的整段Kernel包络事件。算子总耗时仍由终端输出和JSON中的
-`selection_elapsed_us`给出。
-
-## 5. 编译与profiling切换
-
-脚本会读取`build_ep/CMakeCache.txt`并检查两个Kernel的编译期开关：
-
-| 运行方式 | Dispatch profiling | Combine profiling |
-| --- | --- | --- |
-| 功能或性能 | OFF | OFF |
-| Dispatch拆解 | ON | OFF |
-| Combine拆解 | OFF | ON |
-| 两个算子拆解 | ON | ON |
-
-当前编译状态不符合目标模式时，脚本才执行`tests/ep/build.sh full`，随后并行分发
-`install/`和`tests/ep/install/`。因此从拆解模式切回功能或性能模式时，首次执行会
-触发一次profiling OFF重编译；后续相同模式不会重复编译。
+源码或共享 ABI 变化后使用 `--build` 强制重新构建并部署。缓存中的 OFF 标记不能证明已有
+二进制与源码一致。`CommArgs`/tiling 布局变更要求 communicator、EP Host、外置 kernel 和
+所有 consumer 配套重编译；不得只替换 Host 或一个 kernel。记录构建选项及源码/二进制
+provenance，再进行对应环境验证。
 
 ## 6. 日志与产物位置
 
@@ -300,21 +265,15 @@ JSON不包含`displayTimeUnit`，可以直接导入`chrome://tracing`。
 /home/h00580772/test_dir_<run_id>
 ```
 
-耗时拆解JSON位于主节点：
-
-```text
-/home/h00580772/combine_test/tests/ep/logs/<run_id>/traces/
-```
-
-`both`模式为Dispatch和Combine生成不同的`run_id`、原始数据目录、日志目录和Trace
-目录，不会互相覆盖。
+`both`模式为Dispatch和Combine生成不同的`run_id`、msprof原始数据目录和rank日志目录，
+不会互相覆盖。SDK诊断由对应调用方按 invocation UUID 保存，与此runner的msprof产物分开。
 
 ## 7. 注意事项
 
 - 不要并行启动两套64P测试；通信地址和barrier地址是固定配置。
 - `both`是顺序连跑，不代表Demo内部一次调用同时执行两个算子。
-- 性能数据只能使用profiling OFF构建；脚本会自动保证这一点。
-- 耗时拆解数据包含打点开销，只用于阶段归因，不能代替msprof性能结果。
+- 性能基线使用SDK插桩OFF构建；源码迁移后先用`--build`，并核对实际产物provenance。
+- SDK阶段数据包含打点开销；父区间和子区间不能累加成总耗时，不能代替msprof性能结果。
 - 测试失败时先查看总流程日志，再查看对应节点日志和`rank_<rank>.log`。
 - 如果提示`Run this script on 141.61.94.18`，说明脚本执行节点错误。
-- 如果提示找不到msprof，仅影响`performance`模式；`functional`和`breakdown`不使用msprof。
+- 如果提示找不到msprof，仅影响`performance`模式；`functional`不使用msprof。

@@ -1,3 +1,6 @@
+/*
+ * 执行 ServerDedup Combine 的本地结果准备、远端返回和源 token 累加；入口提供通信窗口，SDK DirectWriter 记录阶段 marker。
+ */
 #ifndef TILEXR_EP_COMBINE_MEMORY_SERVER_DEDUP_KERNEL_H
 #define TILEXR_EP_COMBINE_MEMORY_SERVER_DEDUP_KERNEL_H
 
@@ -10,7 +13,7 @@
 #include "tilexr_ep_server_dedup_source_aggregate.h"
 #include "tilexr_ep_server_dedup_select.h"
 #if defined(TILEXR_ENABLE_PROFILING)
-#include "ep_profiling_compat.h"
+#include "device/tilexr_ep_profiling.h"
 #endif
 
 namespace TileXREp {
@@ -23,16 +26,14 @@ class CombineMemoryServerDedupKernel {
 public:
     __aicore__ inline void Init(GM_ADDR commArgs, GM_ADDR expertOut, GM_ADDR assistInfoForCombine, GM_ADDR sendCounts,
         GM_ADDR expertScales, GM_ADDR tokenType, GM_ADDR relayReadIndex, GM_ADDR sourceMask, GM_ADDR yOut, uint32_t bs,
-        uint32_t h, uint32_t topK, uint32_t experts, uint8_t dtype, uint8_t quantMode, int64_t magic,
-        uint8_t profilingEnabled)
+        uint32_t h, uint32_t topK, uint32_t experts, uint8_t dtype, uint8_t quantMode, int64_t magic)
     {
         (void)quantMode;
-        (void)profilingEnabled;
         core_ = GetBlockIdx();
 #if defined(TILEXR_ENABLE_PROFILING)
-        if (profilingEnabled != 0U) {
-            profile_.InitializeLatestCombine(commArgs, core_, 0U, EpCombineProfilingRecordsPerLaunch(bs, topK));
-        }
+        GM_ADDR descriptor = ProfileDescriptor(commArgs, magic, AscendC::GetBlockNum());
+        profilingEnabled_ = descriptor != nullptr;
+        profile_.Initialize(descriptor, core_);
 #endif
         Mark(kEpServerDedupCombineProfileStart);
         Mark(kEpServerDedupCombineProfileInitBegin);
@@ -174,7 +175,7 @@ private:
     {
         ServerDedupSourceAggregate aggregate;
 #if defined(TILEXR_ENABLE_PROFILING)
-        aggregate.SetProfiling(&profile_);
+        aggregate.SetProfiling(profilingEnabled_ ? &profile_ : nullptr);
 #endif
         // Count DMA has retired. Auto uses the same final-stage scratch view as
         // M5, but owns its output events because M4 did not run on this launch.
@@ -200,7 +201,7 @@ private:
     {
         ServerDedupSourceAggregate aggregate;
 #if defined(TILEXR_ENABLE_PROFILING)
-        aggregate.SetProfiling(&profile_);
+        aggregate.SetProfiling(profilingEnabled_ ? &profile_ : nullptr);
 #endif
         aggregate.Init(arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes],
             args_->peerMems[args_->rank] + window_ + TILEXR_EP_SERVER_DEDUP_SHARED_DATA_OFFSET, masksAddr_,
@@ -221,7 +222,9 @@ private:
     __aicore__ inline void Mark(uint32_t event)
     {
 #if defined(TILEXR_ENABLE_PROFILING)
-        profile_.Record(event);
+        if (profilingEnabled_) {
+            profile_.RecordAt(event, static_cast<uint64_t>(AscendC::GetSystemCycle()));
+        }
 #else
         (void)event;
 #endif
@@ -492,7 +495,7 @@ private:
         }
         ServerDedupPartial partial;
 #if defined(TILEXR_ENABLE_PROFILING)
-        partial.SetProfiling(&profile_);
+        partial.SetProfiling(profilingEnabled_ ? &profile_ : nullptr);
 #endif
         partial.Init(args_, &pipe_, arena_.Get<uint8_t>()[kEpServerDedupCombineResidentUbBytes], expertAddr_,
             tableAddr_, relayAddr_, typesAddr_, tokens_, bs_, h_, topK_, experts_, dtype_, window_, workspace_);
@@ -574,7 +577,8 @@ private:
     LocalTensor<float> preparePublish_, prepareInput_, prepareWork_, prepareSum_, prepareZero_;
     LocalTensor<float> readyInput_, readyWork_, readySum_, readyZero_, notifyUb_;
 #if defined(TILEXR_ENABLE_PROFILING)
-    TileXR::DirectProfilingWriter profile_;
+    bool profilingEnabled_ = false;
+    TileXR::Profiling::DirectWriter profile_;
 #endif
 };
 } // namespace TileXREp

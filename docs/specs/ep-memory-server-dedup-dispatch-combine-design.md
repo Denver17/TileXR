@@ -248,23 +248,30 @@ M4/M5 共享 UB，但 M4 未完成的输出仍有独立生命周期。M5 复用�
 
 ## Profiling 与维护边界
 
-Server Dedup 使用 EP 专用兼容实现：设备 writer 位于 `src/ep/common/ep_profiling_compat.h`，
-Host 配置、分配与导出位于 `src/comm/ep_profiling_compat/`。它使用 `CommArgs` 中的兼容
-记录字段及 `TILEXR_PROFILING_*` 环境配置，不改变独立 SDK 的公开入口或捕获生命周期。
-`src/include/tilexr_profiling.h` 仍转发到 `<tilexr/profiling.h>`；新接入使用 `TileXR::Profiling`。
+ServerDedup 的设备代码直接使用公共 `<tilexr/profiling.h>` 中的 `DirectWriter`，
+普通 Memory 与 ServerDedup 共用构建开关 `TILEXR_EP_ENABLE_PROFILING`。
+Dispatch/Combine 保留各自现有的业务事件定义：
+`src/ep/common/ep_memory_server_dedup_profile.h` 与
+`src/ep/common/ep_memory_server_dedup_combine_profile.h`；这些是 event catalog，不是记录 ABI。
+每个 lane 向本调用的 SDK capture 写入 event ID/时间戳，末尾发布一次有效计数和丢点数。
 
-EP Dispatch/Combine 使用独立记录域，复用 latest launch 槽；每核记录时间戳和数字事件 ID，
-末尾发布有效计数和丢点数。兼容导出与独立 SDK 共用 `records.v1` 文件协议及
-`tilexr_profiling` 离线读取包，文件兼容不代表捕获生命周期相同。
-事件解释由各自 mapping JSON 维护。EP 的 Dispatch/Combine 输出分别由
-`TILEXR_PROFILING_RECORDS_PATH` / `TILEXR_PROFILING_COMBINE_RECORDS_PATH` 配置，
-`TILEXR_PROFILING_CAPTURE_ID` 指定共享 UUID，`TILEXR_PROFILING_RECORDS_PER_CORE`
-设置每核容量；在 communicator 初始化前设置，未设置输出路径时禁用对应记录域。
+communicator 保留 SDK invocation-slot owner，初始化时读取
+`TILEXR_PROFILING_SLOTS_FILE` managed plan，为选中 magic 准备独立 SDK DeviceView。
+每个 invocation 使用独立 UUID/输出文件，不复用 latest slot。
+`TILEXR_PROFILING_RECORDS_PER_STREAM` 默认 8，必须是 8…65536 内的十进制 8 的倍数；
+详细事件通常需要从 512 或更大容量开始，最终以无丢点、全部实际 lanes 完成为准。
+旧兼容记录域、writer/encoder、Reserve API、tiling enable/latest 字段和旧输出环境配置均已移除。
+Host、kernel 与所有消费共享 `CommArgs`/tiling 的模块必须同步重编译，不能混用旧二进制。
 
-记录位置是 Scalar 到达点；issue 结束不等于 DMA 完成，只有原有完成 fence 才提供完成
+事件解释使用对应业务 mapping；普通 Memory 的两个 body marker 不覆盖这些详细事件。
+记录位置是 Scalar 到达点；issue 结束不等于 DMA 完成，只有原有 completion fence 才提供完成
 语义。禁止为了打点新增同步。Probe 等无界重试按一次最终 ready 前的整体等待记录，避免
-轮询耗尽记录区。Host、kernel、consumer 必须共用容量规则；latest capture 的有效范围和
-overflow 状态每轮重置，不能混入上一轮尾部。
+轮询耗尽记录区。收集时验证实际 lane 的完成、有效 count 和 dropped，再通过 SDK 导出 records.v1。
+容量不足是 capture 失败，不能截断后声称采集完整。
+
+业务 timeout 属于协议失败控制，不能随 profiling 开关删除；首错保留、错误传播和资源退役
+独立于 marker。删除旧 DFX 常量时同样须追踪业务使用：普通 Memory 的 recv-count workspace
+仍以 768KiB 为末端，不因移除 profiling record 改变布局。
 
 Host 准入、CPU 替身、参考模型和 CANN 编译各自只能证明对应边界；真实异步 DMA、跨机
 进度、256P 规模与性能须在匹配环境中验证。本规格不将历史局部测试提升为当前设备验收。

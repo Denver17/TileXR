@@ -298,7 +298,7 @@ Batched issue timing may include capacity-driven CQ polling, not just encoding.
 
 ## WRITE stage profiling (Debug only)
 
-Debug 插桩只使用现有 `tilexr_profiling.h` 的 `DirectWriter` 和 `AclCapture`，不扩展公共 SDK
+Debug 插桩只使用现有 `<tilexr/profiling.h>` 的 `DirectWriter` 和 `AclCapture`，不扩展公共 SDK
 或采集格式。每个 AIV/QP 独占 UB context 和一个 GM trace lane；writer 在首个 marker 前
 Initialize，RecordAt 逐条追加事件，最后 Publish。UB context 只保存 QP state/pending，
 不缓存 profiling 事件，也不再分配 profiling UB。

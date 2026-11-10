@@ -1,3 +1,4 @@
+# 构建 MoonEP 的独立 Host 库与外置 AICore kernel；注册和安装由 MoonEpKernel.cmake 管理。
 include(GNUInstallDirs)
 
 find_program(BISHENG_EXECUTABLE bisheng)
@@ -6,9 +7,6 @@ if(NOT BISHENG_EXECUTABLE)
 endif()
 include(${CMAKE_SOURCE_DIR}/src/moonep/cmake/MoonEpKernel.cmake)
 include(${CMAKE_SOURCE_DIR}/src/cmake/TileXRKernelArtifact.cmake)
-
-option(TILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING
-    "Enable per-AIV profiling in the MoonEP Combine V2 kernel" OFF)
 
 set(TILEXR_MOONEP_COMBINE_V2_DEFAULT_SOC_TYPE "$ENV{TILEXR_SOC_NAME}")
 if(NOT TILEXR_MOONEP_COMBINE_V2_DEFAULT_SOC_TYPE)
@@ -42,10 +40,6 @@ set(TILEXR_MOONEP_COMBINE_V2_KERNEL_OPTIONS
     -mllvm -cce-aicore-dcci-insert-for-scalar=false
     --cce-aicore-arch=dav-c310-vec
 )
-if(TILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING)
-    list(APPEND TILEXR_MOONEP_COMBINE_V2_KERNEL_OPTIONS
-        -DTILEXR_MOONEP_COMBINE_V2_ENABLE_PROFILING=1)
-endif()
 
 set(TILEXR_MOONEP_COMBINE_V2_KERNEL_INCLUDES
     -I${ASCEND_HOME_PATH}/compiler/tikcpp
@@ -69,7 +63,6 @@ tilexr_add_moonep_kernel(tilexr_moonep_combine_v2_kernel
     INCLUDES ${TILEXR_MOONEP_COMBINE_V2_KERNEL_INCLUDES}
     DEPENDS
         "${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_moonep_combine_v2_kernel.h"
-        "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_profile.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_schedule.h"
         "${CMAKE_SOURCE_DIR}/src/moonep/common/moonep_combine_schedule.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/combine_v2_wqe_batch.h"

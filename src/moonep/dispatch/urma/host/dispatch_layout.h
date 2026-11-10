@@ -1,3 +1,6 @@
+/*
+ * 计算 MoonEP payload、scratch 与控制区的有界工作区布局，供 Host 参数校验与 kernel launch 使用。
+ */
 #ifndef TILEXR_MOONEP_DISPATCH_URMA_LAYOUT_H
 #define TILEXR_MOONEP_DISPATCH_URMA_LAYOUT_H
 
@@ -35,9 +38,6 @@ struct MoonEpDispatchUrmaLayout {
     uint64_t creditSourceBytes = 0;
     uint64_t signalOffset = 0;
     uint64_t signalBytes = 0;
-    uint64_t hiddenProfileOffset = 0;
-    uint64_t weightProfileOffset = 0;
-    uint64_t profileBytes = 0;
     uint64_t hiddenDfxOffset = 0;
     uint64_t weightDfxOffset = 0;
     uint64_t dfxBytes = 0;

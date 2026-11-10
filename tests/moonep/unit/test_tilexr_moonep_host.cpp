@@ -1,3 +1,6 @@
+/*
+ * 验证 MoonEP 的布局、调用或诊断合同；直接覆盖对应 src/moonep 与 tools/moonep 接口，硬件数据面另行验收。
+ */
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -294,35 +297,20 @@ void TestStageDelegation()
         "URMA dispatch reset flag must be delegated unchanged");
     dispatch.flags = TILEXR_MOONEP_FLAG_NONE;
 
-    dispatch.structSize = offsetof(TileXRMoonEpDispatchArgsV1, trace);
-    CheckStatus("old-size URMA dispatch", TileXRMoonEpDispatchV1(&dispatch, stream),
-        dispatchUrmaReturn);
-    Check(dispatchUrmaCalls == 3, "old-size URMA dispatch compatibility mismatch");
-
-    TileXRMoonEpDispatchTraceV1 trace {};
-    trace.structSize = sizeof(trace);
-    trace.abiVersion = TILEXR_MOONEP_ABI_VERSION_V1;
-    dispatch.structSize = sizeof(dispatch);
-    dispatch.registeredWorkspace = nullptr;
-    dispatch.registeredWorkspaceBytes = 0U;
-    dispatch.trace = &trace;
-    CheckStatus("trace without URMA workspace", TileXRMoonEpDispatchV1(&dispatch, stream),
-        TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-
     TileXRMoonEpDispatchArgsV2 dispatchV2 {};
     dispatchV2.structSize = sizeof(dispatchV2);
     dispatchV2.abiVersion = TILEXR_MOONEP_ABI_VERSION_V2;
     CheckStatus("V2 dispatch requires workspace",
         TileXRMoonEpDispatchV2(&dispatchV2, stream),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT);
-    Check(dispatchUrmaCalls == 3,
+    Check(dispatchUrmaCalls == 2,
         "invalid V2 dispatch must not reach the URMA implementation");
     dispatchV2.registeredWorkspace =
         reinterpret_cast<void *>(uintptr_t {0x800000});
     dispatchV2.registeredWorkspaceBytes = 2097152;
     CheckStatus("V2 dispatch", TileXRMoonEpDispatchV2(&dispatchV2, stream),
         dispatchUrmaReturn);
-    Check(dispatchUrmaCalls == 3 && dispatchUrmaV2Calls == 1 &&
+    Check(dispatchUrmaCalls == 2 && dispatchUrmaV2Calls == 1 &&
         seenDispatchUrma == &dispatchV2,
         "V2 dispatch must select the URMA implementation");
 

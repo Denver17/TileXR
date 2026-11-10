@@ -1,3 +1,6 @@
+/*
+ * 定义 Memory EP 的 peer window 分区和 magic 对应的轮次地址；Host 校验容量，Device 按同一布局访问。
+ */
 #ifndef TILEXR_EP_COMMON_EP_MEMORY_WINDOW_H
 #define TILEXR_EP_COMMON_EP_MEMORY_WINDOW_H
 
@@ -27,24 +30,11 @@ constexpr uint64_t kEpMemoryRoundStrideBytes =
 constexpr uint64_t kEpMemoryRequiredPeerBytes =
     static_cast<uint64_t>(TileXR::PING_PONG_SIZE) * kEpMemoryRoundStrideBytes;
 
-constexpr int64_t kEpMemoryDispatchProfileBuffer = 0;
-constexpr int64_t kEpMemoryCombineProfileBuffer = 1;
-constexpr uint64_t kEpMemoryDispatchDfxOffset = 768ULL * 1024ULL;
-constexpr uint64_t kEpMemoryDispatchDfxStride = 512ULL;
+// Receive-count workspace grows backward from this unchanged state-window boundary.
+constexpr uint64_t kEpMemoryRecvCountWorkspaceEnd = 768ULL * 1024ULL;
 constexpr uint64_t kEpMemoryDispatchCumsumOffset = 868ULL * 1024ULL;
 constexpr uint64_t kEpMemoryDispatchCumsumFlagOffset = 876ULL * 1024ULL;
 
-static_assert(kEpMemoryDispatchProfileBuffer != kEpMemoryCombineProfileBuffer,
-    "EP memory Dispatch and Combine profiling must use different buffers");
-static_assert(kEpMemoryDispatchProfileBuffer >= 0 &&
-        kEpMemoryDispatchProfileBuffer < TileXR::PING_PONG_SIZE &&
-        kEpMemoryCombineProfileBuffer >= 0 &&
-        kEpMemoryCombineProfileBuffer < TileXR::PING_PONG_SIZE,
-    "EP memory profiling buffer index exceeds communicator buffers");
-static_assert(kEpMemoryDispatchDfxOffset +
-        static_cast<uint64_t>(kEpMemoryMaxVectorCoreNum) * kEpMemoryDispatchDfxStride <=
-        kEpMemoryDispatchCumsumOffset,
-    "EP memory DFX records must not overlap cumsum state");
 static_assert(kEpMemoryDispatchCumsumOffset +
         static_cast<uint64_t>(kEpMemoryMaxCountCoreNum) * kEpMemoryMaxCountCoreNum *
             kEpMemoryWindowAlignmentBytes <=

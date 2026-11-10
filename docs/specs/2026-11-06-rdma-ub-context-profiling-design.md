@@ -7,7 +7,7 @@
 实施分支为 `codex/rdma-explicit-wait`，设计基线为 `40c6b30`。
 
 目标：Release 裁掉调用方参数检查；显式 context 路径不在每次 WRITE、发布批次和
-完成回收时读写 GM 软件状态；Debug 复用 `tilexr_profiling.h` 的 `DirectWriter`，
+完成回收时读写 GM 软件状态；Debug 复用 `<tilexr/profiling.h>` 的 `DirectWriter`，
 将事件追加到 GM lane，结束记录后提交，用于区分 WRITE 提交和完成等待的成本。
 
 不改变现有按 QP SQ/WR 能力计算窗口、完整批次背压策略、批长上限、CQ 匹配、
@@ -53,9 +53,9 @@ context 由一个 AIV 独占，关联一个 QP，由该 QP 的所有 MR view 共
 doorbell 仍在原来的 GM/MMIO；必须保留 UB 构造 WQE、MTE3 发布完成后 `st_dev`
 响铃、CQE 新鲜读取及正确流水依赖，不能用 UB 同步替代对 NIC 的必要可见性。
 
-## 3. 复用 `tilexr_profiling.h`
+## 3. 复用 `<tilexr/profiling.h>`
 
-入口包含 `tilexr_profiling.h`，直接使用已有 `TileXR::Profiling::DirectWriter`，
+入口包含 `<tilexr/profiling.h>`，直接使用已有 `TileXR::Profiling::DirectWriter`，
 不扩展公共 profiling 模块。沿用 `DeviceView`、event ID、lane、
 count/dropped/completion 和现有 mapping/records 协议。
 

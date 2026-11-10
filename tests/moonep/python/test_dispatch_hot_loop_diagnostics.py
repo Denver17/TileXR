@@ -1,41 +1,10 @@
+# 验证 MoonEP 的布局、调用或诊断合同；直接覆盖对应 src/moonep 与 tools/moonep 接口，硬件数据面另行验收。
 from __future__ import annotations
 
 import ctypes
 from types import SimpleNamespace
 
 from tools.moonep import dispatch_hot_loop
-
-
-def _profile(payload_mode: int, *, shared_owner: bool):
-    record = dispatch_hot_loop.DispatchProfileRecord()
-    record.marker = dispatch_hot_loop.PROFILE_MARKER
-    record.version = dispatch_hot_loop.DIAGNOSTIC_VERSION
-    record.record_bytes = ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)
-    record.payload_mode = payload_mode
-    record.rank = 0
-    record.core = 0
-    record.block_dim = 1
-    record.select_mode = 1
-    record.fallback_reason = 0
-    record.magic = 17
-    record.processed = 8
-    record.put_count = 8
-    if shared_owner:
-        record.scanned = 16
-        record.matched = 8
-        record.selected = 8
-        record.visited_peers = 1
-        record.completion_flags = 2
-        record.kernel_cycles = 110
-        record.staging_cycles = 10
-        record.put_issue_cycles = 20
-        record.flag_wait_cycles = 30
-        record.output_copy_cycles = 40
-        record.quiet_cycles = 10
-        for index in range(11):
-            record.reserved[index] = (index + 1) * 10
-    return record
-
 
 def _dfx(payload_mode: int):
     record = dispatch_hot_loop.DispatchDfxRecord()
@@ -50,7 +19,6 @@ def _dfx(payload_mode: int):
     record.processed_routes = 8
     return record
 
-
 def test_paired_fused_diagnostics_marks_one_shared_epoch_owner(monkeypatch) -> None:
     monkeypatch.setenv("TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT", "1")
     context = SimpleNamespace(
@@ -58,8 +26,6 @@ def test_paired_fused_diagnostics_marks_one_shared_epoch_owner(monkeypatch) -> N
         _dispatch_workspace_bytes=(
             dispatch_hot_loop.COMPLETION_BYTES
             + dispatch_hot_loop.SIGNAL_BYTES
-            + 2 * dispatch_hot_loop.PROFILE_COUNT
-            * ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)
             + 2 * dispatch_hot_loop.DFX_COUNT
             * ctypes.sizeof(dispatch_hot_loop.DispatchDfxRecord)
             + ctypes.sizeof(dispatch_hot_loop.DispatchKernelStatus)
@@ -67,17 +33,6 @@ def test_paired_fused_diagnostics_marks_one_shared_epoch_owner(monkeypatch) -> N
     )
     offsets = dispatch_hot_loop._diagnostic_layout(context)
 
-    hidden_profile = bytearray(
-        dispatch_hot_loop.PROFILE_COUNT
-        * ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)
-    )
-    weight_profile = bytearray(hidden_profile)
-    hidden_profile[: ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)] = bytes(
-        _profile(0, shared_owner=False)
-    )
-    weight_profile[: ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)] = bytes(
-        _profile(1, shared_owner=True)
-    )
     hidden_dfx = bytearray(
         dispatch_hot_loop.DFX_COUNT
         * ctypes.sizeof(dispatch_hot_loop.DispatchDfxRecord)
@@ -97,12 +52,9 @@ def test_paired_fused_diagnostics_marks_one_shared_epoch_owner(monkeypatch) -> N
     status.magic = 17
     status.reserved[0] = (
         dispatch_hot_loop.KERNEL_STATUS_FEATURE_DFX_ENABLED
-        | dispatch_hot_loop.KERNEL_STATUS_FEATURE_PROFILING_ENABLED
         | dispatch_hot_loop.KERNEL_STATUS_FEATURE_FUSED_EPOCH
     )
     blobs = {
-        offsets["hidden_profile"]: bytes(hidden_profile),
-        offsets["weight_profile"]: bytes(weight_profile),
         offsets["hidden_dfx"]: bytes(hidden_dfx),
         offsets["weight_dfx"]: bytes(weight_dfx),
         offsets["kernel_status"]: bytes(status),
@@ -123,12 +75,8 @@ def test_paired_fused_diagnostics_marks_one_shared_epoch_owner(monkeypatch) -> N
     assert result["kernel_status"]["payload_mode"] == 1
     assert result["hidden"]["shared_epoch_owner"] is False
     assert result["weight"]["shared_epoch_owner"] is True
-    assert result["hidden"]["profile"][0]["kernel_cycles"] == 0
-    assert result["hidden"]["profile"][0]["reserved"] == [0] * 11
-    assert result["weight"]["profile"][0]["kernel_cycles"] == 110
     assert len(result["hidden"]["dfx"]) == 1
     assert len(result["weight"]["dfx"]) == 1
-
 
 def test_non_fused_diagnostics_do_not_claim_a_shared_owner(monkeypatch) -> None:
     monkeypatch.setenv("TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT", "1")
@@ -137,8 +85,6 @@ def test_non_fused_diagnostics_do_not_claim_a_shared_owner(monkeypatch) -> None:
         _dispatch_workspace_bytes=(
             dispatch_hot_loop.COMPLETION_BYTES
             + dispatch_hot_loop.SIGNAL_BYTES
-            + 2 * dispatch_hot_loop.PROFILE_COUNT
-            * ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)
             + 2 * dispatch_hot_loop.DFX_COUNT
             * ctypes.sizeof(dispatch_hot_loop.DispatchDfxRecord)
             + ctypes.sizeof(dispatch_hot_loop.DispatchKernelStatus)
@@ -152,17 +98,11 @@ def test_non_fused_diagnostics_do_not_claim_a_shared_owner(monkeypatch) -> None:
     status.payload_mode = 0
     status.magic = 17
     status.reserved[0] = dispatch_hot_loop.KERNEL_STATUS_FEATURE_DFX_ENABLED
-    empty_profile = bytes(
-        dispatch_hot_loop.PROFILE_COUNT
-        * ctypes.sizeof(dispatch_hot_loop.DispatchProfileRecord)
-    )
     empty_dfx = bytes(
         dispatch_hot_loop.DFX_COUNT
         * ctypes.sizeof(dispatch_hot_loop.DispatchDfxRecord)
     )
     blobs = {
-        offsets["hidden_profile"]: empty_profile,
-        offsets["weight_profile"]: empty_profile,
         offsets["hidden_dfx"]: empty_dfx,
         offsets["weight_dfx"]: empty_dfx,
         offsets["kernel_status"]: bytes(status),
@@ -184,7 +124,6 @@ def test_non_fused_diagnostics_do_not_claim_a_shared_owner(monkeypatch) -> None:
     assert result["hidden"]["shared_epoch_owner"] is False
     assert result["weight"]["shared_epoch_owner"] is False
 
-
 def test_skewed_hot_loop_routes_concentrate_on_the_same_experts() -> None:
     case = SimpleNamespace(
         tokens_per_rank=3,
@@ -200,7 +139,6 @@ def test_skewed_hot_loop_routes_concentrate_on_the_same_experts() -> None:
     assert rank_zero == (0, 1, 0, 1, 0, 1)
     assert rank_three == rank_zero
     assert dispatch_hot_loop._all_case_topk(case, 4) == rank_zero * 4
-
 
 def test_reference_slots_leave_padding_for_zero_fill() -> None:
     case = SimpleNamespace(
@@ -226,13 +164,11 @@ def test_reference_slots_leave_padding_for_zero_fill() -> None:
     assert sum(source >= 0 for source in sources) == 2
     assert sum(source < 0 for source in sources) == 6
 
-
 class _FakePlan:
     def __init__(self) -> None:
         import torch
 
         self.dst = torch.tensor([0, 1], dtype=torch.int32)
-
 
 class _FakeBuffer:
     def __init__(self) -> None:
@@ -245,7 +181,6 @@ class _FakeBuffer:
 
     def quiesce(self) -> None:
         self.quiesce_calls += 1
-
 
 def test_repeated_exact_check_compares_every_round_and_alternates_plan(
     monkeypatch,

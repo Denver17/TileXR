@@ -1,3 +1,6 @@
+/*
+ * 定义 URMA Dispatch 的数据布局、core 分工与完成信号常量，供 Host 布局与 Device kernel 共同使用。
+ */
 #ifndef TILEXR_MOONEP_DISPATCH_COMMON_H
 #define TILEXR_MOONEP_DISPATCH_COMMON_H
 
@@ -25,7 +28,6 @@ constexpr uint32_t kDispatchScratchBufferCount = 2U;
 constexpr uint64_t kDispatchInternalAlignmentBytes = 64U;
 constexpr uint64_t kDispatchRegistrationAlignmentBytes = 2ULL * 1024ULL * 1024ULL;
 constexpr uint64_t kDispatchSignalStrideBytes = 64U;
-constexpr uint32_t kDispatchProfileRecordCount = kDispatchAivCoreCount;
 constexpr uint32_t kDispatchDfxRecordCount = kDispatchAivCoreCount;
 constexpr uint64_t kDispatchProductionTimeoutSeconds = 60U;
 

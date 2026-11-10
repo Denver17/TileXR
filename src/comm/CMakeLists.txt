@@ -124,8 +124,6 @@ configure_file(
         @ONLY)
 
 set(TILEXR_SOURCE_FILE tilexr_comm.cpp
-        ep_profiling_compat/runtime.cpp
-        ep_profiling_compat/capture.cpp
         rdma/tilexr_rdma_api.cpp
         rdma/tilexr_rdma_config.cpp
         rdma/tilexr_rdma_transport.cpp
@@ -286,8 +284,6 @@ install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/comm_args.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_sync.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_data_as_flag.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_perf_trace.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_profiling.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_fullmesh.h
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_udma_reg.h

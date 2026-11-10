@@ -14,7 +14,7 @@
 #include <cstdint>
 #include "tilexr_rdma_debug.h"
 #if TILEXR_RDMA_PROFILE_ACTIVE
-#include "tilexr_profiling.h"
+#include <tilexr/profiling.h>
 #endif
 #if defined(__CCE_AICORE__) || defined(__CCE__) || defined(__NPU_ARCH__)
 #define TILEXR_RDMA_TRACE_INLINE __aicore__ inline

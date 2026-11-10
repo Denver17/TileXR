@@ -1,3 +1,6 @@
+/*
+ * 调用真实 Combine V2 验证数据及批次 ACL event 时间；使用 Host 屏障协调 rank，不读取私有时间戳 dump。
+ */
 #include <algorithm>
 #include <array>
 #include <cerrno>
@@ -20,7 +23,6 @@
 
 #include "acl/acl.h"
 #include "combine_v2_host.h"
-#include "combine_v2_profile.h"
 #include "combine_v2_schedule.h"
 #include "tilexr_api.h"
 #include "tilexr_moonep_combine_v2.h"
@@ -37,27 +39,6 @@ constexpr uint32_t kAivCoreNum = 16;
 constexpr uint32_t kQpCount = 32;
 constexpr int kBarrierPortOffset = 97;
 constexpr int kBarrierTimeoutSeconds = 60;
-const char *const kProfileMetricNames[
-    TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount] = {
-    "selection_load_us",
-    "selection_select_us",
-    "self_route_decode_us",
-    "self_copy_us",
-    "remote_route_decode_us",
-    "remote_descriptor_us",
-    "remote_wqe_build_us",
-    "remote_submit_us",
-    "credit_wait_us",
-    "credit_publish_us",
-    "weight_destination_gather_us",
-    "weight_value_gather_us",
-    "weight_record_build_us",
-    "weight_mte3_submit_us",
-    "weight_payload_drain_us",
-    "weight_done_publish_us",
-    "weight_inbound_wait_us",
-    "weight_output_us",
-};
 
 struct HostPort {
     std::string host;
@@ -75,30 +56,8 @@ struct Options {
     int rank = -1;
     int worldSize = 0;
     int device = -1;
-    bool profile = false;
     bool reduceHidden = false;
     bool fusedWeight = false;
-};
-
-struct ProfileSample {
-    int iteration = 0;
-    uint32_t core = 0U;
-    std::array<int64_t,
-        TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount> timePoint {};
-    std::array<uint64_t,
-        TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount> metric {};
-    std::array<std::array<uint32_t,
-        TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount>,
-        TileXRMoonEp::kMoonEpCombineV2ProfileStepCount> weightStepCounter {};
-    uint32_t weightOutputTiles = 0U;
-    bool fullmesh = false;
-    uint32_t fullmeshStep = 0U;
-    uint32_t fullmeshPeer = 0U;
-    uint32_t fullmeshSuccessor = 0U;
-    uint32_t fullmeshLogicalQp = 0U;
-    int64_t fullmeshWqeBuildEnd = 0;
-    int64_t fullmeshSubmitEnd = 0;
-    int64_t fullmeshCqSuccess = 0;
 };
 
 enum class OutputCheckResult {
@@ -142,7 +101,6 @@ void Usage(std::ostream &out, const char *program)
         << "  --device N             Local device id (default: rank modulo 8)\n"
         << "  --skip-iteration-barriers\n"
         << "                         Deprecated no-op; launches are always continuous\n"
-        << "  --profile              Capture per-AIV kernel cycle timestamps\n"
         << "  --reduce-hidden        Include BF16 TopK hidden reduction in the kernel\n"
         << "  --fused-weight         Transfer and validate FP32 route weights in the same launch\n"
         << "  --help                 Show this help\n";
@@ -209,10 +167,7 @@ bool ParseOptions(int argc, char **argv, Options *options, bool *showHelp,
         if (argument == "--skip-iteration-barriers") {
             continue;
         }
-        if (argument == "--profile") {
-            options->profile = true;
-            continue;
-        }
+
         if (argument == "--reduce-hidden") {
             options->reduceHidden = true;
             continue;
@@ -722,161 +677,6 @@ void ReportFirstKernelFailure(int rank, const void *workspace,
               << " status=unavailable" << std::endl;
 }
 
-void CaptureProfileSamples(int rank, int world, int iteration,
-    const void *workspace, uint64_t profileOffset,
-    std::vector<ProfileSample> *samples)
-{
-    if (samples == nullptr) {
-        Abort(rank, "profile sample destination", 1);
-    }
-    const uint32_t coreCount =
-        TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(
-            static_cast<uint32_t>(world));
-    std::vector<TileXRMoonEp::MoonEpCombineV2ProfileRecord> records(coreCount);
-    const std::size_t profileBytes = records.size() * sizeof(records[0]);
-    const void *profileDevice = static_cast<const uint8_t *>(workspace) +
-        profileOffset;
-    CheckAcl(rank, "profile D2H copy", aclrtMemcpy(records.data(),
-        profileBytes, profileDevice, profileBytes, ACL_MEMCPY_DEVICE_TO_HOST));
-
-    for (uint32_t core = 0U; core < coreCount; ++core) {
-        const TileXRMoonEp::MoonEpCombineV2ProfileRecord &record =
-            records[core];
-        if (record.marker != TileXRMoonEp::kMoonEpCombineV2ProfileMarker ||
-            record.version != TileXRMoonEp::kMoonEpCombineV2ProfileVersion ||
-            record.recordBytes != sizeof(record) ||
-            record.rank != static_cast<uint32_t>(rank) ||
-            record.core != core || record.blockDim != coreCount ||
-            record.timePointCount !=
-                TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount ||
-            record.metricCount !=
-                TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount) {
-            Abort(rank, "profile record validation", 1);
-        }
-        ProfileSample sample;
-        sample.iteration = iteration;
-        sample.core = core;
-        for (uint32_t point = 0U;
-            point < TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount;
-            ++point) {
-            sample.timePoint[point] = record.timePoint[point];
-            if (sample.timePoint[point] <= 0 ||
-                (point > 0U && sample.timePoint[point] <
-                    sample.timePoint[point - 1U])) {
-                Abort(rank, "profile timestamp validation", 1);
-            }
-        }
-        for (uint32_t metric = 0U;
-            metric < TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount;
-            ++metric) {
-            sample.metric[metric] = record.metric[metric];
-        }
-        for (uint32_t step = 0U;
-            step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount; ++step) {
-            for (uint32_t counter = 0U;
-                counter < TileXRMoonEp::kMoonEpCombineV2WeightStepCounterCount;
-                ++counter) {
-                sample.weightStepCounter[step][counter] =
-                    record.weightStepCounter[step][counter];
-            }
-        }
-        sample.weightOutputTiles = record.weightOutputTiles;
-        sample.fullmeshWqeBuildEnd = record.timePoint[TileXRMoonEp::
-            MOONEP_COMBINE_V2_DIAG_FULLMESH_WQE_BUILD_END];
-        sample.fullmeshSubmitEnd = record.timePoint[TileXRMoonEp::
-            MOONEP_COMBINE_V2_DIAG_FULLMESH_SUBMIT_END];
-        sample.fullmeshCqSuccess = record.timePoint[TileXRMoonEp::
-            MOONEP_COMBINE_V2_DIAG_FULLMESH_CQ_SUCCESS];
-        const bool routeValid =
-            (record.reserved &
-                TileXRMoonEp::kMoonEpCombineV2ProfileRouteValid) != 0U;
-        if (!routeValid) {
-            if (record.reserved != 0U || sample.fullmeshWqeBuildEnd != 0 ||
-                sample.fullmeshSubmitEnd != 0 ||
-                sample.fullmeshCqSuccess != 0) {
-                Abort(rank, "non-Fullmesh profile validation", 1);
-            }
-        } else {
-            sample.fullmesh = true;
-            const uint32_t transport =
-                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
-                    record.reserved,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileTransportShift,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileTransportMask);
-            sample.fullmeshStep =
-                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
-                    record.reserved,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileStepShift,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileStepMask);
-            sample.fullmeshPeer =
-                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
-                    record.reserved,
-                    TileXRMoonEp::kMoonEpCombineV2ProfilePeerShift,
-                    TileXRMoonEp::kMoonEpCombineV2ProfilePeerMask);
-            sample.fullmeshSuccessor =
-                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
-                    record.reserved,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileSuccessorShift,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileSuccessorMask);
-            sample.fullmeshLogicalQp =
-                TileXRMoonEp::MoonEpCombineV2ProfileRouteField(
-                    record.reserved,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileQpShift,
-                    TileXRMoonEp::kMoonEpCombineV2ProfileQpMask);
-            const uint32_t localRankSize =
-                TileXRMoonEp::MoonEpCombineV2LocalRankSize(
-                    static_cast<uint32_t>(world));
-            const uint32_t expectedRoute =
-                TileXRMoonEp::MoonEpCombineV2PackFullmeshProfileRoute(
-                    sample.fullmeshStep, sample.fullmeshPeer,
-                    sample.fullmeshSuccessor, sample.fullmeshLogicalQp);
-            if (transport != TileXRMoonEp::
-                    MOONEP_COMBINE_V2_PROFILE_TRANSPORT_FULLMESH ||
-                record.reserved != expectedRoute ||
-                sample.fullmeshStep >=
-                    TileXRMoonEp::MoonEpCombineV2StepCount(
-                        static_cast<uint32_t>(world)) ||
-                sample.fullmeshPeer >= static_cast<uint32_t>(world) ||
-                sample.fullmeshSuccessor >= static_cast<uint32_t>(world) ||
-                sample.fullmeshPeer == static_cast<uint32_t>(rank) ||
-                !TileXRMoonEp::MoonEpCombineV2SameServer(
-                    static_cast<uint32_t>(rank), sample.fullmeshPeer,
-                    localRankSize) ||
-                sample.fullmeshLogicalQp !=
-                    TileXRMoonEp::MoonEpCombineV2FullmeshLogicalQp(
-                        sample.fullmeshPeer, localRankSize) ||
-                sample.fullmeshWqeBuildEnd <= 0 ||
-                sample.fullmeshWqeBuildEnd >= sample.fullmeshSubmitEnd ||
-                sample.fullmeshSubmitEnd >= sample.fullmeshCqSuccess) {
-                Abort(rank, "Fullmesh profile validation", 1);
-            }
-        }
-        samples->push_back(sample);
-    }
-}
-
-float ProfileKernelElapsedMs(int rank,
-    const std::vector<ProfileSample> &samples)
-{
-    if (samples.empty()) {
-        Abort(rank, "final profile sample", 1);
-    }
-    int64_t maxCycles = 0;
-    for (const ProfileSample &sample : samples) {
-        const int64_t cycles = sample.timePoint[
-            TileXRMoonEp::MOONEP_COMBINE_V2_TIME_FINAL_END] -
-            sample.timePoint[
-                TileXRMoonEp::MOONEP_COMBINE_V2_TIME_INIT_BEGIN];
-        maxCycles = std::max(maxCycles, cycles);
-    }
-    if (maxCycles <= 0) {
-        Abort(rank, "final profile duration", 1);
-    }
-    return static_cast<float>(maxCycles) /
-        static_cast<float>(
-            TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs * 1000U);
-}
-
 } // namespace
 
 int main(int argc, char **argv)
@@ -953,11 +753,10 @@ int main(int argc, char **argv)
     int64_t maxBs = 0;
     for (const int64_t bs : options.batchSizes) {
         uint64_t workspaceBytes = 0;
-        uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
         ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize, options.topK,
             bs * options.topK, TILEXR_MOONEP_DTYPE_BFLOAT16, &workspaceBytes,
-            &profileOffset, &outputOffsets[0], &outputOffsets[1]);
+            &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || workspaceBytes == 0) {
             Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2", ret);
         }
@@ -1017,13 +816,12 @@ int main(int argc, char **argv)
     for (const int64_t bs : options.batchSizes) {
         const int64_t slots = bs * options.topK;
         uint64_t caseWorkspaceBytes = 0;
-        uint64_t profileOffset = 0;
         uint64_t outputOffsets[2] = {};
         ret = TileXRMoonEpCombineGetWorkspaceSizeV2(bs, options.hiddenSize,
             options.topK, slots, TILEXR_MOONEP_DTYPE_BFLOAT16, &caseWorkspaceBytes,
-            &profileOffset, &outputOffsets[0], &outputOffsets[1]);
+            &outputOffsets[0], &outputOffsets[1]);
         if (ret != TILEXR_MOONEP_SUCCESS || caseWorkspaceBytes == 0) {
-            Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2 profile", ret);
+            Abort(rank, "TileXRMoonEpCombineGetWorkspaceSizeV2", ret);
         }
         TileXRMoonEp::CombineV2Layout caseLayout {};
         ret = TileXRMoonEp::TileXRMoonEpBuildCombineV2Layout(
@@ -1133,12 +931,6 @@ int main(int argc, char **argv)
             Abort(rank, "timed batch start barrier", 1);
         }
 
-        std::vector<ProfileSample> profileSamples;
-        if (options.profile) {
-            profileSamples.reserve(
-                TileXRMoonEp::MoonEpCombineV2ActiveCoreCount(
-                    static_cast<uint32_t>(world)));
-        }
         CheckAcl(rank, "aclrtRecordEvent batch start",
             aclrtRecordEvent(startEvent, stream));
         for (int iteration = 0; iteration < options.iterations; ++iteration) {
@@ -1165,76 +957,6 @@ int main(int argc, char **argv)
             Abort(rank, "continuous weight validation barrier", 1);
         }
 
-        if (options.profile) {
-            const int finalIteration = options.iterations - 1;
-            CaptureProfileSamples(rank, world, finalIteration, workspace,
-                profileOffset, &profileSamples);
-            const float finalProfileElapsedMs =
-                ProfileKernelElapsedMs(rank, profileSamples);
-            std::cout << std::fixed << std::setprecision(6)
-                      << "COMBINE_V2_SAMPLE bs=" << bs
-                      << " iteration=" << finalIteration
-                      << " rank=" << rank
-                      << " elapsed_ms=" << finalProfileElapsedMs
-                      << " timing_source=kernel_profile"
-                      << std::endl;
-        }
-        for (const ProfileSample &sample : profileSamples) {
-            std::cout << "COMBINE_V2_PROFILE bs=" << bs
-                      << " iteration=" << sample.iteration
-                      << " rank=" << rank
-                      << " core=" << sample.core
-                      << " profile_version="
-                      << TileXRMoonEp::kMoonEpCombineV2ProfileVersion
-                      << " cycles_per_us="
-                      << TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs
-                      << " transport="
-                      << (sample.fullmesh ? "fullmesh" : "none")
-                      << " fm_step=" << (sample.fullmesh ?
-                          static_cast<int64_t>(sample.fullmeshStep) : -1)
-                      << " fm_peer=" << (sample.fullmesh ?
-                          static_cast<int64_t>(sample.fullmeshPeer) : -1)
-                      << " fm_successor=" << (sample.fullmesh ?
-                          static_cast<int64_t>(sample.fullmeshSuccessor) : -1)
-                      << " fm_logical_qp=" << (sample.fullmesh ?
-                          static_cast<int64_t>(sample.fullmeshLogicalQp) : -1)
-                      << " fm_wqe_build_end=" << sample.fullmeshWqeBuildEnd
-                      << " fm_submit_end=" << sample.fullmeshSubmitEnd
-                      << " fm_cq_success=" << sample.fullmeshCqSuccess;
-            for (uint32_t point = 0U;
-                point < TileXRMoonEp::kMoonEpCombineV2ProfileTimePointCount;
-                ++point) {
-                std::cout << " t" << point << '=' << sample.timePoint[point];
-            }
-            std::cout << std::fixed << std::setprecision(3);
-            for (uint32_t metric = 0U;
-                metric < TileXRMoonEp::kMoonEpCombineV2ProfileMetricCount;
-                ++metric) {
-                std::cout << ' ' << kProfileMetricNames[metric] << '='
-                          << static_cast<double>(sample.metric[metric]) /
-                              TileXRMoonEp::kMoonEpCombineV2ProfileCyclesPerUs;
-            }
-            for (uint32_t step = 0U;
-                step < TileXRMoonEp::kMoonEpCombineV2ProfileStepCount; ++step) {
-                std::cout << " weight_step" << step << "_records="
-                          << sample.weightStepCounter[step][TileXRMoonEp::
-                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_RECORDS]
-                          << " weight_step" << step << "_batches="
-                          << sample.weightStepCounter[step][TileXRMoonEp::
-                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_BATCHES]
-                          << " weight_step" << step << "_merged_runs="
-                          << sample.weightStepCounter[step][TileXRMoonEp::
-                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_MERGED_RUNS]
-                          << " weight_step" << step << "_mte3_commands="
-                          << sample.weightStepCounter[step][TileXRMoonEp::
-                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_MTE3_COMMANDS]
-                          << " weight_step" << step << "_stage_waits="
-                          << sample.weightStepCounter[step][TileXRMoonEp::
-                              MOONEP_COMBINE_V2_WEIGHT_COUNTER_STAGE_WAITS];
-            }
-            std::cout << " weight_output_tiles=" << sample.weightOutputTiles;
-            std::cout << std::endl;
-        }
         std::cout << std::fixed << std::setprecision(6)
                   << "COMBINE_V2_RANK_PERF bs=" << bs
                   << " rank=" << rank

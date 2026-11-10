@@ -444,7 +444,7 @@ strides and UB allocation become caller preconditions. ABI rejection, queue admi
 errors, timeouts and poison handling remain active. Restore/Save retain cold checkpoint validation.
 The default follows `NDEBUG`; the benchmark explicitly sets matching Host/device values.
 
-Debug 打点只使用 `tilexr_profiling.h` 已有的 `DirectWriter`，覆盖四个 WRITE 入口及内部阶段；
+Debug 打点只使用 `<tilexr/profiling.h>` 已有的 `DirectWriter`，覆盖四个 WRITE 入口及内部阶段；
 调用方先 Initialize 指定 lane，再 Attach 到 context，测量结束后 Publish。每个 marker
 读取 cycle counter 并通过 RecordAt 追加到 GM，不分配 profiling UB，也不扩展公共 SDK。
 此处的 GM trace 写入不同于 QP 软件状态访问：显式 context 的 state/pending 仍在 UB。

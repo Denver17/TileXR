@@ -1,3 +1,6 @@
+/*
+ * 将已校验的 MoonEP Host 参数打包为外置 kernel ABI，通过注册后的 runtime 入口提交。
+ */
 #include "dispatch_launch.h"
 
 #include <cerrno>
@@ -171,8 +174,6 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         params.layout.creditOffset,
         params.layout.creditSourceOffset,
         params.layout.signalOffset,
-        params.layout.hiddenProfileOffset,
-        params.layout.weightProfileOffset,
         params.layout.hiddenDfxOffset,
         params.layout.weightDfxOffset,
         params.layout.kernelStatusOffset,
@@ -187,11 +188,6 @@ int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params)
         TileXRMoonEpDispatchCompletionTimeoutTicks(),
         static_cast<uint64_t>(params.peerMode),
         params.groupWidth,
-        static_cast<GM_ADDR>(params.trace),
-        params.traceBytes,
-        params.traceIteration,
-        params.traceIterationCount,
-        params.traceEventCapacity,
     };
 
     rtArgsEx_t argsInfo {};

@@ -1,3 +1,6 @@
+/*
+ * 校验 MoonEP 公共调用与工作区，准备内部 launch 参数；传输和结果生产由对应 Device kernel 完成。
+ */
 #include "dispatch_host.h"
 
 #include <cstddef>
@@ -11,7 +14,7 @@
 #include "dispatch_launch.h"
 #include "dispatch_layout.h"
 #include "../common/dispatch_schedule.h"
-#include "../common/dispatch_trace.h"
+#include "../common/dispatch_credit.h"
 #include "../common/dispatch_wqe_batch.h"
 #include "tilexr_api.h"
 #include "tilexr_types.h"
@@ -79,8 +82,10 @@ int ValidateDispatchPeerConfig(const DispatchPeerConfig &config,
             routeCount, destinationCapacity, hasWeight)) {
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
-    if (commArgs.rankSize > 1 &&
-        DispatchGroupedGroupCount(commArgs.rankSize, config.groupWidth) == 0U) {
+    const uint32_t groupCount = DispatchGroupedGroupCount(commArgs.rankSize, config.groupWidth);
+    if ((commArgs.rankSize > 1 && groupCount == 0U) ||
+        (DispatchPeerModeUsesCredit(static_cast<uint32_t>(config.mode)) &&
+            groupCount > kDispatchCreditMaxGroupCount)) {
         return TILEXR_MOONEP_ERROR_NOT_SUPPORTED;
     }
     return TILEXR_MOONEP_SUCCESS;
@@ -165,32 +170,6 @@ bool RangesOverlap(const void *lhs, uint64_t lhsBytes, const void *rhs, uint64_t
     }
     return lhsBegin < rhsBegin + static_cast<uintptr_t>(rhsBytes) &&
         rhsBegin < lhsBegin + static_cast<uintptr_t>(lhsBytes);
-}
-
-int ResolveDispatchTrace(const TileXRMoonEpDispatchArgsV1 &args,
-    const TileXRMoonEpDispatchTraceV1 *&trace, uint64_t &requiredBytes)
-{
-    trace = nullptr;
-    requiredBytes = 0U;
-    const std::size_t traceFieldEnd = offsetof(TileXRMoonEpDispatchArgsV1, trace) +
-        sizeof(args.trace);
-    if (args.structSize < traceFieldEnd || args.trace == nullptr) {
-        return TILEXR_MOONEP_SUCCESS;
-    }
-    trace = args.trace;
-    uint64_t coreRecordOffset = 0U;
-    uint64_t eventOffset = 0U;
-    if (trace->structSize < sizeof(*trace) ||
-        trace->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 ||
-        trace->buffer == nullptr || trace->bufferBytes == 0U ||
-        trace->iteration >= trace->iterationCount || trace->reserved != 0U ||
-        reinterpret_cast<uintptr_t>(trace->buffer) % alignof(DispatchTraceEvent) != 0U ||
-        !DispatchTraceLayout(trace->iterationCount, trace->eventCapacity,
-            coreRecordOffset, eventOffset, requiredBytes) ||
-        trace->bufferBytes < requiredBytes) {
-        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
-    }
-    return TILEXR_MOONEP_SUCCESS;
 }
 
 int SelectPayload(const TileXRMoonEpPlanV1 &plan,
@@ -353,7 +332,7 @@ int TileXRMoonEpQueryDispatchUrmaWorkspace(TileXRCommPtr comm, int64_t s,
 static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
     aclrtStream stream, bool resetStatus)
 {
-    const std::size_t baseArgsBytes = offsetof(TileXRMoonEpDispatchArgsV1, trace);
+    const std::size_t baseArgsBytes = sizeof(TileXRMoonEpDispatchArgsV1);
     if (args == nullptr || args->structSize < baseArgsBytes ||
         (args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V1 &&
             args->abiVersion != TILEXR_MOONEP_ABI_VERSION_V2) ||
@@ -370,13 +349,7 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
 
-    const TileXRMoonEpDispatchTraceV1 *trace = nullptr;
-    uint64_t traceRequiredBytes = 0U;
-    int ret = ResolveDispatchTrace(*args, trace, traceRequiredBytes);
-    if (ret != TILEXR_MOONEP_SUCCESS) {
-        return ret;
-    }
-
+    int ret = TILEXR_MOONEP_SUCCESS;
     DispatchPayloadMode hiddenMode = DispatchPayloadMode::Hidden;
     int64_t h = 0;
     ret = SelectPayload(*args->plan, *args->hiddenSh, *args->hiddenNvsh,
@@ -481,17 +454,7 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
             args->plan->zeroFillRanges, zeroFillBytes)) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
-    if (trace != nullptr &&
-        (RangesOverlap(trace->buffer, traceRequiredBytes,
-             args->registeredWorkspace, args->registeredWorkspaceBytes) ||
-         RangesOverlap(trace->buffer, traceRequiredBytes,
-              args->plan->dst, dstBytes) ||
-         RangesOverlap(trace->buffer, traceRequiredBytes,
-              args->plan->zeroFillRanges, zeroFillBytes) ||
-         RangesOverlap(trace->buffer, traceRequiredBytes,
-              args->plan->status, sizeof(int32_t)))) {
-        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
-    }
+
     for (uint32_t lhs = 0; lhs < rangeCount; ++lhs) {
         if (RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
                 args->registeredWorkspace, args->registeredWorkspaceBytes) ||
@@ -503,10 +466,7 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
                 args->plan->status, sizeof(int32_t))) {
             return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
         }
-        if (trace != nullptr && RangesOverlap(ranges[lhs].data,
-                ranges[lhs].bytes, trace->buffer, traceRequiredBytes)) {
-            return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
-        }
+
         for (uint32_t rhs = lhs + 1U; rhs < rangeCount; ++rhs) {
             if (RangesOverlap(ranges[lhs].data, ranges[lhs].bytes,
                     ranges[rhs].data, ranges[rhs].bytes)) {
@@ -526,13 +486,7 @@ static int RunDispatchUrma(const TileXRMoonEpDispatchArgsV1 *args,
     params.peerMode = peerConfig.mode;
     params.groupWidth = peerConfig.groupWidth;
     params.zeroFillRangeCount = args->plan->e + args->plan->b;
-    if (trace != nullptr) {
-        params.trace = trace->buffer;
-        params.traceBytes = trace->bufferBytes;
-        params.traceIteration = trace->iteration;
-        params.traceIterationCount = trace->iterationCount;
-        params.traceEventCapacity = trace->eventCapacity;
-    }
+
     params.layout = layout;
     params.hiddenInput = args->hiddenSh->data;
     params.hiddenOutput = args->hiddenNvsh->data;

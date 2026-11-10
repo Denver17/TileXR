@@ -1,3 +1,6 @@
+/*
+ * 将已校验的 MoonEP Host 参数打包为外置 kernel ABI，通过注册后的 runtime 入口提交。
+ */
 #ifndef TILEXR_MOONEP_DISPATCH_URMA_LAUNCH_H
 #define TILEXR_MOONEP_DISPATCH_URMA_LAUNCH_H
 
@@ -23,11 +26,6 @@ struct DispatchUrmaLaunchParams {
     DispatchPeerMode peerMode = DispatchPeerMode::GroupCredit;
     uint32_t groupWidth = kDispatchDefaultGroupWidth;
     int64_t zeroFillRangeCount = 0;
-    void *trace = nullptr;
-    uint64_t traceBytes = 0U;
-    uint32_t traceIteration = 0U;
-    uint32_t traceIterationCount = 0U;
-    uint32_t traceEventCapacity = 0U;
     MoonEpDispatchUrmaLayout layout {};
 };
 
@@ -51,8 +49,6 @@ struct DispatchKernelArgs {
     uint64_t creditOffset;
     uint64_t creditSourceOffset;
     uint64_t signalOffset;
-    uint64_t hiddenProfileOffset;
-    uint64_t weightProfileOffset;
     uint64_t hiddenDfxOffset;
     uint64_t weightDfxOffset;
     uint64_t kernelStatusOffset;
@@ -67,14 +63,9 @@ struct DispatchKernelArgs {
     uint64_t completionTimeoutTicks;
     uint64_t peerMode;
     uint64_t groupWidth;
-    GM_ADDR trace;
-    uint64_t traceBytes;
-    uint64_t traceIteration;
-    uint64_t traceIterationCount;
-    uint64_t traceEventCapacity;
 };
 
-static_assert(sizeof(DispatchKernelArgs) == 40U * sizeof(uint64_t),
+static_assert(sizeof(DispatchKernelArgs) == 33U * sizeof(uint64_t),
     "MoonEP Dispatch Host/Kernel ABI changed");
 
 int TileXRMoonEpLaunchDispatchUrmaKernel(const DispatchUrmaLaunchParams &params);

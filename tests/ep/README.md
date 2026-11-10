@@ -222,7 +222,8 @@ cross-node runs; topology-specific behavior remains inside TileXR.
 `TILEXR_EP_ENABLE_PROFILING=ON` enables two generic events around each Memory
 Dispatch/Combine invocation. The descriptor comes from CommArgs and magic;
 public EP execution APIs and registered Kernel argument signatures are unchanged.
-This is separate from the existing v2 per-AIV instrumentation.
+ServerDedup uses the same SDK with its detailed event catalog. The old private
+per-AIV record formats and dump parsers are removed.
 
 The kernel-launch Host test checks uninstrumented rejection by default. Configure
 its standalone build with `-DCMAKE_CXX_FLAGS=-DTILEXR_EP_ENABLE_PROFILING=1` to

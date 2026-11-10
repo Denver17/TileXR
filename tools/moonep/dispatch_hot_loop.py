@@ -1,3 +1,4 @@
+# 驱动 MoonEP Dispatch 热循环，使用路由 oracle 检查输出并读取 DFX/完成状态；ACL event 提供批次时间。
 from __future__ import annotations
 
 import argparse
@@ -16,51 +17,32 @@ from .planner_reference import (
 from .rendezvous import completion_barrier_from_env
 from .report import write_json, write_jsonl
 
-
 ROOT = Path(__file__).resolve().parents[2]
 INTEGRATION = ROOT / "integrations" / "moonep_torch"
 if str(INTEGRATION) not in sys.path:
     sys.path.insert(0, str(INTEGRATION))
 
-
-PROFILE_MARKER = 0x54584450
 DFX_MARKER = 0x54584444
 KERNEL_STATUS_MARKER = 0x54584453
 DIAGNOSTIC_VERSION = 3
 KERNEL_STATUS_FEATURE_DFX_ENABLED = 1 << 0
-KERNEL_STATUS_FEATURE_PROFILING_ENABLED = 1 << 1
 KERNEL_STATUS_FEATURE_FUSED_EPOCH = 1 << 2
-PROFILE_COUNT = 64
+DISPATCH_CORE_CAPACITY = 64
 DFX_COUNT = 64
 COMPLETION_BYTES = 512 * 2 * 8
 SIGNAL_BYTES = 64 * 64
 DISPATCH_MODES = ("hidden", "weight", "pair")
 
-
 def _active_dispatch_aiv_count() -> int:
     count = int(os.environ.get("TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT", "64"))
-    if count < 1 or count > PROFILE_COUNT:
+    if count < 1 or count > DISPATCH_CORE_CAPACITY:
         raise ValueError(
             "TILEXR_MOONEP_DISPATCH_AIV_CORE_COUNT must satisfy "
-            f"1 <= coreCount <= {PROFILE_COUNT}"
+            f"1 <= coreCount <= {DISPATCH_CORE_CAPACITY}"
         )
     return count
-TIMELINE_SEGMENT_NAMES = (
-    "staging",
-    "route_select",
-    "remote_put_issue",
-    "local_copy",
-    "issue_to_wait",
-    "completion_wait",
-    "dfx_write",
-    "sync_all",
-    "dfx_reduce",
-    "output_copy",
-    "quiet",
-)
 
 ACL_EVENT_TIME_LINE = 0x00000008
-
 
 class _AclEventApi:
     def __init__(self):
@@ -105,7 +87,6 @@ class _AclEventApi:
     def destroy(self, event: ctypes.c_void_p) -> None:
         self._check("aclrtDestroyEvent", self.library.aclrtDestroyEvent(event))
 
-
 def _create_acl_event_pairs(iterations: int):
     api = _AclEventApi()
     pairs = []
@@ -125,7 +106,6 @@ def _create_acl_event_pairs(iterations: int):
         raise
     return api, pairs
 
-
 def _destroy_acl_event_pairs(api: _AclEventApi, pairs) -> None:
     failure = None
     for start, end in pairs:
@@ -137,40 +117,6 @@ def _destroy_acl_event_pairs(api: _AclEventApi, pairs) -> None:
                     failure = exc
     if failure is not None:
         raise failure
-
-
-class DispatchProfileRecord(ctypes.Structure):
-    _fields_ = [
-        ("marker", ctypes.c_uint32),
-        ("version", ctypes.c_uint16),
-        ("record_bytes", ctypes.c_uint16),
-        ("payload_mode", ctypes.c_uint32),
-        ("rank", ctypes.c_uint32),
-        ("core", ctypes.c_uint32),
-        ("block_dim", ctypes.c_uint32),
-        ("flags", ctypes.c_uint32),
-        ("select_mode", ctypes.c_uint32),
-        ("fallback_reason", ctypes.c_uint32),
-        ("scratch_index", ctypes.c_uint32),
-        ("group_count", ctypes.c_uint32),
-        ("magic", ctypes.c_uint64),
-        ("scanned", ctypes.c_uint64),
-        ("matched", ctypes.c_uint64),
-        ("selected", ctypes.c_uint64),
-        ("processed", ctypes.c_uint64),
-        ("put_count", ctypes.c_uint64),
-        ("put_bytes", ctypes.c_uint64),
-        ("visited_peers", ctypes.c_uint64),
-        ("completion_flags", ctypes.c_uint64),
-        ("kernel_cycles", ctypes.c_uint64),
-        ("staging_cycles", ctypes.c_uint64),
-        ("put_issue_cycles", ctypes.c_uint64),
-        ("flag_wait_cycles", ctypes.c_uint64),
-        ("output_copy_cycles", ctypes.c_uint64),
-        ("quiet_cycles", ctypes.c_uint64),
-        ("reserved", ctypes.c_uint64 * 11),
-    ]
-
 
 class DispatchDfxRecord(ctypes.Structure):
     _fields_ = [
@@ -196,7 +142,6 @@ class DispatchDfxRecord(ctypes.Structure):
         ("reserved", ctypes.c_uint64 * 4),
     ]
 
-
 class DispatchKernelStatus(ctypes.Structure):
     _fields_ = [
         ("marker", ctypes.c_uint32),
@@ -208,16 +153,12 @@ class DispatchKernelStatus(ctypes.Structure):
         ("reserved", ctypes.c_uint64 * 5),
     ]
 
-
-if (ctypes.sizeof(DispatchProfileRecord) != 256
-        or ctypes.sizeof(DispatchDfxRecord) != 128
+if (ctypes.sizeof(DispatchDfxRecord) != 128
         or ctypes.sizeof(DispatchKernelStatus) != 64):
     raise RuntimeError("Python Dispatch diagnostic ABI does not match the C++ records")
 
-
 def _dtype(torch_module, name: str):
     return {"bfloat16": torch_module.bfloat16, "float16": torch_module.float16}[name]
-
 
 def _case_rank_topk(case, rank: int, rank_size: int) -> tuple[int, ...]:
     route_count = case.tokens_per_rank * case.topk
@@ -232,14 +173,12 @@ def _case_rank_topk(case, rank: int, rank_size: int) -> tuple[int, ...]:
         case.route_distribution,
     )
 
-
 def _all_case_topk(case, rank_size: int) -> tuple[int, ...]:
     return tuple(
         expert
         for rank in range(rank_size)
         for expert in _case_rank_topk(case, rank, rank_size)
     )
-
 
 def _inputs(torch_module, case, context):
     device = f"npu:{context.device_index}"
@@ -268,7 +207,6 @@ def _inputs(torch_module, case, context):
         dtype=torch_module.float32
     ).reshape(case.tokens_per_rank, case.topk) / 128.0
     return topk, tpe, hidden.contiguous(), weights.contiguous()
-
 
 def _reference_slot_assignments(case, context, destination_roll: int = 0):
     all_topk = _all_case_topk(case, context.planner_group_size)
@@ -300,7 +238,6 @@ def _reference_slot_assignments(case, context, destination_roll: int = 0):
                 token_by_slot[slot] = route // case.topk
                 route_by_slot[slot] = route
     return source_by_slot, token_by_slot, route_by_slot
-
 
 def _expected(torch_module, case, context, destination_roll: int = 0):
     source_by_slot, token_by_slot, route_by_slot = _reference_slot_assignments(
@@ -337,7 +274,6 @@ def _expected(torch_module, case, context, destination_roll: int = 0):
     )
     return hidden, weights, source_by_slot
 
-
 def _launch_dispatch(runtime, context, plan, hidden, hidden_out, stream,
     weights, weights_out, mode: str, workspace, workspace_bytes) -> None:
     if mode == "hidden":
@@ -354,7 +290,6 @@ def _launch_dispatch(runtime, context, plan, hidden, hidden_out, stream,
             registered_workspace_bytes=workspace_bytes)
     else:
         raise ValueError(f"unsupported Dispatch mode: {mode}")
-
 
 def _alternating_plan_check(torch_module, case, buffer, plan, hidden,
     hidden_out, weights, weights_out, mode: str) -> dict[str, object]:
@@ -402,7 +337,6 @@ def _alternating_plan_check(torch_module, case, buffer, plan, hidden,
         plan.dst.copy_(original_dst)
         torch_module.npu.synchronize()
 
-
 def _repeated_exact_check(torch_module, case, buffer, plan, hidden,
     hidden_out, weights, weights_out, mode: str, rounds: int) -> dict[str, object]:
     if rounds <= 0:
@@ -448,13 +382,11 @@ def _repeated_exact_check(torch_module, case, buffer, plan, hidden,
         plan.dst.copy_(original_dst)
         torch_module.npu.synchronize()
 
-
 def _workspace_blob(context, byte_offset: int, byte_count: int) -> bytes:
     raw = context._dispatch_workspace_owner
     aligned_offset = context._dispatch_workspace_ptr - int(raw.data_ptr())
     view = raw.narrow(0, aligned_offset + byte_offset, byte_count)
     return view.cpu().numpy().tobytes()
-
 
 def _record_dict(record) -> dict[str, object]:
     values = {}
@@ -465,7 +397,6 @@ def _record_dict(record) -> dict[str, object]:
         else:
             values[name] = int(value)
     return values
-
 
 def _record_matches(record, *, marker: int, record_bytes: int,
     payload_mode: int, rank: int, core: int) -> bool:
@@ -479,28 +410,16 @@ def _record_matches(record, *, marker: int, record_bytes: int,
         and int(record.magic) > 0
     )
 
-
 def _diagnostic_layout(context) -> dict[str, int]:
-    profile_bytes = PROFILE_COUNT * ctypes.sizeof(DispatchProfileRecord)
     dfx_bytes = DFX_COUNT * ctypes.sizeof(DispatchDfxRecord)
-    tail_bytes = (COMPLETION_BYTES + SIGNAL_BYTES
-        + 2 * profile_bytes + 2 * dfx_bytes + 64)
+    tail_bytes = COMPLETION_BYTES + SIGNAL_BYTES + 2 * dfx_bytes + 64
     common = context._dispatch_workspace_bytes - tail_bytes
     return {
         "common": common,
-        "hidden_profile": common + COMPLETION_BYTES
-            + SIGNAL_BYTES,
-        "weight_profile": common + COMPLETION_BYTES
-            + SIGNAL_BYTES + profile_bytes,
-        "hidden_dfx": common + COMPLETION_BYTES
-            + SIGNAL_BYTES + 2 * profile_bytes,
-        "weight_dfx": common + COMPLETION_BYTES
-            + SIGNAL_BYTES + 2 * profile_bytes
-            + dfx_bytes,
-        "kernel_status": common + COMPLETION_BYTES
-            + SIGNAL_BYTES + 2 * profile_bytes + 2 * dfx_bytes,
+        "hidden_dfx": common + COMPLETION_BYTES + SIGNAL_BYTES,
+        "weight_dfx": common + COMPLETION_BYTES + SIGNAL_BYTES + dfx_bytes,
+        "kernel_status": common + COMPLETION_BYTES + SIGNAL_BYTES + 2 * dfx_bytes,
     }
-
 
 def _kernel_status(context) -> dict[str, object] | None:
     offsets = _diagnostic_layout(context)
@@ -514,38 +433,17 @@ def _kernel_status(context) -> dict[str, object] | None:
         return None
     return _record_dict(status)
 
-
-def _validate_profile_selection(mode: str, profiles: list[dict[str, object]]) -> None:
-    select_modes = {int(item["select_mode"]) for item in profiles}
-    fallback_reasons = {int(item["fallback_reason"]) for item in profiles}
-    if len(select_modes) != 1 or len(fallback_reasons) != 1:
-        raise RuntimeError(
-            f"inconsistent Dispatch profile selection mode={mode}: "
-            f"select_modes={sorted(select_modes)} fallback_reasons={sorted(fallback_reasons)}"
-        )
-    select_mode = next(iter(select_modes))
-    fallback_reason = next(iter(fallback_reasons))
-    if select_mode not in (0, 1) or (select_mode == 1) != (fallback_reason == 0):
-        raise RuntimeError(
-            f"invalid Dispatch profile selection mode={mode}: "
-            f"select_mode={select_mode} fallback_reason={fallback_reason}"
-        )
-
-
 def _diagnostics(context, *, require_complete: bool = True,
     required_modes: tuple[str, ...] = ("hidden", "weight")) -> dict[str, object]:
     active_count = _active_dispatch_aiv_count()
-    profile_bytes = PROFILE_COUNT * ctypes.sizeof(DispatchProfileRecord)
     dfx_bytes = DFX_COUNT * ctypes.sizeof(DispatchDfxRecord)
     offsets = _diagnostic_layout(context)
     kernel_status = _kernel_status(context)
     if require_complete and kernel_status is None:
         raise RuntimeError("missing or stale Dispatch kernel status")
     features = (int(kernel_status["reserved"][0])
-        if kernel_status is not None else
-        KERNEL_STATUS_FEATURE_DFX_ENABLED)
+        if kernel_status is not None else KERNEL_STATUS_FEATURE_DFX_ENABLED)
     dfx_enabled = bool(features & KERNEL_STATUS_FEATURE_DFX_ENABLED)
-    profiling_enabled = bool(features & KERNEL_STATUS_FEATURE_PROFILING_ENABLED)
     fused_epoch = bool(features & KERNEL_STATUS_FEATURE_FUSED_EPOCH)
     shared_owner_mode = "weight" if fused_epoch else None
     result = {
@@ -555,75 +453,27 @@ def _diagnostics(context, *, require_complete: bool = True,
     }
     rank = int(context.planner_group_rank)
     for payload_mode, mode in enumerate(("hidden", "weight")):
-        profile_blob = _workspace_blob(context, offsets[f"{mode}_profile"], profile_bytes)
         dfx_blob = _workspace_blob(context, offsets[f"{mode}_dfx"], dfx_bytes)
-        profiles = []
         dfx = []
         for core in range(active_count):
-            profile = DispatchProfileRecord.from_buffer_copy(
-                profile_blob, core * ctypes.sizeof(DispatchProfileRecord))
-            if profiling_enabled and _record_matches(profile, marker=PROFILE_MARKER,
-                    record_bytes=ctypes.sizeof(DispatchProfileRecord),
-                    payload_mode=payload_mode, rank=rank, core=core):
-                if int(profile.block_dim) != active_count:
-                    raise RuntimeError(
-                        f"stale Dispatch profile mode={mode} core={core}: "
-                        f"block_dim={int(profile.block_dim)} expected={active_count}"
-                    )
-                item = _record_dict(profile)
-                points = item["reserved"][:11]
-                if any(points[index] < points[index - 1]
-                        for index in range(1, len(points))):
-                    raise RuntimeError(
-                        f"non-monotonic Dispatch profile timeline mode={mode} core={core}"
-                    )
-                item["adjacent_timeline_cycles"] = [points[0]] + [
-                    points[index] - points[index - 1] for index in range(1, len(points))
-                ]
-                item["adjacent_timeline"] = [
-                    {
-                        "stage": TIMELINE_SEGMENT_NAMES[index],
-                        "start_cycle": 0 if index == 0 else points[index - 1],
-                        "end_cycle": points[index],
-                        "duration_cycles": (
-                            points[index] if index == 0
-                            else points[index] - points[index - 1]
-                        ),
-                    }
-                    for index in range(len(points))
-                ]
-                profiles.append(item)
             record = DispatchDfxRecord.from_buffer_copy(
-                dfx_blob, core * ctypes.sizeof(DispatchDfxRecord)
-            )
+                dfx_blob, core * ctypes.sizeof(DispatchDfxRecord))
             if dfx_enabled and _record_matches(record, marker=DFX_MARKER,
                     record_bytes=ctypes.sizeof(DispatchDfxRecord),
                     payload_mode=payload_mode, rank=rank, core=core):
                 dfx.append(_record_dict(record))
-        mode_required = mode in required_modes
-        if (require_complete and mode_required and profiling_enabled
-                and len(profiles) != active_count):
-            raise RuntimeError(
-                f"incomplete Dispatch profile records mode={mode}: "
-                f"{len(profiles)}/{active_count}"
-            )
-        if profiles:
-            _validate_profile_selection(mode, profiles)
-        if (require_complete and mode_required and dfx_enabled
+        if (require_complete and mode in required_modes and dfx_enabled
                 and len(dfx) != active_count):
             raise RuntimeError(
                 f"missing or stale Dispatch DFX records mode={mode}: "
                 f"{len(dfx)}/{active_count}"
             )
         result[mode] = {
-            "profile_available": profiling_enabled,
             "dfx_available": dfx_enabled,
             "shared_epoch_owner": fused_epoch and mode == shared_owner_mode,
-            "profile": profiles,
             "dfx": dfx,
         }
     return result
-
 
 def _tensor_mismatch_debug(actual, expected) -> dict[str, object]:
     mismatch = actual != expected
@@ -637,7 +487,6 @@ def _tensor_mismatch_debug(actual, expected) -> dict[str, object]:
             "expected": float(expected[index].item()),
         })
     return {"count": int(mismatch.sum().item()), "first": first}
-
 
 def _source_attribution_debug(torch_module, actual_hidden, expected_hidden,
     actual_weight, expected_weight, source_by_slot: list[int],
@@ -671,7 +520,6 @@ def _source_attribution_debug(torch_module, actual_hidden, expected_hidden,
             ][:8],
         })
     return result
-
 
 def _measure(torch_module, case, buffer, plan, hidden, hidden_out, weights,
     weights_out, mode: str) -> list[dict[str, float]]:
@@ -712,7 +560,6 @@ def _measure(torch_module, case, buffer, plan, hidden, hidden_out, weights,
     context.release_stream(buffer)
     buffer._bound_stream_ptr = None
     return samples
-
 
 def run_case(torch_module, case, args) -> None:
     from tilexr_moonep import TileXRMoonEPBuffer, TileXRMoonEPContext
@@ -857,7 +704,6 @@ def run_case(torch_module, case, args) -> None:
     if failure is not None:
         raise failure
 
-
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="TileXR native Dispatch hot-loop worker")
     build_case_parser(parser)
@@ -878,7 +724,6 @@ def main(argv: list[str] | None = None) -> int:
     for case in select_cases(load_cases(args.cases), args.case_ids):
         run_case(torch, apply_overrides(case, args), args)
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())

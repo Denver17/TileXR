@@ -1,3 +1,6 @@
+/*
+ * 计算 MoonEP payload、scratch 与控制区的有界工作区布局，供 Host 参数校验与 kernel launch 使用。
+ */
 #include "dispatch_layout.h"
 
 #include <cstddef>
@@ -5,7 +8,7 @@
 
 #include "comm_args.h"
 #include "../common/dispatch_credit.h"
-#include "../common/dispatch_profile.h"
+#include "../common/dispatch_diagnostics.h"
 #include "../common/dispatch_wqe_batch.h"
 #include "tilexr_types.h"
 #include "tilexr_udma_types.h"
@@ -128,10 +131,6 @@ int TileXRMoonEpBuildDispatchUrmaLayout(int64_t rankSize, int64_t s, int64_t k,
         !CheckedMul(kDispatchAivCoreCount, kDispatchSignalStrideBytes,
             &next.signalBytes) ||
         !AppendBytes(next.signalBytes, &cursor, &next.signalOffset) ||
-        !CheckedMul(kDispatchProfileRecordCount, sizeof(DispatchProfileRecord),
-            &next.profileBytes) ||
-        !AppendBytes(next.profileBytes, &cursor, &next.hiddenProfileOffset) ||
-        !AppendBytes(next.profileBytes, &cursor, &next.weightProfileOffset) ||
         !CheckedMul(kDispatchDfxRecordCount, sizeof(DispatchDfxRecord),
             &next.dfxBytes) ||
         !AppendBytes(next.dfxBytes, &cursor, &next.hiddenDfxOffset) ||
@@ -158,8 +157,6 @@ int TileXRMoonEpBuildDispatchUrmaLayout(int64_t rankSize, int64_t s, int64_t k,
     next.creditOffset += commonShift;
     next.creditSourceOffset += commonShift;
     next.signalOffset += commonShift;
-    next.hiddenProfileOffset += commonShift;
-    next.weightProfileOffset += commonShift;
     next.hiddenDfxOffset += commonShift;
     next.weightDfxOffset += commonShift;
     next.kernelStatusOffset += commonShift;
@@ -193,8 +190,6 @@ int TileXRMoonEpBindDispatchUrmaWorkspace(uint64_t workspaceBytes,
     layout->creditOffset += shift;
     layout->creditSourceOffset += shift;
     layout->signalOffset += shift;
-    layout->hiddenProfileOffset += shift;
-    layout->weightProfileOffset += shift;
     layout->hiddenDfxOffset += shift;
     layout->weightDfxOffset += shift;
     layout->kernelStatusOffset += shift;

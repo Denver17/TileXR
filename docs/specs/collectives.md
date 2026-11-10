@@ -80,10 +80,9 @@ See [the API reference](../../tools/profiling/API_REFERENCE.md). Warmup does not
 record, and one stream in each capture has one critical interval; repeated
 kernels are never accumulated into one stream.
 
-The installed `tilexr_collectives_perf.h` and `tilexr_perf_trace.h` files are
-declaration-free compatibility headers. Keep the filenames in the install
-manifest for existing consumers and the sealed v4 CI controller, but do not
-restore the removed session API or trace schema in them.
+Consumers include `<tilexr/profiling.h>` directly. The old flat profiling and
+collectives perf/trace headers are removed from the source and install manifest;
+there are no forwarding headers or compatibility session APIs.
 
 The A5 writer derives every record address from a fixed invocation slot. It
 does not append through a GM counter shared across kernels. A launch that would

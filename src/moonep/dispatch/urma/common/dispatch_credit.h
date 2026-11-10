@@ -1,3 +1,6 @@
+/*
+ * URMA Dispatch 的 credit token 与有界源槽布局；Host 校验组数，Device 用相同偏移发布信用。
+ */
 #ifndef TILEXR_MOONEP_DISPATCH_CREDIT_H
 #define TILEXR_MOONEP_DISPATCH_CREDIT_H
 
@@ -37,9 +40,9 @@ static_assert(kDispatchCreditStrideBytes ==
 static_assert(kDispatchCreditBytes ==
         kDispatchCreditPingPongSlots * kDispatchCreditPlaneBytes,
     "Dispatch credit ping-pong layout changed");
-static_assert(kDispatchCreditMaxGroupCount * 8U >=
+static_assert(kDispatchCreditMaxGroupCount * kDispatchDefaultGroupWidth >=
         static_cast<uint32_t>(TileXR::TILEXR_MAX_RANK_SIZE),
-    "Dispatch credit source slots do not cover width-8 groups");
+    "Dispatch credit source slots do not cover default-width groups");
 
 TILEXR_MOONEP_CREDIT_INLINE bool DispatchCreditToken(
     int64_t magic, uint32_t group, uint64_t &token)

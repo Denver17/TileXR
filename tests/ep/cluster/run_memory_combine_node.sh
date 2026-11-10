@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
+# 按配置启动本机各 rank 的 Memory Combine demo，并检查退出状态和正确性结果。
+# perf 模式传递暖机与测量轮次；外部集群脚本负责 msprof 采集。
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 if (( $# < 4 || $# > 6 )); then
-    echo "Usage: $0 rank_base run_id loop_count correctness|perf|profile [warmup_count] [config_file]" >&2
+    echo "Usage: $0 rank_base run_id loop_count correctness|perf [warmup_count] [config_file]" >&2
     exit 2
 fi
 readonly CONFIG_FILE=${6:-"${script_dir}/combine_memory_64p.env"}
@@ -52,8 +54,8 @@ readonly RANK_TIMEOUT_SECONDS=${TILEXR_EP_CLUSTER_TIMEOUT_SECONDS}
     echo "loop_count must be a positive integer: ${LOOP_COUNT}" >&2
     exit 2
 }
-[[ "${TEST_MODE}" == correctness || "${TEST_MODE}" == perf || "${TEST_MODE}" == profile ]] || {
-    echo "test_mode must be correctness, perf, or profile: ${TEST_MODE}" >&2
+[[ "${TEST_MODE}" == correctness || "${TEST_MODE}" == perf ]] || {
+    echo "test_mode must be correctness or perf: ${TEST_MODE}" >&2
     exit 2
 }
 for value_name in RANK_SIZE BS H TOPK MOE_EXPERT_NUM RANK_TIMEOUT_SECONDS; do
@@ -125,17 +127,11 @@ export TILEXR_DEMO_BARRIER_ADDR="${BARRIER_ADDR}"
 export TILEXR_EP_DEMO_IMPL=memory
 export TILEXR_EP_DEMO_RUN_MODE=combine
 export TILEXR_EP_DEMO_LOOP="${LOOP_COUNT}"
-if [[ "${TEST_MODE}" == perf || "${TEST_MODE}" == profile ]]; then
+if [[ "${TEST_MODE}" == perf ]]; then
     export TILEXR_EP_DEMO_PERF=1
     export TILEXR_EP_DEMO_WARMUP="${WARMUP_COUNT}"
 else
     unset TILEXR_EP_DEMO_PERF TILEXR_EP_DEMO_WARMUP
-fi
-if [[ "${TEST_MODE}" == profile ]]; then
-    export TILEXR_EP_DEMO_COMBINE_MEMORY_PROFILE=1
-    export TILEXR_EP_COMBINE_MEMORY_PROFILE_RUN_ID="${RUN_ID}"
-else
-    unset TILEXR_EP_DEMO_COMBINE_MEMORY_PROFILE TILEXR_EP_COMBINE_MEMORY_PROFILE_RUN_ID
 fi
 export TILEXR_EP_DEMO_BS="${BS}"
 export TILEXR_EP_DEMO_H="${H}"
@@ -183,12 +179,6 @@ for index in "${!pids[@]}"; do
         ret=1
     elif ! grep -q "rank ${rank} combine validation PASS" "${log}"; then
         printf 'RANK_MISSING_PASS rank=%d log=%s\n' "${rank}" "${log}" >&2
-        tail -n 80 "${log}" >&2 || true
-        ret=1
-    elif [[ "${TEST_MODE}" == profile ]] &&
-        ! grep -q "^EP_COMBINE_MEMORY_PROFILE run_id=${RUN_ID} .* rank=${rank} " "${log}"; then
-        printf 'RANK_MISSING_PROFILE rank=%d run_id=%s log=%s\n' \
-            "${rank}" "${RUN_ID}" "${log}" >&2
         tail -n 80 "${log}" >&2 || true
         ret=1
     fi

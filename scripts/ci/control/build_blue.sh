@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 在控制侧配置构建、安装 runtime 与测试程序，并检查交付产物和安装头文件。
+# SOURCE_DIR 与 ARTIFACT_DIR 由调用者指定；运行日志写入本轮 artifact 目录。
 
 set -euo pipefail
 
@@ -308,10 +310,10 @@ done
 
 for required_header in \
     tilexr_api.h tilexr_types.h comm_args.h tilexr_sync.h \
-    tilexr_data_as_flag.h tilexr_perf_trace.h \
+    tilexr_data_as_flag.h \
     tilexr_udma.h tilexr_udma_reg.h tilexr_udma_types.h \
     tilexr_sdma_config.h tilexr_sdma_types.h tilexr_sdma.h tilexr_sdma_compat.h \
-    tilexr_ep.h tilexr_collectives.h tilexr_collectives_perf.h
+    tilexr_ep.h tilexr_collectives.h
 do
     require_regular_file "${SOURCE_DIR}/install/include/${required_header}"
 done

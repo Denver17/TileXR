@@ -1,10 +1,13 @@
+/*
+ * 生成 ServerDedup Combine 的 partial 返回数据，使用调用者提供的 UB 和通信窗口；可借用 SDK writer 记录操作区间。
+ */
 #ifndef TILEXR_EP_SERVER_DEDUP_PARTIAL_H
 #define TILEXR_EP_SERVER_DEDUP_PARTIAL_H
 
 #include "kernel_operator.h"
 #include "ep_memory_server_dedup_combine_profile.h"
 #if defined(TILEXR_ENABLE_PROFILING)
-#include "ep_profiling_compat.h"
+#include <tilexr/profiling.h>
 #endif
 #include "comm_args.h"
 #include "tilexr_types.h"
@@ -20,7 +23,7 @@ using namespace AscendC;
 class ServerDedupPartial {
 public:
 #if defined(TILEXR_ENABLE_PROFILING)
-    __aicore__ inline void SetProfiling(TileXR::DirectProfilingWriter *writer)
+    __aicore__ inline void SetProfiling(TileXR::Profiling::DirectWriter *writer)
     {
         profile_ = writer;
     }
@@ -119,14 +122,14 @@ private:
     {
 #if defined(TILEXR_ENABLE_PROFILING)
         if (profile_ != nullptr) {
-            profile_->Record(event);
+            profile_->RecordAt(event, static_cast<uint64_t>(AscendC::GetSystemCycle()));
         }
 #else
         (void)event;
 #endif
     }
 #if defined(TILEXR_ENABLE_PROFILING)
-    TileXR::DirectProfilingWriter *profile_ = nullptr;
+    TileXR::Profiling::DirectWriter *profile_ = nullptr;
 #endif
     template <class T>
     __aicore__ inline LocalTensor<T> Allocate(uint32_t bytes)

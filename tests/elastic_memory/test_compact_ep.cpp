@@ -3,7 +3,8 @@
  * 比较最大预分配、Host 实际大小参考和 Device pool；Host 计时与供 msprof 对齐的
  * kernel 序号分开记录，各阶段准备后执行 Host AllGather。
  * 环绕用例保留上一轮 Allocation 至本轮完成，登记 Combine stream 后释放引用并等待退休。
- * 可选 SDK capture 绑定 Pool service stream，在 Pending 完成后采集，避免阻塞 Host 扩容。
+ * SDK capture 绑定 Pool service stream，在 Pending 完成后采集 records、completion 和 Host events；
+ * manifest shard 使用 launch 前声明的身份，capture 在导出后关闭，避免阻塞 Host 扩容。
  */
 #include "tilexr_elastic_ep.h"
 #include "device/tilexr_elastic_memory_profile.h"
@@ -23,6 +24,7 @@
 #include <iomanip>
 #include <memory>
 #include <algorithm>
+#include <unistd.h>
 
 // Existing internal Host control channel from src/comm/comm_wrap.cpp; no Device work.
 int TileXRCommHostAllGatherTimeout(TileXRCommPtr comm, const void *sendBuf, size_t sendBytes,
@@ -115,6 +117,7 @@ TileXR::Profiling::CaptureConfig ProfileConfig(int rank, int ordinal)
     TileXR::Profiling::CaptureConfig config;
     config.rank = rank;
     config.recordsPerStream = 64;
+    config.generation = uint64_t(ordinal) + 1;
     const char *seed = std::getenv("TILEXR_ELASTIC_CAPTURE_ID");
     Require(seed != nullptr && std::strlen(seed) == 32, "capture requires shared fresh 32-hex UUID seed");
     const std::string digits = "0123456789abcdef";
@@ -131,6 +134,20 @@ TileXR::Profiling::CaptureConfig ProfileConfig(int rank, int ordinal)
     Require(std::any_of(config.captureId.begin(), config.captureId.end(), [](uint8_t x) { return x != 0; }),
         "derived capture UUID must be nonzero");
     return config;
+}
+TileXR::Profiling::ManifestProducer ProfileProducer(int device)
+{
+    TileXR::Profiling::ManifestProducer producer;
+    const char *mapping = std::getenv("TILEXR_ELASTIC_MAPPING_SHA256");
+    Require(mapping != nullptr, "capture requires the prepared mapping fingerprint");
+    producer.mappingSha256 = mapping;
+    char host[256] {};
+    Require(gethostname(host, sizeof(host) - 1) == 0, "cannot identify profiling host");
+    producer.host = host;
+    producer.deviceId = std::to_string(device);
+    producer.versions["sdk_version"] = "1.0.0";
+    producer.versions["device_view_abi"] = std::to_string(TileXR::Profiling::DEVICE_VIEW_ABI_VERSION);
+    return producer;
 }
 uint64_t OracleRows(int rank, int bs, bool zero)
 {
@@ -228,6 +245,7 @@ void RunRound(TileXR::Elastic::Pool &pool, TileXRCommPtr comm, aclrtStream strea
         if (sampleProfile) {
             capture = std::make_shared<TileXR::Profiling::AclCapture>();
             auto profileConfig = ProfileConfig(rank, perf->ordinal);
+            capture->Events().Begin(TileXR::Profiling::CaptureIdString(profileConfig.captureId));
             pending = TileXR::Elastic::DispatchCompactProfiled(pool, params, stream,
                 [capture, profileConfig](aclrtStream serviceStream, uint32_t lanes) mutable {
                     profileConfig.logicalStreamCount = lanes;
@@ -268,7 +286,8 @@ void RunRound(TileXR::Elastic::Pool &pool, TileXRCommPtr comm, aclrtStream strea
         // has run. Collection here cannot stall that loop behind its own resident kernel.
         CheckProfile(capture->Collect(), "collect capture");
         const auto *snapshot = capture->Snapshot();
-        Require(snapshot != nullptr && snapshot->streams.size() == capture->Config().logicalStreamCount,
+        Require(snapshot != nullptr && snapshot->generation == uint64_t(perf->ordinal) + 1 &&
+            snapshot->streams.size() == capture->Config().logicalStreamCount,
             "missing profiling lanes");
         for (size_t lane = 0; lane < snapshot->streams.size(); ++lane) {
             const auto &record = snapshot->streams[lane];
@@ -281,7 +300,14 @@ void RunRound(TileXR::Elastic::Pool &pool, TileXRCommPtr comm, aclrtStream strea
         CheckProfile(capture->Export(path), "export capture");
         std::cout << "PROFILE rank=" << rank << " ordinal=" << perf->ordinal
             << " lanes=" << snapshot->streams.size() << " file=" << path << std::endl;
+        CheckProfile(capture->ExportCompletion(path + ".completion.json"), "export completion");
         CheckProfile(capture->Close(), "close capture");
+        int32_t device = 0;
+        Check(aclrtGetDevice(&device), "profile device identity");
+        auto producer = ProfileProducer(device);
+        producer.attemptId = capture->Events().AttemptId();
+        CheckProfile(TileXR::Profiling::ExportManifestShard(*snapshot, capture->Config(),
+            capture->Events(), producer, path + ".manifest.json"), "export manifest shard");
     }
     const auto dispatched = Clock::now();
     const auto atCompletion = pool.Snapshot();
@@ -520,6 +546,9 @@ void RunKernelPerf(TileXR::Elastic::Pool &pool, TileXRCommPtr comm, aclrtStream 
     const char *profileDir = std::getenv("TILEXR_ELASTIC_PROFILE_DIR");
     local.enabled = mode == "device_pool" && profileDir != nullptr && profileDir[0] != '\0';
     if (local.enabled) {
+        int32_t device = 0;
+        Check(aclrtGetDevice(&device), "profile device identity");
+        (void)ProfileProducer(device);
         const auto config = ProfileConfig(rank, 0);
         std::copy(config.captureId.begin(), config.captureId.end(), local.id);
     }

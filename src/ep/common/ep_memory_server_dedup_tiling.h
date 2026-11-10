@@ -1,3 +1,6 @@
+/*
+ * 定义 ServerDedup Dispatch 的 Host/AICore tiling 布局；Host 校验并缓存快照，kernel 按字段读取。
+ */
 #ifndef TILEXR_EP_MEMORY_SERVER_DEDUP_TILING_H
 #define TILEXR_EP_MEMORY_SERVER_DEDUP_TILING_H
 
@@ -11,7 +14,6 @@ namespace TileXREp {
 struct EpServerDedupTilingData {
     uint32_t bs;
     uint32_t h;
-    uint32_t profilingLaunchSlot;
     uint16_t moeExpertNum;
     uint8_t topK;
     uint8_t reservedSendCoreNum;
@@ -20,17 +22,16 @@ struct EpServerDedupTilingData {
     uint8_t dtype;
     uint8_t expandXOutDtype;
     uint8_t reservedEnableServerDedup;
-    uint8_t reserved[11];
+    uint8_t reserved[15];
 };
 static_assert(sizeof(EpServerDedupTilingData) == 32U, "tiling occupies one 32B block");
 // Keep the wire structure naturally aligned. Kernel reads use scalar GM
 // accesses, not an implicit vector/MTE load of the entire block.
 static_assert(alignof(EpServerDedupTilingData) == 4U, "tiling uses natural scalar alignment");
-static_assert(offsetof(EpServerDedupTilingData, profilingLaunchSlot) == 8U, "profiling slot offset");
-static_assert(offsetof(EpServerDedupTilingData, moeExpertNum) == 12U, "expert count offset");
-static_assert(offsetof(EpServerDedupTilingData, topK) == 14U, "topK offset");
-static_assert(offsetof(EpServerDedupTilingData, reservedSendCoreNum) == 15U, "reserved offset");
-static_assert(offsetof(EpServerDedupTilingData, reservedEnableServerDedup) == 20U, "reserved switch offset");
+static_assert(offsetof(EpServerDedupTilingData, moeExpertNum) == 8U, "expert count offset");
+static_assert(offsetof(EpServerDedupTilingData, topK) == 10U, "topK offset");
+static_assert(offsetof(EpServerDedupTilingData, reservedSendCoreNum) == 11U, "reserved offset");
+static_assert(offsetof(EpServerDedupTilingData, reservedEnableServerDedup) == 16U, "reserved switch offset");
 
 } // namespace TileXREp
 

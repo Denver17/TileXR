@@ -1,8 +1,11 @@
+/*
+ * 执行 MoonEP Combine V2 的传输、归约及失败传播；Host combine_v2_launch.cpp 提供工作区与路由参数。
+ */
 #include "tilexr_moonep_combine_v2_kernel.h"
 
 extern "C" __global__ __aicore__ void
 tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
-    GM_ADDR registeredWorkspace, GM_ADDR dstLocal, uint64_t profileOffset,
+    GM_ADDR registeredWorkspace, GM_ADDR dstLocal,
     uint64_t scratchEpoch0Offset, uint64_t scratchEpoch1Offset,
     uint64_t doneOffset, uint64_t reservedOffset0,
     uint64_t controlSourceOffset, uint64_t failureOffset,
@@ -18,7 +21,7 @@ tilexr_moonep_combine_v2_kernel(GM_ADDR commArgs,
 {
     AscendC::TPipe pipe;
     MoonEpCombineV2 op;
-    op.Init(commArgs, registeredWorkspace, dstLocal, profileOffset,
+    op.Init(commArgs, registeredWorkspace, dstLocal,
         scratchEpoch0Offset, scratchEpoch1Offset, doneOffset,
         reservedOffset0, controlSourceOffset, failureOffset,
         reservedSyncReceiveOffset, reservedSyncSourceOffset,

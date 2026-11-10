@@ -1,3 +1,6 @@
+/*
+ * 验证 MoonEP 的布局、调用或诊断合同；直接覆盖对应 src/moonep 与 tools/moonep 接口，硬件数据面另行验收。
+ */
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -106,9 +109,7 @@ void TestPairedAndHiddenOnly()
         launchedArgs.weightScratchOffset == paired.layout.weight.scratchOffset &&
         launchedArgs.weightRowBytes == paired.layout.weight.rowBytes,
         "paired Kernel ABI active layout order mismatch");
-    Check(launchedArgs.hiddenProfileOffset == paired.layout.hiddenProfileOffset &&
-        launchedArgs.weightProfileOffset == paired.layout.weightProfileOffset &&
-        launchedArgs.hiddenDfxOffset == paired.layout.hiddenDfxOffset &&
+    Check(launchedArgs.hiddenDfxOffset == paired.layout.hiddenDfxOffset &&
         launchedArgs.weightDfxOffset == paired.layout.weightDfxOffset &&
         launchedArgs.hasWeight == 1U && launchedArgs.magic == nextMagic,
         "paired Kernel ABI diagnostics or epoch fields mismatch");

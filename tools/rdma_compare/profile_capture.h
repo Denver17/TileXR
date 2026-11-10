@@ -10,7 +10,7 @@
 #ifndef TILEXR_RDMA_BENCH_PROFILE_CAPTURE_H
 #define TILEXR_RDMA_BENCH_PROFILE_CAPTURE_H
 #include "tilexr_rdma_debug.h"
-#include "tilexr_profiling.h"
+#include <tilexr/profiling.h>
 #include "tools/socket/tilexr_sock_exchange.h"
 #include <array>
 #include <cstdlib>

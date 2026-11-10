@@ -1,3 +1,4 @@
+"""用 fake native functions 验证 ctypes 参数布局、工作区查询及 stage 调用，不启动 NPU。"""
 from __future__ import annotations
 
 import ctypes
@@ -19,7 +20,6 @@ from tilexr_moonep import ProjectionBuffers, TileXRMoonEPBuffer, TileXRMoonEPCon
 from tilexr_moonep.abi import (
     TileXRMoonEPDispatchArgsV1,
     TileXRMoonEPDispatchArgsV2,
-    TileXRMoonEPDispatchTraceV1,
     TileXRMoonEPPlanV1,
     TileXRMoonEPPlanningArgsV1,
     TileXRMoonEPPrefetchWeightArgsV1,
@@ -155,7 +155,7 @@ class FakeCDLLLoader:
         library = FakeLibrary()
 
         def workspace(bs, h, topk, nv_s, dtype, workspace_bytes,
-                      profile_offset, output_epoch0_offset, output_epoch1_offset):
+                      output_epoch0_offset, output_epoch1_offset):
             record = tuple(
                 int(value.value if hasattr(value, "value") else value)
                 for value in (bs, h, topk, nv_s, dtype)
@@ -164,7 +164,6 @@ class FakeCDLLLoader:
             ctypes.cast(workspace_bytes, ctypes.POINTER(ctypes.c_uint64)).contents.value = (
                 2 * 1024 * 1024
             )
-            ctypes.cast(profile_offset, ctypes.POINTER(ctypes.c_uint64)).contents.value = 0x1000
             ctypes.cast(
                 output_epoch0_offset, ctypes.POINTER(ctypes.c_uint64)
             ).contents.value = 0x2000
@@ -472,9 +471,8 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(ctypes.sizeof(TileXRMoonEPTensorV1), 64)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanV1), 120)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPlanningArgsV1), 80)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchTraceV1), 40)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 88)
-        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV2), 88)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV1), 80)
+        self.assertEqual(ctypes.sizeof(TileXRMoonEPDispatchArgsV2), 80)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPPrefetchWeightArgsV1), 56)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradArgsV1), 48)
         self.assertEqual(ctypes.sizeof(TileXRMoonEPReduceGradWorkspaceQueryV2), 64)
@@ -495,8 +493,6 @@ class FfiAbiTests(unittest.TestCase):
         self.assertEqual(TileXRMoonEPReduceGradWorkspaceInfoV2.chunkCounts.offset, 88)
         self.assertEqual(TileXRMoonEPReduceGradPrepareArgsV2.sources.offset, 48)
         self.assertEqual(TileXRMoonEPReduceGradArgsV2.sources.offset, 48)
-        self.assertEqual(TileXRMoonEPDispatchArgsV1.trace.offset, 80)
-        self.assertEqual(TileXRMoonEPDispatchArgsV2.trace.offset, 80)
 
     def test_context_enforces_native_planner_expert_count_limit(self):
         common = dict(

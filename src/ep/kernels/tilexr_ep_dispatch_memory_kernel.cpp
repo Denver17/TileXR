@@ -1,5 +1,8 @@
+/*
+ * 提供普通 Memory Dispatch 的 AICore 入口，校验设备参数并执行发送、计数和输出复制；可选 SDK recorder 记录 kernel body。
+ */
 #include "tilexr_ep_dispatch_memory_kernel.h"
-#include <tilexr/profiling/device.h>
+#include "device/tilexr_ep_profiling.h"
 
 extern "C" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel(GM_ADDR commArgsGM, GM_ADDR xGM,
     GM_ADDR expertIdsGM, GM_ADDR xActiveMaskGM, GM_ADDR expandXOutGM, GM_ADDR dynamicScalesOutGM,
@@ -23,19 +26,7 @@ extern "C" __global__ __aicore__ void tilexr_ep_dispatch_memory_kernel(GM_ADDR c
         return;
     }
 
-    GM_ADDR profileGM = nullptr;
-#if defined(TILEXR_ENABLE_PROFILING) && TILEXR_ENABLE_PROFILING == 1
-    auto *args = reinterpret_cast<__gm__ TileXR::CommArgs *>(commArgsGM);
-    if (args->profilingDescriptorsGM && magic >= args->profilingMagicBase) {
-        const uint64_t slot = uint64_t(magic - args->profilingMagicBase);
-        if (slot < args->profilingSlotCount) {
-            auto *descriptors = reinterpret_cast<__gm__ uint64_t *>(args->profilingDescriptorsGM);
-            profileGM = reinterpret_cast<GM_ADDR>(descriptors[slot]);
-            if (profileGM && AscendC::GetBlockIdx() == 0)
-                reinterpret_cast<__gm__ uint32_t *>(args->profilingLaneCountsGM)[slot*16] = AscendC::GetBlockNum();
-        }
-    }
-#endif
+    GM_ADDR profileGM = TileXREp::ProfileDescriptor(commArgsGM, magic, AscendC::GetBlockNum());
     TileXR::Profiling::Recorder<2> recorder;
     if (profileGM) recorder.RecordMarker<0, 1>();
     AscendC::TPipe pipe;

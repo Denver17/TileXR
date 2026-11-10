@@ -1,9 +1,11 @@
+/*
+ * 校验 ServerDedup Dispatch 的设备 core 数，取得通信 magic 和 tiling 快照，并在调用者 stream 提交外置 kernel。
+ */
 #include "ep_memory_server_dedup_launch.h"
 #include "acl/acl_rt.h"
 #include "ep_kernel_launch.h"
 #include "../../comm/tilexr_internal.h"
 #include "ep_memory_server_dedup_count_layout.h"
-#include "ep_memory_server_dedup_profile.h"
 
 namespace TileXREp {
 
@@ -33,17 +35,12 @@ int TileXREpLaunchDispatchMemoryServerDedupKernel(
     if (ret != TileXR::TILEXR_SUCCESS) {
         return ret;
     }
-    uint32_t profilingLaunchSlot = UINT32_MAX;
-#if defined(TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING) && TILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING
-    // Sequential launches reuse one standard capture slot, independent of
-    // communication magic. An unavailable capture never prevents submission.
-    TileXRProfilingReserveLatestLaunch(p.comm, kEpServerDedupProfilingRecordsPerLaunch, &profilingLaunchSlot);
-#endif
+    ret = TileXREpValidateProfilingCapture(*context.hostArgs, magic, kEpServerDedupCoreNum);
+    if (ret != TileXR::TILEXR_SUCCESS) return ret;
     // Basic/config validation has already checked every range and supported enum.
     EpServerDedupTilingData tiling {};
     tiling.bs = static_cast<uint32_t>(p.bs);
     tiling.h = static_cast<uint32_t>(p.h);
-    tiling.profilingLaunchSlot = profilingLaunchSlot;
     tiling.moeExpertNum = static_cast<uint16_t>(p.moeExpertNum);
     tiling.topK = static_cast<uint8_t>(p.topK);
     tiling.expertTokenNumsType = static_cast<uint8_t>(p.expertTokenNumsType);

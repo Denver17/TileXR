@@ -1,3 +1,6 @@
+/*
+ * 以 Host stub 验证 URMA Dispatch 的参数、传输能力和 credit 源槽准入；不启动 NPU。
+ */
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -336,6 +339,58 @@ void TestGroupedFullmeshCapability()
     SetPeerMode(nullptr);
 }
 
+void TestCreditGroupCapacity()
+{
+    Reset();
+    TileXRMoonEpPlanV1 plan = ValidPlan();
+    plan.r = TileXR::TILEXR_MAX_RANK_SIZE;
+    plan.e = plan.r * 2;
+    plan.dst = reinterpret_cast<void *>(uintptr_t {0x10000});
+    plan.zeroFillRanges = reinterpret_cast<void *>(uintptr_t {0x20000});
+    plan.status = reinterpret_cast<void *>(uintptr_t {0x30000});
+    TileXRMoonEpTensorV1 hiddenInput = Tensor(
+        reinterpret_cast<void *>(uintptr_t {0x400000}),
+        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 64, 16, 1024);
+    TileXRMoonEpTensorV1 hiddenOutput = Tensor(
+        reinterpret_cast<void *>(uintptr_t {0x500000}),
+        TILEXR_MOONEP_DTYPE_FLOAT16, 2, 128, 16, 2048);
+    TileXRMoonEpDispatchArgsV2 args = Args(
+        &plan, &hiddenInput, nullptr, &hiddenOutput, nullptr);
+    ConfigureGroupedTransport(args.registeredWorkspace, args.registeredWorkspaceBytes);
+    commArgs.rankSize = static_cast<int32_t>(plan.r);
+    commArgs.localRankSize = 1;
+    registry.rankSize = static_cast<uint32_t>(plan.r);
+    for (uint32_t rank = 0; rank < registry.rankSize; ++rank) {
+        registry.regions[rank].base = static_cast<GM_ADDR>(args.registeredWorkspace);
+        registry.regions[rank].bytes = args.registeredWorkspaceBytes;
+    }
+    const auto stream = reinterpret_cast<aclrtStream>(uintptr_t {0x8000});
+#if defined(_WIN32)
+    _putenv_s("TILEXR_MOONEP_DISPATCH_GROUP_WIDTH", "8");
+#else
+    setenv("TILEXR_MOONEP_DISPATCH_GROUP_WIDTH", "8", 1);
+#endif
+    CheckStatus("credit group source capacity",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_ERROR_NOT_SUPPORTED);
+    Check(launchCalls == 0 && memsetCalls == 0,
+        "over-capacity credit groups must fail before status reset or launch");
+#if defined(_WIN32)
+    _putenv_s("TILEXR_MOONEP_DISPATCH_GROUP_WIDTH", "16");
+#else
+    setenv("TILEXR_MOONEP_DISPATCH_GROUP_WIDTH", "16", 1);
+#endif
+    CheckStatus("default-width credit source capacity",
+        TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV2(&args, stream),
+        TILEXR_MOONEP_SUCCESS);
+    Check(launchCalls == 1, "default-width credit groups within capacity must launch");
+#if defined(_WIN32)
+    _putenv_s("TILEXR_MOONEP_DISPATCH_GROUP_WIDTH", "");
+#else
+    unsetenv("TILEXR_MOONEP_DISPATCH_GROUP_WIDTH");
+#endif
+}
+
 void TestGroupedNonPowerOfTwoCapacity()
 {
     for (const char *mode : {"group_credit", "group"}) {
@@ -459,6 +514,7 @@ int main()
     TestHiddenOnlyAndFailureBoundaries();
     TestGroupedFullmeshCapability();
     TestGroupedNonPowerOfTwoCapacity();
+    TestCreditGroupCapacity();
     SetPeerMode(nullptr);
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

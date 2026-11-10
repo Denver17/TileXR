@@ -77,8 +77,6 @@ target_link_libraries(tilexr-collectives
 install(TARGETS tilexr-collectives LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_collectives_perf.h
-        ${CMAKE_CURRENT_SOURCE_DIR}/../include/tilexr_perf_trace.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES
         ${CMAKE_CURRENT_SOURCE_DIR}/kernels/tilexr_alltoall_a5.mapping.json

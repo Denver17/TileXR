@@ -225,7 +225,7 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
     }
     next.roundPayloadBytes = TileXR::IPC_BUFF_MAX_SIZE - kEpMemoryStateWindowBytes;
     if (next.roundPayloadBytes <= 0 ||
-        next.workspaceBytes > static_cast<int64_t>(kEpMemoryDispatchDfxOffset)) {
+        next.workspaceBytes > static_cast<int64_t>(kEpMemoryRecvCountWorkspaceEnd)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -233,7 +233,7 @@ int TileXREpBuildMemoryDispatchReferenceConfig(int64_t rankSize, int64_t rank, i
     int64_t requiredRoundBytes = 0;
     int64_t statusBytes = 0;
     const int64_t workspaceStartOffset =
-        static_cast<int64_t>(kEpMemoryDispatchDfxOffset) - next.workspaceBytes;
+        static_cast<int64_t>(kEpMemoryRecvCountWorkspaceEnd) - next.workspaceBytes;
     if (!MulInt64(next.rscvStatusNum, next.expertPerSizeOnWin, &dispatchDataBytes) ||
         !AddInt64(next.combineReserveBytes, dispatchDataBytes, &requiredRoundBytes) ||
         !MulInt64(next.rscvStatusNum, kEpMemoryWindowAlignmentBytes, &statusBytes) ||

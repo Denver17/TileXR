@@ -9,18 +9,14 @@
  */
 
 /*
- * 功能：初始化 rank 信息、peer memory 和可选传输，生成供 kernel 使用的 CommArgs。
- * 调用关系：comm_wrap.cpp 调用 TileXRComm；本文件通过 ACL/runtime 分配内存、打开 IPC mapping，通过 socket 交换 rank 信息。
- * 资源与生命周期：对象持有本地 allocation、IPC mapping 和 device CommArgs；显式销毁先执行可返回错误的 cleanup，析构再尝试释放本地资源。
- *
- * Purpose: Initialize rank information, peer memory and optional transports, and prepare kernel CommArgs.
- * Calls: comm_wrap.cpp calls TileXRComm; ACL/runtime allocates memory and opens IPC mappings, while sockets exchange rank information.
- * Lifetime: Owns local allocations, IPC mappings and device CommArgs. Explicit destruction runs fallible cleanup
- *           before the destructor attempts local resource release.
+ * 初始化 communicator 的 rank、peer memory 和可选传输，供 comm_wrap.cpp 调用。
+ * 对象持有 ACL allocation、IPC mapping、device CommArgs 和 SDK profiling captures；
+ * 显式销毁先执行可返回错误的清理，析构再尝试释放本地资源。
+ * Implements communicator setup and resource ownership behind comm_wrap.cpp.
+ * SDK captures own profiling storage and encoding; the domain owns their lifetime.
  */
 #include "tilexr_comm.h"
 #include "tilexr_kernel_tiling_cache.h"
-#include "ep_profiling_compat/capture.h"
 #include <tilexr/profiling/acl.h>
 #include <fstream>
 #include "tilexr_internal.h"
@@ -513,6 +509,25 @@ int TileXRComm::InitProfilingSlots()
     const char *path = std::getenv("TILEXR_PROFILING_SLOTS_FILE");
     if (!path || !*path || commArgs_.profilingDescriptorsGM) return TILEXR_SUCCESS;
     try {
+        uint32_t recordsPerStream = 8;
+        const char *records = std::getenv("TILEXR_PROFILING_RECORDS_PER_STREAM");
+        if (records) {
+            if (!*records) return TILEXR_ERROR_PARA_CHECK_FAIL;
+            recordsPerStream = 0;
+            for (const char *digit = records; *digit; ++digit) {
+                if (*digit < '0' || *digit > '9' ||
+                    recordsPerStream > (std::numeric_limits<uint32_t>::max() - uint32_t(*digit - '0')) / 10)
+                    return TILEXR_ERROR_PARA_CHECK_FAIL;
+                recordsPerStream = recordsPerStream * 10 + uint32_t(*digit - '0');
+            }
+        }
+        // The SDK owns capacity bounds and alignment, including for a manifest
+        // without selected captures. Decimal parsing above only checks syntax.
+        Profiling::CaptureConfig baseConfig;
+        baseConfig.rank = rank_;
+        baseConfig.recordsPerStream = recordsPerStream;
+        Profiling::Layout baseLayout;
+        if (!Profiling::BuildLayout(baseConfig, &baseLayout)) return TILEXR_ERROR_PARA_CHECK_FAIL;
         std::ifstream input(path);
         uint64_t count = 0, budget = 0;
         if (!(input >> count >> budget) || !count || budget > (UINT64_C(1) << 30) ||
@@ -536,9 +551,9 @@ int TileXRComm::InitProfilingSlots()
                 !profilingPaths_[size_t(ordinal-1)].empty() || !paths.insert(output).second ||
                 !ids.insert(id).second)
                 return TILEXR_ERROR_PARA_CHECK_FAIL;
-            Profiling::CaptureConfig config;
-            config.rank = rank_; config.logicalStreamCount = uint32_t(capacity);
-            config.recordsPerStream = 8; config.maxWorkspaceBytes = budget;
+            Profiling::CaptureConfig config = baseConfig;
+            config.logicalStreamCount = uint32_t(capacity);
+            config.maxWorkspaceBytes = budget;
             for (size_t i = 0; i < 16; ++i) {
                 auto hex = [](char c) -> int { return c >= '0' && c <= '9' ? c-'0' :
                     c >= 'a' && c <= 'f' ? c-'a'+10 : -1; };
@@ -606,13 +621,14 @@ int TileXRComm::FinalizeProfilingSlots()
             if (!actual || actual > commArgs_.profilingLaneCapacity) return TILEXR_ERROR_INTERNAL;
             auto status = capture->Collect();
             if (!status) { TILEXR_LOG(ERROR) << status.message; return TILEXR_ERROR_INTERNAL; }
-            auto snapshot = *capture->Snapshot();
+            const auto *collected = capture->Snapshot();
+            if (!collected || collected->streams.size() < actual) return TILEXR_ERROR_INTERNAL;
+            auto snapshot = *collected;
             // SDK storage reserves device capacity; only launched lanes belong
             // to this invocation. Never discard an incomplete launched lane.
             snapshot.streams.resize(actual);
             for (const auto &lane : snapshot.streams)
-                if (!lane.complete || lane.dropped || lane.records.size() != 2 ||
-                    lane.records[0].eventId != 1 || lane.records[1].eventId != 2)
+                if (!lane.complete || lane.dropped || lane.records.empty())
                     return TILEXR_ERROR_INTERNAL;
             status = Profiling::ExportSnapshot(snapshot, profilingPaths_[i]);
             if (!status) { TILEXR_LOG(ERROR) << status.message; return TILEXR_ERROR_INTERNAL; }
@@ -863,11 +879,6 @@ int TileXRComm::Init()
         return TILEXR_ERROR_INTERNAL;
     }
 
-    ret = epProfiling_->Init(rank_, devId_, commDomain_);
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
-    }
-
     const int32_t localIpcEnabled = memoryOnlyDomain_ ? 1 :
         (IsEnvEnabled("TILEXR_ENABLE_IPC", true) ? 1 : 0);
     std::vector<int32_t> allIpcEnabled(rankSize_, -1);
@@ -1015,10 +1026,6 @@ int TileXRComm::InitThread(const std::string &uid)
         TILEXR_LOG(ERROR) << "init common failed!";
         return TILEXR_ERROR_INTERNAL;
     }
-    int ret = epProfiling_->Init(rank_, devId_, commDomain_);
-    if (ret != TILEXR_SUCCESS) {
-        return ret;
-    }
     {
         lock_guard<mutex> lock(g_mtx);
         if (g_localPeerMemAllocationMap.find(uid) == g_localPeerMemAllocationMap.end()) {
@@ -1028,7 +1035,7 @@ int TileXRComm::InitThread(const std::string &uid)
         }
         uid_ = uid;
     }
-    ret = InitMem();
+    int ret = InitMem();
     if (ret != TILEXR_SUCCESS) {
         TILEXR_LOG(ERROR) << "InitMem failed! ret: " << ret;
         return ret;
@@ -1552,7 +1559,6 @@ TileXRComm::~TileXRComm()
         socketExchange_ = nullptr;
     }
     FreePeerMem(commArgs_.dumpAddr);
-    epProfiling_.reset();
     FreePeerMem(peerMemAllocation_[rank_]);
     peerMem_[rank_] = nullptr;
     FreePeerMem(creditIpcMem_[rank_]);
@@ -1565,7 +1571,7 @@ TileXRComm::~TileXRComm()
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize) : rank_(rank), rankSize_(rankSize),
-    epProfiling_(new EpProfilingCapture(commArgs_)), kernelTilings_(new KernelTilingCache())
+    kernelTilings_(new KernelTilingCache())
 {
 }
 
@@ -1573,14 +1579,14 @@ TileXRComm::TileXRComm(int rank, int rankSize, int commDomain, int bufferSize,
     bool sharedQpDomain, bool memoryOnlyDomain)
     : rank_(rank), rankSize_(rankSize), commDomain_(commDomain),
       bufferSize_(bufferSize), sharedQpDomain_(sharedQpDomain),
-      memoryOnlyDomain_(memoryOnlyDomain), epProfiling_(new EpProfilingCapture(commArgs_)),
+      memoryOnlyDomain_(memoryOnlyDomain),
       kernelTilings_(new KernelTilingCache())
 {
 }
 
 TileXRComm::TileXRComm(int rank, int rankSize, TileXRUniqueId commId)
     : rank_(rank), rankSize_(rankSize), commId_(commId),
-      epProfiling_(new EpProfilingCapture(commArgs_)), kernelTilings_(new KernelTilingCache())
+      kernelTilings_(new KernelTilingCache())
 {
 }
 
@@ -1617,26 +1623,6 @@ CommArgs* TileXRComm::GetCommArgs()
 int64_t TileXRComm::NextMagic()
 {
     return magic_.fetch_add(1);
-}
-
-int TileXRComm::FinalizeProfiling()
-{
-    return epProfiling_->Finalize();
-}
-
-int TileXRComm::ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot)
-{
-    return epProfiling_->ReserveLaunch(recordsPerLaunch, launchSlot);
-}
-
-int TileXRComm::ReserveLatestProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot)
-{
-    return epProfiling_->ReserveLatestLaunch(recordsPerLaunch, launchSlot);
-}
-
-int TileXRComm::ReserveLatestCombineProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot)
-{
-    return epProfiling_->ReserveLatestCombineLaunch(recordsPerLaunch, launchSlot);
 }
 
 int TileXRComm::GetKernelTiling(const void *data, uint32_t bytes, GM_ADDR *deviceData)

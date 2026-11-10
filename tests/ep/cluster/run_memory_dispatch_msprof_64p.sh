@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# 为配置中的集群部署 Memory EP demo，执行 correctness 或带 msprof 的性能测量。
+# 性能结果沿用暖机、rank barrier 和 msprof Task Duration 统计路径。
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -19,8 +21,6 @@ readonly COMBINE_CONFIG_FILE=${TILEXR_EP_CLUSTER_COMBINE_CONFIG_FILE:-"${script_
 readonly DISPATCH_NODE_SCRIPT="${REMOTE_ROOT}/tests/ep/cluster/run_memory_dispatch_node.sh"
 readonly COMBINE_NODE_SCRIPT="${REMOTE_ROOT}/tests/ep/cluster/run_memory_combine_node.sh"
 readonly STATS_SCRIPT="${REMOTE_ROOT}/tools/ep/msprof_kernel_stats.py"
-readonly DISPATCH_TRACE_SCRIPT="${REMOTE_ROOT}/tools/ep/dispatch_memory_trace.py"
-readonly COMBINE_TRACE_SCRIPT="${REMOTE_ROOT}/tools/ep/combine_memory_trace.py"
 readonly BUILD_CACHE="${REMOTE_ROOT}/build_ep/CMakeCache.txt"
 readonly DEMO_BIN="${REMOTE_ROOT}/tests/ep/install/bin/tilexr_ep_dispatch_demo"
 readonly RSYNC_RSH='ssh -o BatchMode=yes -o ConnectTimeout=8 -o ConnectionAttempts=1 -o StrictHostKeyChecking=no -o LogLevel=ERROR -o ServerAliveInterval=5 -o ServerAliveCountMax=12'
@@ -34,7 +34,6 @@ declare -A perf_min=()
 declare -A perf_max=()
 declare -A perf_avg=()
 declare -A perf_json=()
-declare -A breakdown_result=()
 declare -A functional_result=()
 
 ssh_options=(
@@ -50,7 +49,7 @@ ssh_options=(
 usage() {
     cat <<'EOF'
 Usage: run_memory_dispatch_msprof_64p.sh [--op dispatch|combine|both]
-                                         [--mode functional|performance|breakdown]
+                                         [--mode functional|performance]
                                          [--build]
 
 Defaults:
@@ -112,9 +111,9 @@ parse_args() {
             ;;
     esac
     case "${RUN_MODE}" in
-        functional|performance|breakdown) ;;
+        functional|performance) ;;
         *)
-            echo "--mode must be functional, performance, or breakdown: ${RUN_MODE}" >&2
+            echo "--mode must be functional or performance: ${RUN_MODE}" >&2
             return 2
             ;;
     esac
@@ -182,16 +181,12 @@ load_case_config() {
             CASE_REMOTE_CONFIG_FILE="${REMOTE_ROOT}/tests/ep/cluster/$(basename -- "${DISPATCH_CONFIG_FILE}")"
             CASE_NODE_SCRIPT=${DISPATCH_NODE_SCRIPT}
             CASE_KERNEL_NAME=tilexr_ep_dispatch_memory_kernel
-            CASE_TRACE_SCRIPT=${DISPATCH_TRACE_SCRIPT}
-            CASE_TRACE_PREFIX=ep_dispatch_memory
             ;;
         combine)
             CASE_CONFIG_FILE=${COMBINE_CONFIG_FILE}
             CASE_REMOTE_CONFIG_FILE="${REMOTE_ROOT}/tests/ep/cluster/$(basename -- "${COMBINE_CONFIG_FILE}")"
             CASE_NODE_SCRIPT=${COMBINE_NODE_SCRIPT}
             CASE_KERNEL_NAME=tilexr_ep_combine_memory_kernel
-            CASE_TRACE_SCRIPT=${COMBINE_TRACE_SCRIPT}
-            CASE_TRACE_PREFIX=ep_combine_memory
             ;;
     esac
     [[ -r "${CASE_CONFIG_FILE}" ]] || {
@@ -346,43 +341,20 @@ print_case() {
         printf 'result_rounds=%d\n' "${LAST_SAMPLE_COUNT}"
         printf 'server_reduction=mean_of_50_rounds_x_8_cards\n'
         printf 'cluster_reduction=min_max_mean_of_%d_server_averages\n' "${#hosts[@]}"
-    elif [[ "${RUN_MODE}" == breakdown ]]; then
-        printf 'profile_iteration=%d\n' "$((CASE_ITERATION_COUNT - 1))"
-        printf 'rank_selection=fastest_p50_slowest\n'
     fi
     printf 'run_id=%s\n' "${CASE_RUN_ID}"
     print_separator
 }
 
-expected_profile_flags() {
-    EXPECT_DISPATCH_PROFILE=OFF
-    EXPECT_COMBINE_PROFILE=OFF
-    if [[ "${RUN_MODE}" == breakdown ]]; then
-        case "${OP_SELECTION}" in
-            dispatch) EXPECT_DISPATCH_PROFILE=ON ;;
-            combine) EXPECT_COMBINE_PROFILE=ON ;;
-            both)
-                EXPECT_DISPATCH_PROFILE=ON
-                EXPECT_COMBINE_PROFILE=ON
-                ;;
-        esac
-    fi
-}
-
-build_flags_match() {
+baseline_build_ready() {
     [[ -r "${BUILD_CACHE}" && -x "${DEMO_BIN}" ]] &&
-        grep -q "^TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING:BOOL=${EXPECT_DISPATCH_PROFILE}$" \
-            "${BUILD_CACHE}" &&
-        grep -q "^TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING:BOOL=${EXPECT_COMBINE_PROFILE}$" \
-            "${BUILD_CACHE}"
+        grep -q '^TILEXR_EP_ENABLE_PROFILING:BOOL=OFF$' "${BUILD_CACHE}"
 }
 
 ensure_build() {
-    expected_profile_flags
-    if [[ "${FORCE_BUILD}" != true ]] && build_flags_match; then
+    if [[ "${FORCE_BUILD}" != true ]] && baseline_build_ready; then
         print_stage "编译配置检查完成"
-        printf 'dispatch_profiling=%s\n' "${EXPECT_DISPATCH_PROFILE}"
-        printf 'combine_profiling=%s\n' "${EXPECT_COMBINE_PROFILE}"
+        printf 'sdk_profiling=OFF\n'
         printf 'rebuild=no\n'
         return
     fi
@@ -391,12 +363,10 @@ ensure_build() {
     printf 'force_build=%s\n' "${FORCE_BUILD}"
     (
         cd "${TILEXR_ROOT}"
-        TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING="${EXPECT_DISPATCH_PROFILE}" \
-            TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING="${EXPECT_COMBINE_PROFILE}" \
-            bash tests/ep/build.sh full
+        bash tests/ep/build.sh full
     )
-    build_flags_match || {
-        echo "Build completed without the requested profiling flags" >&2
+    baseline_build_ready || {
+        echo "Build completed without the SDK-disabled baseline" >&2
         return 1
     }
     print_stage "代码编译完成"
@@ -534,10 +504,6 @@ run_case_host() {
         performance)
             run_performance_host "${host}" "${rank_base}"
             ;;
-        breakdown)
-            run_direct_host "${host}" "${rank_base}" \
-                "${CASE_ITERATION_COUNT}" profile "${CASE_WARMUP_COUNT}"
-            ;;
     esac
 }
 
@@ -649,122 +615,6 @@ summarize_performance() {
     print_separator
 }
 
-gather_rank_logs() {
-    local host index source
-    declare -a gather_pids=()
-    declare -a gather_logs=()
-    mkdir -p -- "${CASE_RANK_LOG_DIR}"
-    for index in "${!hosts[@]}"; do
-        host=${hosts[index]}
-        [[ "${host}" == "${MASTER_HOST}" ]] && continue
-        source="${REMOTE_ROOT}/tests/ep/logs/${CASE_RUN_ID}/rank_*.log"
-        gather_logs[index]="${CASE_LOG_DIR}/gather_rank_logs_${index}.log"
-        scp "${ssh_options[@]}" "${SSH_USER}@${host}:${source}" "${CASE_RANK_LOG_DIR}/" \
-            >"${gather_logs[index]}" 2>&1 &
-        gather_pids[index]=$!
-    done
-    wait_for_jobs RANK_LOG_GATHER gather_pids gather_logs
-}
-
-format_trace_output() {
-    local raw_output=$1
-    local line field role elapsed output output_dir trace_dir=""
-    local -A json_by_role=()
-    local -A elapsed_by_role=()
-    while IFS= read -r line; do
-        [[ "${line}" == EP_*_MEMORY_TRACE\ * ]] || continue
-        role=""
-        elapsed=""
-        output=""
-        for field in ${line}; do
-            case "${field}" in
-                role=*) role=${field#role=} ;;
-                elapsed_us=*) elapsed=${field#elapsed_us=} ;;
-                output=*) output=${field#output=} ;;
-            esac
-        done
-        case "${role}" in
-            fastest|p50|slowest) ;;
-            *)
-                echo "Invalid trace role in exporter output: ${line}" >&2
-                return 1
-                ;;
-        esac
-        [[ -n "${elapsed}" && -n "${output}" ]] || {
-            echo "Missing trace time or output path: ${line}" >&2
-            return 1
-        }
-        output_dir=${output%/*}
-        if [[ -z "${trace_dir}" ]]; then
-            trace_dir=${output_dir}
-        elif [[ "${trace_dir}" != "${output_dir}" ]]; then
-            echo "Trace files are not in one directory" >&2
-            return 1
-        fi
-        [[ -z "${json_by_role[${role}]:-}" ]] || {
-            echo "Duplicate trace role: ${role}" >&2
-            return 1
-        }
-        json_by_role[${role}]=${output##*/}
-        elapsed_by_role[${role}]=${elapsed}
-    done <<<"${raw_output}"
-
-    [[ -n "${trace_dir}" ]] || {
-        echo "No trace result found in exporter output" >&2
-        return 1
-    }
-    for role in fastest p50 slowest; do
-        [[ -n "${json_by_role[${role}]:-}" && -n "${elapsed_by_role[${role}]:-}" ]] || {
-            echo "Missing trace result for role: ${role}" >&2
-            return 1
-        }
-    done
-
-    printf 'trace_dir=%s\n' "${trace_dir}"
-    for role in fastest p50 slowest; do
-        printf '%s_json=%s\n' "${role}" "${json_by_role[${role}]}"
-        printf '%s_elapsed_us=%s\n' "${role}" "${elapsed_by_role[${role}]}"
-    done
-}
-
-export_breakdown() {
-    local active_mask_value=0 trace_output formatted_output
-    [[ "${CASE_ACTIVE_MASK_TYPE}" == token ]] && active_mask_value=1
-    gather_rank_logs
-    local -a rank_logs=("${CASE_RANK_LOG_DIR}"/rank_*.log)
-    (( ${#rank_logs[@]} == CASE_RANK_SIZE )) || {
-        echo "Expected ${CASE_RANK_SIZE} rank logs, found ${#rank_logs[@]}" >&2
-        return 1
-    }
-    local -a command=(
-        "${PYTHON}" "${CASE_TRACE_SCRIPT}" "${rank_logs[@]}"
-        --world-size "${CASE_RANK_SIZE}"
-        --run-id "${CASE_RUN_ID}"
-        --bs "${CASE_BS}"
-        --hidden-size "${CASE_H}"
-        --topk "${CASE_TOPK}"
-        --experts "${CASE_EXPERTS}"
-        --dtype "${CASE_DTYPE}"
-        --quant-mode "${CASE_QUANT_MODE}"
-        --comm-quant-mode "${CASE_COMM_QUANT_MODE}"
-        --active-mask-type "${active_mask_value}"
-        --output-dir "${CASE_TRACE_DIR}"
-        --prefix "${CASE_TRACE_PREFIX}"
-    )
-    if [[ "${CASE_OP}" == dispatch ]]; then
-        command+=(--expert-token-nums-type 1)
-    fi
-    trace_output=$("${command[@]}")
-    formatted_output=$(format_trace_output "${trace_output}")
-    breakdown_result[${CASE_OP}]=${formatted_output}
-
-    print_separator
-    printf '%s\n' '当前算子耗时拆解结果'
-    printf 'op=%s\n' "${CASE_OP}"
-    printf '%s\n' "${formatted_output}"
-    print_separator
-}
-
 run_operator() {
     local op=$1
     load_case_config "${op}"
@@ -781,7 +631,6 @@ run_operator() {
     CASE_STATS_DIR="${CASE_LOG_DIR}/msprof_stats"
     CASE_RAW_ROOT="/home/h00580772/test_dir_${CASE_RUN_ID}"
     CASE_RANK_LOG_DIR="${TILEXR_ROOT}/tests/ep/logs/${CASE_RUN_ID}"
-    CASE_TRACE_DIR="${CASE_RANK_LOG_DIR}/traces"
     mkdir -p -- "${CASE_LOG_DIR}"
 
     print_case
@@ -805,11 +654,6 @@ run_operator() {
             print_stage "数据汇总分析开始"
             summarize_performance
             print_stage "数据汇总分析完成"
-            ;;
-        breakdown)
-            print_stage "耗时拆解导出开始"
-            export_breakdown
-            print_stage "耗时拆解导出完成"
             ;;
     esac
 }
@@ -835,13 +679,6 @@ print_final_summary() {
                 printf 'summary_json=%s\n\n' "${perf_json[${op}]}"
             done
             ;;
-        breakdown)
-            printf '%s\n' '最终耗时拆解结果'
-            for op in "${selected_ops[@]}"; do
-                printf 'op=%s\n' "${op}"
-                printf '%s\n\n' "${breakdown_result[${op}]}"
-            done
-            ;;
     esac
     printf 'session_id=%s\n' "${SESSION_ID}"
     printf 'session_log=%s\n' "${SESSION_LOG_DIR}"
@@ -851,9 +688,7 @@ print_final_summary() {
 main() {
     parse_args "$@"
     for required in "${HOST_FILE}" "${DISPATCH_CONFIG_FILE}" "${COMBINE_CONFIG_FILE}" \
-        "${TILEXR_ROOT}/tools/ep/msprof_kernel_stats.py" \
-        "${TILEXR_ROOT}/tools/ep/dispatch_memory_trace.py" \
-        "${TILEXR_ROOT}/tools/ep/combine_memory_trace.py"; do
+        "${TILEXR_ROOT}/tools/ep/msprof_kernel_stats.py"; do
         [[ -r "${required}" ]] || {
             echo "Missing required file: ${required}" >&2
             exit 2

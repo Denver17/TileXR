@@ -225,7 +225,11 @@ The allocation hot-path target for normal hits and nonempty wraparound without g
 
 Core operator performance compares device kernel execution time only. With identical shape, inputs, routes, dtype, ranks, communication path, compilation, and diagnostic configuration, compare maximum-capacity preallocation, a Host actual-size reference, and the Device pool. Pool capacity must be sufficient, and growthCount must remain unchanged throughout measurement. The Host reference is a comparison only and must not become a size Planner in the production path.
 
-Diagnosis uses the repository's `TileXR::Profiling` SDK with capture on the actual service stream. Collect runs after completion and must not block the growth service. Validate timer conversion, all-lane/key-owner markers, overflow/drop, and instrumentation disturbance. Do not directly substitute HWTS/AIV/sysClock frequencies for the GetSystemCycle frequency or subtract timestamps across lanes without establishing that this is valid.
+Diagnosis uses the repository's `TileXR::Profiling` SDK with capture on the actual service stream. Collect runs after completion and must not block the growth service.
+
+The consumer uses standalone SDK 1.0.0 / DeviceView ABI 2; rebuild Host and kernel together. `tests/elastic_memory/profile_compact.py` declares participants and workload before launch, merges rank-owned manifest, completion and Host-event evidence after completion, and delegates repeat reports to the public capture-set API. The mapping template leaves the timer scale unset: supply an evidenced scale and its basis. Read allocator samples from the owner lane, rather than treating an absent stage on the slowest lane as zero allocation time.
+
+Validate timer conversion, all-lane/key-owner markers, overflow/drop, and instrumentation disturbance. Do not directly substitute HWTS/AIV/sysClock frequencies for the GetSystemCycle frequency or subtract timestamps across lanes without establishing that this is valid.
 
 Formal comparisons remove Device diagnostic instrumentation, retain identical Host stage barriers/framework profiler settings, and measure msprof Task Duration for the named Dispatch/Combine kernels. Allocation, synchronization, and cross-rank waits inside the operator remain included; Host wall time or Task Wait Time is not a substitute. Cover at least bs16/h128 and bs256/h4096 with BF16/topK2/2 ranks, retaining warmup, sufficient samples, and per-rank/cross-rank distributions. Improved medians do not establish improved tail latency.
 

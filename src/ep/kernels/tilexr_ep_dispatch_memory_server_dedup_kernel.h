@@ -1,3 +1,6 @@
+/*
+ * 在指定 core 分工下执行 ServerDedup Dispatch 计数、发送和接收；入口提供 TPipe，SDK marker 记录已有阶段边界。
+ */
 #ifndef TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_KERNEL_H
 #define TILEXR_EP_DISPATCH_MEMORY_SERVER_DEDUP_KERNEL_H
 
@@ -14,9 +17,9 @@ public:
         GM_ADDR expandXOut, GM_ADDR dynamicScalesOut, GM_ADDR expertTokenNumsOut, GM_ADDR sendCountsOut,
         GM_ADDR tokenTypeOut, GM_ADDR destinationIndexOut, GM_ADDR relayReadIndexOut, GM_ADDR sourceMaskOut,
         GM_ADDR expertScalesOut, uint32_t bs, uint32_t h, uint32_t topK, uint32_t experts, uint32_t expertTokenNumsType,
-        int64_t magic, uint32_t profilingLaunchSlot, TPipe *pipe)
+        int64_t magic, TPipe *pipe)
     {
-        profile_.Init(commArgs, profilingLaunchSlot);
+        profile_.Init(commArgs, magic);
         profile_.Mark(0);
         args_ = reinterpret_cast<const __gm__ TileXR::CommArgs *>(commArgs);
         core_ = GetBlockIdx();

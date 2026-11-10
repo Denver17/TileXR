@@ -9,13 +9,10 @@
  */
 
 /*
- * 功能：校验 Host API 参数，创建 communicator，并转发查询、注册和销毁请求。
- * 调用关系：实现 tilexr_api.h 的入口，调用 TileXRComm；unique ID 由 socket bootstrap 生成。
- * 资源与生命周期：创建成功后返回 opaque handle；销毁时调用 cleanup，失败则返回，成功后删除对象。
- *
- * Purpose: Validate Host API arguments, create communicators and forward queries, registration and destruction.
- * Calls: Implements tilexr_api.h through TileXRComm; socket bootstrap supplies unique IDs.
- * Lifetime: Returns an opaque handle after creation. Destruction runs cleanup and deletes the object only if it succeeds.
+ * 实现 Host 公共 API：校验参数并向 TileXRComm 转发初始化、查询和注册请求。
+ * 创建成功后返回 opaque handle；销毁按 rank 协议完成资源清理后才删除对象。
+ * Implements public Host APIs through TileXRComm and socket bootstrap.
+ * Returns owned opaque handles; destruction agrees cleanup status before deletion.
  */
 #include "tilexr_api.h"
 #include <vector>
@@ -197,45 +194,6 @@ int TileXRCommNextMagic(TileXRCommPtr comm, int64_t *magic)
     auto* c = static_cast<TileXRComm *>(comm);
     *magic = c->NextMagic();
     return TILEXR_SUCCESS;
-}
-
-int TileXRProfilingReserveLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
-    uint32_t *launchSlot)
-{
-    if (launchSlot != nullptr) {
-        *launchSlot = static_cast<uint32_t>(-1);
-    }
-    if (comm == nullptr || launchSlot == nullptr) {
-        return TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    auto *c = static_cast<TileXRComm *>(comm);
-    return c->ReserveProfilingLaunch(recordsPerLaunch, launchSlot);
-}
-
-int TileXRProfilingReserveLatestLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
-    uint32_t *launchSlot)
-{
-    if (launchSlot != nullptr) {
-        *launchSlot = static_cast<uint32_t>(-1);
-    }
-    if (comm == nullptr || launchSlot == nullptr) {
-        return TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    auto *c = static_cast<TileXRComm *>(comm);
-    return c->ReserveLatestProfilingLaunch(recordsPerLaunch, launchSlot);
-}
-
-int TileXRProfilingReserveLatestCombineLaunch(TileXRCommPtr comm, uint32_t recordsPerLaunch,
-    uint32_t *launchSlot)
-{
-    if (launchSlot != nullptr) {
-        *launchSlot = static_cast<uint32_t>(-1);
-    }
-    if (comm == nullptr || launchSlot == nullptr) {
-        return TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    auto *c = static_cast<TileXRComm *>(comm);
-    return c->ReserveLatestCombineProfilingLaunch(recordsPerLaunch, launchSlot);
 }
 
 int TileXRCommHostAllGather(TileXRCommPtr comm, const void *sendBuf, size_t sendBytes, void *recvBuf)
@@ -500,17 +458,14 @@ int TileXRCommDestroy(TileXRCommPtr comm)
         return TILEXR_INVALID_VALUE;
     }
     auto *c = static_cast<TileXRComm *>(comm);
-    // Optional local profiling ownership must not choose which ranks enter
+    // Optional local resource ownership must not choose which ranks enter
     // cleanup agreement. Successful local resources have already been detached;
     // peers retaining failed items can retry destruction without replaying them.
     const int resourceRet = TileXR::FinalizeInternalResourceTogether(*c);
     if (resourceRet != TILEXR_SUCCESS) {
         return resourceRet;
     }
-    int finalizeRet = c->FinalizeProfiling();
-    if (finalizeRet == TILEXR_SUCCESS) {
-        finalizeRet = c->FinalizeKernelTilings();
-    }
+    int finalizeRet = c->FinalizeKernelTilings();
     // Reuse the existing rank agreement so a failed tiling release cannot leave
     // one rank retrying destruction after its peers have deleted their comms.
     finalizeRet = c->AgreeInternalStatus(finalizeRet);

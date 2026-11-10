@@ -131,7 +131,6 @@ struct ExtraFlag {
     static constexpr uint32_t SDMA = 1 << 11;
     static constexpr uint32_t UDMA_SHARED_QP = 1 << 12;
     static constexpr uint32_t UDMA_FULLMESH = 1 << 13;
-    static constexpr uint32_t PROFILING = 1 << 14;
     static constexpr uint32_t ATOMIC_ENABLE = 1 << 15;  // 表示在910A5算子中启用atomic实现
     static constexpr uint32_t IS_GREATER_THAN_40_AIV = 1 << 16;
     static constexpr uint32_t PERF_CYCLE_A5 = 1 << 17;
@@ -164,21 +163,6 @@ struct CommArgs {
     uint64_t peerMemBytes = 0U;
     int32_t commDomain = 0;
     uint32_t reserved0 = 0U;
-    // EP compatibility capture only. The standalone profiling SDK uses its
-    // independent DeviceView and does not allocate or read these ABI slots.
-    GM_ADDR tilexrProfilingTimestampsGM = nullptr;
-    GM_ADDR tilexrProfilingEventIdsGM = nullptr;
-    GM_ADDR tilexrProfilingRecordCountsGM = nullptr;
-    GM_ADDR tilexrProfilingDroppedCountsGM = nullptr;
-    uint32_t tilexrProfilingRecordsPerCore = 0U;
-    uint32_t tilexrProfilingCoreCapacity = 0U;
-    // Independent EP Combine compatibility capture; appended to preserve offsets.
-    GM_ADDR tilexrCombineProfilingTimestampsGM = nullptr;
-    GM_ADDR tilexrCombineProfilingEventIdsGM = nullptr;
-    GM_ADDR tilexrCombineProfilingRecordCountsGM = nullptr;
-    GM_ADDR tilexrCombineProfilingDroppedCountsGM = nullptr;
-    uint32_t tilexrCombineProfilingRecordsPerCore = 0U;
-    uint32_t tilexrCombineProfilingCoreCapacity = 0U;
     // Fixed generic capture slots, indexed by magic - profilingMagicBase.
     GM_ADDR profilingDescriptorsGM = nullptr; // uint64_t[profilingSlotCount]
     GM_ADDR profilingLaneCountsGM = nullptr;  // uint32_t[profilingSlotCount * 16]

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 构建或启动 Combine V2 性能探针，向 tools/moonep 和 tests/moonep_combine_v2 传递运行参数。
 set -euo pipefail
 
 REMOTE_ROOT=""
@@ -21,7 +22,6 @@ BUILD_JOBS="$(nproc)"
 LOG_FILE=""
 SKIP_BUILD=0
 SKIP_RUNTIME_SYNC=0
-PROFILE=0
 REDUCE_HIDDEN=0
 
 usage() {
@@ -50,7 +50,6 @@ Options:
   --skip-build              Reuse an existing install directory
   --skip-runtime-sync       Do not rsync install to worker hosts
   --skip-iteration-barriers Deprecated no-op; launches are always continuous
-  --profile                 Capture per-AIV kernel cycle timestamps
   --reduce-hidden           Include BF16 TopK hidden reduction in the kernel
   --help                    Show this help
 EOF
@@ -79,7 +78,6 @@ while [[ $# -gt 0 ]]; do
         --skip-build) SKIP_BUILD=1; shift ;;
         --skip-runtime-sync) SKIP_RUNTIME_SYNC=1; shift ;;
         --skip-iteration-barriers) shift ;;
-        --profile) PROFILE=1; shift ;;
         --reduce-hidden) REDUCE_HIDDEN=1; shift ;;
         --help|-h) usage; exit 0 ;;
         *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -156,9 +154,6 @@ if (( ! SKIP_BUILD )); then
         --cann-path "${CANN_PATH}" \
         --jobs "${BUILD_JOBS}"
     )
-    if (( PROFILE )); then
-        build_args+=(--enable-profiling)
-    fi
     bash "${build_script}" "${build_args[@]}"
 fi
 
@@ -187,9 +182,6 @@ if [[ -n "${BS_LIST}" ]]; then
     run_args+=(--bs-list "${BS_LIST}")
 else
     run_args+=(--bs "${BS}")
-fi
-if (( PROFILE )); then
-    run_args+=(--profile)
 fi
 if (( REDUCE_HIDDEN )); then
     run_args+=(--reduce-hidden)

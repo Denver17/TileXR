@@ -1,4 +1,7 @@
-﻿#include "combine_v2_host.h"
+/*
+ * 校验 MoonEP 公共调用与工作区，准备内部 launch 参数；传输和结果生产由对应 Device kernel 完成。
+ */
+#include "combine_v2_host.h"
 
 #include <cstddef>
 #include <limits>
@@ -8,15 +11,14 @@
 
 extern "C" int TileXRMoonEpCombineGetWorkspaceSizeV2(
     int64_t bs, int64_t h, int64_t topK, int64_t nvS, uint32_t dtype,
-    uint64_t *workspaceBytes, uint64_t *profileOffset,
+    uint64_t *workspaceBytes,
     uint64_t *outputEpoch0Offset, uint64_t *outputEpoch1Offset)
 {
-    if (workspaceBytes == nullptr || profileOffset == nullptr ||
+    if (workspaceBytes == nullptr ||
         outputEpoch0Offset == nullptr || outputEpoch1Offset == nullptr) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     *workspaceBytes = 0;
-    *profileOffset = 0;
     *outputEpoch0Offset = 0;
     *outputEpoch1Offset = 0;
 
@@ -27,7 +29,6 @@ extern "C" int TileXRMoonEpCombineGetWorkspaceSizeV2(
         return ret;
     }
     *workspaceBytes = layout.totalBytes;
-    *profileOffset = layout.profileOffset;
     *outputEpoch0Offset = layout.scratchOffset[0];
     *outputEpoch1Offset = layout.scratchOffset[1];
     return TILEXR_MOONEP_SUCCESS;

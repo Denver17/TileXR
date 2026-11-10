@@ -1,4 +1,7 @@
-﻿#include <cstdint>
+/*
+ * 验证 MoonEP 的布局、调用或诊断合同；直接覆盖对应 src/moonep 与 tools/moonep 接口，硬件数据面另行验收。
+ */
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 
@@ -181,12 +184,11 @@ void TestValidLaunch()
     Reset();
     const TileXRMoonEp::CombineV2Params params = ValidParams();
     uint64_t workspaceBytes = 0;
-    uint64_t profileOffset = 0;
     uint64_t epoch0Offset = 0;
     uint64_t epoch1Offset = 0;
     CheckStatus(TileXRMoonEpCombineGetWorkspaceSizeV2(
         params.bs, params.h, params.topK, params.nvS, params.dtype,
-        &workspaceBytes, &profileOffset, &epoch0Offset, &epoch1Offset),
+        &workspaceBytes, &epoch0Offset, &epoch1Offset),
         TILEXR_MOONEP_SUCCESS, "public workspace query");
     Check(workspaceBytes == 4194304U && epoch0Offset < epoch1Offset,
         "public workspace layout mismatch");

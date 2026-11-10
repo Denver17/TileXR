@@ -186,12 +186,36 @@ done
      -name 'libtilexr_ep_combine_kernel.so' \) | grep -q .
 ```
 
-Server Dedup profiling compatibility changes require separate OFF and ON build
-directories, using `-DTILEXR_EP_SERVER_DEDUP_ENABLE_PROFILING=OFF` or `ON` at
-configuration. Build `tilexr-ep` to include the communicator compatibility owner,
-Host launch code and all six kernels. `TILEXR_EP_SERVER_DEDUP_ENABLE=auto|0|1`
-selects the dedup policy; the default is `auto`. Keep Host and device artifacts
-from the same build, including every consumer of the expanded `CommArgs` ABI.
+EP profiling changes require separate OFF and ON build directories with
+`-DTILEXR_EP_ENABLE_PROFILING=OFF` or `ON`. Build the communicator, `tilexr-ep`
+and every deployed external kernel together. Ordinary Memory uses two SDK body
+markers per lane; ServerDedup uses SDK `DirectWriter` and its existing event
+catalog. Private 512B dumps, compatibility writers/owners, old reserve APIs and
+per-operator legacy profiling switches are removed.
+
+For SDK captures, prepare a managed `TILEXR_PROFILING_SLOTS_FILE` before creating
+the communicator. Its invocation count includes unselected warmups; selected
+calls have independent UUIDs and output paths. Set
+`TILEXR_PROFILING_RECORDS_PER_STREAM` when a detailed capture needs more than the
+integration default of 8 records/lane. Values must be decimal multiples of eight
+in 8…65536; use 512 or more as an initial ServerDedup budget, then require zero
+dropped records and complete actual lanes. A two-record assertion is valid only
+for the ordinary Memory body mapping, not detailed ServerDedup.
+
+`TILEXR_EP_SERVER_DEDUP_ENABLE=auto|0|1` still selects the business dedup policy.
+Keep Host/device artifacts from the same build, including all consumers of the
+changed `CommArgs` and tiling layouts. Rebuild rather than reusing cached artifacts
+after removing fields. Capture tests must verify invocation identity, rank/lane
+coverage, timer basis and numerical correctness; OFF tests must retain business
+timeouts, stage barriers and framework/external profiler state. The cluster runner
+retains functional/performance modes; node scripts retain correctness/perf.
+Removed profile/breakdown modes are rejected.
+This checklist is a validation requirement, not a new hardware pass claim.
+
+Maintenance lesson: a profiling-looking address can also bound business storage.
+`kEpMemoryRecvCountWorkspaceEnd` retains the original 768KiB recv-count workspace
+boundary; deleting private dumps must not move it. Timer reads used for business
+timeouts must likewise survive removal of instrumentation.
 
 Building on 910B proves cross-compilation and packaging only. Host tests must
 also verify that every public EP entry returns `TILEXR_ERROR_NOT_SUPPORT` there

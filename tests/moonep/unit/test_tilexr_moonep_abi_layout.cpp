@@ -1,3 +1,6 @@
+/*
+ * 验证 MoonEP 的布局、调用或诊断合同；直接覆盖对应 src/moonep 与 tools/moonep 接口，硬件数据面另行验收。
+ */
 #include <cstddef>
 #include <cstdint>
 #include <iostream>
@@ -44,13 +47,7 @@ int main()
         "Unexpected PlanningArgsV1 size");
     static_assert(offsetof(TileXRMoonEpPlanningArgsV1, cuSeqlens) == 48,
         "Unexpected PlanningArgsV1 cuSeqlens offset");
-    static_assert(sizeof(TileXRMoonEpDispatchTraceV1) == 40,
-        "Unexpected DispatchTraceV1 size");
-    static_assert(offsetof(TileXRMoonEpDispatchTraceV1, buffer) == 8,
-        "Unexpected DispatchTraceV1 buffer offset");
-    static_assert(offsetof(TileXRMoonEpDispatchTraceV1, iteration) == 24,
-        "Unexpected DispatchTraceV1 iteration offset");
-    static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == 88,
+    static_assert(sizeof(TileXRMoonEpDispatchArgsV1) == 80,
         "Unexpected DispatchArgsV1 size");
     static_assert(offsetof(TileXRMoonEpDispatchArgsV1, hiddenSh) == 24,
         "Unexpected DispatchArgsV1 hidden input offset");
@@ -62,14 +59,10 @@ int main()
         "Unexpected DispatchArgsV1 registered workspace size offset");
     static_assert(std::is_standard_layout<TileXRMoonEpDispatchArgsV2>::value,
         "Dispatch V2 args must be standard layout");
-    static_assert(sizeof(TileXRMoonEpDispatchArgsV2) == 88,
+    static_assert(sizeof(TileXRMoonEpDispatchArgsV2) == 80,
         "Unexpected DispatchArgsV2 size");
     static_assert(offsetof(TileXRMoonEpDispatchArgsV2, registeredWorkspace) == 64,
         "Unexpected DispatchArgsV2 registered workspace offset");
-    static_assert(offsetof(TileXRMoonEpDispatchArgsV1, trace) == 80,
-        "Unexpected DispatchArgsV1 trace offset");
-    static_assert(offsetof(TileXRMoonEpDispatchArgsV2, trace) == 80,
-        "Unexpected DispatchArgsV2 trace offset");
     static_assert(sizeof(TileXRMoonEpPrefetchWeightArgsV1) == 56,
         "Unexpected PrefetchWeightArgsV1 size");
     static_assert(offsetof(TileXRMoonEpPrefetchWeightArgsV1, gate) == 24,

@@ -1,0 +1,105 @@
+{
+  "schema": "tilexr_profiling_mapping.v2",
+  "operator": "ElasticMemory compact Dispatch",
+  "cycles_per_us": null,
+  "stages": [
+    {
+      "name": "kernel_body",
+      "category": "total",
+      "begin": 1,
+      "end": 32,
+      "critical": true
+    },
+    {
+      "name": "send_and_count",
+      "category": "compute",
+      "begin": 2,
+      "end": 3,
+      "parent": "kernel_body"
+    },
+    {
+      "name": "allocator",
+      "category": "other",
+      "begin": 6,
+      "end": 21,
+      "parent": "kernel_body"
+    },
+    {
+      "name": "state_load",
+      "category": "copy",
+      "begin": 7,
+      "end": 8,
+      "parent": "allocator"
+    },
+    {
+      "name": "segment_search",
+      "category": "other",
+      "begin": 9,
+      "end": 10,
+      "parent": "allocator"
+    },
+    {
+      "name": "try_allocate",
+      "category": "compute",
+      "begin": 13,
+      "end": 14,
+      "parent": "allocator"
+    },
+    {
+      "name": "growth_wait",
+      "category": "wait",
+      "begin": 15,
+      "end": 16,
+      "parent": "allocator"
+    },
+    {
+      "name": "state_writeback",
+      "category": "copy",
+      "begin": 17,
+      "end": 18,
+      "parent": "allocator"
+    },
+    {
+      "name": "result_publish",
+      "category": "finalize",
+      "begin": 19,
+      "end": 20,
+      "parent": "allocator"
+    },
+    {
+      "name": "rank_gate",
+      "category": "sync",
+      "begin": 22,
+      "end": 23,
+      "parent": "kernel_body"
+    },
+    {
+      "name": "output_setup",
+      "category": "compute",
+      "begin": 24,
+      "end": 29,
+      "parent": "kernel_body"
+    },
+    {
+      "name": "count_wait",
+      "category": "wait",
+      "begin": 25,
+      "end": 26,
+      "parent": "output_setup"
+    },
+    {
+      "name": "local_ready_wait",
+      "category": "wait",
+      "begin": 27,
+      "end": 28,
+      "parent": "output_setup"
+    },
+    {
+      "name": "local_output_copy",
+      "category": "copy",
+      "begin": 30,
+      "end": 31,
+      "parent": "kernel_body"
+    }
+  ]
+}

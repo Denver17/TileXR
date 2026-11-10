@@ -8,7 +8,163 @@ implementation of the complete design**, not completion of every acceptance item
 
 The user-approved single-owner segmented ring and 2.5 us allocation target are
 implemented and tested on CANN 9.2. The current measurements, retained boundaries
-and reproduction commands are in the November 9 section below.
+and reproduction commands are in the November 9 section below. The November 10
+removal section records the current ABI, fresh regressions and remaining hardware gaps.
+
+## Legacy profiling removal (November 10)
+
+The old communicator capture/encoder, Reserve APIs, ExtraFlag bit, CommArgs
+record arrays, private Memory/MoonEP record formats and writers, trace/dump
+readers, old CMake/runtime switches, and flat forwarding headers are deleted.
+There is no compatibility layer. Public consumers include `<tilexr/profiling.h>`.
+Ordinary Memory keeps SDK body markers; ServerDedup writes its business event
+catalog through SDK DirectWriter and the existing SDK invocation-slot owner.
+ElasticMemory continues to use the #216 Recorder/capture/manifest pipeline.
+MoonEP private phase timing has been removed without a replacement stage API;
+its framework profiler, Host stage barriers, DFX/status and business timeouts
+remain. UDMA registration Profile APIs are unrelated to timing and remain.
+
+Shared CommArgs, ServerDedup tiling and MoonEP native/ctypes layouts changed;
+rebuild/deploy Host libraries, external kernels, headers and Python consumers
+together, using a clean install prefix. The new SDK slot capacity setting is
+strictly decimal `TILEXR_PROFILING_RECORDS_PER_STREAM`, default 8, valid multiples
+of 8 in 8..65536. Detailed captures need sufficient capacity and zero drops;
+finalization no longer assumes every operator emits exactly two events.
+
+### Current evidence
+
+All operations used the isolated ElasticMemory worktree. Environment: a5 /
+rack08os2, aarch64, CANN 9.2.0 (`/home/pkg/b070/cann-9.2.0`), Ascend950DT,
+physical 0/1 with identity mapping and no runtime remap, driver 26.2.0.b020 and
+firmware 9.2.0.101.200 (fresh board/driver queries retained). CANN 9.2 is the validated
+build/run environment; other versions are not promised. The existing HCCL
+qualification and its retained per-rank limits were reused, not rerun.
+
+| Check | Result and boundary |
+|---|---|
+| Full CANN build/install | OFF and ON PASS, EP + ElasticMemory + all MoonEP stages + UniTest; ON uses compact STAGES |
+| SDK Host / offline | 5/5 CTest and 23/23 Python PASS |
+| EP Host | Release 12/12 PASS; profiling-enabled launch validation 1/1 PASS |
+| MoonEP ctypes / diagnostic | FFI 7/7; continuous-iteration 3/3; CPU diagnostic pytest 5/5 PASS |
+| CI controller contract | 56/56 PASS |
+| A5 Host CTest | OFF and ON each 36/38 PASS; two independently reproduced baseline failures below |
+| Native pool | 20 calls, 20 side effects PASS |
+| Growth bookkeeping fault | one allocation, one injected failure, one free, one side effect PASS |
+| Real Torch / torch_npu | 20 normal cases per rank PASS; both failure-propagation cases PASS, final committed/metadata zero |
+| Ordinary Memory OFF | 2 ranks, BF16, bs16/h128/topK2, warmup 20 + measured 100 Dispatch/Combine per rank; output oracle and no-growth checks PASS |
+| Installed cleanup | OFF/ON clean prefixes contain no old flat headers; libtile-comm exports no removed Reserve APIs |
+| Independent review | Caught/fixed missing SubmitPair signature and stale ABI/config tests; final read-only review found no remaining actionable implementation defect |
+
+Torch used Python 3.12, Torch 2.10.0+cpu plus real torch_npu 2.10.0.post7 at
+`/home/l00984991/envs/py312_lzy`. The extension was rebuilt against the new clean
+install. Normal cases include FP16/BF16, dropped Pending/inputs, zero receive,
+alias/trim, surviving growth, cross-stream consumers, delayed retirement and
+close with live Storage. These are real NPU tests, not the CPU diagnostics test.
+The latter initially failed because torch_npu auto-loaded without CANN in that
+CPU-only command; `TORCH_DEVICE_BACKEND_AUTOLOAD=0` makes its scope explicit.
+
+The default unoptimized EP Host build also segfaulted in host_validation; the
+unchanged `origin/main` ce4b9dfd reproduces that failure. Release passes. No claim
+is made here about that baseline failure's root cause. The unchanged main also
+reproduces Planner V3's exact-fit peer-publication assertions and Combine
+schedule's credit-IPC size assertions. Full CTest is therefore not clean. Main's
+Dispatch width-8 capacity static_assert prevented compilation after its rank
+limit became 256; this change checks the actual default width 16 and rejects
+credit group counts above the existing 16-group capacity before launch. It does
+not expand the protocol/workspace or prove 256-rank execution.
+
+### Occupancy refusals and missing hardware coverage
+
+The initial launch was refused at 02:39:52 UTC: device 0 PID 520205/python3, 350MB;
+device 1 idle. No NPU test had launched. After the process disappeared, a new
+combined mapping/proc-mem gate passed at 02:41:34 and the regressions ran. Each
+subsequent test required a new gate. The ordinary Memory OFF pair passed its
+02:42:46 gate. At02:43:00 the next pair was refused (PID 532229, 370MB); at 02:44:16
+the SDK STAGES pair was refused (PID 540073, 370MB). The final bounded observation
+02:44:53..02:46:14 contained five busy snapshots of PID 540073. No further NPU
+launch followed. No process was killed/reset or bypassed through device remapping.
+These snapshots do not prove exclusive occupancy for the entire passing test
+intervals or establish the effect of unrelated tasks; that effect is unknown.
+
+**New SDK capture roundtrip, remaining three-mode/two-shape matrix, and real
+MoonEP URMA execution were not completed in this removal run.** The Nov9 SDK
+records above are historical results from the earlier ABI and do not validate
+this new CommArgs layout. ServerDedup requires at least 16 ranks; an 8-card host
+cannot verify that runtime path. Its OFF/ON kernels compile, but that is not
+hardware correctness, lane-completeness, timer-calibration or performance evidence.
+
+The single completed OFF pair is a correctness/ABI observation, not a performance
+improvement or an exclusive-device benchmark. It keeps native Memory transport,
+Host AllGather before Dispatch/Combine, and identical msprof task-based AICore /
+runtime-API settings. The native C++ driver has no framework NPU profiler to
+silently disable. Full Task Duration includes normal device work and excludes
+Host submission/allocation and Task Wait Time. No device diagnostics are enabled.
+
+| Stage / rank | Kernel | Samples | Task Duration min / median / max / P95 (us) |
+|---|---|---:|---|
+| Dispatch/0 | `tilexr_ep_dispatch_memory_kernel` | 100 | 18.080 / 20.700 / 102.163 / 48.822 |
+| Combine/0 | `tilexr_ep_combine_memory_kernel` | 100 | 10.041 / 10.439 / 11.089 / 10.814 |
+| Dispatch/1 | `tilexr_ep_dispatch_memory_kernel` | 100 | 16.531 / 17.944 / 107.223 / 58.514 |
+| Combine/1 | `tilexr_ep_combine_memory_kernel` | 100 | 9.906 / 10.456 / 11.027 / 10.766 |
+
+Dispatch: backend `native_memory`, native status PASS; cross-rank median [min,max] of rank medians **19.322 [17.944,20.700]us**. Logical-byte bandwidth median [min,max] **0.446 [0.414,0.478]GB/s**.
+
+Combine: backend `native_memory`, native status PASS; cross-rank median [min,max] of rank medians **10.447 [10.439,10.456]us**. Logical-byte bandwidth median [min,max] **0.784 [0.783,0.785]GB/s**.
+
+Dispatch logical final output 8576 B/rank (8192 hidden + 384 assist), maximum output
+allocation 17152 B; Combine logical input 8192 B and output 4096 B/rank. Bandwidth uses
+those logical output/input bytes respectively, not physical fabric traffic.
+This maximum-preallocation pair performs no pool allocations: growth 0→0; pool
+committed/peak/trim are not being measured. The ordinary output allocation stays
+17152 B through all rounds and is freed at driver teardown. The 2 GiB/rank staging
+peer window remains; output sizes must not be interpreted as total HBM savings.
+There is no paired Device-pool timing from this run and no updated 2.5 us claim.
+
+### Provenance and retained reproduction
+
+Local evidence root:
+`/workspace/TileXR-worktrees/elastic-memory/.elastic-memory-evidence/remove-legacy-profiling-20261110/`.
+Remote root:
+`/home/h30059441/elastic-memory-dev-20261106/remove-legacy-profiling-20261110/`.
+`final-code-sha256.json` identifies 1192 transferred code/dependency files; local
+and remote hashes match. `binary-sha256.json` records both build/install sets and
+the rebuilt Torch extension. `off-small-maximum_capacity/loaded-maps.json`
+records actual loaded Host DSO paths and hashes for both native ranks. Build
+logs identify the source tree and linked external kernels. The delivered Git
+SHA is recorded in the evidence provenance file and PR, avoiding a circular
+self-hash inside this document. Previous binary hashes are not reused.
+
+Build command is preserved in `build-remote.sh` (two variants):
+
+```bash
+source /home/pkg/b070/cann-9.2.0/set_env.sh
+export PATH=/home/l00984991/envs/py312_lzy/bin:$PATH
+cmake -S "$R/source" -B "$R/build-OFF" -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$R/install-OFF" -DTILEXR_BUILD_EP=ON \
+  -DTILEXR_BUILD_ELASTIC_MEMORY=ON -DTILEXR_BUILD_MOONEP=ON \
+  -DTILEXR_BUILD_MOONEP_PLANNER=ON -DTILEXR_BUILD_TESTS=ON \
+  -DTILEXR_BUILD_UNITEST=ON -DTILEXR_DIAGNOSTICS_SOC_TYPE=Ascend950 \
+  -DTILEXR_EP_ENABLE_PROFILING=OFF -DTILEXR_EP_COMPACT_PROFILING=OFF
+cmake --build "$R/build-OFF" --parallel 8
+cmake --install "$R/build-OFF"
+```
+
+ON selects
+`TILEXR_EP_ENABLE_PROFILING=ON` and `TILEXR_EP_COMPACT_PROFILING=STAGES` in a
+separate build/install tree. Retained commands/logs:
+
+- Host: `ctest --test-dir "$R/build-OFF" --output-on-failure`; ON likewise.
+- Real regression: `bash "$R/run-regressions.sh"`; it rechecks identity/proc-mem before each test and refuses busy/unknown.
+- Completed pair: `bash "$R/run-pair.sh" NAME OFF maximum_capacity 16 128 100 0`.
+- Pending SDK pair: `bash "$R/run-pair.sh" NEW_NAME ON device_pool 16 128 20 1`.
+- Pending generic SDK slots: `bash "$R/run-pair.sh" NEW_NAME ON maximum_capacity 16 128 20 0 kernel_perf 1`.
+
+These environment-specific launch scripts remain evidence only, not maintained
+repository tools. Every future launch requires a fresh passing gate; these
+commands are reproduction references, not a request for the design session to
+run tests. Raw profiler output, occupancy JSON/mapping, per-rank logs, snapshots,
+source/binary manifests and review are retained in the above roots. The former
+Pool occupancy-violation run remains excluded as described in its original section.
 
 ## Supported behavior and boundaries
 
@@ -31,6 +187,227 @@ retired records blocked behind a live prefix), and 128 registered consumer
 streams/events per lease. Exceeding metadata capacity fails explicitly. The
 allocator does not relocate live segments to compact memory.
 The caller must keep device context and registered streams alive through retirement.
+
+## Standalone profiling SDK migration and retest (November 9, #216)
+
+Based on merged `main` `ce4b9dfd` (including profiling #216 `4d3e5276` and
+ElasticMemory #215), this consumer uses SDK 1.0.0, DeviceView ABI 2 and
+`mapping.v2`. Both Host and kernel were rebuilt. Each capture has an explicit
+`generation=ordinal+1`; SDK records, completion and rank-owned Host-event manifest
+shards are exported after `Pending::Wait`, on the creating context. Initialize
+uses the actual Pool service stream; Collect does not execute inside its launch
+callback or block resident-kernel growth.
+
+The maintained `tests/elastic_memory/profile_compact.py` prepares the two-rank,
+64-lane/rank manifests **before launch**, using the declared route workload,
+then uses the #216 APIs `attach_completion`, `merge_manifest_shards` and
+`generate_capture_set_reports`. The SDK emits per-capture Markdown/HTML/Perfetto/
+JSON/CSV and capture-set repeat distributions. No separate timer, encoder or
+stage-pairing implementation was added. SDK header dependencies are explicit in
+the compact kernel CMake target so an SDK change rebuilds the device consumer.
+
+Environment: `a5` / `rack08os2`, aarch64, Ascend950DT V120, physical 0/1 identity
+mapping, CANN **9.2.0** (`/home/pkg/b070/cann-9.2.0`), driver `26.2.0.b020`,
+firmware `9.2.0.101.200` from this run's board query. Torch 2.10.0+cpu plus real
+`torch_npu` 2.10.0.post7 / Python 3.12. Other CANN versions are not promised.
+All launches passed a fresh combined mapping + proc-mem gate, without remapping.
+No HCCL qualification was repeated; the retained qualification and its existing
+per-rank evidence limits remain applicable.
+
+### SDK stage evidence and instrumentation boundary
+
+Four STAGES pairs cover bs16/h128 and bs256/h4096, ordinary output retirement
+and retaining one prior output to force nonempty ring wrap. Each rank runs
+20 warmups without capture, then 20 measured captures with unchanged growthCount
+1→1. All 80 shared captures have 128 expected/present/usable lanes, complete
+publication and cleanup health, matching generation and zero dropped/overflow:
+**10,240 lane instances, 67,200 markers, 160 owner allocator intervals**.
+
+Owner is lane 63. Values below are approximate microseconds, derived from raw
+single-lane event 6→21 differences; there is no cross-lane/rank timestamp
+subtraction. P95 uses the nearest-rank definition.
+
+| Case | Rank | Min | Median | Max | P95 |
+|---|---:|---:|---:|---:|---:|
+| stages-small-final | 0 | 1.559 | 1.571 | 1.791 | 1.582 |
+| stages-small-final | 1 | 1.538 | 1.548 | 1.558 | 1.552 |
+| stages-large | 0 | 1.567 | 1.578 | 1.758 | 1.624 |
+| stages-large | 1 | 1.548 | 1.557 | 1.790 | 1.589 |
+| stages-ring-small | 0 | 1.442 | 1.459 | 1.470 | 1.469 |
+| stages-ring-small | 1 | 1.435 | 1.441 | 1.666 | 1.464 |
+| stages-ring-large | 0 | 1.454 | 1.461 | 1.645 | 1.501 |
+| stages-ring-large | 1 | 1.433 | 1.455 | 1.478 | 1.467 |
+
+All 160 samples span 1.433–1.791 us, median 1.540 us, P95 1.592 us; no observed
+sample exceeds 2.5 us under the retained approximate scale. This is sampled
+measurement, not a hard latency guarantee. The explicit scale is
+1000.8934146536867 ticks/us, retained from same-target empirical GetSystemCycle
+vs msprof duration sweeps (`optimization-20261108-resume/timer-calibration/`).
+It is not an independently identified timer frequency or a new #216 calibration
+session. Short-interval absolute error, marker overhead and cross-lane epochs
+remain unqualified. Raw ticks and clock basis are preserved. Every longest
+same-lane kernel-body interval is shorter than its matching whole-task duration;
+that consistency check alone does not calibrate the clock.
+
+SDK capture-set `critical_lane_union_us` describes the slowest critical lane;
+that lane may not own allocation. Owner stages come from the owner lane's paired
+samples, not a zero/absent allocator column on another lane. Stage nesting and
+parallel work prohibit summing these stages into a serial critical path.
+
+The STAGES versus OFF Dispatch medians of rank medians are 14.625 versus
+12.596 us (small), and 93.627 versus 92.010 us (large). Different batches include
+rank arrival variance; STAGES ring-small rank medians are 23.991 / 13.611 us.
+These differences expose diagnostic disturbance and scheduling skew, not an
+isolated recorder-cost estimate; no subtraction correction is applied.
+
+### Complete operator comparison with device diagnostics OFF
+
+Both ranks use BF16, topK=2, experts=4, route `(token*2+k+source)%4`, native Memory
+transport and 64 AIV blocks. Host AllGather barriers remain before Dispatch and
+Combine. All ten native paired measurements use identical msprof task-based
+AICore/runtime-API profiling; no Python/framework profiler exists in this native
+driver, so none is silently toggled between native modes. Torch regression is
+functional coverage, not this timing source. The OFF comparison has 20 warmups
+and **100 measured Dispatch/Combine tasks per rank/mode/shape**, with no growth.
+Host allocation, Host queue/wall time and Task Wait Time are excluded; normal
+Device allocation, metadata and in-kernel synchronization remain included.
+
+All kernel times below are named msprof **Task Duration**, in microseconds.
+Cross-rank summary is median [minimum, maximum] of per-rank medians, not a pooled
+sample median.
+
+| Shape | Mode | Rank | Dispatch min / median / max / P95 | Combine median |
+|---|---|---:|---|---:|
+| small | maximum_capacity | 0 | 17.941 / 20.867 / 93.503 / 52.532 | 10.529 |
+| small | maximum_capacity | 1 | 16.748 / 17.918 / 98.567 / 66.819 | 10.997 |
+| small | host_actual_reference | 0 | 17.716 / 19.733 / 80.129 / 42.786 | 10.893 |
+| small | host_actual_reference | 1 | 16.378 / 18.952 / 120.877 / 65.301 | 10.463 |
+| small | device_pool | 0 | 10.559 / 13.925 / 48.216 / 22.729 | 10.568 |
+| small | device_pool | 1 | 10.552 / 11.267 / 21.475 / 15.610 | 10.904 |
+| large | maximum_capacity | 0 | 94.324 / 97.997 / 99.719 / 99.225 | 76.166 |
+| large | maximum_capacity | 1 | 86.600 / 88.885 / 90.118 / 89.667 | 75.332 |
+| large | host_actual_reference | 0 | 94.139 / 98.505 / 100.146 / 99.552 | 76.834 |
+| large | host_actual_reference | 1 | 84.466 / 88.984 / 90.107 / 89.799 | 74.355 |
+| large | device_pool | 0 | 88.869 / 95.031 / 99.048 / 97.715 | 76.236 |
+| large | device_pool | 1 | 84.998 / 88.990 / 99.698 / 96.789 | 75.293 |
+
+| Shape | Mode | Dispatch cross-rank us | Combine cross-rank us | Logical output GB/s cross-rank |
+|---|---|---|---|---|
+| small | maximum_capacity | 19.392 [17.918, 20.867] | 10.763 [10.529, 10.997] | 0.445 [0.411, 0.479] |
+| small | host_actual_reference | 19.343 [18.952, 19.733] | 10.678 [10.463, 10.893] | 0.444 [0.435, 0.453] |
+| small | device_pool | 12.596 [11.267, 13.925] | 10.736 [10.568, 10.904] | 0.689 [0.616, 0.761] |
+| large | maximum_capacity | 93.441 [88.885, 97.997] | 75.749 [75.332, 76.166] | 45.060 [42.863, 47.257] |
+| large | host_actual_reference | 93.745 [88.984, 98.505] | 75.594 [74.355, 76.834] | 44.923 [42.642, 47.205] |
+| large | device_pool | 92.010 [88.990, 95.031] | 75.764 [75.293, 76.236] | 45.701 [44.201, 47.201] |
+
+Every Dispatch/Combine stage is backend `native_memory`, native status `PASS`.
+Pool uses `tilexr_ep_dispatch_compact_kernel`; the two preallocated references
+use `tilexr_ep_dispatch_memory_kernel`; all use
+`tilexr_ep_combine_memory_kernel`. Dispatch bandwidth is logical hidden+assist
+output bytes divided by the same device-task duration, not physical fabric or
+HBM bandwidth. Combine logical input is hidden payload 8,192 / 4,194,304 B,
+output is 4,096 / 2,097,152 B per rank (small / large); its full distributions
+are in `audit.json`. No UDMA bandwidth is claimed.
+
+The measured OFF compact binary SHA256 is unchanged from #215
+(`6e46c01e...b5993c`). This migration changes profiling evidence and analysis;
+latency differences from prior batches do not demonstrate a kernel optimization.
+Current pool medians are below the two references in this batch, while tails and
+rank imbalance remain visible. No stronger hardware-wide claim follows.
+
+Actual pool bundles are **8,576 / 4,200,448 B**; counts add 32 B per rank outside
+the pool, so complete output totals are 8,608 / 4,200,480 B. Maximum-capacity
+bundles reserve 17,152 / 8,400,896 B. Ordinary pool committed/peak is
+8,639 / 4,200,511 B (63 B alignment headroom), unchanged throughout sampling;
+retained-output ring committed/peak is 21,440 / 10,501,120 B. Successful final
+trim returns every data segment; the native test asserts committed=0 before
+Close. Control metadata is 6,208 B before Close, zero after the last owners are
+dropped. The **2 GiB staging + 4 MiB flags + 1 MiB guard per rank remain**;
+output reduction is not an equivalent reduction in total HBM.
+
+### Regression, provenance and reproduction
+
+- CANN9.2 STAGES/OFF full build+install and fresh Torch extension build: PASS.
+- Standalone SDK Host/protocol: 5/5 PASS; offline Python suite: 23/23 PASS;
+  C++14 allocator CTest: PASS.
+- Native pool: 20 calls / 20 side effects, FIFO/ring/zero/metadata-early/late-error/
+  delayed-consumer lifetime checks PASS.
+- Post-HBM-allocation Host fault: 1 allocation / 1 injected exception / 1 real
+  free / 1 side effect, failed-domain admission rejected. The first command
+  omitted the fixture's required byte-selector environment and failed its
+  **pre-ACL argument check**; the preserved error log is not a failed kernel run.
+  The corrected, freshly gated invocation passes.
+- Torch: 20 normal cases/rank and paired rank-failure propagation/cleanup PASS;
+  real ordinary Tensor, alias, cross-stream, zero-output and early-drop paths.
+- Independent read-only code review and independent raw CSV/records statistics
+  audit: no confirmed defect/inconsistency; no reviewer NPU launch.
+
+The last workload completed both ranks with exit0. At **12:56:00 UTC**, the
+post-test gate rejected card0 (PID2874292, 2368 MB; process name unavailable),
+while card1 was idle. The command batch exits90 for this gate, not for a failed
+workload. No subsequent NPU launch occurred. Ownership of that process and any
+relation to completed tests are unconfirmed; do not claim the card is free or
+that no external task was affected. No kill/reset/remap was used.
+
+Local evidence root:
+`/workspace/TileXR-worktrees/elastic-memory/.elastic-memory-evidence/profiling-v216-20261109/`.
+Remote root:
+`/home/h30059441/elastic-memory-dev-20261106/profiling-v216-20261109/`.
+`final-code-sha256.json` + `final-code-verification.log` bind the unchanged 1,210
+non-documentation source/dependency files to the deployed snapshot. Build logs,
+`binary-sha256.json`, per-run `binary-sha256.txt` and actual `/proc/PID/maps`
+DSO hashes bind the launched executables, Host libraries and external kernels.
+The OFF/STAGES compact kernel hashes are respectively:
+
+```
+6e46c01ec1258b8adab56300d2695bf87b96dcd359cd9b017b199137e4b5993c
+eb583930723800bb7883d6a90e832f42742e6522af1add076827ca407307a336
+```
+
+Each measured directory retains proc-mem/mapping preflight, logs, msprof raw
+records/CSV and loaded maps; SDK directories also retain planned manifests,
+records/completion/shards, all per-capture reports and `repeat-report/`.
+`audit.json`, `owner-raw-samples.json`, `independent-audit.md/json` retain both
+machine summaries and independent checks. Environment-specific launch/gate/
+monitor scripts stay ignored and are not project tools.
+
+Build from the repository root after sourcing the actual CANN9.2 environment:
+
+```bash
+cmake -S . -B build-STAGES -DCMAKE_BUILD_TYPE=Release \
+  -DTILEXR_BUILD_EP=ON -DTILEXR_BUILD_ELASTIC_MEMORY=ON \
+  -DTILEXR_BUILD_TESTS=ON -DTILEXR_BUILD_UNITEST=OFF \
+  -DTILEXR_DIAGNOSTICS_SOC_TYPE=Ascend950 \
+  -DTILEXR_EP_COMPACT_PROFILING=STAGES
+cmake --build build-STAGES --parallel 8
+export PYTHONPATH="$PWD/tools/profiling/python"
+python3 tests/elastic_memory/profile_compact.py prepare /fresh/capture-directory \
+  --bs 16 --h 128 --lanes 64 --devices 0 1 --host "$(hostname)" \
+  --soc Ascend950DT --cann 9.2.0 --driver 26.2.0.b020 \
+  --source-id SOURCE_COMMIT_AND_MANIFEST \
+  --cycles-per-us CONFIRMED_OR_EXPLICIT_APPROXIMATE_SCALE \
+  --clock-basis 'evidence path and accuracy boundary'
+```
+
+Export the three `TILEXR_ELASTIC_*` values printed by prepare to **both ranks**.
+After a new strict combined idle/identity gate, run the following concurrently
+with rank=device=0 and 1, a shared unused `TILEXR_COMM_ID` port and UDMA disabled:
+
+```bash
+msprof --output=/fresh/prof-rankRANK --task-time=on --ai-core=on \
+  --aic-mode=task-based --runtime-api=on \
+  --application="$PWD/build-STAGES/tests/elastic_memory/test_elastic_compact_ep RANK DEVICE kernel_perf device_pool 16 128 20 20"
+python3 tests/elastic_memory/profile_compact.py analyze /fresh/capture-directory
+```
+
+Repeat as separate freshly gated pairs with `kernel_ring_perf`, and with
+bs256/h4096. For the formal comparison, rebuild a separate `build-OFF` with
+`TILEXR_EP_COMPACT_PROFILING=OFF`, unset the capture environment, use
+`kernel_perf MODE BS H 20 100`, and compare all three modes under identical
+msprof/Host-barrier settings. Never reuse the post-test occupancy snapshot as
+launch permission. Existing reports can be read/reanalyzed using the public SDK
+capture-set API into a new output directory; the preparation/analysis helper
+publishes files exclusively and does not overwrite a completed run.
 
 ## Metadata-ready materialization and 5 us active polling (November 9)
 
@@ -725,7 +1102,10 @@ substitute Host wall time or add task-wait time to the profiler task duration.
 
 ### Repository SDK capture command
 
-Use `TILEXR_EP_COMPACT_PROFILING=STAGES` for diagnostic capture. The retained
+The following is the historical pre-#216 reproduction. Current captures require
+the prepared mapping fingerprint and completion/manifest sidecars described in
+the standalone SDK migration section above. Use `TILEXR_EP_COMPACT_PROFILING=STAGES`
+for diagnostic capture. The retained
 `kernel-increment-20261109/run-pair.sh` supplies `TILEXR_ELASTIC_PROFILE_DIR` and
 a shared capture seed to both ranks, binds the capture to the actual service
 stream, and collects after completion. After a fresh combined gate, its paired

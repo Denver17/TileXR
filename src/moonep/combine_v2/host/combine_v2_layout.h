@@ -1,4 +1,7 @@
-﻿#ifndef TILEXR_MOONEP_COMBINE_V2_LAYOUT_H
+/*
+ * 计算 MoonEP payload、scratch 与控制区的有界工作区布局，供 Host 参数校验与 kernel launch 使用。
+ */
+#ifndef TILEXR_MOONEP_COMBINE_V2_LAYOUT_H
 #define TILEXR_MOONEP_COMBINE_V2_LAYOUT_H
 
 #include <cstdint>
@@ -15,8 +18,6 @@ struct CombineV2Layout {
     uint64_t slots = 0;
     uint64_t rowBytes = 0;
     uint64_t expertBytes = 0;
-    uint64_t profileOffset = 0;
-    uint64_t profileBytes = 0;
     uint64_t scratchOffset[kMoonEpCombineV2EpochCount] = {};
     uint64_t scratchBytes = 0;
     uint64_t doneOffset = 0;

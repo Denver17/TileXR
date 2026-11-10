@@ -37,5 +37,5 @@ add_dependencies(test_elastic_growth_fault elastic_pool_kernel elastic_growth_fa
 if(TARGET tilexr-ep)
     add_executable(test_elastic_compact_ep test_compact_ep.cpp)
     target_link_directories(test_elastic_compact_ep PRIVATE ${ASCEND_HOME_PATH}/${ARCH}-linux/lib64)
-    target_link_libraries(test_elastic_compact_ep PRIVATE tilexr-elastic-memory tilexr-ep tile-comm ascendcl runtime pthread)
+    target_link_libraries(test_elastic_compact_ep PRIVATE TileXR::profiling tilexr-elastic-memory tilexr-ep tile-comm ascendcl runtime pthread)
 endif()

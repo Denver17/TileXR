@@ -1,3 +1,6 @@
+/*
+ * 校验 MoonEP 公共 stage 参数，转发到 Planner、Dispatch、Prefetch、Combine 和 ReduceGrad Host 实现；不持有调用者的 tensor buffer。
+ */
 #include "tilexr_moonep.h"
 
 #include <cstddef>
@@ -309,16 +312,11 @@ extern "C" int TileXRMoonEpDispatchV1(const TileXRMoonEpDispatchArgsV1 *args,
 {
     const std::size_t legacyArgsBytes = offsetof(
         TileXRMoonEpDispatchArgsV1, registeredWorkspace);
-    const std::size_t urmaArgsBytes = offsetof(
-        TileXRMoonEpDispatchArgsV1, trace);
+    const std::size_t urmaArgsBytes = sizeof(TileXRMoonEpDispatchArgsV1);
     if (args != nullptr && args->structSize >= urmaArgsBytes &&
         (args->registeredWorkspace != nullptr ||
             args->registeredWorkspaceBytes != 0)) {
         return TileXRMoonEp::TileXRMoonEpRunDispatchUrmaV1(args, stream);
-    }
-    if (args != nullptr && args->structSize >= sizeof(*args) &&
-        args->trace != nullptr) {
-        return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;
     }
     if (args != nullptr && args->structSize < legacyArgsBytes) {
         return TILEXR_MOONEP_ERROR_INVALID_ARGUMENT;

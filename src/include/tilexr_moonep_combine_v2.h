@@ -1,4 +1,7 @@
-﻿#ifndef TILEXR_MOONEP_COMBINE_V2_H
+/*
+ * 声明 Combine V2 工作区查询与执行入口；调用者提供已注册的 workspace 和 output，设备执行由对应 Host library 提交。
+ */
+#ifndef TILEXR_MOONEP_COMBINE_V2_H
 #define TILEXR_MOONEP_COMBINE_V2_H
 
 #include <stdint.h>
@@ -11,7 +14,7 @@ extern "C" {
 
 int TileXRMoonEpCombineGetWorkspaceSizeV2(
     int64_t bs, int64_t h, int64_t topK, int64_t nvS, uint32_t dtype,
-    uint64_t *workspaceBytes, uint64_t *profileOffset,
+    uint64_t *workspaceBytes,
     uint64_t *outputEpoch0Offset, uint64_t *outputEpoch1Offset);
 
 // Supports rank sizes 2 through 8, 16, 32, 64, and 128. For 2 through 8

@@ -1,10 +1,14 @@
+/*
+ * 编译校验 MoonEP Combine V2 公开工作区查询及算子签名，消费 tilexr_moonep_combine_v2.h。
+ */
+
 #include <cstdint>
 #include <type_traits>
 
 #include "tilexr_moonep_combine_v2.h"
 
 using CombineWorkspaceQueryV2 = int (*)(int64_t, int64_t, int64_t,
-    int64_t, uint32_t, uint64_t *, uint64_t *, uint64_t *, uint64_t *);
+    int64_t, uint32_t, uint64_t *, uint64_t *, uint64_t *);
 using CombineV2 = int (*)(void *, const int32_t *, TileXRCommPtr, int64_t,
     int64_t, int64_t, int64_t, uint32_t, uint64_t *, uint32_t, aclrtStream);
 using CombineStageV2Fused = int (*)(void *, uint64_t, const int32_t *,

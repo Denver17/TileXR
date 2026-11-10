@@ -9,13 +9,10 @@
  */
 
 /*
- * 功能：声明 communicator 的 rank 状态、CommArgs、内存和传输对象，以及初始化和 cleanup 接口。
- * 调用关系：comm_wrap.cpp 通过 TileXRComm 实现公共 API；成员函数分别由 tilexr_comm.cpp 和传输模块实现。
- * 资源与生命周期：对象持有通信资源；getter 返回的 CommArgs、workspace 和 transport 指针供调用方借用。
- *
- * Purpose: Declare communicator rank state, CommArgs, memory and transport members, with setup and cleanup interfaces.
- * Calls: comm_wrap.cpp implements public APIs through TileXRComm; tilexr_comm.cpp and transport modules define its methods.
- * Lifetime: The object owns communication resources; pointers returned for CommArgs, workspaces and transports are borrowed.
+ * 声明 comm_wrap.cpp 使用的 communicator 状态、传输和清理接口。
+ * 对象持有通信资源、kernel tilings 和 SDK captures；getter 返回借用指针。
+ * Declares communicator setup and cleanup shared by Host wrappers and transports.
+ * The object owns communication resources, tilings and SDK captures; getters borrow them.
  */
 #ifndef TILEXR_COMM_H
 #define TILEXR_COMM_H
@@ -36,7 +33,6 @@
 
 namespace TileXR {
 class KernelTilingCache;
-class EpProfilingCapture;
 constexpr int IPC_NAME_SIZE = 65;
 constexpr int64_t TILEXR_MIB_BYTES = 1024LL * 1024;
 constexpr uint64_t TILEXR_MEMORY_DOMAIN_EXTRA_ALLOC_BYTES = 1024ULL * 1024ULL;
@@ -97,10 +93,6 @@ public:
     GM_ADDR GetSDMAWorkspacePtr() const;
     SDMAInitStatus GetSDMAInitStatus() const;
     std::string PrintDFX();
-    int FinalizeProfiling();
-    int ReserveProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
-    int ReserveLatestProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
-    int ReserveLatestCombineProfilingLaunch(uint32_t recordsPerLaunch, uint32_t *launchSlot);
     int GetKernelTiling(const void *data, uint32_t bytes, GM_ADDR *deviceData);
     int FinalizeKernelTilings();
     int GetInternalResource(void **resource) const;
@@ -190,7 +182,6 @@ private:
     GM_ADDR sdmaWorkspaceDev_ = nullptr;
     SDMAInitStatus sdmaInitStatus_ = SDMAInitStatus::DISABLED_BY_ENV;
     std::unique_ptr<TileXRSDMATransport> sdmaTransport_;
-    std::unique_ptr<EpProfilingCapture> epProfiling_;
     void *internalResource_ = nullptr;
     std::unique_ptr<KernelTilingCache> kernelTilings_;
     TileXRInternalResourceDestroyFn internalResourceDestroy_ = nullptr;

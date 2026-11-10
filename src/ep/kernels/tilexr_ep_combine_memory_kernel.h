@@ -1,3 +1,7 @@
+/*
+ * Memory Combine 按 assist metadata 将 expert 输出送回源 rank，并按 token 累加结果。
+ * 外置 kernel 入口调用本实现；TPipe 持有计算与搬运所用的 UB buffer。
+ */
 #ifndef TILEXR_EP_KERNELS_TILEXR_EP_COMBINE_MEMORY_KERNEL_H
 #define TILEXR_EP_KERNELS_TILEXR_EP_COMBINE_MEMORY_KERNEL_H
 
@@ -5,7 +9,6 @@
 
 #include "adv_api/reduce/sum.h"
 #include "comm_args.h"
-#include "ep_combine_memory_profile.h"
 #include "ep_memory_window.h"
 #include "kernel_operator.h"
 #include "tilexr_data_as_flag.h"
@@ -73,14 +76,6 @@ public:
             TileXREp::kEpMemoryStateWindowBytes;
     }
 
-    __aicore__ inline GM_ADDR ProfileRecordBase(uint32_t rank, uint32_t core) const
-    {
-        return TileXREp::TileXREpMemoryRoundDataBase(
-            args_->peerMems[rank], TileXREp::kEpMemoryCombineProfileBuffer) +
-            TileXREp::kEpMemoryDispatchDfxOffset +
-            static_cast<uint64_t>(core) * TileXREp::kEpMemoryDispatchDfxStride;
-    }
-
 private:
     __gm__ TileXR::CommArgs *args_{nullptr};
     int64_t magic_{0};
@@ -140,9 +135,6 @@ private:
     __aicore__ inline void AddSharedExpertX(uint32_t tokenIndex, uint32_t processLen);
     __aicore__ inline void ProcessExpert(uint32_t tokenIndex, uint32_t processLen);
     __aicore__ inline void LocalWindowCopy();
-    __aicore__ inline void InitProfile(uint64_t startCycles, int64_t magic);
-    __aicore__ inline void RecordProfilePoint(uint32_t index);
-    __aicore__ inline void WriteProfile();
 
     TPipe *tpipe_{nullptr};
     TileXRCombineMemoryContext context_;
@@ -222,110 +214,7 @@ private:
     LocalTensor<float> sumFloatBufLocal_;
     LocalTensor<float> expertScalesLocal_;
 
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    uint64_t profileGeneration_{0U};
-    uint32_t profileReceiveTokens_{0U};
-    uint64_t profileFlagPollAttempts_{0U};
-    uint64_t profileFlagPollMisses_{0U};
-    uint64_t profileTimePoint_[TileXREp::kEpCombineMemoryProfileTimePointCapacity];
-#endif
 };
-
-static_assert(sizeof(TileXREp::EpCombineMemoryProfileRecord) ==
-        TileXREp::kEpMemoryDispatchDfxStride,
-    "EP Combine Memory profile record must match the DFX stride");
-static_assert(TileXREp::kEpMemoryDispatchDfxOffset +
-        static_cast<uint64_t>(TileXREp::kEpMemoryMaxVectorCoreNum) *
-            TileXREp::kEpMemoryDispatchDfxStride <=
-        TileXREp::kEpMemoryDispatchCumsumOffset,
-    "EP Combine Memory profile records overlap cumsum state");
-
-template <typename ExpandXType, int64_t QuantMode>
-__aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::InitProfile(
-    uint64_t startCycles, int64_t magic)
-{
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    profileGeneration_ = static_cast<uint64_t>(magic);
-    profileReceiveTokens_ = 0U;
-    profileFlagPollAttempts_ = 0U;
-    profileFlagPollMisses_ = 0U;
-    for (uint32_t index = 0U; index < TileXREp::kEpCombineMemoryProfileTimePointCapacity; ++index) {
-        profileTimePoint_[index] = 0U;
-    }
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_INIT_BEGIN] = startCycles;
-#else
-    (void)startCycles;
-    (void)magic;
-#endif
-}
-
-template <typename ExpandXType, int64_t QuantMode>
-__aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::RecordProfilePoint(
-    uint32_t index)
-{
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    if (index < TileXREp::kEpCombineMemoryProfileTimePointCapacity) {
-        profileTimePoint_[index] = static_cast<uint64_t>(GetSystemCycle());
-    }
-#else
-    (void)index;
-#endif
-}
-
-template <typename ExpandXType, int64_t QuantMode>
-__aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::WriteProfile()
-{
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    if (profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_FINAL_END] == 0U) {
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FINAL_END);
-    }
-    uint64_t lastPoint = profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_INIT_BEGIN];
-    for (uint32_t index = 1U; index < TileXREp::kEpCombineMemoryProfileTimePointCount; ++index) {
-        if (profileTimePoint_[index] == 0U) {
-            profileTimePoint_[index] = lastPoint;
-        } else {
-            lastPoint = profileTimePoint_[index];
-        }
-    }
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_SEND_ROWS] = sendCntNum_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_RECEIVE_TOKENS] = profileReceiveTokens_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_FLAG_POLL_ATTEMPTS] =
-        profileFlagPollAttempts_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_FLAG_POLL_MISSES] = profileFlagPollMisses_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_BLOCKS_PER_TOKEN] = blockCntPerToken_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_DISPATCH_BUFFER_NUM] = dispatchBufferNum_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_RECEIVE_BUFFER_NUM] = bufferNum_;
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_DIAG_SEND_GROUP_COUNT] =
-        !isSmallBs_ && IsDoubleGroupRankSize() && sharedExpertRankNum_ == 0U ?
-        TileXREp::kEpMemoryDoubleGroupRoundNum : 1U;
-
-    __gm__ TileXREp::EpCombineMemoryProfileRecord *record =
-        reinterpret_cast<__gm__ TileXREp::EpCombineMemoryProfileRecord *>(
-            context_.ProfileRecordBase(epRankId_, coreIdx_));
-    record->marker = TileXREp::kEpCombineMemoryProfileMarker;
-    record->version = TileXREp::kEpCombineMemoryProfileVersion;
-    record->recordBytes = sizeof(TileXREp::EpCombineMemoryProfileRecord);
-    record->rank = epRankId_;
-    record->core = coreIdx_;
-    record->blockDim = aivNum_;
-    record->timePointCount = TileXREp::kEpCombineMemoryProfileTimePointCount;
-    record->metricCount = TileXREp::kEpCombineMemoryProfileMetricCount;
-    record->generation = profileGeneration_;
-    for (uint32_t index = 0U; index < TileXREp::kEpCombineMemoryProfileTimePointCapacity; ++index) {
-        record->timePoint[index] = profileTimePoint_[index];
-    }
-    for (uint32_t index = 0U; index < TileXREp::kEpCombineMemoryProfileMetricCapacity; ++index) {
-        record->metric[index] = 0U;
-    }
-
-    GlobalTensor<uint8_t> recordGlobal;
-    recordGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint8_t *>(record), sizeof(*record));
-    for (uint32_t offset = 0U; offset < sizeof(*record); offset += 64U) {
-        DataCacheCleanAndInvalid<uint8_t, CacheLine::SINGLE_CACHE_LINE, DcciDst::CACHELINE_OUT>(
-            recordGlobal[offset]);
-    }
-#endif
-}
 
 template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::InitInputAndOutput(
@@ -403,17 +292,11 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::Init(
     int64_t sharedExpertRankNum, int64_t globalBs, int64_t activeMaskType,
     int64_t quantMode, int64_t magic, TPipe *pipe)
 {
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    const uint64_t profileStartCycles = static_cast<uint64_t>(GetSystemCycle());
-#else
-    const uint64_t profileStartCycles = 0U;
-#endif
     (void)globalBs;
     (void)quantMode;
     tpipe_ = pipe;
     coreIdx_ = GetBlockIdx();
     aivNum_ = GetBlockNum();
-    InitProfile(profileStartCycles, magic);
     context_.Init(commArgsGM, magic);
     epRankId_ = context_.Rank();
     epWorldSize_ = context_.RankSize();
@@ -658,13 +541,11 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchCopyAdd()
             if (doubleGroupEnabled && roundId == 0U) {
                 PipeBarrier<PIPE_ALL>();
                 AscendC::SyncAll<true>();
-                RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_GROUP0_END);
             }
         }
     } else if (doubleGroupEnabled) {
         PipeBarrier<PIPE_ALL>();
         AscendC::SyncAll<true>();
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_SEND_GROUP0_END);
     }
 }
 
@@ -694,15 +575,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::SetWaitTpStatus
     PipeBarrier<PIPE_ALL>();
     ExpertAlltoAllDispatchCopyAdd();
     SyncFunc<AscendC::HardEvent::MTE3_S>();
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    const uint64_t sendEndCycles = static_cast<uint64_t>(GetSystemCycle());
-    const bool doubleGroupEnabled =
-        !isSmallBs_ && IsDoubleGroupRankSize() && sharedExpertRankNum_ == 0U;
-    if (!doubleGroupEnabled) {
-        profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_SEND_GROUP0_END] = sendEndCycles;
-    }
-    profileTimePoint_[TileXREp::EP_COMBINE_MEMORY_TIME_SEND_END] = sendEndCycles;
-#endif
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -762,9 +634,6 @@ MoeCombineMemory<ExpandXType, QuantMode>::CheckPackedFlagRangeArrive(
     if (blockCount == 0U) {
         return true;
     }
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    profileFlagPollAttempts_++;
-#endif
     LocalTensor<float> flagLocal = packedCheckFlagBuf_.Get<float>();
     LocalTensor<float> sumOut = packedCheckReduceBuf_.GetWithOffset<float>(
         TileXR::DATA_AS_FLAG_SUM_RESULT_BYTES / sizeof(float), 0U);
@@ -783,11 +652,6 @@ MoeCombineMemory<ExpandXType, QuantMode>::CheckPackedFlagRangeArrive(
     SyncFunc<AscendC::HardEvent::V_S>();
     const bool ready = sumOut.GetValue(0) ==
         TileXR::DATA_AS_FLAG_READY_VALUE * blockCount;
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    if (!ready) {
-        profileFlagPollMisses_++;
-    }
-#endif
     return ready;
 }
 
@@ -1033,13 +897,8 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::LocalWindowCopy
         beginIndex += remainderToken;
     }
     if (tokenPerAivNum == 0U) {
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FIRST_TOKEN_READY);
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_LAST_TOKEN_READY);
         return;
     }
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-    profileReceiveTokens_ = tokenPerAivNum;
-#endif
     const uint32_t endIndex = beginIndex + tokenPerAivNum;
     const uint32_t processLen = axisH_;
     rowTmpFloatLocal_ = rowTmpFloatBuf_.Get<float>();
@@ -1070,12 +929,6 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::LocalWindowCopy
                 continue;
             }
             completed++;
-            if (completed == 1U) {
-                RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FIRST_TOKEN_READY);
-            }
-            if (completed == tokenPerAivNum) {
-                RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_LAST_TOKEN_READY);
-            }
             tokenStatus.SetValue(localIndex, 1);
             if (tokenActive) {
                 ProcessExpert(tokenIndex, processLen);
@@ -1098,16 +951,10 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::Process()
 {
     if ASCEND_IS_AIV {
         BuffInit();
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_INIT_END);
         SetWaitTpStatusAndDisPatch();
         PipeBarrier<PIPE_ALL>();
         AlltoAllBuffInitAndMaskCal();
         LocalWindowCopy();
-#if defined(TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING)
-        SyncFunc<AscendC::HardEvent::MTE3_S>();
-#endif
-        RecordProfilePoint(TileXREp::EP_COMBINE_MEMORY_TIME_FINAL_END);
-        WriteProfile();
     }
 }
 

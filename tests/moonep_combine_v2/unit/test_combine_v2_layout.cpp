@@ -1,9 +1,11 @@
-﻿#include <cstdint>
+/*
+ * 验证 MoonEP 的布局、调用或诊断合同；直接覆盖对应 src/moonep 与 tools/moonep 接口，硬件数据面另行验收。
+ */
+#include <cstdint>
 #include <cstdlib>
 #include <iostream>
 
 #include "combine_v2_layout.h"
-#include "combine_v2_profile.h"
 #include "comm_args.h"
 #include "tilexr_moonep.h"
 
@@ -31,14 +33,6 @@ void CheckStatus(int actual, int expected, const char *message)
 void TestTargetLayout()
 {
     using namespace TileXRMoonEp;
-    Check(sizeof(MoonEpCombineV2ProfileRecord) == 704U,
-        "profile record size mismatch");
-    Check(kMoonEpCombineV2ProfileTimePointCount == 22U,
-        "profile point count mismatch");
-    Check(kMoonEpCombineV2ProfileMetricCount == 18U,
-        "profile metric count mismatch");
-    Check(kMoonEpCombineV2WeightStepCounterCount == 5U,
-        "weight profile counter count mismatch");
 
     CombineV2Layout layout {};
     CheckStatus(TileXRMoonEpBuildCombineV2Layout(
@@ -47,25 +41,22 @@ void TestTargetLayout()
     Check(layout.slots == 131072U, "target slots mismatch");
     Check(layout.rowBytes == 7168U, "target row bytes mismatch");
     Check(layout.expertBytes == 939524096U, "target expert bytes mismatch");
-    Check(layout.profileBytes ==
-        kMoonEpCombineV2CoreCount * sizeof(MoonEpCombineV2ProfileRecord),
-        "target profile bytes mismatch");
-    Check(layout.scratchOffset[0] == layout.profileOffset + layout.profileBytes,
+    Check(layout.scratchOffset[0] == layout.expertBytes,
         "scratch epoch 0 offset mismatch");
     Check(layout.scratchOffset[1] == layout.scratchOffset[0] + layout.expertBytes,
         "scratch epoch 1 offset mismatch");
     Check(layout.doneBytes == 32768U, "done bytes mismatch");
-    Check(layout.controlSourceOffset == 2818616320ULL,
+    Check(layout.controlSourceOffset == 2818605056ULL,
         "control source offset mismatch");
-    Check(layout.failureOffset == 2818618368ULL,
+    Check(layout.failureOffset == 2818607104ULL,
         "failure offset mismatch");
     Check(layout.controlSourceBytes == 2048U, "control source bytes mismatch");
     Check(layout.failureBytes == 2048U, "failure bytes mismatch");
-    Check(layout.collectiveStatusOffset == 2818620416ULL,
+    Check(layout.collectiveStatusOffset == 2818609152ULL,
         "collective status offset mismatch");
     Check(layout.collectiveStatusBytes == 2048U,
         "collective status bytes mismatch");
-    Check(layout.outputOffset == 2818622464ULL,
+    Check(layout.outputOffset == 2818611200ULL,
         "target output offset mismatch");
     Check(layout.outputOffset ==
             layout.collectiveStatusOffset + layout.collectiveStatusBytes,
@@ -139,7 +130,7 @@ void TestWeightMemoryLayout()
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "zero weight slots");
     CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, 0, &layout),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "zero weight world");
-    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, 129, &layout),
+    CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(128, TileXR::TILEXR_MAX_RANK_SIZE + 1, &layout),
         TILEXR_MOONEP_ERROR_INVALID_ARGUMENT, "oversized weight world");
     CheckStatus(TileXRMoonEpBuildCombineV2WeightLayout(
         static_cast<int64_t>(TileXR::IPC_BUFF_MAX_SIZE / 16U), 128, &layout),

@@ -1,3 +1,6 @@
+/*
+ * 读取 Host 提供的 Dispatch tiling，选择 FP16/BF16 与量化实例并执行 ServerDedup；输入和 output 地址由 Host 传入。
+ */
 #include "tilexr_ep_dispatch_memory_server_dedup_kernel.h"
 #include "tilexr_types.h"
 #include "ep_memory_server_dedup_tiling.h"
@@ -15,7 +18,6 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     const uint32_t topK = tiling->topK;
     const uint32_t moeExpertNum = tiling->moeExpertNum;
     const uint32_t expertTokenNumsType = tiling->expertTokenNumsType;
-    const uint32_t profilingLaunchSlot = tiling->profilingLaunchSlot;
     const uint8_t quantMode = tiling->quantMode;
     const uint8_t dtype = tiling->dtype;
     const uint8_t expandXOutDtype = tiling->expandXOutDtype;
@@ -24,7 +26,7 @@ extern "C" __global__ __aicore__ __mix__(0, 1) void tilexr_ep_dispatch_memory_se
     TileXREp::DispatchMemoryServerDedupKernel<XType, Quantized, E4M3> kernel; \
     kernel.Init(commArgs, x, expertIds, expertScales, expandXOut, dynamicScalesOut, expertTokenNumsOut, sendCountsOut, \
         tokenTypeOut, destinationIndexOut, relayReadIndexOut, sourceMaskOut, expertScalesOut, bs, h, topK, \
-        moeExpertNum, expertTokenNumsType, magic, profilingLaunchSlot, &pipe); \
+        moeExpertNum, expertTokenNumsType, magic, &pipe); \
     kernel.Process()
     if (dtype == TileXR::TILEXR_DATA_TYPE_FP16) {
         if (quantMode == 0) {

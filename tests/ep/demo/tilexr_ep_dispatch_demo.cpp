@@ -1,3 +1,8 @@
+/*
+ * 创建各 rank 的 EP 输入并校验 Dispatch/Combine 输出，支持 Memory 与 UDMA backend。
+ * perf 模式保留暖机、测量前后 barrier 和 stream 完成等待，耗时由外部 profiler 采集。
+ * main 持有 communicator、stream 和 device buffers，并在退出路径调用 Cleanup。
+ */
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -18,8 +23,6 @@
 #include <unistd.h>
 
 #include "acl/acl.h"
-#include "ep_combine_memory_profile.h"
-#include "ep_dispatch_memory_profile.h"
 #include "ep_memory_window.h"
 #include "mxfp8_golden.h"
 #include "tilexr_ep_expert_ids.h"
@@ -605,26 +608,6 @@ bool BuildExpertIds(DemoConfig *config, int rank, int rankSize, ExpertListMode m
     return true;
 }
 
-bool IsProfileRunIdValid(const std::string &runId)
-{
-    if (runId.empty() || runId.size() > 128U) {
-        return false;
-    }
-    for (char value : runId) {
-        const bool alphaNumeric = (value >= 'a' && value <= 'z') ||
-            (value >= 'A' && value <= 'Z') || (value >= '0' && value <= '9');
-        if (!alphaNumeric && value != '-' && value != '_' && value != '.') {
-            return false;
-        }
-    }
-    return true;
-}
-
-const char *ProfileDtypeName(TileXR::TileXRDataType dtype)
-{
-    return dtype == TileXR::TILEXR_DATA_TYPE_BFP16 ? "bf16" : "fp16";
-}
-
 std::vector<uint8_t> ActiveMask(int64_t activeMaskType, const DemoConfig &config)
 {
     if (activeMaskType == TileXREp::TILEXR_EP_ACTIVE_MASK_NONE) {
@@ -1136,351 +1119,6 @@ bool ValidateTpRecvCounts(int rank, int rankSize, const DemoConfig &config, cons
     return true;
 }
 
-bool CaptureDispatchMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
-    int iteration, uint64_t expectedGeneration, const std::string &runId,
-    const DemoConfig &config, TileXR::TileXRDataType dtype, int quantMode,
-    int64_t activeMaskType, int expertTokenNumsType)
-{
-    TileXR::CommArgs *commArgs = nullptr;
-    if (!CheckTileXR(TileXRGetCommArgsHost(comm, commArgs),
-            "TileXRGetCommArgsHost dispatch profile") || commArgs == nullptr ||
-        commArgs->rank != rank || commArgs->rankSize != rankSize ||
-        rank < 0 || rank >= commArgs->rankSize || commArgs->peerMems[rank] == nullptr) {
-        std::cerr << "rank " << rank << " invalid communicator for dispatch profile" << std::endl;
-        return false;
-    }
-
-    using ProfileRecord = TileXREp::EpDispatchMemoryProfileRecord;
-    const std::size_t profileBytes =
-        static_cast<std::size_t>(TileXREp::kEpMemoryMaxVectorCoreNum) * sizeof(ProfileRecord);
-    const uint64_t profileOffset = TileXREp::TileXREpMemoryRoundDataOffset(
-        TileXREp::kEpMemoryDispatchProfileBuffer) + TileXREp::kEpMemoryDispatchDfxOffset;
-    if (profileOffset > commArgs->peerMemBytes ||
-        profileBytes > commArgs->peerMemBytes - profileOffset) {
-        std::cerr << "rank " << rank << " dispatch profile region exceeds peer memory" << std::endl;
-        return false;
-    }
-
-    std::vector<uint8_t> profileData(profileBytes);
-    const void *profileDevice = commArgs->peerMems[rank] + profileOffset;
-    if (!CheckAcl(aclrtMemcpy(profileData.data(), profileBytes, profileDevice, profileBytes,
-            ACL_MEMCPY_DEVICE_TO_HOST), "copy dispatch profile")) {
-        return false;
-    }
-    const auto ReadRecord = [&profileData](uint32_t core) {
-        ProfileRecord record {};
-        std::memcpy(&record, profileData.data() +
-            static_cast<std::size_t>(core) * sizeof(ProfileRecord), sizeof(ProfileRecord));
-        return record;
-    };
-
-    const ProfileRecord first = ReadRecord(0U);
-    const uint32_t blockDim = first.blockDim;
-    if (blockDim == 0U || blockDim > TileXREp::kEpMemoryMaxVectorCoreNum) {
-        std::cerr << "rank " << rank << " invalid dispatch profile blockDim=" << blockDim << std::endl;
-        return false;
-    }
-    const uint64_t alltoallCoreCount = first.timePoint[
-        TileXREp::EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT];
-    const uint64_t sendGroupCount = first.timePoint[
-        TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT];
-    if (alltoallCoreCount > blockDim || (sendGroupCount != 1U && sendGroupCount != 2U)) {
-        std::cerr << "rank " << rank << " invalid dispatch alltoall core count="
-                  << alltoallCoreCount << " send group count=" << sendGroupCount << std::endl;
-        return false;
-    }
-
-    uint64_t maxKernelCycles = 0U;
-    for (uint32_t core = 0U; core < blockDim; ++core) {
-        const ProfileRecord record = ReadRecord(core);
-        const uint32_t expectedRole = core < alltoallCoreCount ?
-            TileXREp::EP_DISPATCH_MEMORY_ROLE_SENDER :
-            TileXREp::EP_DISPATCH_MEMORY_ROLE_COUNT_CUMSUM;
-        if (record.marker != TileXREp::kEpDispatchMemoryProfileMarker ||
-            record.version != TileXREp::kEpDispatchMemoryProfileVersion ||
-            record.recordBytes != sizeof(ProfileRecord) ||
-            record.rank != static_cast<uint32_t>(rank) || record.core != core ||
-            record.blockDim != blockDim || record.coreRole != expectedRole ||
-            record.timePointCount != TileXREp::kEpDispatchMemoryProfileTimePointCount ||
-            record.metricCount != TileXREp::kEpDispatchMemoryProfileMetricCount ||
-            record.generation != expectedGeneration ||
-            record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT] !=
-                alltoallCoreCount ||
-            record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT] !=
-                sendGroupCount) {
-            std::cerr << "rank " << rank << " core " << core
-                      << " invalid dispatch profile metadata generation=" << record.generation
-                      << " expected_generation=" << expectedGeneration
-                      << "; rebuild with TILEXR_EP_DISPATCH_MEMORY_ENABLE_PROFILING=ON"
-                      << std::endl;
-            return false;
-        }
-        for (uint32_t point = 0U;
-            point < TileXREp::kEpDispatchMemoryProfileTimePointCount; ++point) {
-            if (record.timePoint[point] == 0U ||
-                (point > 0U && record.timePoint[point] < record.timePoint[point - 1U])) {
-                std::cerr << "rank " << rank << " core " << core
-                          << " invalid dispatch profile timestamp t" << point << std::endl;
-                return false;
-            }
-        }
-        if ((sendGroupCount == 1U &&
-                record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_GROUP0_END] !=
-                    record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_END]) ||
-            (expectedRole == TileXREp::EP_DISPATCH_MEMORY_ROLE_SENDER &&
-                record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_TRANSFER_END] !=
-                    record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_CUMSUM_END])) {
-            std::cerr << "rank " << rank << " core " << core
-                      << " invalid dispatch role/group phase endpoints" << std::endl;
-            return false;
-        }
-        const uint64_t kernelCycles =
-            record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_FINAL_END] -
-            record.timePoint[TileXREp::EP_DISPATCH_MEMORY_TIME_INIT_BEGIN];
-        maxKernelCycles = std::max(maxKernelCycles, kernelCycles);
-    }
-
-    const double elapsedUs = static_cast<double>(maxKernelCycles) /
-        TileXREp::kEpDispatchMemoryProfileCyclesPerUs;
-    std::cout << std::fixed << std::setprecision(6)
-              << "EP_DISPATCH_MEMORY_SAMPLE"
-              << " run_id=" << runId
-              << " iteration=" << iteration
-              << " rank=" << rank
-              << " world_size=" << rankSize
-              << " bs=" << config.bs
-              << " h=" << config.h
-              << " k=" << config.topK
-              << " experts=" << config.moeExpertNum
-              << " dtype=" << ProfileDtypeName(dtype)
-              << " quant_mode=" << quantMode
-              << " comm_quant_mode=0"
-              << " active_mask_type=" << activeMaskType
-              << " expert_token_nums_type=" << expertTokenNumsType
-              << " generation=" << expectedGeneration
-              << " elapsed_us=" << elapsedUs
-              << " timing_source=kernel_profile" << std::endl;
-
-    for (uint32_t core = 0U; core < blockDim; ++core) {
-        const ProfileRecord record = ReadRecord(core);
-        const char *coreRole = record.coreRole == TileXREp::EP_DISPATCH_MEMORY_ROLE_SENDER ?
-            "sender" : "count_cumsum";
-        std::cout << "EP_DISPATCH_MEMORY_PROFILE"
-                  << " run_id=" << runId
-                  << " iteration=" << iteration
-                  << " rank=" << rank
-                  << " world_size=" << rankSize
-                  << " bs=" << config.bs
-                  << " h=" << config.h
-                  << " k=" << config.topK
-                  << " experts=" << config.moeExpertNum
-                  << " dtype=" << ProfileDtypeName(dtype)
-                  << " quant_mode=" << quantMode
-                  << " comm_quant_mode=0"
-                  << " active_mask_type=" << activeMaskType
-                  << " expert_token_nums_type=" << expertTokenNumsType
-                  << " core=" << core
-                  << " core_role=" << coreRole
-                  << " block_dim=" << blockDim
-                  << " generation=" << record.generation
-                  << " profile_version=" << record.version
-                  << " cycles_per_us=" << TileXREp::kEpDispatchMemoryProfileCyclesPerUs
-                  << " point_count=" << record.timePointCount
-                  << " metric_count=" << record.metricCount;
-        for (uint32_t point = 0U; point < record.timePointCount; ++point) {
-            std::cout << " t" << point << '=' << record.timePoint[point];
-        }
-        for (uint32_t metric = 0U; metric < record.metricCount; ++metric) {
-            std::cout << " m" << metric << '=' << record.metric[metric];
-        }
-        std::cout
-            << " assigned_routes="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_ASSIGNED_ROUTES]
-            << " issued_routes="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_ISSUED_ROUTES]
-            << " count_records="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_COUNT_RECORDS]
-            << " alltoall_core_count="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_ALLTOALL_CORE_COUNT]
-            << " send_buffer_num="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_BUFFER_NUM]
-            << " status_poll_attempts="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_STATUS_POLL_ATTEMPTS]
-            << " status_poll_misses="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_STATUS_POLL_MISSES]
-            << " cumsum_poll_attempts="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_CUMSUM_POLL_ATTEMPTS]
-            << " cumsum_gate_attempts="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_CUMSUM_GATE_ATTEMPTS]
-            << " valid_experts="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_VALID_EXPERTS]
-            << " receive_batches="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_RECEIVE_BATCHES]
-            << " receive_tokens="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_RECEIVE_TOKENS]
-            << " payload_poll_attempts="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_PAYLOAD_POLL_ATTEMPTS]
-            << " payload_poll_misses="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_PAYLOAD_POLL_MISSES]
-            << " max_copy_token_count="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_MAX_COPY_TOKEN_COUNT]
-            << " blocks_per_token="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_BLOCKS_PER_TOKEN]
-            << " send_group_count="
-            << record.timePoint[TileXREp::EP_DISPATCH_MEMORY_DIAG_SEND_GROUP_COUNT]
-            << std::endl;
-    }
-    return true;
-}
-
-bool CaptureCombineMemoryProfile(TileXRCommPtr comm, int rank, int rankSize,
-    int iteration, uint64_t expectedGeneration, const std::string &runId,
-    const DemoConfig &config, TileXR::TileXRDataType dtype, int quantMode,
-    int commQuantMode, int64_t activeMaskType)
-{
-    TileXR::CommArgs *commArgs = nullptr;
-    if (!CheckTileXR(TileXRGetCommArgsHost(comm, commArgs),
-            "TileXRGetCommArgsHost combine profile") || commArgs == nullptr ||
-        commArgs->rank != rank || commArgs->rankSize != rankSize ||
-        rank < 0 || rank >= commArgs->rankSize || commArgs->peerMems[rank] == nullptr) {
-        std::cerr << "rank " << rank << " invalid communicator for combine profile" << std::endl;
-        return false;
-    }
-
-    using ProfileRecord = TileXREp::EpCombineMemoryProfileRecord;
-    const std::size_t profileBytes =
-        static_cast<std::size_t>(TileXREp::kEpMemoryMaxVectorCoreNum) * sizeof(ProfileRecord);
-    const uint64_t profileOffset = TileXREp::TileXREpMemoryRoundDataOffset(
-        TileXREp::kEpMemoryCombineProfileBuffer) +
-        TileXREp::kEpMemoryDispatchDfxOffset;
-    if (profileOffset > commArgs->peerMemBytes ||
-        profileBytes > commArgs->peerMemBytes - profileOffset) {
-        std::cerr << "rank " << rank << " combine profile region exceeds peer memory" << std::endl;
-        return false;
-    }
-
-    std::vector<uint8_t> profileData(profileBytes);
-    const void *profileDevice = commArgs->peerMems[rank] + profileOffset;
-    if (!CheckAcl(aclrtMemcpy(profileData.data(), profileBytes, profileDevice, profileBytes,
-            ACL_MEMCPY_DEVICE_TO_HOST), "copy combine profile")) {
-        return false;
-    }
-    const auto ReadRecord = [&profileData](uint32_t core) {
-        ProfileRecord record {};
-        std::memcpy(&record, profileData.data() +
-            static_cast<std::size_t>(core) * sizeof(ProfileRecord), sizeof(ProfileRecord));
-        return record;
-    };
-
-    const ProfileRecord first = ReadRecord(0U);
-    const uint32_t blockDim = first.blockDim;
-    if (blockDim == 0U || blockDim > TileXREp::kEpMemoryMaxVectorCoreNum) {
-        std::cerr << "rank " << rank << " invalid combine profile blockDim=" << blockDim << std::endl;
-        return false;
-    }
-
-    uint64_t maxKernelCycles = 0U;
-    for (uint32_t core = 0U; core < blockDim; ++core) {
-        const ProfileRecord record = ReadRecord(core);
-        if (record.marker != TileXREp::kEpCombineMemoryProfileMarker ||
-            record.version != TileXREp::kEpCombineMemoryProfileVersion ||
-            record.recordBytes != sizeof(ProfileRecord) ||
-            record.rank != static_cast<uint32_t>(rank) || record.core != core ||
-            record.blockDim != blockDim ||
-            record.timePointCount != TileXREp::kEpCombineMemoryProfileTimePointCount ||
-            record.metricCount != TileXREp::kEpCombineMemoryProfileMetricCount ||
-            record.generation != expectedGeneration) {
-            std::cerr << "rank " << rank << " core " << core
-                      << " invalid combine profile metadata generation=" << record.generation
-                      << " expected_generation=" << expectedGeneration
-                      << "; rebuild with TILEXR_EP_COMBINE_MEMORY_ENABLE_PROFILING=ON"
-                      << std::endl;
-            return false;
-        }
-        for (uint32_t point = 0U;
-            point < TileXREp::kEpCombineMemoryProfileTimePointCount; ++point) {
-            if (record.timePoint[point] == 0U ||
-                (point > 0U && record.timePoint[point] < record.timePoint[point - 1U])) {
-                std::cerr << "rank " << rank << " core " << core
-                          << " invalid combine profile timestamp t" << point << std::endl;
-                return false;
-            }
-        }
-        const uint64_t kernelCycles =
-            record.timePoint[TileXREp::EP_COMBINE_MEMORY_TIME_FINAL_END] -
-            record.timePoint[TileXREp::EP_COMBINE_MEMORY_TIME_INIT_BEGIN];
-        maxKernelCycles = std::max(maxKernelCycles, kernelCycles);
-    }
-
-    const double elapsedUs = static_cast<double>(maxKernelCycles) /
-        TileXREp::kEpCombineMemoryProfileCyclesPerUs;
-    std::cout << std::fixed << std::setprecision(6)
-              << "EP_COMBINE_MEMORY_SAMPLE"
-              << " run_id=" << runId
-              << " iteration=" << iteration
-              << " rank=" << rank
-              << " world_size=" << rankSize
-              << " bs=" << config.bs
-              << " h=" << config.h
-              << " k=" << config.topK
-              << " experts=" << config.moeExpertNum
-              << " dtype=" << ProfileDtypeName(dtype)
-              << " quant_mode=" << quantMode
-              << " comm_quant_mode=" << commQuantMode
-              << " active_mask_type=" << activeMaskType
-              << " generation=" << expectedGeneration
-              << " elapsed_us=" << elapsedUs
-              << " timing_source=kernel_profile" << std::endl;
-
-    for (uint32_t core = 0U; core < blockDim; ++core) {
-        const ProfileRecord record = ReadRecord(core);
-        std::cout << "EP_COMBINE_MEMORY_PROFILE"
-                  << " run_id=" << runId
-                  << " iteration=" << iteration
-                  << " rank=" << rank
-                  << " world_size=" << rankSize
-                  << " bs=" << config.bs
-                  << " h=" << config.h
-                  << " k=" << config.topK
-                  << " experts=" << config.moeExpertNum
-                  << " dtype=" << ProfileDtypeName(dtype)
-                  << " quant_mode=" << quantMode
-                  << " comm_quant_mode=" << commQuantMode
-                  << " active_mask_type=" << activeMaskType
-                  << " core=" << core
-                  << " block_dim=" << blockDim
-                  << " generation=" << record.generation
-                  << " profile_version=" << record.version
-                  << " cycles_per_us=" << TileXREp::kEpCombineMemoryProfileCyclesPerUs
-                  << " point_count=" << record.timePointCount
-                  << " metric_count=" << record.metricCount;
-        for (uint32_t point = 0U; point < record.timePointCount; ++point) {
-            std::cout << " t" << point << '=' << record.timePoint[point];
-        }
-        for (uint32_t metric = 0U; metric < record.metricCount; ++metric) {
-            std::cout << " m" << metric << '=' << record.metric[metric];
-        }
-        std::cout << " send_rows="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_SEND_ROWS]
-                  << " receive_tokens="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_RECEIVE_TOKENS]
-                  << " flag_poll_attempts="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_FLAG_POLL_ATTEMPTS]
-                  << " flag_poll_misses="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_FLAG_POLL_MISSES]
-                  << " blocks_per_token="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_BLOCKS_PER_TOKEN]
-                  << " dispatch_buffer_num="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_DISPATCH_BUFFER_NUM]
-                  << " receive_buffer_num="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_RECEIVE_BUFFER_NUM]
-                  << " send_group_count="
-                  << record.timePoint[TileXREp::EP_COMBINE_MEMORY_DIAG_SEND_GROUP_COUNT]
-                  << std::endl;
-    }
-    return true;
-}
-
 void Cleanup(TileXRCommPtr comm, aclrtStream stream, int deviceId, bool deviceSet, bool aclReady,
     std::vector<void *> &buffers)
 {
@@ -1518,16 +1156,6 @@ int main(int argc, char **argv)
     const int firstNpu = argc > 4 ? std::atoi(argv[4]) : GetEnvInt("TILEXR_DEMO_FIRST_NPU", 0);
     const int loopCount = GetEnvInt("TILEXR_EP_DEMO_LOOP", 150);
     const bool perfMode = EnvEnabled("TILEXR_EP_DEMO_PERF");
-    const bool dispatchProfileMode = EnvEnabled("TILEXR_EP_DEMO_DISPATCH_MEMORY_PROFILE");
-    const char *dispatchProfileRunIdText =
-        std::getenv("TILEXR_EP_DISPATCH_MEMORY_PROFILE_RUN_ID");
-    const std::string dispatchProfileRunId =
-        dispatchProfileRunIdText == nullptr ? "" : dispatchProfileRunIdText;
-    const bool combineProfileMode = EnvEnabled("TILEXR_EP_DEMO_COMBINE_MEMORY_PROFILE");
-    const char *combineProfileRunIdText =
-        std::getenv("TILEXR_EP_COMBINE_MEMORY_PROFILE_RUN_ID");
-    const std::string combineProfileRunId =
-        combineProfileRunIdText == nullptr ? "" : combineProfileRunIdText;
     const int warmupCount = GetEnvInt("TILEXR_EP_DEMO_WARMUP", 50);
     const char *backendText = std::getenv("TILEXR_EP_DEMO_IMPL");
     bool validBackend = true;
@@ -1655,11 +1283,7 @@ int main(int argc, char **argv)
         useStaticQuant || usePerTokenDynamicQuant || (useMxfp8 && (runCombine || !useMemory)) ||
         (useCombineMxfp8 && (!runCombine || !useMemory)) ||
         (runCombine && config.effectiveTpWorldSize() != 1) ||
-        (perfMode && runMode == DemoRunMode::DISPATCH_COMBINE) ||
-        (dispatchProfileMode && (!perfMode || !useMemory || runMode != DemoRunMode::DISPATCH ||
-            !IsProfileRunIdValid(dispatchProfileRunId))) ||
-        (combineProfileMode && (!perfMode || !useMemory || runMode != DemoRunMode::COMBINE ||
-            !IsProfileRunIdValid(combineProfileRunId)))) {
+        (perfMode && runMode == DemoRunMode::DISPATCH_COMBINE)) {
         std::cerr << "This demo expects a valid rank and moeExpertNum divisible by MoE rank num, got moeExpertNum="
                   << config.moeExpertNum << " rankSize=" << rankSize
                   << " bs=" << config.bs
@@ -1959,14 +1583,7 @@ int main(int argc, char **argv)
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
-        const uint64_t expectedGeneration = static_cast<uint64_t>(warmupCount) +
-            static_cast<uint64_t>(loopCount);
-        const bool profileOk = !dispatchProfileMode || CaptureDispatchMemoryProfile(
-            comm, rank, rankSize, loopCount - 1, expectedGeneration, dispatchProfileRunId,
-            config, dtype, quantMode, activeMaskType, expertTokenNumsType);
-        const bool barrierOk = DemoBarrierAll(rank, rankSize,
-            dispatchProfileMode ? "dispatch profile captured" : "dispatch perf synchronized");
-        if (!profileOk || !barrierOk) {
+        if (!DemoBarrierAll(rank, rankSize, "dispatch perf synchronized")) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
@@ -2012,14 +1629,7 @@ int main(int argc, char **argv)
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }
-        const uint64_t expectedGeneration = static_cast<uint64_t>(warmupCount) +
-            static_cast<uint64_t>(loopCount);
-        const bool profileOk = !combineProfileMode || CaptureCombineMemoryProfile(
-            comm, rank, rankSize, loopCount - 1, expectedGeneration, combineProfileRunId,
-            config, dtype, quantMode, commQuantMode, activeMaskType);
-        const bool barrierOk = DemoBarrierAll(rank, rankSize,
-            combineProfileMode ? "combine profile captured" : "combine perf synchronized");
-        if (!profileOk || !barrierOk) {
+        if (!DemoBarrierAll(rank, rankSize, "combine perf synchronized")) {
             Cleanup(comm, stream, deviceId, deviceSet, aclReady, buffers);
             return 1;
         }

@@ -362,7 +362,6 @@ class ControlSourceContractTests(unittest.TestCase):
             "tilexr_sdma.h",
             "tilexr_ep.h",
             "tilexr_collectives.h",
-            "tilexr_collectives_perf.h",
             "libtile-comm.so",
             "libtilexr-ep.so",
             "libtilexr-collectives.so",

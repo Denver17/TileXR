@@ -1,3 +1,7 @@
+/*
+ * 注册外置 EP kernel binary，打包参数并向调用者 stream 提交；同时校验可选 SDK capture 的 invocation slot。
+ * binary 注册状态由本文件保存，通信和 output buffer 由调用方持有。
+ */
 #include "ep_kernel_launch.h"
 #include "ep_memory_server_dedup_launch.h"
 #include "ep_memory_server_dedup_combine_launch.h"
@@ -70,19 +74,6 @@ uint8_t gServerDedupKernelStub = 0;
 KernelRegistrationState gCombineServerDedupRegistration;
 uint8_t gCombineServerDedupKernelStub = 0;
 
-int ValidateProfilingSlot(const TileXR::CommArgs &args, int64_t magic, uint32_t lanes)
-{
-    if (!args.profilingDescriptorsGM) return TileXR::TILEXR_SUCCESS;
-#if defined(TILEXR_EP_ENABLE_PROFILING) && TILEXR_EP_ENABLE_PROFILING == 1
-    if (magic < args.profilingMagicBase ||
-        uint64_t(magic - args.profilingMagicBase) >= args.profilingSlotCount ||
-        lanes > args.profilingLaneCapacity) return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    return TileXR::TILEXR_SUCCESS;
-#else
-    (void)magic; (void)lanes;
-    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
-#endif
-}
 
 bool HasPrefix(const char *value, const char *prefix)
 {
@@ -363,6 +354,20 @@ int64_t TileXREpUdmaStatusOffset(int64_t totalBytes, int64_t rankSize, int64_t s
 
 } // namespace
 
+int TileXREpValidateProfilingCapture(const TileXR::CommArgs &args, int64_t magic, uint32_t lanes)
+{
+    if (!args.profilingDescriptorsGM) return TileXR::TILEXR_SUCCESS;
+#if defined(TILEXR_EP_ENABLE_PROFILING) && TILEXR_EP_ENABLE_PROFILING == 1
+    if (magic < args.profilingMagicBase ||
+        uint64_t(magic - args.profilingMagicBase) >= args.profilingSlotCount ||
+        lanes > args.profilingLaneCapacity) return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    return TileXR::TILEXR_SUCCESS;
+#else
+    (void)magic; (void)lanes;
+    return TileXR::TILEXR_ERROR_NOT_SUPPORT;
+#endif
+}
+
 bool TileXREpIsA5Soc()
 {
     const char *socName = aclrtGetSocName();
@@ -478,7 +483,7 @@ int TileXREpLaunchDispatchMemoryKernel(const EpDispatchParams &params, const EpH
     if (magicRet != TileXR::TILEXR_SUCCESS) {
         return magicRet;
     }
-    const int profilingRet = ValidateProfilingSlot(*context.hostArgs, magic, blockDim);
+    const int profilingRet = TileXREpValidateProfilingCapture(*context.hostArgs, magic, blockDim);
     if (profilingRet != TileXR::TILEXR_SUCCESS) return profilingRet;
     const int registerRet = EnsureDispatchMemoryKernelRegistered();
     if (registerRet != TileXR::TILEXR_SUCCESS) {
@@ -538,7 +543,7 @@ int TileXREpLaunchCombineMemoryKernel(const EpCombineParams &params, const EpHos
     if (magicRet != TileXR::TILEXR_SUCCESS) {
         return magicRet;
     }
-    const int profilingRet = ValidateProfilingSlot(*context.hostArgs, magic, blockDim);
+    const int profilingRet = TileXREpValidateProfilingCapture(*context.hostArgs, magic, blockDim);
     if (profilingRet != TileXR::TILEXR_SUCCESS) return profilingRet;
     const int registerRet = EnsureCombineMemoryKernelRegistered();
     if (registerRet != TileXR::TILEXR_SUCCESS) {
