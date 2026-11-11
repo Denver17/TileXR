@@ -7,7 +7,7 @@ WQEBB 换算公式，不再使用固定 128 WR 或两个 pending batch 的限制
 用户随后确认完整方案并授权开始实现；设备验证仍单独等待恢复通知。
 
 本文修订 `2026-11-05-rdma-explicit-completion-design.md` 中的双批次状态方案，
-保留 WRITE 提交 / 应用显式 `RDMAWait` 的完成契约。继续使用
+保留 WRITE 提交 / 应用显式 `RDMAWait` 的完成语义。继续使用
 `codex/rdma-explicit-wait` worktree、C++14 和现有 CANN 支持边界。
 
 不修改 Host Put/Get、legacy all-signaled API、WQE 数据格式、UB/MTE3 发布和
@@ -85,7 +85,7 @@ UBNIC V2 硬件队列格式不变，不借此修改其 queue ABI 标识。
 - `src/include/tilexr_rdma_device_types.h`：view 版本、pending 描述和状态说明。
 - `src/include/tilexr_rdma_device.h`：view 读取及 pending 元数据 I/O。
 - `src/include/tilexr_rdma_pipeline.h`：容量换算、FIFO、跨调用背压与显式等待。
-- `src/include/tilexr_rdma_write_options.h` 和 `tilexr_rdma_write.h`：默认值与契约。
+- `src/include/tilexr_rdma_write_options.h` 和 `tilexr_rdma_write.h`：默认值与使用要求。
 - `tools/rdma_compare`：多 QP 基准的 admission/说明改为实际窗口；计时仍包含
   显式 Wait，CPU-only describe 不伪造只有创建 QP 后才能知道的实际容量。
   旧 matched QP1/NDA 对比程序显式设置应用 cap=128，保留双方原有比较条件；

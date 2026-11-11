@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 按配置启动本机各 rank 的 Memory Combine demo，并检查退出状态和正确性结果。
-# perf 模式传递暖机与测量轮次；外部集群脚本负责 msprof 采集。
+# perf 模式传递预热与测量轮次；外部集群脚本负责 msprof 采集。
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

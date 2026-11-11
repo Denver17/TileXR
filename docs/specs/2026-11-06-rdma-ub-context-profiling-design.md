@@ -43,7 +43,7 @@ context 由一个 AIV 独占，关联一个 QP，由该 QP 的所有 MR view 共
   写回 GM。调用方要复用 UB、结束 kernel 或把 QP 所有权移交给后续 kernel 前，
   显式保存状态及仍有效的 pending 项，完成所需搬运后才释放 UB。
 - 保存不是 Wait，不使 NIC 工作完成；导出仍 pending 的状态后，QP、MR、payload
-  和 GM 持久化状态的生命周期继续遵守已有完成契约。后续 kernel 先恢复再操作。
+  和 GM 持久化状态的生命周期继续遵守已有完成语义。后续 kernel 先恢复再操作。
 - 返回的超时、CQE 错误和 poisoned 状态保留在 context 中；正常错误返回路径也必须
   保存后再退出。kernel 异常终止、未成功保存时，GM 快照可能过期，不允许据此
   恢复发送或假定无在途请求，必须按已有安全清理要求使 QP 静止/销毁；不承诺异常

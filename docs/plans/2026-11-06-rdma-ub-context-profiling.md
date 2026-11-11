@@ -20,13 +20,13 @@
 - 前置：书面设计确认；先记录原有合法行为和批次/CQE 计数预期。
 - 验收：Debug 拒绝非法参数，Release 合法输入等价，两个宏值的实际设备编译命令
   明确；测试直接编译对应配置，不能仅凭 `NDEBUG` 或源文本匹配作结论。
-- 输出：稳定的宏契约，供 context 与插桩使用。
+- 输出：稳定的宏定义规范，供 context 与插桩使用。
 
 ## 2. UB 状态 I/O 与调用入口
 
 - 目标：四个 WRITE 和 Wait 共用调用方持有的 UB context，热路径软件元数据不落 GM。
 - 修改范围：上述 RDMA 头文件、必要的 context 头、`tests/rdma` 中的现有及新增测试。
-- 前置：宏契约；复用当前状态/FIFO 编码及发布顺序。
+- 前置：宏定义规范；复用当前状态/FIFO 编码及发布顺序。
 - 约束：一 AIV 独占 QP；不同 MR 共享 QP 状态；V3 view 和硬件 ABI 不变；
   老入口用临时 context 保持 API 边界持久化，不增加逐批 GM 写回。
 - 验收：有效 pending 保存/恢复，错误状态持久化，可观测元数据 I/O 计数为预期；
@@ -39,7 +39,7 @@
 - 修改范围：RDMA trace 接线点、benchmark kernel 和 `tests/rdma`；
   公共 profiling 实现、文档和测试保持与 `main` 一致。
 - 前置：context 接口；阅读 `docs/specs/profiling.md` 和 `tools/profiling/FORMAT.md`
-  的当前契约后接入，沿用追加、dropped 和 Publish 行为。
+  的当前规范后接入，沿用追加、dropped 和 Publish 行为。
 - 验收：宏关闭时无实际 RDMA 标记；四种 WRITE 路径记录事件并提交 lane；
   原有分析器可读取，无新文件协议或额外计时屏障。文档明确逐点 GM 写入的开销。
 - 输出：现有格式的记录及 WRITE/Wait 阶段 mapping。
@@ -77,7 +77,7 @@ PYTHONPATH=tools/profiling/python python3 -m unittest discover -s tests/profilin
 - RDMA CPU：Debug、Release 两个构建各 18/18 通过；参数负例目标显式使用 Debug 宏，
   context 行为分别以宏 0/1 编译，另有启用 profiling 的真实 adapter CPU 替身目标。
 - Profiling：公共 SDK、文档和测试与 `main` 无 diff；原有 device 协议测试和
-  Python 分析测试 23/23 通过，覆盖现有 writer 和分析器契约。
+  Python 分析测试 23/23 通过，覆盖现有 writer 和分析器行为约定。
 - 显式 UB context 测试验证连续调用无 GM 元数据 I/O、跨 MR/Save/Restore、pending wrap、
   原批次/CQE 计数和 timeout 状态。替身检查 UB 端点 32B 对齐。
 - `test_rdma_context_profile <新输出文件>` 可选导出 DirectWriter 的 SDK records；

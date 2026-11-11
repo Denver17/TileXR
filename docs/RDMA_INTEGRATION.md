@@ -7,7 +7,7 @@ reference for build dependencies, source ownership, low-level contracts and
 retained validation evidence. Clock diagnostics retain their original MTE path.
 
 本文供集成与维护使用；应用接入、四种 WRITE 接口和完整示例见中英文使用指南。
-下文区分当前实现契约与历史硬件记录，文档改写不表示重新运行了硬件验证。
+下文区分当前实现约定与历史硬件记录，文档改写不表示重新运行了硬件验证。
 
 ## Supported paths
 

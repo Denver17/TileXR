@@ -190,4 +190,4 @@ placement 使用 `tilexr.unitest.placement.v1`，`hosts` 中每项包含：`name
 | `ep_dispatch_barrier` 返回 unsupported | 当前没有适用的公开设备 Barrier API，Host ready 或 stream sync 不能替代 |
 | 端口或 SSH 连接失败 | 核对空闲端口、数据网地址、SSH 配置和各节点环境；失败不会自动换端口或重试 |
 
-架构和测量契约见 [UniTest 设计](../../docs/specs/unitest.md)。历史构建、实机证据及未验证项见[验证记录](../../docs/validation/unitest.md)。
+架构和测量规则见 [UniTest 设计](../../docs/specs/unitest.md)。历史构建、实机证据及未验证项见[验证记录](../../docs/validation/unitest.md)。

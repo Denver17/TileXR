@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# 构建并编排 MoonEP 元数据门禁，通过 tools/moonep 测试入口验证路由和算子契约。
+# 构建并编排 MoonEP 元数据门禁，通过 tools/moonep 测试入口验证路由和算子接口约定。
 
 from __future__ import annotations
 

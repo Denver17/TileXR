@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 为配置中的集群部署 Memory EP demo，执行 correctness 或带 msprof 的性能测量。
-# 性能结果沿用暖机、rank barrier 和 msprof Task Duration 统计路径。
+# 性能结果沿用预热、rank barrier 和 msprof Task Duration 统计路径。
 set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)

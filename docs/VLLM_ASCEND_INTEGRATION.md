@@ -1,7 +1,7 @@
 # vLLM / vllm-ascend 集合通信集成设计
 
 本文说明 TileXR 如何接入 vllm-ascend 的普通集合通信、实际调用栈和使用方式。
-接口契约以 [集成规范](specs/vllm-ascend-collectives.md) 为准；
+接口约定以 [集成规范](specs/vllm-ascend-collectives.md) 为准；
 硬件测试入口见 [collectives 验证指引](../tests/collectives/README.md)。
 
 ## 目标与支持范围
@@ -44,7 +44,7 @@ flowchart TD
     Runtime --> Core[libtile-comm.so: communicator / IPC / workspace / flags]
     CPU[框架 CPU ProcessGroup] --> Binding[group_binding: readiness / domain / unique ID]
     Binding --> Adapter
-    Patch --> Original[不支持契约: 原 NPUCommunicator 方法]
+    Patch --> Original[不支持的调用: 原 NPUCommunicator 方法]
     Model --> Fused[融合算子: 框架原路径]
 ```
 
@@ -53,7 +53,7 @@ flowchart TD
 | 启动入口 | [sitecustomize.py](../integrations/vllm_ascend/sitecustomize.py)：环境变量显式启用后，在 Python 启动时安装 patch |
 | 框架接口 | [vllm_patch.py](../integrations/vllm_ascend/tilexr_collectives/vllm_patch.py)：包装构造、四种普通通信、AllToAll 原路径及销毁；维护 route 计数 |
 | 组绑定 | [group_binding.py](../integrations/vllm_ascend/tilexr_collectives/group_binding.py)：成员顺序、组内 rank、device、domain 和 unique ID 分发 |
-| 框架语义与执行排序 | [vllm_adapter.py](../integrations/vllm_ascend/tilexr_collectives/vllm_adapter.py)：原地契约、维度移动、跨流事件、失败状态和显式 close |
+| 框架语义与执行排序 | [vllm_adapter.py](../integrations/vllm_ascend/tilexr_collectives/vllm_adapter.py)：原地修改约定、维度移动、跨流事件、失败状态和显式 close |
 | Tensor 包装 | [torch_collectives.py](../integrations/vllm_ascend/tilexr_collectives/torch_collectives.py)：dtype、连续布局、输出分配、`record_stream` 和指针提取 |
 | Python/native ABI | [runtime.py](../integrations/vllm_ascend/tilexr_collectives/runtime.py)：加载两份 DSO，声明 ctypes 参数，返回码转异常 |
 | 集合通信 Host | [tilexr_collectives.cpp](../src/collectives/host/tilexr_collectives.cpp)：参数检查、launch context 和 kernel 选择 |
@@ -139,7 +139,7 @@ domain 是 native bootstrap 端口偏移。显式设置 `TILEXR_COMM_ID=IP:BASE_
 ```
 
 `GroupCoordinator._all_reduce_out_place` 是上游方法名；接入层保持已验证的
-`DeviceCommunicatorBase` 实际输入修改契约，不将该名字视为 native 原地保证。
+`DeviceCommunicatorBase` 实际修改输入的行为约定，不将该名字视为 native 原地保证。
 TileXR reduction 先写独立输出，再在同一 stream 更新输入，避免依赖未验证的
 native 输入/输出 alias。图模式不在本次资格验证内。
 
@@ -159,7 +159,7 @@ ctypes 调用不自动向 Torch allocator 登记 tensor 使用；输入、输出
 不会同时被同组两次通信使用。普通操作不逐次设备同步。
 
 框架决定所有 rank 的参与和调用顺序；没有逐次 CPU 协商或额外恢复协议。
-不支持的输入契约在 native 提交前调用保存的 original 方法。
+输入不符合支持条件时，在 native 提交前调用保存的 original 方法。
 Native 返回错误则抛异常并令 adapter 进入失败状态，后续操作继续报错，
 不能在部分 rank 已提交后把同一操作切换到 HCCL。设备异步错误也可能在后续
 consumer/synchronize 时才暴露，route 成功计数本身不是数值正确性证据。

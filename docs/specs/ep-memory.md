@@ -21,7 +21,7 @@ EP 打包在 configure 阶段不依赖具体 SoC。普通 Dispatch/Combine、Mem
 对于非 A5 硬件，在准备 context、加载或注册 kernel、推进 magic 值之前，
 返回 `TILEXR_ERROR_NOT_SUPPORT`。
 
-## Server Dedup 契约与部署
+## Server Dedup 使用要求与部署
 
 - Dispatch 支持 FP16/BF16 输入，以及非量化或 MXFP8 E4M3/E5M2 输出；Combine 当前仅支持
   FP16/BF16、`quantMode=0`。Dispatch 的量化支持不代表 Combine 支持量化输入。
@@ -40,11 +40,11 @@ EP 打包在 configure 阶段不依赖具体 SoC。普通 Dispatch/Combine、Mem
 - 关闭 overflow recording 的编译设置仅用于两个 Server Dedup kernel；其他 EP kernel
   保留原有开启设置。具体编译与设备证据见[构建验证](../BUILD_VERIFICATION.md)。
 
-## Dispatch 契约
+## Dispatch 接口约定
 
 Dispatch 将输入行路由到 expert owner，并按所选 API 版本返回 expert 本地 payload、
 Combine 所需的 assist 元数据和接收计数。V2 还保留 `tilexr_ep.h` 声明的
-active-mask、量化、scale 和展开输出契约。
+active-mask、量化、scale 和展开输出的接口约定。
 
 Memory kernel 在 peer window 中使用带 generation 标记的轮次。
 发送、count/cumsum、本地 copy 和接收阶段使用互不重叠的状态及 workspace 区域。
@@ -53,7 +53,7 @@ Memory kernel 在 peer window 中使用带 generation 标记的轮次。
 MXFP8 模式保留公共接口中的 E4M3/E5M2 选择、打包行格式和动态 scale 输出。
 不受支持的量化或 dtype 组合会在 Host 校验阶段失败。
 
-## Combine 契约
+## Combine 接口约定
 
 Combine 消费 expert 输出以及 Dispatch 生成的 assist/count 元数据，恢复 token 顺序，
 并按所选入口的要求应用 expert weight。Memory kernel 与 Dispatch 遵循相同的
@@ -70,7 +70,7 @@ Payload、status、count、同步和 scratch 区域互不重叠；SDK capture �
 新 generation 用于区分过期状态，无需批量清空共享窗口。
 
 Memory 支持跨节点的映射 peer 通信。只有具体入口、communicator 能力、
-payload 和已注册 workspace 契约要求使用 UDMA 时，才选择 UDMA。
+payload 和已注册 workspace 的使用要求明确指定 UDMA 时，才选择 UDMA。
 
 ## Profiling
 
@@ -90,7 +90,7 @@ managed plan，按通信 magic 为选中调用取得独立 capture。容量由
 共享 `CommArgs` 与 ServerDedup tiling 布局变更要求 Host、kernel 和 consumer 配套重编译。
 记录的是源码定义的到达/完成边界，marker 本身不增加业务同步；完整任务延迟使用外部 msprof。
 64-rank runner 只提供 functional/performance，旧 breakdown 和节点 profile 模式返回参数错误。
-perf 暖机、Host barrier 和 msprof 测量保持启用，不因删除设备诊断而移除。
+perf 预热、Host barrier 和 msprof 测量保持启用，不因删除设备诊断而移除。
 
 维护边界：旧 DFX 地址同时曾用作 recv-count workspace 末端。当前
 `kEpMemoryRecvCountWorkspaceEnd` 保持原 **768KiB** 地址及 workspace 容量检查，删除 dump

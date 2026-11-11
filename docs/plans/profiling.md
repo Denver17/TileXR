@@ -95,7 +95,7 @@ TileXR 内部算子与第三方算子都引用 `<tilexr/profiling.h>`，使用�
 
 这些是独立化要解除的依赖，不据此认定现有通信功能存在算法错误。槽位初始化、direct writer 状态、文件发布、时钟与完整性等具体问题见整改清单。
 
-固定基线源码已包含 direct writer、标量 GM flush、稀疏扫描/稳定排序、同 rank 多 core 共用 origin、`track/instance_range`，且旧 collectives tracing 已退役、coarse flush 已更新、生产 binary 已外置。旧文档归于 #150/#151/#167/#171 的历史记录只作线索，本计划的事实依据是本次固定 Git 对象与对应测试，不要求回到 #143 旧实现。
+固定基线源码已包含 direct writer、标量 GM flush、稀疏扫描/稳定排序、同 rank 多 core 共用 origin、`track/instance_range`，且旧 collectives tracing 已移除、coarse flush 已更新、生产 binary 已外置。旧文档归于 #150/#151/#167/#171 的历史记录只作线索，本计划的事实依据是本次固定 Git 对象与对应测试，不要求回到 #143 旧实现。
 
 ## 3. 目标架构
 
@@ -188,7 +188,7 @@ Recorder 在测量区间内记录固定槽的数值事件与系统时间戳，�
 
 DirectWriter 供运行时事件数或显式时间戳回填使用，记录时直接写 GM，开销与 deferred Recorder 不同。两种能力对所有调用者开放；一个 logical stream 的一次测量只选择一种 writer。Host 对已提交的有效记录统一按 timestamp 稳定排序，相同 timestamp 保留提交顺序，不能据排序补造缺失事件。
 
-默认关闭设备 profiling；`TILEXR_ENABLE_PROFILING=1` 开启，未定义或 `=0` 为关闭。运行时关闭遵循上节的无操作契约，不等同于编译关闭的开销。具体开关统一、状态复用及开销验证见整改清单。
+默认关闭设备 profiling；`TILEXR_ENABLE_PROFILING=1` 开启，未定义或 `=0` 为关闭。运行时关闭遵循上节的无操作行为约定，不等同于编译关闭的开销。具体开关统一、状态复用及开销验证见整改清单。
 
 | 设备编译 | runtime enabled | 合同 |
 |---|---|---|
@@ -279,7 +279,7 @@ Linux 发布固定为同目录唯一临时文件（O_CREAT|O_EXCL）→ 完整�
 
 继续使用 `tilexr_profiling_records.v1`、`tilexr_profiling_mapping.v1`，独立化不强制升级文件协议。records 仍为 little-endian 的 48 byte file header、24 byte stream header、16 byte record，stream ID 仍编码 rank 与 logical stream。mapping 的现有事件表达能力保持可用。
 
-内存布局是 SDK 内部契约，不是磁盘格式。不同 producer 必须迁移到统一提交布局，历史 records 保持可读。首版一次分布式测量共享 UUID，每 rank 一个文件，每 stream 恰好一个完整 critical interval；重复的普通子阶段仍可表达。
+内存布局是 SDK 内部约定，不是磁盘格式。不同 producer 必须迁移到统一提交布局，历史 records 保持可读。首版一次分布式测量共享 UUID，每 rank 一个文件，每 stream 恰好一个完整 critical interval；重复的普通子阶段仍可表达。
 
 独立化保留现有报告产物和通用解析原则，包括固定基线已支持的 `track/instance_range`，以及同 `(launch, rank, device)` 下多个 core 的相对时间偏移。时钟声明、重复测量提示、缺失输入的完整性说明等需要整改的事项见配套清单；它们不属于解除通信依赖所必需的架构变化。可选的预期参与者检查另列增强项，不默认扩大本设计范围。
 
@@ -305,15 +305,15 @@ SDK 版本、DeviceView ABI 版本和 records/mapping 版本分别管理。保�
 | [A5 AllToAll Host](../../src/collectives/host/collective_launcher.cpp#L433) 与 [direct writer](../../src/collectives/kernels/tilexr_alltoall_a5_kernel.cpp#L564) | Host 校验并递增 `profilingLaunchSlot`；send writer 与 receive 多逻辑 lane writer 支持显式时间戳回填 | Host 与 kernel 同步迁移；保留逻辑 lane、事件含义与回填能力，改为每次测量独立 capture |
 | [Add4 kernel](../../tests/profiling/demo/profiled_add4_kernel.cpp#L78) 与 [Host](../../tests/profiling/demo/profiled_add4_host.cpp) | deferred recorder，创建 communicator 后采集 | 改为默认 AclCapture 流程，脱离 communicator 独立构建 |
 
-A5 当前按 communicator 累计多个 launch slot；新契约的一次 capture 一次测量要求同时调整 Host 采集编排和设备参数，不能只替换设备头文件。重复测量各自保存，不能把多个 critical interval 塞入同一 stream 后继续宣称报告支持多轮。#151 已删除的旧 `perf_trace_session/report`、`perf_trace_kernel` 与 probe 不属于待迁移实现。
+A5 当前按 communicator 累计多个 launch slot；新规范要求一次 capture 对应一次测量，这需要同时调整 Host 采集编排和设备参数，不能只替换设备头文件。重复测量各自保存，不能把多个 critical interval 塞入同一 stream 后继续宣称报告支持多轮。#151 已删除的旧 `perf_trace_session/report`、`perf_trace_kernel` 与 probe 不属于待迁移实现。
 
 业务对象可以从已有配置或环境变量构造普通 CaptureConfig、选择采样时机和文件名；这些是调用方编排。不能继续以 communicator 生命周期自动代表多次算子测量，也不能让公共 API 解释 `CommArgs` 或根据使用者采用不同数据布局。
 
-旧 profiling 字段如因业务结构 ABI 暂留占位，不再作为 SDK 的通信协议。内部 kernel 参数变更时须同步编译安装匹配的 Host 与 kernel binary；公开业务函数及 MoonEP 的 `Buffer`、`MoonEPCommPlan`、异步与零拷贝契约保持不变。
+旧 profiling 字段如因业务结构 ABI 暂留占位，不再作为 SDK 的通信协议。内部 kernel 参数变更时须同步编译安装匹配的 Host 与 kernel binary；公开业务函数及 MoonEP 的 `Buffer`、`MoonEPCommPlan`、异步与零拷贝接口约定保持不变。
 
 旧 `tilexr_profiling.h` 如暂留，仅转包含公共入口或提供通用名称别名，不保留解释业务结构的签名和旧采集实现。稀疏 producer 的事件、lane 和丢弃语义先核对再迁移；相关风险见整改清单，不能机械缩短旧 exporter 的扫描范围。
 
-旧 comm runtime 通用实现迁入 SDK 后移除第二份 exporter；`InitProfiling/FinalizeProfiling/ResetProfilingState` 与 comm_wrap 的旧自动多轮聚合路径退役。旧环境变量可在普通业务调用方构造 CaptureConfig/选择采样时机，不作为 SDK 的内部身份模式，也不承诺旧聚合语义。
+旧 comm runtime 通用实现迁入 SDK 后移除第二份 exporter；`InitProfiling/FinalizeProfiling/ResetProfilingState` 与 comm_wrap 的旧自动多轮聚合路径已移除。旧环境变量可在普通业务调用方构造 CaptureConfig/选择采样时机，不作为 SDK 的内部身份模式，也不承诺旧聚合语义。
 
 ### 异步调用的可执行迁移步骤
 
@@ -341,7 +341,7 @@ A5 当前按 communicator 累计多个 launch slot；新契约的一次 capture 
 | I01 统一设备 API/布局 | I00、第 5 节合同 | 新 types/device/direct 头；迁移 Recorder/DirectWriter；GM 前缀/state 整体迁移 | ABI、条件槽、0 时间戳、顺序、未提交/overflow/非法提交行为；C01–C06/C08 |
 | I02 统一 AclCapture/导出 | I00、I01 布局 | 新 host/acl/file 头；从 runtime 迁移编码、Snapshot、上下文和所有权、文件发布 | Save=Collect+Export，失败重试/无提前释放；C07/C09、A03 说明 |
 | I03 独立构建/安装 | I01/I02 头稳定 | src/profiling CMake/config，comm/collectives include/install；Host/ACL/设备分组 | 多 TU、安装 prefix 外部消费者，无 TileXR 链接；T03 SDK 门槛 |
-| I04 TileXR 全量迁移 | I01/I02、I03 include 合同 | lccl_op、collective_kernel 参数、owner、A5 Host/KernelArgs/kernel；旧 comm 路径退役，binary 成对更新 | 无 CommArgs 采集签名/第二实现；业务 API/异步/数值回归；C10/A02/T01 |
+| I04 TileXR 全量迁移 | I01/I02、I03 include 合同 | lccl_op、collective_kernel 参数、owner、A5 Host/KernelArgs/kernel；旧 comm 路径移除，binary 成对更新 | 无 CommArgs 采集签名/第二实现；业务 API/异步/数值回归；C10/A02/T01 |
 | I05 唯一 Python 包/分析整改 | I00、v1 不变 | pyproject/canonical 包、CLI/API、测试与脚本全迁移；A01/A04/A05 | wheel/sdist 外部隔离消费、0/1/2、历史 v1、最低版本；T03 Python 门槛 |
 | I06 统一示例/文档/交付 | I03/I04/I05 | 唯一 examples/profiling，合并旧 demo；README/API_REFERENCE/FORMAT、根索引和 CI | 内外同 API/命令完成 Add4/记录/报告；D01–D03、T01–T03 首期门槛 |
 
@@ -392,7 +392,7 @@ CTest 统一标签 `profiling_host`、`profiling_python`、`profiling_cann`、`p
 | I04 | TileXR 与外部算子使用同一公共类型、参数语义和解析器，业务正确性与公开 API 回归通过 | 工具不区分使用对象，不存在长期双路径 |
 | I06 | 最小 Add4 在不创建 communicator 的情况下完成数值检查、真实 records 导出和三个报告 | 实测平台上的独立端到端可用性 |
 
-完成标准是 I00–I06 及整改清单全部首期必需项成立并留证，内部/外部教程仅用统一入口，旧在线实现和旧成功入口退役。只通过 include 编译、合成分析，或 TileXR 仍有专属采集路径，均不能宣称完成。E 类明确延期，不阻塞首期。
+完成标准是 I00–I06 及整改清单全部首期必需项成立并留证，内部/外部教程仅用统一入口，旧在线实现和旧成功入口已移除。只通过 include 编译、合成分析，或 TileXR 仍有专属采集路径，均不能宣称完成。E 类明确延期，不阻塞首期。
 
 当前 Add4 构建限于 Ascend950，独立化不能自动扩张已验证平台。验收分别记录 SoC、执行模式、CANN、driver 和编译选项；Host 测试不证明设备可见性、低扰动或 UDMA 数据面。MoonEP 回归遵守项目已有 grouped mode、框架 profiler、阶段 barrier 与性能报告要求。
 

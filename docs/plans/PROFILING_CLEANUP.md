@@ -57,9 +57,9 @@
 | C01 | 条件性风险，一期 | I01、C08 | I01/I04 | Recorder 有效槽及编译/设备用例 |
 | C02 | 条件性风险，一期 | I01、C08 | I01/I04 | DirectWriter 初始化与状态 |
 | C03 | 条件性风险，一期 | C02、C08 | I01/I04 | dropped、幂等提交、重复写入拒绝 |
-| C04 | 契约规范化，一期 | C08 | I01 | 零时间戳与非法事件 ID |
-| C05 | 契约规范化，一期 | I01/I02 | I01/I02/I04 | 编译/运行时启停 |
-| C06 | 契约规范化，一期 | I01/I02、C08 | I01/I02 | rank/lane、容量及布局校验 |
+| C04 | 接口与行为规范化，一期 | C08 | I01 | 零时间戳与非法事件 ID |
+| C05 | 接口与行为规范化，一期 | I01/I02 | I01/I02/I04 | 编译/运行时启停 |
+| C06 | 接口与行为规范化，一期 | I01/I02、C08 | I01/I02 | rank/lane、容量及布局校验 |
 | C07 | 条件性风险，一期 | I02 | I02/I03 | Host 文件编码和无覆盖发布 |
 | C08 | 整体布局迁移，一期 | I01/I02 合同冻结 | I01/I02/I04 | producer、Collect、exporter、协议回归 |
 | C09 | 新增 API 验收，一期 | I02、C07/C08 | I02 | AclCapture 资源、状态、context、失败路径 |
@@ -107,7 +107,7 @@
 
 ### C04 timestamp 0 合法，事件 ID 0 保留
 
-**状态/期次：待实施，一期。依赖：C08。类型：契约规范化。**
+**状态/期次：待实施，一期。依赖：C08。类型：接口与行为规范化。**
 
 - 本地证据：[RecordAt](../../src/include/tilexr_profiling.h#L174) 丢弃 timestamp 0，而 [records parser](../../tools/profiling/records.py) 允许零起点。
 - 修改：DirectWriter 的时间戳值与事件有效性分离；timestamp 0 合法，ID 0 为非法事件并明确拒绝。不得静默把 ID 0 计为正常有效记录；具体设备错误状态遵循 C08，Host 得到可处理结果。
@@ -115,7 +115,7 @@
 
 ### C05 编译开关与运行时 disabled 分别定义
 
-**状态/期次：待实施，一期。依赖：I01/I02。类型：契约规范化。**
+**状态/期次：待实施，一期。依赖：I01/I02。类型：接口与行为规范化。**
 
 - 本地证据：[宏判断](../../src/include/tilexr_profiling.h#L34) 使用 `defined`，值为 0 仍启用；这不是旧指南已承诺 0 可关闭而实现违约。
 - 修改：统一 `TILEXR_ENABLE_PROFILING` 未定义/0 为编译关闭，1 为开启，非法值有诊断。编译开关不改变 Host 类型布局、业务 Kernel 参数或磁盘协议。
@@ -124,7 +124,7 @@
 
 ### C06 身份、容量和地址布局统一校验
 
-**状态/期次：待实施，一期。依赖：I01/I02、C08。类型：契约规范化。**
+**状态/期次：待实施，一期。依赖：I01/I02、C08。类型：接口与行为规范化。**
 
 - 本地证据：[stream ID 编码](../../src/include/tilexr_profiling.h#L29) 直接按位组合，[导出](../../src/comm/tilexr_profiling_runtime.cpp#L191) 将带符号 rank 转无符号；本地实际 TileXR 合法范围未必触发越界。
 - 修改：保留磁盘 rank/lane 的高低 16 位编码。配置/导出入口拒绝负 rank 和不能编码的值；区分 lane 索引最大 65535 与 lane 数量上界，不能 off-by-one。layout 检查乘加溢出、地址/stride 对齐、ABI version/struct bytes、缓冲尺寸与内存预算。
@@ -391,7 +391,7 @@ ctest --test-dir build-profiling-cann --output-on-failure -L profiling_cann
 | I02、C07、C09 | `host.h/file.h/acl.h`：布局预算、Snapshot、v1 编码、独立 AclCapture、context/同步/释放重试、Linux 无覆盖发布 | `profiling_sdk_host`、`profiling_sdk_acl_mock`；本机未运行 Linux 专有文件故障/并发分支与真实 ACL。`WorkspaceBytes()` 已按仍拥有的分配返回，关闭/移动后归零 |
 | I03 | `src/profiling`：独立 CMake、INTERFACE target、include/license/version/examples 安装 | `profiling_sdk_installed_consumer` 从删除后的 staging 源码隔离构建 C++14 executable/shared library/多 TU；无需通信库或 CANN。Linux 消费待 CI |
 | I04、C10 | `collective_launcher/kernel`、`profiling_capture_queue.h`、coarse/A5 kernel 参数一起迁移；comm 旧采集/第二 exporter 移除；最多 4 capture/64 MiB，48 A5 lane，独立 UUID | `profiling_capture_queue_mock` 覆盖耗尽跳过、后续 acquire 无 sync/D2H/free、失败重试和固定共同清理阶段；A5 布局与 mapping 回归。真实 launcher/跨 rank 异步/数值及新 Host/Kernel 配套编译仍待目标环境 |
-| I05、A01–A05 | canonical `tilexr_profiling` 包、union/exclusive/pressure、统一 provenance、输入完整性边界、旧成功入口退役 | 81 项 Python 3.12.14 测试、wheel/sdist 仓外隔离 CLI 0/1/2 与 API 三报告；Python 3.9 CI 只配置、未运行，不把它标已验 |
+| I05、A01–A05 | canonical `tilexr_profiling` 包、union/exclusive/pressure、统一 provenance、输入完整性边界、旧成功入口移除 | 81 项 Python 3.12.14 测试、wheel/sdist 仓外隔离 CLI 0/1/2 与 API 三报告；Python 3.9 CI 只配置、未运行，不把它标已验 |
 | I06、D01–D03 | `examples/profiling` 唯一外置 binary Add4；`README/API_REFERENCE/FORMAT`、根索引、collectives/CI/scripts 说明同步；旧设计标历史 | 文档 JSON 示例和 Add4 模板通过真实 parser，纯 Host 安装消费通过；Ascend950 Add4 的真实编译、数值/记录、独立目录搬迁和性能证据待验证 |
 | T01 | 删除 demo 生产 token 守卫与依赖字符串守卫，改为实际编译、导入、安装和行为 | 编译开关/ABI、SDK 安装消费者、独立发行消费者、实际 writer→reader 往返；文档测试只提取公开 JSON 示例，不约束生产实现文本 |
 | T02、T03 | 增加 Host/设备 CPU 替身/ACL 故障/队列、跨语言 round-trip、发行 runner、3.9/3.12 workflow 和 CTest 标签 | 本地可执行组通过；一个 Host switch 二进制被 Windows 应用控制策略禁止启动；Linux/CANN/NPU 与 GitHub CI 尚未执行，T02/T03 不全量关闭 |

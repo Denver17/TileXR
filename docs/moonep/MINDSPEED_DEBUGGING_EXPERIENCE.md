@@ -7,10 +7,10 @@ TileXR MoonEP 接入 MindSpeed 的问题、证据链和可复用方法。后续�
 
 ## 最终结论
 
-这次适配不是一个单点故障，而是模型规模和完整前反向流程依次暴露了五类契约问题：
+这次适配不是一个单点故障，而是模型规模和完整前反向流程依次暴露了五类接口与行为不匹配问题：
 
 1. 通信 runtime 和 RA 的所有权不唯一。
-2. MindSpeed 依赖的 Buffer、Tensor view 和 zero-copy 契约超出了 MoonEP 公共 API。
+2. MindSpeed 依赖的 Buffer、Tensor view 和 zero-copy 使用约定超出了 MoonEP 公共 API。
 3. 逻辑 worker 数、物理 QP 数和 AIV block 数被错误地绑定到同一固定上限。
 4. CQE、SQ tail、ring index 和 cycle bit 的语义没有明确区分。
 5. 同一个 plan 跨 Planner、Dispatch、Prefetch、Combine、反向 Dispatch 和 ReduceGrad
@@ -31,7 +31,7 @@ Python 侧的 `plan.status.zero_()` 不是可靠修复：NPU task queue 和 Kern
 | 现象 | 根因 | 修复原则 | 发现方式 |
 |---|---|---|---|
 | `RaInit=328002`，UDMA 注册继发 `-7` | SHMEM/HCCL 和 TileXR 重复拥有 RA；rank 间 owned/attached 状态可能不一致 | 通信 runtime 只能有一个 owner；允许显式 attach，并跨 rank 校验所有权 | TileXR-only、SHMEM -> TileXR、TileXR -> SHMEM 三组初始化顺序 A/B |
-| 替换 `moonep.Buffer` 后模型仍失败 | MindSpeed 依赖 `_ctx`、token/route buffers、packed Prefetch/Reduce、caller buffer 等私有契约 | 用适配层显式桥接，不能只替换公共类名 | 从 traceback 沿 caller/adapter/native 三层逐项核对对象契约 |
+| 替换 `moonep.Buffer` 后模型仍失败 | MindSpeed 依赖 `_ctx`、token/route buffers、packed Prefetch/Reduce、caller buffer 等私有接口约定 | 用适配层显式桥接，不能只替换公共类名 | 从 traceback 沿 caller/adapter/native 三层逐项核对对象使用约定 |
 | 权重被 `storage_offset != 0` 拒绝 | 权重是连续 arena 的合法 subview，随后还会复制到独立注册 backing | 区分 source view 和 registered backing；只在立即复制边界允许 offset | 打印 storage、data pointer、offset 和注册对象身份 |
 | backward 要求 SHMEM view | zero-copy alias 缺少 owner、generation 和 plan 元数据 | 地址别名必须携带所有权和生命周期标签 | 验证 alias storage 相同，并校验 owner/plan/generation |
 | Combine V1 `DecodeRoute=3002` | 4 字节 `DataCopyPad` 标量读取返回陈旧 UB 数据 | GM 小标量使用当前 CANN 版本实机验证过的读取模式 | 逐分支状态码加设备侧原值捕获；立即在 Combine 后同步状态 |
@@ -442,7 +442,7 @@ follower 本地重算为 `846def...`。generation、completion marker 和 artifa
 
 多节点 managed launcher 必须把 leader 已发布的 generation 路径显式传给 follower。
 follower 应校验路径位于 cache root、目录 key 与 manifest 一致、artifact 完整，并比较
-shape、runner、adapter、Kernel 模式和执行控制等共享契约；`driver/firmware/soc` 这类
+shape、runner、adapter、Kernel 模式和执行控制等共同约定；`driver/firmware/soc` 这类
 主机局部 provenance 不应参与 follower 对 leader generation 的重新寻址。不能改成扫描
 “最新 generation”或放宽全部 identity 校验，否则可能复用错误 shape 或二进制的输入。
 显式设置的 Dispatch peer mode 也必须进入 provenance；实际 `legacy` 不能按 shape
@@ -461,7 +461,7 @@ Linux 间使用 `rsync -a` 保留链接语义，但不能把“链接存在”�
 ## model replay meta 的跨机器兼容性边界
 
 可上库的 replay meta 必须把路由可复用性和性能可比性分开判断。同一 `S/K/H/EP/R/E/Hf/P`、
-55-call 契约、adapter/runner、model stack 和 Kernel 契约下，TopK 路由可以在另一台同规模
+55-call 调用约定、adapter/runner、model stack 和 Kernel 接口约定下，TopK 路由可以在另一台同规模
 机器上解压并重建 runtime cache，不应因为主机名、IP、driver 文件哈希或拓扑地址变化而重新
 跑模型。相反，历史性能只有在 CANN、driver、firmware、SoC、拓扑、rank mapping、profiler
 和 stage barrier 等完整 provenance 一致时才是 direct baseline；否则必须标成
@@ -469,7 +469,7 @@ Linux 间使用 `rsync -a` 保留链接语义，但不能把“链接存在”�
 主机差异而阻止路由 replay。
 
 Dispatch 的 `legacy`、`group` 和 `group_credit` 是数据面 peer/WQE 调度策略，不是模型
-TopK、expert histogram 或 Planning metadata 的输入契约。同一 shape 和其余 route contract
+TopK、expert histogram 或 Planning metadata 的输入要求。同一 shape 和其余 route contract
 一致时，meta 路由应允许跨 peer mode 重建；完整的 meta checksum 和 mode provenance 仍须
 保留，runtime cache identity 也继续按实际 mode 隔离。性能兼容性必须比较包含 peer mode 的
 完整 provenance：mode 不同时标为 `checked-in reference`，并在比较输出中同时显示模型采集
@@ -578,7 +578,7 @@ rendezvous、Combine 和 ReduceGrad 因而都不是该次复现的首个失败�
 meta、16 rank、5+20、profiler、barrier、二进制和跨节点 registered QP 不变，只禁止
 grouped Dispatch 为同节点 peer 选择 fullmesh QP 后，`group` 与 `group_credit` 均通过。
 这组单变量 A/B 说明 grouped plan 的跨 stage 复用不能混用生命周期不同的 SQ/CQ 队列域：
-fullmesh QP 保留的历史状态不受当前 operator-generation registry 契约约束，会让重复
+fullmesh QP 保留的历史状态不受当前 operator-generation registry 的规则约束，会让重复
 Dispatch 在历史 CQ/SQ frontier 上失去一致性。
 
 最小修复只把 grouped Dispatch 固定到 registry-owned QP；不删除通用 fullmesh runtime，
@@ -588,7 +588,7 @@ profiling 均关闭的 Release 构建，同时继续保留 framework NPU profile
 barrier。最终验证覆盖 B131 的单机 8 rank 和双机 16 rank、`group`/`group_credit`、
 4K/8K 两组 shape；16 rank 的 model、空-cache meta 和 runtime cache 路径均有实机证据，
 但本结论不能外推到 64/128 rank、其他 CANN/SoC/拓扑，也不能证明 fullmesh runtime 在
-获得等价 generation/reset 契约后仍不可用于其他算子。
+获得等价 generation/reset 机制后仍不可用于其他算子。
 
 最终交付证据必须晚于最后一次产品代码修改。调试期已经通过的 shape 或 replay source
 只能作为回归参考；清理 DFX、修改默认 mode、launcher、Host 或 Kernel 后，必须冻结完整
@@ -602,7 +602,7 @@ Python 上下文必须在任何 NPU workspace 或 registered mailbox 分配前�
 参数上限。原生 Planner 当前只接受 `expert_count <= 4096`；如果 Python 只校验正数和 rank
 整除，非法但可整除的超大值会先放大 mailbox 分配，产生 OOM，而不是稳定返回参数错误。
 边界回归应同时覆盖 `4096` 可接受和大于 `4096` 且仍可整除的输入被提前拒绝；该 Host
-校验只证明失败顺序和 API 契约，不替代合法 shape 的实机数据面闭环。
+校验只证明失败顺序和 API 行为约定，不替代合法 shape 的实机数据面闭环。
 
 ## 同版本 CANN 的编译器构建身份与 clean 门禁
 

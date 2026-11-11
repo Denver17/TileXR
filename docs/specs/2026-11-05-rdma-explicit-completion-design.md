@@ -9,11 +9,11 @@
 保留 C++14、CANN 9.1 和当前 Ascend950 AIV 路径；不扩大到 Host RDMA、
 legacy all-signaled API、物理 SQ/CQ 环回或新的异步执行框架。
 
-## 接口与返回契约
+## 接口与返回值说明
 
 - `RDMAWrite`、`RDMAWriteSge`、`RDMAWriteMultiQp` 和
   `RDMAWriteSgeMultiQp` 保持参数不变；成功表示本次 WR 已提交，不再表示传输完成。
-  它们调用的 `RDMAPutPipeline` / `RDMAPutSgeListPipeline` 同步采用该契约。
+  它们调用的 `RDMAPutPipeline` / `RDMAPutSgeListPipeline` 同步采用该约定。
 - 新增 `RDMAWait(view, scratch, maxPolls = 1000000U)`，等待所选 QP 上此前提交的
   pipeline 批次全部完成；不是只等待当前 MR view 发出的 WR。
   复用 WRITE 已有的 UB scratch，不新增 scratch 分配接口。
@@ -45,7 +45,7 @@ legacy all-signaled API、物理 SQ/CQ 环回或新的异步执行框架。
 
 1. 在任何 drain、状态预留和 WQE 发布前，完成本次参数与整段 SQ/CQ 非环回容量检查。
    CQ admission 包括此前 pending 批次及本次将产生的 CQE，不能只看 `cqConsumer`。
-   原有非法请求的无发布契约保持不变。
+   保持原有行为：非法请求不发布到队列。
 2. 每批发送前，根据已有 pending 批次数和 WR 数检查两批次窗口、`maxInFlight`
    与 `maxSendWr`。不足时消费最早批次；支持相邻调用使用不同 postBatch 或 SGE 数。
 3. 继续使用 UB 构造 WQE、MTE3 发布 tail 再发布 first WQE，以及完成发布后才
@@ -56,7 +56,7 @@ legacy all-signaled API、物理 SQ/CQ 环回或新的异步执行框架。
    保持现有有限轮询与 sticky error；不增加自动重试、取消或队列复位。
 
 QP 仍由一个 AIV 独占，跨调用、MR view、stream 和 kernel 的使用顺序由应用保证。
-这是现有所有权契约的延续，不新增并发访问能力。
+这是现有资源归属约定的延续，不新增并发访问能力。
 
 ## 资源与失败语义
 
@@ -65,7 +65,7 @@ NIC 仍可能读取的 source HBM、MR、QP、共享状态及相关 view 必须�
 应用可以先执行独立工作，再显式 Wait，不能修改尚未完成的发送数据。
 
 背压和 Wait 都可能暴露 CQE 错误或 timeout。保持 QP 的 sticky error，失败不代表
-发送已取消，也不允许立即释放可能仍被引用的内存；沿用 quiesce / destroy 的清理契约。
+发送已取消，也不允许立即释放可能仍被引用的内存；沿用 quiesce / destroy 的清理规则。
 成功 Wait 提供所选 QP 的发送完成边界，不替代远端 consumer 的应用同步和缓存依赖。
 仅对 submit-only kernel 调用 `aclrtSynchronizeStream`，不能替代显式 RDMA 完成等待。
 

@@ -4,7 +4,7 @@ Server Dedup 在远端服务器内复用同一 Token 的传输：Dispatch 对同
 Server 的多条专家路由只跨机发送一次，再在 Server 内转发；Combine 在该 Server 内加权
 聚合，再向原始 source 返回一个 partial。本地 Server 和远端单条路由直接传输。
 
-本文描述当前完整实现的接口、数据与同步契约。构建验证见
+本文描述当前完整实现的接口约定、数据格式与同步规则。构建验证见
 [构建说明](../BUILD_VERIFICATION.md)。普通 Memory 使用独立的公开入口和实现，见
 [EP Memory](ep-memory.md)；不能用它的元数据解释 Server Dedup 输出。
 
@@ -13,7 +13,7 @@ Server 的多条专家路由只跨机发送一次，再在 Server 内转发；Co
 记 R 为 rank 数，E 为总专家数，L=E/R，BS 为每 rank 原始输入 Token 数，H 为 hidden
 长度，K 为 top-k。所有 rank 的 shape、构建配置和调用顺序必须一致。
 
-| 项目 | 当前契约 |
+| 项目 | 当前规范 |
 | --- | --- |
 | 平台 | A5 / Ascend950，固定 64 AIV；项目目标 CANN 9.1.0，Host C++14 |
 | 拓扑 | 16..256 ranks，8 的倍数；每 Server 连续 8 ranks，serverId=rank/8 |
@@ -73,7 +73,7 @@ Dispatch 的 32B tiling 由 communicator 的 `KernelTilingCache` 以完整配置
 GM 快照，保持到 communicator 销毁；参数准备失败不得提交 kernel。固定 ABI 以公共头和
 launch 实现为准，改变 tiling 或 CommArgs 时必须同时更新 Host、kernel 和消费者。
 
-## 输出与五表契约
+## 输出与五表格式约定
 
 `tokenNum=sendCountsOut[E-1]`，只消费前 tokenNum 行。容量尾部无定义，不要求清零。
 
@@ -242,7 +242,7 @@ DIRECT 在 M3 不预先乘权重。零权重槽仍须等待、消费并清理 Fl
 这一中间舍入意味着不能用单次无限精度全局 sum 作为逐位相同的参考结果。
 
 M4/M5 共享 UB，但 M4 未完成的输出仍有独立生命周期。M5 复用区域前须按物理槽等待
-相关输出退役；M6 没有 M4 的事件可继承，须初始化自己的输出槽并按真实映射排空。
+相关输出使用结束；M6 没有 M4 的事件可继承，须初始化自己的输出槽并按真实映射排空。
 每个最终 Token 的全部结果块就绪后才读入；完成后清理本轮所有结果 Flag，不覆盖 payload。
 无效表行、未置位槽及 padding 不作为数值判据。
 
@@ -269,10 +269,10 @@ Host、kernel 与所有消费共享 `CommArgs`/tiling 的模块必须同步重�
 轮询耗尽记录区。收集时验证实际 lane 的完成、有效 count 和 dropped，再通过 SDK 导出 records.v1。
 容量不足是 capture 失败，不能截断后声称采集完整。
 
-业务 timeout 属于协议失败控制，不能随 profiling 开关删除；首错保留、错误传播和资源退役
+业务 timeout 属于协议失败控制，不能随 profiling 开关删除；首错保留、错误传播和资源释放
 独立于 marker。删除旧 DFX 常量时同样须追踪业务使用：普通 Memory 的 recv-count workspace
 仍以 768KiB 为末端，不因移除 profiling record 改变布局。
 
 Host 准入、CPU 替身、参考模型和 CANN 编译各自只能证明对应边界；真实异步 DMA、跨机
 进度、256P 规模与性能须在匹配环境中验证。本规格不将历史局部测试提升为当前设备验收。
-后续改动应同步更新当前契约及必要回归，实验过程和旧设计通过 Git 历史追溯。
+后续改动应同步更新当前规范及必要回归，实验过程和旧设计通过 Git 历史追溯。

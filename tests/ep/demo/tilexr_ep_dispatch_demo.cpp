@@ -1,6 +1,6 @@
 /*
  * 创建各 rank 的 EP 输入并校验 Dispatch/Combine 输出，支持 Memory 与 UDMA backend。
- * perf 模式保留暖机、测量前后 barrier 和 stream 完成等待，耗时由外部 profiler 采集。
+ * perf 模式保留预热、测量前后 barrier 和 stream 完成等待，耗时由外部 profiler 采集。
  * main 持有 communicator、stream 和 device buffers，并在退出路径调用 Cleanup。
  */
 #include <algorithm>

@@ -4,7 +4,7 @@ TileXR 支持在 Ascend C AIV kernel 中直接提交 RDMA WRITE：Host 建立连
 
 TileXR lets Ascend C AIV kernels post RDMA WRITE directly. The Host owns connections, QPs and MRs; four `RDMAWrite*` adapters submit contiguous or gathered data, and `RDMAWait` explicitly waits for completion. Follow this guide for setup, calls and cleanup.
 
-环境配置、低层队列契约、历史硬件证据与实现来源见 [RDMA 集成说明 / Integration and validation](RDMA_INTEGRATION.md)。可运行的 benchmark 及其纯 kernel 构建方式见 [rdma_compare](../tools/rdma_compare/README.md)。
+环境配置、低层队列使用规则、历史硬件证据与实现来源见 [RDMA 集成说明 / Integration and validation](RDMA_INTEGRATION.md)。可运行的 benchmark 及其纯 kernel 构建方式见 [rdma_compare](../tools/rdma_compare/README.md)。
 
 ## 1. 选择接口 / Choose an interface
 
@@ -17,7 +17,7 @@ TileXR lets Ascend C AIV kernels post RDMA WRITE directly. The Host owns connect
 
 All four calls return success after submitting this call's WRs, without an unconditional tail drain. They may still wait for the oldest batch under in-flight, SQ or pending-record backpressure, so they are not strictly non-blocking. The default window follows each QP's actual SQ/WR capacity, not a fixed two batches or 128 WRs. `count` is the WR count on the selected QP. Multi-QP calls select `qpIndex`; the application launches AIVs, partitions buffers and synchronizes them. Each QP has one exclusive AIV owner across regions, kernels and streams.
 
-在需要完成边界的位置调用 `TileXR::RDMAWait(view, scratch, maxPolls)`；它排空所选 QP 跨调用、跨 MR view 的共享 pending 批次，而不只等待当前 view 的发送。多 QP owner 使用 `views + qpIndex` 分别等待，不隐式遍历其他 QP。接口位于 `tilexr_rdma_device.h`，包含 `tilexr_rdma_write.h` 也可使用；低层 `RDMAPutPipeline` / `RDMAPutSgeListPipeline` 采用相同提交/等待契约。
+在需要完成边界的位置调用 `TileXR::RDMAWait(view, scratch, maxPolls)`；它排空所选 QP 跨调用、跨 MR view 的共享 pending 批次，而不只等待当前 view 的发送。多 QP owner 使用 `views + qpIndex` 分别等待，不隐式遍历其他 QP。接口位于 `tilexr_rdma_device.h`，包含 `tilexr_rdma_write.h` 也可使用；低层 `RDMAPutPipeline` / `RDMAPutSgeListPipeline` 采用相同提交/等待规则。
 
 Call `TileXR::RDMAWait(view, scratch, maxPolls)` where completion is required. It drains the selected QP's shared pending batches across calls and MR views, not only WRs submitted through this view. Each multi-QP owner waits on `views + qpIndex`; no other QP is traversed implicitly. The API is in `tilexr_rdma_device.h`, also included by `tilexr_rdma_write.h`. Low-level `RDMAPutPipeline` / `RDMAPutSgeListPipeline` use the same submit/wait contract.
 
@@ -338,7 +338,7 @@ Multi-QP wrappers do not partition payloads, synchronize AIVs or order different
 
 直接使用 `TileXR::RDMAWriteOptions`；所有 offset/stride 均为字节。 / Use `TileXR::RDMAWriteOptions` directly; all offsets/strides are bytes.
 
-| 字段 / Field | 默认 / Default | 契约 / Contract |
+| 字段 / Field | 默认 / Default | 使用要求 / Requirements |
 | --- | ---: | --- |
 | `count` | 1 | 所选 QP 的 WR 数，必须大于 0。 / Positive WR count on the selected QP. |
 | `localStride` | 0 | 每个 WR 对每个本地段的位移；0 复用 source。 / Per-WR displacement of every local segment; zero reuses it. |
@@ -455,7 +455,7 @@ or public SDK extension is added. GM trace writes are separate from QP software 
 context state/pending remain in UB. Release emits no RDMA markers. Instrumented Debug timing includes
 recording overhead and does not measure uninstrumented Release performance.
 
-维护注意：接入 profiling 时先核对现有 writer 的事件追加和生命周期契约。重复阶段事件
+维护注意：接入 profiling 时先核对现有 writer 的事件追加规则和生命周期要求。重复阶段事件
 可使用 DirectWriter；不要仅为接入一个算子而新增通用 recorder、采集协议或文件格式。
 Review existing writer append/lifetime contracts before integration. DirectWriter supports repeated
 stage events; an operator integration alone does not require a new recorder, capture protocol or format.

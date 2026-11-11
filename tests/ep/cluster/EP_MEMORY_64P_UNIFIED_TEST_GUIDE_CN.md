@@ -59,7 +59,7 @@ bash tests/ep/cluster/run_memory_dispatch_msprof_64p.sh \
 `*_internal.json`属于脚本内部汇总文件。
 
 旧私有 dump 的 `--mode breakdown` 和节点脚本 `profile` 模式已删除，传入时返回参数错误；
-没有兼容别名。当前性能路径保留暖机、测量前后 Host barrier 和外部 msprof 采集。
+没有兼容别名。当前性能路径保留预热、测量前后 Host barrier 和外部 msprof 采集。
 
 ## 3. 测试前准备
 
