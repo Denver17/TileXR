@@ -3,7 +3,7 @@
  * token 计数和 communicator；materialize 等待不可变元数据，再用 at_npu::native::from_blob
  * 包装 hidden/assist，共享 Allocation lease，并在消费者 stream 排入 producer event 依赖。
  * synchronize 检查完整完成与晚到错误；消费者登记后，Storage 释放交由
- * pool.cpp 的退休流程处理。Combine 等待完成 event；无法确认访问结束时保留相关 owner。
+ * pool.cpp 的释放流程处理。Combine 等待完成 event；无法确认访问结束时保留相关 owner。
  * Buffer 同时只保留一个未消费的路由 handle；适配层用于无梯度推理，hidden 支持 FP16/BF16。
  */
 #include <torch/extension.h>

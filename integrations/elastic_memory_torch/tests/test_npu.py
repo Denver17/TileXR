@@ -7,7 +7,7 @@
 # materialize 仅保证元数据可用；立即提交普通 Torch 运算检查 producer event 依赖。
 # 生命周期用例主动丢弃输入或 Pending，保留 Storage view，并在显式登记的 stream 上
 # 放置延迟消费者，检查扩容、trim 和 close 不提前回收仍被使用的输出。回读比较前等待
-# 相应工作完成，释放引用后通过 collect 等待退休；测试依赖真实 torch_npu 与 NPU 环境。
+# 相应工作完成，删除引用后通过 collect 等待释放完成；测试依赖真实 torch_npu 与 NPU 环境。
 import argparse
 import gc
 import json

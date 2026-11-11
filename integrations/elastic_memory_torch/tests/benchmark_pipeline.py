@@ -78,7 +78,7 @@ def inputs_and_expected(rank, bs, width):
 
 
 def retire(pool):
-    # 退休等待在样本之外；不 trim，后续样本继续复用已增长的 segment。
+    # 释放等待在样本之外；不 trim，后续样本继续复用已增长的 segment。
     gc.collect()
     deadline = time.monotonic() + 10
     while True:
@@ -219,7 +219,7 @@ def run(args):
                                            result.expert_counts), expected):
                     torch.testing.assert_close(actual.cpu(), wanted, rtol=0, atol=0)
                 torch.testing.assert_close(expert.cpu(), expected_mul, rtol=0, atol=0)
-                del actual  # zip 的最后一个 Tensor 引用也必须在退休前释放。
+                del actual  # zip 的最后一个 Tensor 引用也必须删除，lease 才能释放。
                 after = pool.snapshot()
                 require(after["live_bytes"] + after["pending_retire_bytes"] + after["free_bytes"]
                         == after["committed_bytes"], "pool accounting mismatch")

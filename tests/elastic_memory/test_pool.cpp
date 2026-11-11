@@ -3,8 +3,8 @@
  * 回读数据及分配前副作用计数，核对新地址可用且调用未重放。
  * 用映射 gate 保持 producer 驻留，检查早期元数据、consumer 依赖和 finalStatus 迟到错误。
  * 零输出通过独立 predecessor 延迟 consumer boundary，区分有无活跃引用时的 Close 行为。
- * 保留 Allocation 引用来检查环绕、乱序退休后的队头阻塞和 trim/close；
- * 正常路径等待退休后释放辅助内存、stream 和 kernel 注册。Torch 与多 rank EP 另有测试。
+ * 保留 Allocation 引用来检查环绕、乱序释放后的队头阻塞和 trim/close；
+ * 正常路径等待释放完成后回收辅助内存、stream 和 kernel 注册。Torch 与多 rank EP 另有测试。
  */
 #include "tilexr_elastic_memory.h"
 #include <runtime/kernel.h>

@@ -1,9 +1,9 @@
 /*
  * 在 Host 上直接调用生产 allocator.h 的环形分配算术，不启动 ACL 或 NPU kernel。
  * 固定用例检查地址对齐、连续空间、绕回 padding、handle 代次、空环归一化及溢出；
- * 随机用例逐字节枚举候选位置，与分配结果交叉核对。测试自行模拟乱序退休，只有
+ * 随机用例逐字节枚举候选位置，与分配结果交叉核对。测试自行模拟乱序释放，只有
  * 连续的安全前缀推进 reclaim；失败申请必须保留原 RingState 并清空返回值。
- * 本文件覆盖分配算术，不覆盖 Host/device mailbox 可见性或 stream 退休事件。
+ * 本文件覆盖分配算术，不覆盖 Host/device mailbox 可见性或 stream 释放事件。
  */
 #include "allocator.h"
 #ifdef NDEBUG

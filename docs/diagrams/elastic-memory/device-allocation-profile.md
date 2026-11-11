@@ -10,14 +10,14 @@
 ## 热路径阶段
 
 CANN 9.2.0 / Ascend950DT，BF16、bs16/h128/topK2、2 ranks、每 rank 64 AIV。
-仓库 `TileXR::Profiling` SDK STAGES 每 rank 20 次暖机、20 次采样，无增长。
+仓库 `TileXR::Profiling` SDK STAGES 每 rank 20 次预热、20 次采样，无增长。
 下表为逐 rank 中位数，单位为近似 µs：
 
 | 区间 | rank 0 | rank 1 | 计入的工作 |
 |---|---:|---:|---|
 | 完整 AllocateBundle | 1.451 | 1.431 | 初始化、读取、计算、提交、结果发布及必要同步 |
 | 状态读取 | 0.381 | 0.356 | MTE2 读取 64B header + 64B 当前 RingState |
-| TryAllocateRing | 0.315 | 0.321 | 应用连续退休前缀水位、对齐、容量判断、绕回 padding |
+| TryAllocateRing | 0.315 | 0.321 | 应用连续可回收前缀水位、对齐、容量判断、绕回 padding |
 | 状态提交 | 0.177 | 0.177 | 成功且非空时将 64B RingState 写到 mailbox committed，等待 MTE3 完成 |
 | 结果发布 | 0.334 | 0.334 | 先发布 sequence=0 的 64B Output，再携本轮 sequence 发布完整描述符 |
 | owner rank gate（分配接口之外） | 2.083 | 2.097 | 本地描述符发布及 peer 错误汇聚；可与其他核的输出复制重叠 |
@@ -26,14 +26,14 @@ CANN 9.2.0 / Ascend950DT，BF16、bs16/h128/topK2、2 ranks、每 rank 64 AIV。
 prefix/expert-map/count 准备与分配重叠，不能把所有核画成先完成分配再开始准备或复制。
 
 两 shape（bs16/h128、bs256/h4096）、两 rank、普通命中及非空绕回四组共 160 个 owner 样本：
-约 **1.301–1.671µs**，本次无超过 2.5µs。每组每 rank 20 次暖机、20 次采样，
+约 **1.301–1.671µs**，本次无超过 2.5µs。每组每 rank 20 次预热、20 次采样，
 120 次普通命中、40 次非空绕回，growthCount 均不变。
 10,240 条 lane 流和 67,200 个 marker 完整，无 overflow/drop。
 
 ## 完整算子与测量边界
 
 移除设备诊断插桩后，以 msprof Task Duration 比较相同路由、BF16/topK2、2 ranks 的完整 Dispatch。
-各模式保持相同 Host stage barrier/framework profiler，每 rank 20 次暖机、100 次采样；池测量期间 growthCount=1→1。
+各模式保持相同 Host stage barrier/framework profiler，每 rank 20 次预热、100 次采样；池测量期间 growthCount=1→1。
 下面为两个 rank 中位数的中位数，单位 µs：
 
 | Shape | 最大输出预分配 | Host 实际输出对照 | Device pool |
@@ -56,8 +56,8 @@ STAGES 和 OFF 为独立批次，受 rank 到达时间与插桩扰动影响，�
 非 Capacity 错误直接发布失败；Host 增长失败也使整调用失败，不重试、不回滚。
 peer 错误汇聚与本地复制重叠，因此失败时本地成功的核可能已写 output，不能承诺未发生写入。
 
-Host 在调用间依据 Storage/view 引用及生产者、通信、登记 stream 的完成状态整理连续退休前缀，
-Device 应用已发布水位。A 活跃而 B/C 已退休时不能越过 A；padding 和被队头阻塞的空间仍占容量。
+Host 在调用间依据 Storage/view 引用及生产者、通信、登记 stream 的完成状态整理连续可回收前缀，
+Device 应用已发布水位。A 活跃而 B/C 已释放时不能越过 A；padding 和被队头阻塞的空间仍占容量。
 空段只在安全边界实际归还。`Pending::Wait` 等待完整完成；`materialize` 等元数据并建立消费 stream 依赖，最终错误由 `synchronize` 检查。图中性能为异步改造前批次，不证明新增异步收益。
 
 ## 证据与维护

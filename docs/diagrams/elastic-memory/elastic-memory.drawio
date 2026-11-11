@@ -126,7 +126,7 @@
             <mxGeometry height="456" width="921" x="90" y="1098" as="geometry" />
           </mxCell>
         </UserObject>
-        <mxCell id="11" parent="10" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[Host 物化 Tensor]" vertex="1">
+        <mxCell id="11" parent="10" style="text;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;whiteSpace=wrap;fontSize=16;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=#243247;;fontFamily=WenQuanYi Zen Hei;" value="[Host 导出 Tensor]" vertex="1">
           <mxGeometry height="16" width="867" x="54" y="2" as="geometry" />
         </mxCell>
         <mxCell id="12" parent="10" style="shape=line;dashed=1;fixDash=1;dashPattern=2 2;strokeColor=#6C8EBF;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
@@ -475,7 +475,7 @@
             <mxGeometry height="54" width="192" x="901" y="978" as="geometry" />
           </mxCell>
         </UserObject>
-        <UserObject label="本页的元数据提前物化是接口目标；当前 materialize 等待完整数据完成&#10;当前 kernel 驻留等待 Host 增长已在 CANN 9.2 实测；不会退出后重跑" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="materialize 等元数据；数据读取等完成事件&#10;Host 扩容必须可与驻留 kernel 并发推进，仍需实机验证" id="67">
+        <UserObject label="元数据提前返回：materialize 不等待数据写完，最终状态须另行检查&#10;当前 kernel 驻留等待 Host 增长已在 CANN 9.2 实测；不会退出后重跑" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="materialize 等元数据；数据读取等完成事件&#10;Host 扩容必须可与驻留 kernel 并发推进，仍需实机验证" id="67">
           <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
             <mxGeometry height="54" width="1026" x="75" y="1640" as="geometry" />
           </mxCell>
@@ -791,7 +791,7 @@
         <mxCell id="22" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="2" vertex="1">
           <mxGeometry height="20" width="20" x="302" y="239" as="geometry" />
         </mxCell>
-        <UserObject label="deleter 提交退休请求" mermaidId="e:S-&gt;H#1" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="deleter 提交退休请求" id="23">
+        <UserObject label="deleter 提交释放请求" mermaidId="e:S-&gt;H#1" mermaidBaseStyle="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;" mermaidBaseValue="deleter 提交释放请求" id="23">
           <mxCell edge="1" parent="1" source="3" style="endArrow=block;endSize=9;verticalAlign=bottom;spacingBottom=2;edgeStyle=sequenceEdgeStyle;libavoidRouting=0;curved=0;rounded=0;fontSize=16;labelBackgroundColor=none;strokeWidth=1.5;strokeColor=#52647D;fontColor=#52647D;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;;fontFamily=WenQuanYi Zen Hei;" target="5">
             <mxGeometry relative="1" as="geometry">
               <Array as="points">
@@ -851,7 +851,7 @@
             </mxGeometry>
           </mxCell>
         </UserObject>
-        <mxCell id="31" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="安全退休后推进连续前缀&#10;调用间发布紧凑回收水位" vertex="1">
+        <mxCell id="31" parent="1" style="text;html=1;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;fontColor=#52647D;;fontFamily=WenQuanYi Zen Hei;" value="安全释放后推进连续前缀&#10;调用间发布紧凑回收水位" vertex="1">
           <mxGeometry height="18" width="200" x="670" y="576" as="geometry" />
         </mxCell>
         <mxCell id="32" parent="1" style="ellipse;aspect=fixed;fillColor=light-dark(#333333,#cccccc);align=center;verticalAlign=middle;fontColor=light-dark(#FFFFFF,#333333);fontSize=12;;fontFamily=WenQuanYi Zen Hei;" value="6" vertex="1">
@@ -976,7 +976,7 @@
             <mxGeometry height="37" width="308" x="487" y="473" as="geometry" />
           </mxCell>
         </UserObject>
-        <UserObject label="collect 非阻塞；trim(wait=True) 等已退休对象的访问结束&#10;池内 free 不等于已归还 HBM，活跃别名仍可能保留整段内存" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="collect 非阻塞；trim(wait=True) 等已退休对象的访问结束&#10;池内 free 不等于已归还 HBM，活跃别名仍可能保留整段内存" id="52">
+        <UserObject label="collect 非阻塞；trim(wait=True) 等已释放对象的访问结束&#10;池内 free 不等于已归还 HBM，活跃别名仍可能保留整段内存" mermaidId="n:note3" mermaidBaseStyle="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;" mermaidBaseValue="collect 非阻塞；trim(wait=True) 等已释放对象的访问结束&#10;池内 free 不等于已归还 HBM，活跃别名仍可能保留整段内存" id="52">
           <mxCell parent="1" style="html=1;fillColor=#FFF2D8;strokeColor=#D3A246;fontColor=#243247;fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontSize=16;;fontFamily=WenQuanYi Zen Hei;" vertex="1">
             <mxGeometry height="54" width="1013" x="50" y="1296" as="geometry" />
           </mxCell>

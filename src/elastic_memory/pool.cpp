@@ -4,7 +4,7 @@
  * WaitMetadata 只等待不可变地址和 shape；Wait/Synchronize 继续报告完整调用的最终结果。
  * 消费者 stream 等待保留的 producer event；FIFO 下一请求和回收仍在完整完成后推进。
  * Allocation 保持 Core 存活，最后一个引用释放后，服务线程
- * 检查登记的 stream/event、推进连续退休前缀并尝试归还空 segment。无法确认设备访问结束时
+ * 检查登记的 stream/event、推进连续可回收前缀并尝试归还空 segment。无法确认设备访问结束时
  * 保留资源和输入 owner，拒绝后续请求，避免提前释放。
  */
 #include "tilexr_elastic_memory.h"

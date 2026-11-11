@@ -2,7 +2,7 @@
  * 声明供原生 EP 和 Torch 适配层使用的 Pool、Pending、Allocation 接口，实现在
  * src/elastic_memory/pool.cpp。Submit 接收输入 stream 和 Device 启动回调，Pending::Wait
  * 等待数据完成，WaitMetadata 仅等待不可变元数据；Allocation 持有内存使用权和 producer
- * 完成状态，消费者须建立 stream 依赖并登记 stream/event 后才能退休。
+ * 完成状态，消费者须建立 stream 依赖并登记 stream/event 后才能释放。
  * Close 停止接收请求并尝试回收，仍存活的 Allocation 可继续保持 segment 和 Core。
  */
 #ifndef TILEXR_ELASTIC_MEMORY_H

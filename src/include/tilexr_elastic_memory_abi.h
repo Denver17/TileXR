@@ -2,7 +2,7 @@
  * 定义 pool.cpp 与 tilexr_elastic_memory_device.h 共用的环状态、分配 Handle 和 mailbox。
  * Host 在调用前发布只读 PoolState，Device 按实际 bytes 分配，将选中段的 RingState 写入
  * committed 槽后发布 Output；扩容请求和响应通过独立槽传递，以请求序号匹配本次调用。
- * Handle 的 generation 区分分配身份，完整 lease 和连续退休前缀由 Host 管理。
+ * Handle 的 generation 区分分配身份，完整 lease 和连续可回收前缀由 Host 管理。
  */
 #ifndef TILEXR_ELASTIC_MEMORY_ABI_H
 #define TILEXR_ELASTIC_MEMORY_ABI_H

@@ -3,7 +3,7 @@
 Pending.materialize 等待元数据并在消费 stream 排入 producer 完成依赖，缓存结果；DeepEPBuffer 每次持有一个可消费的路由
 handle，下一轮 Dispatch 前须 Combine 或 discard。Storage 的 allocation lease 与
 路由 handle 分开持有，view 可跨 pool 关闭存活。额外消费 stream 须显式登记，调用者
-保持设备及 stream 存活至退休；pool 统计不包括 communicator 的 staging。
+保持设备及 stream 存活至释放完成；pool 统计不包括 communicator 的 staging。
 """
 from contextlib import contextmanager
 

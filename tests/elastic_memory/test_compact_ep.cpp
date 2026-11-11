@@ -2,7 +2,7 @@
  * 用独立路由 oracle 核对双 rank 的 compact Dispatch 输出，并交给生产 Combine。
  * 比较最大预分配、Host 实际大小参考和 Device pool；Host 计时与供 msprof 对齐的
  * kernel 序号分开记录，各阶段准备后执行 Host AllGather。
- * 环绕用例保留上一轮 Allocation 至本轮完成，登记 Combine stream 后释放引用并等待退休。
+ * 环绕用例保留上一轮 Allocation 至本轮完成，登记 Combine stream 后删除引用并等待释放完成。
  * SDK capture 绑定 Pool service stream，在 Pending 完成后采集 records、completion 和 Host events；
  * manifest shard 使用 launch 前声明的身份，capture 在导出后关闭，避免阻塞 Host 扩容。
  */
