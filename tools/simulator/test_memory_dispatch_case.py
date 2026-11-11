@@ -77,8 +77,18 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             for rank in range(2):
                 for name in case.OUTPUT_TYPES:
                     data = (output / "expected" / ("rank%d" % rank) / (name + ".bin")).read_bytes()
-                    (output / "bin" / ("david_%d_%s.bin" % (rank, name))).write_bytes(
-                        data.ljust(scenario["output_sizes"][str(rank)][name], b"\xa5"))
+                    size = scenario["output_sizes"][str(rank)][name]
+                    data = data.ljust(size, b"\xa5")
+                    address = workload["chip%d" % rank]["output_param"][name]["addr"]
+                    for die in (1, 2):
+                        sparse = bytearray()
+                        for offset in range(0, size, 512):
+                            length = min(512, size - offset)
+                            block = data[offset:offset + length] if offset // 512 % 2 == die - 1 else b"\xa5" * length
+                            sparse.extend(struct.pack("<Q", address + offset) + block.ljust(512, b"\0"))
+                        (output / "bin" / ("david_%d_die%d_%s.bin" % (rank, die, name))).write_bytes(sparse)
+            with contextlib.redirect_stdout(io.StringIO()):
+                case.extract(types.SimpleNamespace(case=output))
             log = root / "sim.log"
             log.write_text("Simulation is complete, simulated time: 1.25 us\n")
             validation = types.SimpleNamespace(case=output, log=log, exit_code=0)
@@ -93,6 +103,12 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             validation.exit_code = 124
             with self.assertRaisesRegex(ValueError, "did not exit successfully"):
                 case.validate(validation)
+            conflicting = output / "bin/david_1_die2_expandXOut.bin"
+            address = workload["chip1"]["output_param"]["expandXOut"]["addr"]
+            with conflicting.open("ab") as stream:
+                stream.write(struct.pack("<Q", address) + b"b" * 512)
+            with self.assertRaisesRegex(ValueError, "Conflicting die writes"):
+                case.extract(types.SimpleNamespace(case=output))
             original = output / "input_bin/rank0/commArgs.bin"
             original.write_bytes(b"stale input")
             with self.assertRaisesRegex(ValueError, "inputs or deployed kernel changed"):

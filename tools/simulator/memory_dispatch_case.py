@@ -322,6 +322,50 @@ def validate(args):
     print(json.dumps(report))
 
 
+def extract(args):
+    case = args.case.resolve()
+    scenario = preflight(case)
+    chips = read_yaml(case / "workload.yml")["workload_config"]
+    extracted = 0
+    for rank, chip in enumerate(chips.values()):
+        for name, region in chip["output_param"].items():
+            start, size = region["addr"], region["size"]
+            initial = pathlib.Path(chip["kernel_param"][name]["input_bin"]).read_bytes()
+            merged = bytearray(initial)
+            owners = {}
+            files = sorted((case / "bin").glob("david_%d_die*_%s.bin" % (rank, name)))
+            if not files:
+                raise ValueError("Missing per-die output: rank=%d field=%s" % (rank, name))
+            for path in files:
+                with path.open("rb") as stream:
+                    while True:
+                        record = stream.read(520)
+                        if not record:
+                            break
+                        if len(record) != 520:
+                            raise ValueError("Truncated sparse GM record: %s" % path)
+                        address = struct.unpack_from("<Q", record)[0]
+                        if address % 512:
+                            raise ValueError("Unaligned sparse GM record")
+                        begin, end = max(start, address), min(start + size, address + 512)
+                        if begin >= end:
+                            continue
+                        data = record[8 + begin - address:8 + end - address]
+                        offset = begin - start
+                        if data == initial[offset:offset + len(data)]:
+                            continue
+                        if address in owners and owners[address] != data:
+                            raise ValueError("Conflicting die writes: rank=%d field=%s address=%#x"
+                                             % (rank, name, address))
+                        owners[address] = data
+                        merged[offset:offset + len(data)] = data
+            # 未写入的区域保留初始化值，由后续数值校验检查；不从 expected 补数据。
+            (case / "bin" / ("david_%d_%s.bin" % (rank, name))).write_bytes(merged)
+            extracted += 1
+    print(json.dumps({"status": "EXTRACTED", "rank_size": scenario["rank_size"],
+                      "outputs": extracted}))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -337,6 +381,9 @@ def main():
     flight.add_argument("case", type=pathlib.Path)
     flight.set_defaults(action=lambda args: print(json.dumps({
         "status": "PREFLIGHT_PASS", "scenario": preflight(args.case.resolve())})))
+    merge = sub.add_parser("extract")
+    merge.add_argument("case", type=pathlib.Path)
+    merge.set_defaults(action=extract)
     check = sub.add_parser("validate")
     check.add_argument("case", type=pathlib.Path)
     check.add_argument("--log", type=pathlib.Path, required=True)
