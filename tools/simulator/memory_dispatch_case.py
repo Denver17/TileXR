@@ -18,6 +18,8 @@ import struct
 import yaml
 
 
+SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+SAFE_DUMPER = getattr(yaml, "CSafeDumper", yaml.SafeDumper)
 GM_SIZE = 0x2000000000
 INPUT_BASE = 0x200000000
 PEER_BASE = 0x1000000000
@@ -41,6 +43,14 @@ def sha256(path):
 
 def write_json(path, value):
     pathlib.Path(path).write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def read_yaml(path):
+    return yaml.load(pathlib.Path(path).read_text(), Loader=SAFE_LOADER)
+
+
+def encode_yaml(value):
+    return yaml.dump(value, Dumper=SAFE_DUMPER, sort_keys=False)
 
 
 def aligned(value, alignment=512):
@@ -141,7 +151,7 @@ def preflight(case):
         raise ValueError("Case inputs or deployed kernel changed: %s" % changed)
     if (case / "workload.yml").read_bytes() != (case / "v310_config/workload_config.yml").read_bytes():
         raise ValueError("Workload mirrors differ")
-    chips = yaml.safe_load((case / "workload.yml").read_text())["workload_config"]
+    chips = read_yaml(case / "workload.yml")["workload_config"]
     if list(chips) != ["chip%d" % rank for rank in range(scenario["rank_size"])]:
         raise ValueError("Workload ranks differ from scenario")
     for rank, chip in enumerate(chips.values()):
@@ -201,10 +211,10 @@ def generate(args):
             shutil.copy2(source, config_dir / name)
     for folder in (output / "UBusSim_config", config_dir):
         for path in folder.glob("*.yml"):
-            config = yaml.safe_load(path.read_text())
+            config = read_yaml(path)
             patch_config(config, args.ranks)
-            path.write_text(yaml.safe_dump(config, sort_keys=False))
-    template = yaml.safe_load((args.template / "v310_config/workload_config.yml").read_text())
+            path.write_text(encode_yaml(config))
+    template = read_yaml(args.template / "v310_config/workload_config.yml")
     chip_template = next(iter(template["workload_config"].values()))
     rows, expected = oracle(args.ranks, args.bs, args.h, args.top_k,
                             args.experts, args.token_nums_type)
@@ -261,7 +271,7 @@ def generate(args):
         }
         output_sizes[str(rank)] = {name: len(contents[name]) for name in OUTPUT_TYPES}
         workload["workload_config"]["chip%d" % rank] = chip
-    encoded = yaml.safe_dump(workload, sort_keys=False)
+    encoded = encode_yaml(workload)
     (output / "workload.yml").write_text(encoded)
     (config_dir / "workload_config.yml").write_text(encoded)
     shutil.copy2(args.layout, output / "layout.json")
