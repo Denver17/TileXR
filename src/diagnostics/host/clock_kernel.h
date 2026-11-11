@@ -1,10 +1,7 @@
 /*
- * 功能：定义 Host 提交 clock kernel 的参数布局和 launch 接口。
- * 调用关系：straggler_session.cpp 传入 session 与 stream；clock_kernel.cpp 按此 ABI 提交 kernel。
- * 资源与生命周期：参数中的指针借用 session 和 communicator 的内存，不在此处分配或释放。
- * Purpose: Define the Host clock launch interface and its argument ABI.
- * Calls: straggler_session.cpp supplies the session/stream; clock_kernel.cpp submits this ABI.
- * Lifetime: Argument pointers borrow session/communicator memory; this header allocates or frees none.
+ * 功能：定义 clock sync 和 sleep_at 的 Host launch 接口及 kernel 参数布局。
+ * 调用关系：session 提供参数，clock_kernel.cpp 按此 ABI 调用 CANN runtime。
+ * 资源与生命周期：sync 参数借用 session 的内存；sleep_at 按值传递 deadline。
  */
 #ifndef TILEXR_DIAGNOSTICS_HOST_CLOCK_KERNEL_H
 #define TILEXR_DIAGNOSTICS_HOST_CLOCK_KERNEL_H
@@ -38,6 +35,12 @@ static_assert(offsetof(ClockSyncKernelArgs, warmupSampleCount) == 36,
               "clock-sync warmup-count ABI changed");
 static_assert(offsetof(ClockSyncKernelArgs, rdmaMemory) == 40, "clock-sync RDMA ABI changed");
 static_assert(sizeof(ClockSyncKernelArgs) == 48, "clock-sync argument ABI changed");
+
+struct ClockSleepAtKernelArgs {
+    uint64_t localDeadline;
+};
+static_assert(sizeof(ClockSleepAtKernelArgs) == 8, "sleep-at argument ABI changed");
+int LaunchClockSleepAtKernel(uint64_t localDeadline, aclrtStream stream);
 
 int LaunchClockSyncKernel(const StragglerSession &session, uint32_t warmupSamples,
                           uint32_t samples, int64_t magic, uint64_t timeoutCycles,

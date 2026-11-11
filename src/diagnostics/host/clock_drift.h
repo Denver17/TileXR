@@ -1,8 +1,6 @@
 /*
- * 功能：声明初始拟合和反馈更新接口，以及保存采样点、模型和探测状态的 ClockDriftTracker。
- * 调用关系：straggler_session.cpp 持有 tracker，clock_drift.cpp 更新相对逻辑 rank 0 的模型。
- * Purpose: Declare fitting/feedback interfaces and the tracker storing points, model and probe state.
- * Calls: straggler_session.cpp owns the tracker; clock_drift.cpp updates its model relative to logical rank 0.
+ * 功能：声明 drift 拟合、时间校正所需的 tracker 和 sleep_at deadline 换算接口。
+ * 调用关系：session 持有 tracker，clock_drift.cpp 读取采样并更新模型。
  */
 #ifndef TILEXR_DIAGNOSTICS_HOST_CLOCK_DRIFT_H
 #define TILEXR_DIAGNOSTICS_HOST_CLOCK_DRIFT_H
@@ -30,6 +28,10 @@ struct ClockDriftTracker {
     std::vector<ClockDriftPoint> points;
     TileXRClockDriftModel model {};
 };
+
+// Invert a READY affine model and ceil the local deadline. Output is unchanged on error.
+int ClockSleepDeadline(const TileXRClockDriftModel &model, int64_t referenceCycle,
+                        uint64_t *localDeadline);
 
 TileXRClockDriftModel FitClockDrift(const std::vector<ClockDriftPoint> &points,
                                    uint64_t frequency, int rank);

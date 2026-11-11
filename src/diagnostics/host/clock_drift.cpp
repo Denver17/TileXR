@@ -1,10 +1,7 @@
 /*
- * 功能：拟合相对逻辑 rank 0 的 offset 和 rate，按确认的残差更新补偿，并校正本地时间戳。
- * 调用关系：straggler_session.cpp 提供采样；公开校正接口也供 straggler_analysis.cpp 使用。
- * 资源与生命周期：采样点和模型保存在调用方持有的 ClockDriftTracker 中，本文件不分配 device buffer。
- * Purpose: Fit and maintain offsets/rates relative to logical rank 0 and correct local timestamps.
- * Calls: straggler_session.cpp supplies samples; straggler_analysis.cpp also uses the correction API.
- * Lifetime: The caller owns the tracker, its points and model; no device buffers are allocated here.
+ * 功能：拟合和更新相对逻辑 rank 0 的 drift 模型，校正 cycle 并反算 sleep_at 的本地 deadline。
+ * 调用关系：session 提供采样，session 和 analysis 模块使用模型换算时间。
+ * 资源与生命周期：采样点和模型保存在调用方持有的 tracker 中；本文件不分配 device buffer。
  */
 #include "clock_drift.h"
 
@@ -79,6 +76,51 @@ void TrackClockDrift(ClockDriftTracker &tracker,
 }
 
 } // namespace
+
+int ClockSleepDeadline(const TileXRClockDriftModel &model, int64_t referenceCycle,
+                        uint64_t *localDeadline)
+{
+    if (localDeadline == nullptr || model.version != 1 || model.cyclesPerSecond == 0 ||
+        !std::isfinite(model.offsetCycles) || !std::isfinite(model.rateCorrection) ||
+        std::fabs(model.rateCorrection) >= 0.001) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    if (model.state != TILEXR_CLOCK_DRIFT_READY) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    // Keep the reference epoch integer and ceil only its model correction.
+    // Ceil(anchor-relative displacement) can lose a subcycle offset when the
+    // target is far from the anchor, even with extended Host precision.
+    const long double referenceDelta = referenceCycle >= 0 ?
+        Delta(static_cast<uint64_t>(referenceCycle), model.anchorCycle) :
+        static_cast<long double>(referenceCycle) - model.anchorCycle;
+    const long double displacement = std::ceil((-static_cast<long double>(model.offsetCycles) -
+        static_cast<long double>(model.rateCorrection)*referenceDelta) /
+        (1.0L + static_cast<long double>(model.rateCorrection)));
+    const long double magnitude = std::fabs(displacement);
+    // Exclusive power-of-two bound avoids an out-of-range uint64_t cast.
+    if (!std::isfinite(displacement) || magnitude >= std::ldexp(1.0L, 64)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    const uint64_t amount = static_cast<uint64_t>(magnitude);
+    const uint64_t referenceMagnitude = referenceCycle < 0 ?
+        uint64_t {0} - static_cast<uint64_t>(referenceCycle) : static_cast<uint64_t>(referenceCycle);
+    uint64_t deadline = 0;
+    if (referenceCycle < 0) {
+        if (displacement < 0 || amount < referenceMagnitude) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        deadline = amount - referenceMagnitude;
+    } else {
+        if ((displacement < 0 && amount > referenceMagnitude) ||
+            (displacement >= 0 && amount > std::numeric_limits<uint64_t>::max() - referenceMagnitude)) {
+            return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+        }
+        deadline = displacement < 0 ? referenceMagnitude - amount : referenceMagnitude + amount;
+    }
+    *localDeadline = deadline;
+    return TileXR::TILEXR_SUCCESS;
+}
 
 TileXRClockDriftModel FitClockDrift(const std::vector<ClockDriftPoint> &points,
                                    uint64_t frequency, int rank)

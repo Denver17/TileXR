@@ -1,10 +1,7 @@
 /*
- * 功能：定义诊断 session 的校准状态、buffer、待完成 stream 记录和可替换的 runtime hooks。
- * 调用关系：straggler_session.cpp 实现会话操作，clock_kernel.cpp 读取 launch 所需字段；unit test 替换 hooks。
- * 资源与生命周期：session 持有 device allocation 和 RDMA registration，借用 communicator 与调用方的 stream。
- * Purpose: Define calibration state, buffers, pending-stream records and replaceable runtime hooks.
- * Calls: straggler_session.cpp implements operations, clock_kernel.cpp reads launch state and unit tests replace hooks.
- * Lifetime: Sessions own device allocations/RDMA registration and borrow the communicator and caller streams.
+ * 功能：定义 session 的校准状态、buffer、待完成 stream 记录和可替换的 runtime hooks。
+ * 调用关系：session 实现读写这些状态，clock launcher 读取启动参数，unit test 替换 hooks。
+ * 资源与生命周期：session 持有 device allocation 和 RDMA registration，借用 communicator 与 stream。
  */
 #ifndef TILEXR_DIAGNOSTICS_HOST_STRAGGLER_SESSION_H
 #define TILEXR_DIAGNOSTICS_HOST_STRAGGLER_SESSION_H
@@ -56,6 +53,8 @@ struct StragglerSession {
     std::vector<int> recordStatuses;
     std::vector<aclrtStream> recordStreams;
     std::vector<aclrtStream> outstandingStreams;
+    // Separate from observation work: a blocking clock refresh can drain waits.
+    std::vector<aclrtStream> clockSleepStreams;
     aclrtStream clockStream = nullptr;
     uint64_t localLaunchId = 0;
     uint64_t nextCollectId = 1;
@@ -99,6 +98,7 @@ struct StragglerRuntimeHooks {
     int (*rdmaGetView)(void *comm, TileXRRDMAMemHandle handle, int peer,
                         TileXRRDMADeviceView *view) = nullptr;
     int (*rdmaShutdown)(void *comm) = nullptr;
+    int (*launchClockSleepAt)(uint64_t localDeadline, aclrtStream stream) = nullptr;
 };
 
 void SetStragglerRuntimeHooksForTest(const StragglerRuntimeHooks *hooks);

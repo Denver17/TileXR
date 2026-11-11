@@ -1,10 +1,7 @@
 /*
- * 功能：加载并注册 clock AICore binary，校验 launch 参数并向调用方的 stream 提交 kernel。
- * 调用关系：straggler_session.cpp 调用此处；依赖 kernel binary loader 和 CANN runtime。
- * 资源与生命周期：注册状态和 binary handle 保存在文件静态变量中；session 持有采样 buffer。
- * Purpose: Load/register the clock binary, validate launch arguments and submit it to the caller's stream.
- * Calls: Used by straggler_session.cpp through the binary loader and CANN runtime.
- * Lifetime: Static state retains registration and its binary handle; the session owns sample buffers.
+ * 功能：加载并注册 clock sync 和 sleep_at 入口，向调用方的 stream 提交 kernel。
+ * 调用关系：session 调用 launch 接口；本文件使用 kernel binary loader 和 CANN runtime。
+ * 资源与生命周期：成功注册的 binary handle 保存在静态状态中；采样 buffer 和 stream 由调用方持有。
  */
 #include "clock_kernel.h"
 
@@ -32,10 +29,10 @@ bool g_registered = false;
 int g_registrationStatus = TileXR::TILEXR_ERROR_NOT_INITIALIZED;
 void *g_binaryHandle = nullptr;
 
-int8_t *ClockSyncFunSig()
+int8_t *ClockFunSig(TileXR::TileXRType type)
 {
     const uint64_t sig =
-        (static_cast<uint64_t>(TileXR::TileXRType::CLOCK_SYNC) <<
+        (static_cast<uint64_t>(type) <<
             FUNSIG_OFFSET_BITS << FUNSIG_OFFSET_BITS) + FUNSIG_SKEW;
     return reinterpret_cast<int8_t *>(sig);
 }
@@ -66,13 +63,17 @@ int EnsureDiagnosticsKernelRegistered()
         g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
         return g_registrationStatus;
     }
-    ret = rtFunctionRegister(handle, ClockSyncFunSig(),
-        "TileXRClockSync", "TileXRClockSync", 0);
-    if (ret != RT_ERROR_NONE) {
-        std::cerr << "TileXR diagnostics rtFunctionRegister failed, ret=" << ret
-                  << ", kernel=TileXRClockSync" << std::endl;
-        g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
-        return g_registrationStatus;
+    const TileXR::TileXRType types[] = {TileXR::TileXRType::CLOCK_SYNC,
+                                        TileXR::TileXRType::CLOCK_SLEEP_AT};
+    const char *names[] = {"TileXRClockSync", "TileXRClockSleepAt"};
+    for (size_t index = 0; index < 2; ++index) {
+        ret = rtFunctionRegister(handle, ClockFunSig(types[index]), names[index], names[index], 0);
+        if (ret != RT_ERROR_NONE) {
+            std::cerr << "TileXR diagnostics rtFunctionRegister failed, ret=" << ret
+                      << ", kernel=" << names[index] << std::endl;
+            g_registrationStatus = TileXR::TILEXR_ERROR_MKIRT;
+            return g_registrationStatus;
+        }
     }
     g_binaryHandle = handle;
     g_registered = true;
@@ -80,7 +81,30 @@ int EnsureDiagnosticsKernelRegistered()
     return TileXR::TILEXR_SUCCESS;
 }
 
+template <typename Args>
+int LaunchClockKernel(TileXR::TileXRType type, Args &args, aclrtStream stream)
+{
+    const int status = EnsureDiagnosticsKernelRegistered();
+    if (status != TileXR::TILEXR_SUCCESS) { return status; }
+    rtTaskCfgInfo_t config {};
+    config.schemMode = 1;
+    rtArgsEx_t argsInfo {};
+    argsInfo.args = &args;
+    argsInfo.argsSize = sizeof(args);
+    const rtError_t ret = rtKernelLaunchWithFlagV2(
+        ClockFunSig(type), 1, &argsInfo, nullptr,
+        static_cast<rtStream_t>(stream), 0, &config);
+    return ret == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;
+}
+
 } // namespace
+
+int LaunchClockSleepAtKernel(uint64_t localDeadline, aclrtStream stream)
+{
+    if (stream == nullptr) { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
+    ClockSleepAtKernelArgs args {localDeadline};
+    return LaunchClockKernel(TileXR::TileXRType::CLOCK_SLEEP_AT, args, stream);
+}
 
 int LaunchClockSyncKernel(const StragglerSession &session, uint32_t warmupSamples,
                           uint32_t samples, int64_t magic, uint64_t timeoutCycles,
@@ -88,10 +112,6 @@ int LaunchClockSyncKernel(const StragglerSession &session, uint32_t warmupSample
 {
     if (session.devArgs == nullptr || session.deviceSamples == nullptr || samples == 0 || stream == nullptr) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    const int registerRet = EnsureDiagnosticsKernelRegistered();
-    if (registerRet != TileXR::TILEXR_SUCCESS) {
-        return registerRet;
     }
     ClockSyncKernelArgs args {};
     args.commArgsPtr = session.devArgs;
@@ -101,15 +121,7 @@ int LaunchClockSyncKernel(const StragglerSession &session, uint32_t warmupSample
     args.timeoutCycles = timeoutCycles;
     args.warmupSampleCount = warmupSamples;
     args.rdmaMemory = session.clockRdmaMemory;
-    rtTaskCfgInfo_t cfgInfo {};
-    cfgInfo.schemMode = 1;
-    rtArgsEx_t argsInfo {};
-    argsInfo.args = &args;
-    argsInfo.argsSize = sizeof(args);
-    const rtError_t ret = rtKernelLaunchWithFlagV2(
-        ClockSyncFunSig(), 1, &argsInfo, nullptr,
-        static_cast<rtStream_t>(stream), 0, &cfgInfo);
-    return ret == RT_ERROR_NONE ? TileXR::TILEXR_SUCCESS : TileXR::TILEXR_ERROR_MKIRT;
+    return LaunchClockKernel(TileXR::TileXRType::CLOCK_SYNC, args, stream);
 }
 
 } // namespace Host

@@ -1,8 +1,6 @@
 /*
- * 功能：用合成时间戳检查初始拟合、反馈方向、阈值确认、更新间隔和逻辑 rank 0 的零补偿。
- * 调用关系：直接调用 clock_drift.cpp，并通过 TileXRClockCorrectCycle 检查实际校正值；不启动 NPU kernel。
- * Purpose: Check fitting, feedback sign/confirmation, update intervals and logical rank 0's zero correction.
- * Calls: Exercise clock_drift.cpp and validate applied values through TileXRClockCorrectCycle without NPU launches.
+ * 功能：用合成采样检查 drift 拟合、反馈更新、cycle 校正及 sleep_at deadline 的取整和范围边界。
+ * 调用关系：直接调用 clock_drift.cpp 的接口；不启动 NPU kernel。
  */
 #include <cmath>
 #include <iostream>
@@ -166,6 +164,79 @@ void TestLogicalRankZeroReference()
     Check(TileXRClockCorrectCycle(&tracker.model, local, &aligned) == TileXR::TILEXR_SUCCESS &&
         aligned == static_cast<int64_t>(local), "reference correction is identity");
 }
+void TestSleepDeadline()
+{
+    using TileXRDiagnostics::Host::ClockSleepDeadline;
+    TileXRClockDriftModel m {};
+    m.version = 1; m.state = TILEXR_CLOCK_DRIFT_READY;
+    m.cyclesPerSecond = 1000000000; m.anchorCycle = 1000000000000000ull;
+    for (double offset : {-1000.25, 0.0, 1000.25}) {
+        for (double rate : {-230e-9, 0.0, 300e-9}) {
+            m.offsetCycles = offset; m.rateCorrection = rate;
+            for (int64_t age : {-1000000000ll, 0ll, 80000000000ll}) {
+                const int64_t target = static_cast<int64_t>(m.anchorCycle) + age;
+                uint64_t deadline = 123;
+                Check(ClockSleepDeadline(m,target,&deadline) == 0,"inverse READY model");
+                // Evaluate relative to the target, without losing fractions by
+                // adding the absolute epoch; the selected cycle must not be early.
+                const auto residual = [&](uint64_t local) {
+                    const long double delta = local >= m.anchorCycle ?
+                        static_cast<long double>(local-m.anchorCycle) :
+                        -static_cast<long double>(m.anchorCycle-local);
+                    return delta-age+m.offsetCycles+static_cast<long double>(rate)*delta;
+                };
+                Check(residual(deadline) >= -1e-8L,"ceil never early");
+                Check(residual(deadline-1) < 1e-8L,"earliest integer local deadline");
+            }
+        }
+    }
+    m.rateCorrection = 0; m.offsetCycles = 0.25;
+    m.anchorCycle = (uint64_t {1} << 63) - 100;
+    uint64_t deadline = 123;
+    Check(ClockSleepDeadline(m,static_cast<int64_t>(m.anchorCycle)+3,&deadline) == 0 &&
+        deadline == m.anchorCycle+3,"large epoch preserves fractional rounding");
+    m.offsetCycles = -0.25;
+    Check(ClockSleepDeadline(m,static_cast<int64_t>(m.anchorCycle)+3,&deadline) == 0 &&
+        deadline == m.anchorCycle+4,"negative fractional offset rounds up near int64 limit");
+    m.anchorCycle = 0;
+    Check(ClockSleepDeadline(m,std::numeric_limits<int64_t>::max(),&deadline) == 0 &&
+        deadline == (uint64_t {1} << 63),"far reference preserves subcycle offset");
+    m.offsetCycles = -std::ldexp(1.0,63);
+    Check(ClockSleepDeadline(m,std::numeric_limits<int64_t>::max(),&deadline) == 0 &&
+        deadline == std::numeric_limits<uint64_t>::max(),"largest local deadline accepted");
+    Check(ClockSleepDeadline(m,std::numeric_limits<int64_t>::min(),&deadline) == 0 &&
+        deadline == 0,"minimum signed reference without negation overflow");
+    m.anchorCycle = 100; m.offsetCycles = -101;
+    Check(ClockSleepDeadline(m,-1,&deadline) == 0 && deadline == 100,"signed reference domain");
+    m.offsetCycles = 0;
+    Check(ClockSleepDeadline(m,0,&deadline) == 0 && deadline == 0,"zero deadline valid");
+    auto failsWithoutWrite = [&](const char *name) {
+        deadline = 123;
+        Check(ClockSleepDeadline(m,-1,&deadline) != 0 && deadline == 123,name);
+    };
+    failsWithoutWrite("negative local deadline rejected");
+    m.offsetCycles = -std::ldexp(1.0,65);
+    failsWithoutWrite("overflow rejected before integer conversion");
+    m.offsetCycles = std::numeric_limits<double>::infinity();
+    failsWithoutWrite("infinite offset rejected");
+    m.offsetCycles = 0; m.rateCorrection = std::numeric_limits<double>::quiet_NaN();
+    failsWithoutWrite("NaN rate rejected");
+    m.rateCorrection = 0.001;
+    failsWithoutWrite("rate sanity boundary rejected");
+    m.rateCorrection = 0; m.cyclesPerSecond = 0;
+    failsWithoutWrite("unknown frequency rejected");
+    m.cyclesPerSecond = 1000000000; m.version = 2;
+    failsWithoutWrite("unknown version rejected");
+    m.version = 1;
+    for (uint32_t state : {TILEXR_CLOCK_DRIFT_DISABLED,TILEXR_CLOCK_DRIFT_COLLECTING,
+            TILEXR_CLOCK_DRIFT_INSUFFICIENT,TILEXR_CLOCK_DRIFT_UNSTABLE}) {
+        m.state = state;
+        Check(ClockSleepDeadline(m,100,&deadline) == TileXR::TILEXR_ERROR_NOT_INITIALIZED,
+            "all unready states rejected");
+    }
+    m.state = TILEXR_CLOCK_DRIFT_READY;
+    Check(ClockSleepDeadline(m,100,nullptr) != 0,"null output rejected");
+}
 } // namespace
 int main()
 {
@@ -173,6 +244,7 @@ int main()
     TestShortAndInvalid(); TestTrackerFreezes();
     TestTrackingFeedback();
     TestLogicalRankZeroReference();
+    TestSleepDeadline();
     std::cout << "clock drift failures=" << failures << '\n';
     return failures == 0 ? 0 : 1;
 }

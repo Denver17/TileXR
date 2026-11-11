@@ -1,10 +1,8 @@
 /*
- * 功能：按指定 rank/device 运行真实 clock collective，检查结果并导出采样、模型、校正值和耗时。
- * 调用关系：多进程 runner 启动此程序；使用 diagnostics Host API，输出供独立 Python analyzer 审计。
- * 资源与生命周期：程序创建 communicator、stream 和 detector，并调用各自销毁接口；detector 销毁失败时直接退出。
- * Purpose: Run real clock collectives for a rank/device and export checked samples, models, corrections and timings.
- * Calls: Multiprocess runners launch this diagnostics Host API consumer; Python analyzers audit its output.
- * Lifetime: Creates a communicator, stream and detector and calls their teardown APIs; exits immediately if detector teardown fails.
+ * 功能：执行多 rank clock 校准并导出采样和模型，可选检查 sleep_at 或采集后续 RDMA kernel。
+ * 调用关系：runner 为各 rank 启动本程序；程序调用 diagnostics API，输出供 analyzer 读取。
+ * 资源与生命周期：程序创建 communicator、stream 和 detector，结束时调用销毁接口；
+ *   detector 销毁失败时返回，不继续销毁 communicator 和 stream。
  */
 #include <algorithm>
 #include <chrono>
@@ -22,6 +20,7 @@
 #include "acl/acl.h"
 #include "tilexr_straggler.h"
 #include "straggler_session.h"
+#include "sleep_at_rdma_profile.h"
 
 namespace {
 
@@ -33,6 +32,8 @@ struct Options {
     int samples = 128;
     int warmup = 32;
     bool freezeCalibration = false;
+    bool sleepAtTest = false;
+    bool sleepAtRdmaProfile = false;
     int roundGapMs = 0;
     int maintenanceIntervalMs = 60000;
     std::string outputDir = "clock_sync_e2e";
@@ -92,6 +93,12 @@ bool ParseOptions(int argc, char **argv, Options &options)
         } else if (argument == "--freeze-calibration") {
             if (value > 1) { return false; }
             options.freezeCalibration = value != 0;
+        } else if (argument == "--sleep-at-test") {
+            if (value > 1) { return false; }
+            options.sleepAtTest = value != 0;
+        } else if (argument == "--sleep-at-rdma-profile") {
+            if (value > 1) { return false; }
+            options.sleepAtRdmaProfile = value != 0;
         } else if (argument == "--round-gap-ms") {
             if (value > 10000) { return false; }
             options.roundGapMs = static_cast<int>(value);
@@ -106,7 +113,8 @@ bool ParseOptions(int argc, char **argv, Options &options)
         options.rank >= 0 && options.rank < options.rankSize && options.deviceId >= 0 &&
         options.rounds > 0 && options.samples >= 4 && options.samples <= 256 &&
         options.warmup <= 256 && !options.outputDir.empty() &&
-        (!options.freezeCalibration || options.rounds >= 2);
+        (!options.freezeCalibration || options.rounds >= 2) &&
+        (!options.sleepAtRdmaProfile || options.rankSize == 2);
 }
 
 bool WriteFrozenCalibration(const Options &options, const TileXRClockSyncResult &clock)
@@ -197,6 +205,79 @@ bool WriteRdmaProfile(TileXRDiagnostics::Host::StragglerSession &session,
     return send.good() && receive.good();
 }
 
+bool CheckSleepAt(const Options &options, TileXRCommPtr comm,
+                    TileXRStraggler detector, aclrtStream stream)
+{
+    using namespace TileXRDiagnostics::Host;
+    auto &session = *static_cast<StragglerSession *>(detector);
+    TileXRClockDriftModel model {};
+    bool ok = TileXRClockGetDriftModel(detector,options.rank,&model) == 0 &&
+        model.state == TILEXR_CLOCK_DRIFT_READY;
+    if (!AgreeValidation(comm,options.rankSize,ok)) { return false; }
+    // The timing record is written by the clock kernel on every rank.
+    TileXR::TileXRClockSyncDeviceSample timing {};
+    const auto *timingAddress = static_cast<const uint8_t *>(session.deviceSamples) +
+        options.samples*sizeof(timing);
+    ok = aclrtMemcpy(&timing,sizeof(timing),timingAddress,sizeof(timing),
+        ACL_MEMCPY_DEVICE_TO_HOST) == ACL_SUCCESS && timing.t3 != 0;
+    std::vector<uint64_t> rootCycles(static_cast<size_t>(options.rankSize));
+    ok = ok && TileXRCommHostAllGatherTimeout(comm,&timing.t3,sizeof(timing.t3),
+        rootCycles.data(),5000) == 0;
+    if (!AgreeValidation(comm,options.rankSize,ok)) { return false; }
+    std::ofstream evidence(options.outputDir + "/sleep_at_rank" +
+        std::to_string(options.rank) + ".jsonl");
+    // Probe through the existing clock entry: its timing.t0 is a device cycle
+    // read after the wait on this same stream. This adds no production outputs.
+    for (int test = 0; test < 3; ++test) {
+        // First warms registration with an expired target. Then two future
+        // waits are queued without synchronization. Finally retry a past target.
+        const int64_t target = test == 1 ? static_cast<int64_t>(rootCycles[0] +
+            model.cyclesPerSecond/5) : static_cast<int64_t>(rootCycles[0]);
+        const int64_t finalTarget = target + (test == 1 ? model.cyclesPerSecond/50 : 0);
+        uint64_t deadline = 0;
+        ok = ClockSleepDeadline(model,finalTarget,&deadline) == 0;
+        int64_t magic = 0;
+        ok = ok && TileXRCommNextMagic(comm,&magic) == 0;
+        if (!AgreeValidation(comm,options.rankSize,ok)) { return false; }
+        const auto start = std::chrono::steady_clock::now();
+        ok = TileXRClockSleepAt(detector,target,stream) == 0;
+        if (test == 1) { ok = ok && TileXRClockSleepAt(detector,finalTarget,stream) == 0; }
+        const auto submitted = std::chrono::steady_clock::now();
+        ok = ok && LaunchClockSyncKernel(session,0,4,magic,
+            model.cyclesPerSecond*2,stream) == 0;
+        // Drain even after a launch error before reporting it to peer ranks.
+        const bool drained = aclrtSynchronizeStream(stream) == ACL_SUCCESS;
+        ok = ok && drained;
+        const auto finished = std::chrono::steady_clock::now();
+        const auto *probeTiming = static_cast<const uint8_t *>(session.deviceSamples) + 4*sizeof(timing);
+        ok = ok && aclrtMemcpy(&timing,sizeof(timing),probeTiming,sizeof(timing),
+            ACL_MEMCPY_DEVICE_TO_HOST) == ACL_SUCCESS &&
+            timing.status == TileXR::TILEXR_CLOCK_SYNC_SAMPLE_SUCCESS && timing.t0 >= deadline;
+        int64_t aligned = 0;
+        ok = ok && TileXRClockCorrectCycle(&model,timing.t0,&aligned) == 0 && aligned >= finalTarget;
+        const auto enqueueNs = std::chrono::duration_cast<std::chrono::nanoseconds>(submitted-start).count();
+        const auto totalNs = std::chrono::duration_cast<std::chrono::nanoseconds>(finished-start).count();
+        // 220ms future wait leaves a broad margin for Host jitter while still
+        // detecting a blocking Host implementation or a missing device wait.
+        ok = ok && (test != 1 || (enqueueNs < 100000000 && totalNs >= 100000000)) &&
+            (test == 1 || totalNs < 100000000);
+        evidence << "{\"case\":" << test << ",\"rank\":" << options.rank
+            << ",\"target\":" << finalTarget << ",\"local_deadline\":" << deadline
+            << ",\"next_kernel_start\":" << timing.t0 << ",\"corrected_start\":" << aligned
+            << ",\"enqueue_ns\":" << enqueueNs << ",\"total_ns\":" << totalNs
+            << ",\"model_generation\":" << model.trainedAtGeneration
+            << ",\"pass\":" << (ok ? "true" : "false") << "}\n";
+        evidence.flush();
+        std::cout << "[rank " << options.rank << "] sleep_at case=" << test
+            << " pass=" << ok << " enqueue_ns=" << enqueueNs << " total_ns=" << totalNs << '\n';
+        if (!AgreeValidation(comm,options.rankSize,ok && evidence.good())) { return false; }
+        ok = TileXRCommHostAllGatherTimeout(comm,&timing.t3,sizeof(timing.t3),
+            rootCycles.data(),5000) == 0;
+        if (!AgreeValidation(comm,options.rankSize,ok)) { return false; }
+    }
+    return true;
+}
+
 bool WriteSummary(const Options &options, const std::vector<TileXRClockSyncResult> &results)
 {
     std::vector<uint64_t> precisions;
@@ -252,7 +333,8 @@ int main(int argc, char **argv)
         std::cerr << "Usage: " << argv[0]
                   << " --rank-size N --rank R --device-id D --rounds N"
                   << " --samples N --warmup N --output-dir DIR --comm-mode local|socket"
-                  << " --freeze-calibration 0|1 --round-gap-ms N" << std::endl;
+                  << " --freeze-calibration 0|1 --round-gap-ms N --sleep-at-test 0|1"
+                  << " --sleep-at-rdma-profile 0|1" << std::endl;
         return 2;
     }
 
@@ -420,6 +502,12 @@ int main(int argc, char **argv)
         ok = AgreeValidation(comm, options.rankSize, ok && metrics.good() && raw.good() && queues.good() &&
             drift.good() && corrected.good() &&
             sendProfile.good() && pollProfile.good());
+    }
+    if (ok && options.sleepAtTest) {
+        ok = CheckSleepAt(options, comm, detector, stream);
+    }
+    if (ok && options.sleepAtRdmaProfile) {
+        ok = RunSleepAtRdmaProfile(comm, detector, stream, options.rank, options.deviceId, options.outputDir);
     }
     if (ok) {
         ok = WriteSummary(options, results);

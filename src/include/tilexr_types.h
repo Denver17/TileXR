@@ -7,6 +7,10 @@
  * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
  * See LICENSE in the root of the software repository for the full text of the License.
  */
+/*
+ * 功能：定义公共错误码、数据类型、芯片信息和注册 kernel 的标识及名称。
+ * 调用关系：Host 和 device 模块共用这些定义；名称映射仅用于 Host。
+ */
 #ifndef TILEXR_TYPES_H
 #define TILEXR_TYPES_H
 
@@ -110,6 +114,7 @@ enum class TileXRType {
     RECV = 10,
     PROFILE_PROBE = 11,
     CLOCK_SYNC = 12,
+    CLOCK_SLEEP_AT = 13,
     PURE_MATMUL = 101,
     MATMUL_ALL_REDUCE = 102,
     MATMUL_REDUCE_SCATTER = 103,
@@ -155,6 +160,7 @@ const std::map<TileXRType, std::string> TILEXR_TYPE2NAME = {
     { TileXRType::RECV, "TileXRRecv" },
     { TileXRType::PROFILE_PROBE, "TileXRProfileProbe" },
     { TileXRType::CLOCK_SYNC, "TileXRClockSync" },
+    { TileXRType::CLOCK_SLEEP_AT, "TileXRClockSleepAt" },
     { TileXRType::ALLTOALLV_ALLGATHER_MATMUL, "TileXRAllToAllVAllGatherMatmul" },
     { TileXRType::MATMUL_REDUCESCATTER_ALLTOALLV, "TileXRMatmulReduceScatterAllToAllV" },
 

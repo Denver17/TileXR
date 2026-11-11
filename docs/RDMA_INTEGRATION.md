@@ -754,6 +754,87 @@ reference, keep the independently measured residual null. Include all validation
 outliers, the finite validation window and model assumptions; never substitute
 RTT/2, launch/barrier skew, or calibration-sample fit for the requested maximum.
 
+## Scheduling work with sleep_at
+
+After drift training reports READY, enqueue a wait in logical communicator
+rank 0's absolute cycle domain (the signed domain returned by
+`TileXRClockCorrectCycle`):
+
+```cpp
+// referenceDeadline was selected on logical rank 0 and shared by the application.
+int status = TileXRClockSleepAt(detector, referenceDeadline, stream);
+// Check status before enqueueing the work that should follow the deadline.
+```
+
+The Host call snapshots the calling rank's READY model and computes
+`local = reference + ceil((-offset - rate * (reference - anchor)) / (1 + rate))`.
+Keep the reference integer and round only the correction: rounding a huge
+anchor-relative displacement can erase a fractional offset and wake one cycle
+early. Checked integer addition produces the local deadline; the call then
+asynchronously launches one AIV. When the wait starts,
+a past deadline exits immediately; otherwise it busy waits on `GetSystemCycle`.
+Following work on that stream starts after the wait. Other streams and ranks
+are independent: the call performs no barrier, exchange or recalibration.
+The application must distribute its target and arrange any required dependencies.
+
+Use the detector on its owner thread with its device/context current. Keep a
+submitted stream alive until the next `TileXRClockSynchronize` or detector
+destruction, which drains pending waits; failed draining retains them for retry.
+A later model update affects later calls only. An unready model returns
+`TILEXR_ERROR_NOT_INITIALIZED`; invalid arguments, model coefficients or local
+cycle overflow return `TILEXR_ERROR_PARA_CHECK_FAIL` before kernel submission.
+Launch errors propagate immediately and execution errors surface at stream
+synchronization. No device allocation is needed per wait.
+
+The Host launchers share runtime argument/configuration setup, while sync and
+sleep_at keep distinct argument layouts. The sleep_at ABI contains only the
+local deadline by value; it does not pass the model or session buffers to the AIV.
+
+This is an AIV busy wait, so it consumes an AIV and remains subject to the CANN
+task timeout. It guarantees stream ordering relative to the selected local
+integer deadline, not physical simultaneous execution across devices. Model
+bias, extrapolation age and scheduling delays still apply; the call does not
+refresh or impose a new calibration-age policy.
+
+For hardware validation, add `--sleep-at-test 1` to the clock E2E test after
+training a READY model. Its three cases cover an expired target, two future
+waits enqueued without Host synchronization, and another expired target. The
+following clock kernel records its actual start cycle on each rank; exported
+`sleep_at_rankN.jsonl` checks that it starts at or after the converted deadline
+and records Host enqueue/total times. These checks establish model-relative
+waiting and asynchronous submission, not independently measured clock accuracy.
+Use the supported cross-NIC devices for the RDMA clock prerequisite. A passing
+cross-NIC pair does not qualify same-RNIC local loopback.
+
+To inspect the following kernel's entry alignment, run the clock E2E with
+`--sleep-at-rdma-profile 1` on two supported cross-NIC devices. After training
+a READY drift model, the test queues `sleep_at` and a separate single-AIV
+kernel consecutively on the same stream. Each rank submits 64 distinct 4 KiB
+WRITEs to its peer on one QP and calls `RDMAWait`. Only the test kernel's entry
+and exit use profiling markers; RDMA's internal trace is compiled out. The
+test verifies all source/destination bytes, guards and completion counters.
+
+Install the profiling Python package or add `tools/profiling/python` to
+`PYTHONPATH`, then run:
+
+```bash
+python3 tests/diagnostics/export_sleep_at_rdma_profile.py OUTPUT_DIRECTORY
+```
+
+The installed exporter also accepts this directory. It
+reads the SDK `.records.bin` files and frozen model sidecars and produces
+`sleep_at_rdma.perfetto.json` for <https://ui.perfetto.dev/> plus an alignment
+summary. Both ranks use the same reference target as display origin; raw
+cycles and the affine models remain in the trace. The reported entry skew is
+relative to that model, not independent physical synchronization evidence.
+
+Maintenance lesson: the profiling SDK's ordinary local-device reports reset
+each rank/device origin independently. Those reports are useful for durations
+but cannot establish cross-rank entry alignment. For this test, explicitly
+convert both endpoints with the frozen model and subtract one shared target;
+never subtract each rank's first marker. Do not issue legacy clock traffic on
+the same QP after switching to the pipeline WRITE adapter.
+
 ## Maintaining the documentation / 文档维护
 
 When integrating communicator lifecycle changes, preserve every cleanup stage:

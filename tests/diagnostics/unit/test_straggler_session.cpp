@@ -1,10 +1,7 @@
 /*
- * 功能：检查 session 创建/销毁、线程所有权、collective 失败、模型发布、持久化和 cleanup 重试。
- * 调用关系：通过 StragglerRuntimeHooks 为 straggler_session.cpp 注入 Host 内存、采样和故障。
- * 资源与生命周期：测试替身记录 allocation 和释放尝试；不提交真实 device kernel 或 RDMA 请求。
- * Purpose: Check session lifecycle/ownership, collective failures, model publication, persistence and cleanup retries.
- * Calls: Inject Host memory, samples and faults into straggler_session.cpp through StragglerRuntimeHooks.
- * Lifetime: Fakes track allocations and release attempts; no real device kernel or RDMA request is submitted.
+ * 功能：检查 session 生命周期、clock 和 sleep_at 提交、观测收集、模型发布与 cleanup 重试。
+ * 调用关系：替换 runtime hooks，向 session 实现提供合成采样和故障。
+ * 资源与生命周期：测试用 Host allocation 模拟 device buffer，记录同步与释放尝试；不提交真实 RDMA 请求。
  */
 #include <algorithm>
 #include <cstddef>
@@ -399,6 +396,16 @@ int MockShutdown(void *)
     return g_rdmaShutdownStatus;
 }
 
+std::vector<uint64_t> g_sleepDeadlines;
+std::vector<aclrtStream> g_sleepStreams;
+int g_sleepStatus = TileXR::TILEXR_SUCCESS;
+int LaunchSleepAt(uint64_t deadline, aclrtStream stream)
+{
+    g_sleepDeadlines.push_back(deadline);
+    g_sleepStreams.push_back(stream);
+    return g_sleepStatus;
+}
+
 const TileXRDiagnostics::Host::StragglerRuntimeHooks kHooks {
     MallocDevice,
     FreeDevice,
@@ -418,6 +425,7 @@ const TileXRDiagnostics::Host::StragglerRuntimeHooks kHooks {
     RdmaUnregister,
     RdmaGetView,
     MockShutdown,
+    LaunchSleepAt,
 };
 
 void ResetHooks()
@@ -1356,6 +1364,73 @@ void TestTrackingConfigurationAndPersistence()
     CheckEq("destroy invalid-probe detector",TileXRStragglerDestroy(detector),TileXR::TILEXR_SUCCESS);
 }
 
+void TestSleepAtSubmissionAndLifetime()
+{
+    ResetHooks();
+    g_sleepDeadlines.clear(); g_sleepStreams.clear(); g_sleepStatus = 0;
+    ScopedClockTransport enabled("1","TILEXR_CLOCK_DRIFT_WINDOW_US");
+    g_commArgs.rank = 1; g_commArgs.rankSize = 2;
+    g_commArgs.peerMems[0] = reinterpret_cast<GM_ADDR>(0x2000);
+    g_commArgs.peerMems[1] = reinterpret_cast<GM_ADDR>(0x3000);
+    auto detector = Create(Config());
+    auto *s = static_cast<TileXRDiagnostics::Host::StragglerSession *>(detector);
+    const auto a = reinterpret_cast<aclrtStream>(0x11);
+    const auto b = reinterpret_cast<aclrtStream>(0x12);
+    CheckEq("sleep rejects null detector",TileXRClockSleepAt(nullptr,1,a),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckEq("sleep rejects null stream",TileXRClockSleepAt(detector,1,nullptr),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckEq("sleep rejects collecting model",TileXRClockSleepAt(detector,1000,a),
+        TileXR::TILEXR_ERROR_NOT_INITIALIZED);
+    CheckTrue("unready never launches",g_sleepDeadlines.empty());
+    auto &m = s->clockDriftModels[1];
+    m.version = 1; m.state = TILEXR_CLOCK_DRIFT_READY; m.cyclesPerSecond = 1000000000;
+    m.anchorCycle = 1000; m.offsetCycles = 0.25; m.rateCorrection = 0;
+    // Rank 0's model is deliberately not READY: only the local model is used.
+    const size_t syncs = g_synchronizedStreams.size();
+    const auto sequence = s->controlSequence;
+    CheckEq("sleep enqueued",TileXRClockSleepAt(detector,2000,a),0);
+    CheckEq("local model inversion",g_sleepDeadlines.back(),uint64_t {2000});
+    m.offsetCycles = -0.25; ++m.trainedAtGeneration;
+    CheckEq("later call snapshots updated model",TileXRClockSleepAt(detector,2000,a),0);
+    CheckEq("old task retains snapshot",g_sleepDeadlines.front(),uint64_t {2000});
+    CheckEq("new task uses new snapshot",g_sleepDeadlines.back(),uint64_t {2001});
+    CheckEq("submission never synchronizes",g_synchronizedStreams.size(),syncs);
+    CheckEq("submission never communicates",s->controlSequence,sequence);
+    int otherThreadStatus = 0;
+    std::thread other([&] { otherThreadStatus = TileXRClockSleepAt(detector,2000,a); });
+    other.join();
+    CheckEq("sleep owner thread required",otherThreadStatus,TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    CheckEq("foreign thread never launches",g_sleepDeadlines.size(),size_t {2});
+    m.rank = 0;
+    CheckEq("wrong local rank model rejected",TileXRClockSleepAt(detector,2000,a),
+        TileXR::TILEXR_ERROR_PARA_CHECK_FAIL);
+    m.rank = 1;
+    g_sleepStatus = TileXR::TILEXR_ERROR_MKIRT;
+    CheckEq("launch failure propagated",TileXRClockSleepAt(detector,2000,b),g_sleepStatus);
+    CheckEq("submitted stream passed through",g_sleepStreams.back(),b);
+    g_syncStatus = 1;
+    CheckEq("destroy failure retains sleep session",TileXRStragglerDestroy(detector),
+        TileXR::TILEXR_ERROR_INTERNAL);
+    CheckEq("destroy deduplicates streams",g_synchronizedStreams.size(),syncs+2);
+    g_syncStatus = ACL_SUCCESS;
+    CheckEq("destroy retry drains pending sleeps",TileXRStragglerDestroy(detector),0);
+    CheckTrue("both streams drained",std::find(g_synchronizedStreams.begin(),
+        g_synchronizedStreams.end(),a) != g_synchronizedStreams.end() &&
+        std::find(g_synchronizedStreams.begin(),g_synchronizedStreams.end(),b) !=
+            g_synchronizedStreams.end());
+    g_sleepStatus = 0;
+
+    ResetHooks();
+    detector = Create(Config());
+    s = static_cast<TileXRDiagnostics::Host::StragglerSession *>(detector);
+    Calibrate(detector);
+    CheckEq("sleep before model refresh",TileXRClockSleepAt(detector,1000,a),0);
+    Calibrate(detector);
+    CheckTrue("model refresh drains sleeps",s->clockSleepStreams.empty());
+    CheckEq("destroy refreshed sleep detector",TileXRStragglerDestroy(detector),0);
+}
+
 } // namespace
 
 int main()
@@ -1386,6 +1461,7 @@ int main()
     TestDriftConfigurationAndCollection();
     TestFailedDriftGatherDoesNotPublishPartialModel();
     TestTrackingConfigurationAndPersistence();
+    TestSleepAtSubmissionAndLifetime();
     CheckTrue("all tests released device allocations", g_allocations.empty());
     CheckEq("all tests released RDMA registrations", g_rdmaHandle, TileXRRDMAMemHandle {0});
     TileXRDiagnostics::Host::SetStragglerRuntimeHooksForTest(nullptr);

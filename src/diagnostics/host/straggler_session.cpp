@@ -1,12 +1,8 @@
 /*
- * 功能：创建诊断 session，校验 collective 调用，执行 clock 采样、模型交换、文件写入和观测收集。
- * 调用关系：实现 tilexr_straggler.h 的会话接口，调用 clock kernel、drift 拟合和记录分析模块。
- * 资源与生命周期：session 借用 communicator 和 stream，持有采样/记录及可选 RDMA buffer。
+ * 功能：创建诊断 session，校准时钟，提交 sleep_at，并收集和分析观测记录。
+ * 调用关系：实现公开 Host 接口，调用 clock launcher、drift 拟合和记录分析模块。
+ * 资源与生命周期：session 借用 communicator 和 stream，持有采样、记录及可选 RDMA buffer。
  *   Destroy 等待已记录的 stream 并尝试释放资源；失败时保留 session 供重试。
- * Purpose: Create diagnostic sessions, validate collective calls, sample clocks, exchange/save models and collect observations.
- * Calls: Implement tilexr_straggler.h session APIs using the clock kernel, drift fitter and record analyzer.
- * Lifetime: Sessions borrow communicators/streams and own sample, record and optional RDMA buffers.
- *   Destroy waits for recorded streams and attempts cleanup; failures retain the session for retry.
  */
 #include "straggler_session.h"
 
@@ -127,6 +123,7 @@ const StragglerRuntimeHooks kDefaultHooks {
     TileXRRDMAUnregister,
     TileXRRDMAGetDeviceView,
     TileXRRDMAShutdown,
+    LaunchClockSleepAtKernel,
 };
 
 const StragglerRuntimeHooks *g_hooks = &kDefaultHooks;
@@ -855,7 +852,13 @@ extern "C" int TileXRStragglerDestroy(TileXRStraggler detector)
     int quiescenceStatus = TileXR::TILEXR_SUCCESS;
     {
         std::lock_guard<std::mutex> stateGuard(session->stateMutex);
-        for (aclrtStream outstanding : session->outstandingStreams) {
+        auto streams = session->outstandingStreams;
+        for (aclrtStream stream : session->clockSleepStreams) {
+            if (std::find(streams.begin(), streams.end(), stream) == streams.end()) {
+                streams.push_back(stream);
+            }
+        }
+        for (aclrtStream outstanding : streams) {
             if (TileXRDiagnostics::Host::g_hooks->synchronizeStream(outstanding) != ACL_SUCCESS) {
                 quiescenceStatus = TileXR::TILEXR_ERROR_INTERNAL;
             }
@@ -871,6 +874,7 @@ extern "C" int TileXRStragglerDestroy(TileXRStraggler detector)
             return quiescenceStatus;
         }
         session->outstandingStreams.clear();
+        session->clockSleepStreams.clear();
         std::fill(session->recordStreams.begin(), session->recordStreams.end(), nullptr);
     }
     bool failed = false;
@@ -983,6 +987,14 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
     }
     std::lock_guard<std::mutex> stateGuard(session->stateMutex);
     int localStatus = TileXR::TILEXR_SUCCESS;
+    // Synchronization is already a blocking API. Drain value-only sleep work
+    // before publishing a new model, without classifying it as uncollected observations.
+    for (aclrtStream pending : session->clockSleepStreams) {
+        if (TileXRDiagnostics::Host::g_hooks->synchronizeStream(pending) != ACL_SUCCESS) {
+            localStatus = TileXR::TILEXR_ERROR_INTERNAL;
+        }
+    }
+    if (localStatus == TileXR::TILEXR_SUCCESS) { session->clockSleepStreams.clear(); }
     if (session->clockStream != nullptr) {
         const aclrtStream pendingClockStream = session->clockStream;
         if (TileXRDiagnostics::Host::g_hooks->synchronizeStream(pendingClockStream) == ACL_SUCCESS) {
@@ -1165,6 +1177,34 @@ extern "C" int TileXRClockSynchronize(TileXRStraggler detector,
             static_cast<uint64_t>(magic),generation,ret);
     }
     return ret;
+}
+
+extern "C" int TileXRClockSleepAt(TileXRStraggler detector, int64_t referenceCycle,
+                                    aclrtStream stream)
+{
+    using namespace TileXRDiagnostics::Host;
+    auto *session = static_cast<StragglerSession *>(detector);
+    if (session == nullptr || stream == nullptr || !ValidateOwner(*session)) {
+        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
+    }
+    std::lock_guard<std::mutex> guard(session->stateMutex);
+    const int rank = session->hostArgs->rank;
+    if (rank < 0 || static_cast<size_t>(rank) >= session->clockDriftModels.size()) {
+        return TileXR::TILEXR_ERROR_NOT_INITIALIZED;
+    }
+    const auto model = session->clockDriftModels[static_cast<size_t>(rank)];
+    if (model.rank != rank) { return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL; }
+    uint64_t deadline = 0;
+    const int status = ClockSleepDeadline(model, referenceCycle, &deadline);
+    if (status != TileXR::TILEXR_SUCCESS) { return status; }
+    if (g_hooks->launchClockSleepAt == nullptr) { return TileXR::TILEXR_ERROR_NOT_INITIALIZED; }
+    // Track before launch, as for observations: even a failed submission may
+    // require draining the stream before the session can be destroyed.
+    if (std::find(session->clockSleepStreams.begin(), session->clockSleepStreams.end(), stream) ==
+        session->clockSleepStreams.end()) {
+        session->clockSleepStreams.push_back(stream);
+    }
+    return g_hooks->launchClockSleepAt(deadline, stream);
 }
 
 extern "C" int TileXRClockGetDriftModel(TileXRStraggler detector, int rank,

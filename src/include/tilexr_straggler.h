@@ -1,10 +1,8 @@
 /*
- * 功能：公开诊断 session、clock 校准、相对逻辑 rank 0 的时间校正及观测 report 接口。
- * 调用关系：应用和通信算子调用 Host 接口，diagnostics 的 session、drift 与 analysis 模块实现计算。
- * 资源与生命周期：调用方持有 communicator 和 stream，在创建线程使用 opaque handle，并在销毁 communicator 前销毁 session。
- * Purpose: Expose diagnostic sessions, clock calibration, correction relative to logical rank 0 and observation reports.
- * Calls: Applications/communication operators call Host APIs implemented by diagnostics session, drift and analysis modules.
- * Lifetime: Callers own communicators/streams, use the opaque handle on its creating thread and destroy the session before its communicator.
+ * 功能：声明诊断 session、clock 校准、drift 校正、sleep_at 和观测接口及数据布局。
+ * 调用关系：应用和通信算子调用这些 Host 接口，diagnostics 模块实现采样和分析。
+ * 资源与生命周期：调用方持有 communicator 和 stream，在创建线程使用 session 的 opaque handle，
+ *   并在销毁 communicator 前调用 session 销毁接口。
  */
 #ifndef TILEXR_STRAGGLER_H
 #define TILEXR_STRAGGLER_H
@@ -240,6 +238,22 @@ int TileXRClockGetDriftModel(TileXRStraggler detector, int rank,
                              TileXRClockDriftModel *model);
 int TileXRClockCorrectCycle(const TileXRClockDriftModel *model,
                             uint64_t localCycle, int64_t *referenceCycle);
+/* Enqueue one AIV busy wait on stream until an absolute logical-rank-0 cycle.
+ * referenceCycle uses the signed cycle domain of TileXRClockCorrectCycle.
+ * Snapshots this rank's READY drift model at invocation; no collective,
+ * calibration or Host stream synchronization is performed. The inverse is
+ * rounded up, so integer rounding cannot advance the model-relative deadline.
+ * A deadline already passed when the kernel starts exits immediately.
+ * Returns NOT_INITIALIZED for an unready model, PARA_CHECK_FAIL for invalid
+ * arguments/model or an unrepresentable local cycle, and propagates launch
+ * errors. Later execution errors are reported by stream synchronization.
+ * Use on the detector's creating thread with its device/context current.
+ * Keep the borrowed stream alive until the next clock synchronization or
+ * detector destruction; both drain pending waits before changing session state.
+ * Waiting consumes one AIV and is subject to the runtime task timeout. It
+ * orders later work on this stream only; model error/drift and scheduling
+ * delays remain. Later model updates do not change an enqueued deadline. */
+int TileXRClockSleepAt(TileXRStraggler detector, int64_t referenceCycle, aclrtStream stream);
 int TileXRStragglerObservationBegin(TileXRStraggler detector,
                                     const TileXRStragglerOperation *operation,
                                     aclrtStream stream,
