@@ -65,11 +65,13 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             kernel.write_bytes(b"object fixture")
             output = root / "case"
             args = types.SimpleNamespace(layout=layout, kernel=kernel, template=template,
-                                         output=output, ranks=2, cores=4, bs=2, h=256,
+                                         output=output, ranks=2, cores=4, bs=96, h=256,
                                          top_k=2, experts=4, token_nums_type=0, magic=1)
             with contextlib.redirect_stdout(io.StringIO()):
                 case.generate(args)
             scenario = case.preflight(output)
+            self.assertEqual(scenario["semantic_output_sizes"]["0"]["assistInfoForCombineOut"], 2304)
+            self.assertEqual(scenario["output_sizes"]["0"]["assistInfoForCombineOut"], 2560)
             workload = yaml.safe_load((output / "workload.yml").read_text())["workload_config"]
             self.assertEqual(workload["chip1"]["bin_param"]["addr"], case.GM_SIZE + 0x40000000)
             self.assertEqual(list(workload["chip0"]["kernel_param"]), list(case.ABI))

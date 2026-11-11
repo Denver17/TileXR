@@ -172,6 +172,12 @@ def preflight(case):
                 path = pathlib.Path(entry["input_bin"])
                 if not path.is_file() or entry["value"] % 32:
                     raise ValueError("Missing or unaligned pointer input")
+        if scenario["format_version"] >= 2:
+            for name, region in chip["output_param"].items():
+                extent = scenario["output_sizes"][str(rank)][name]
+                semantic = scenario["semantic_output_sizes"][str(rank)][name]
+                if region["size"] != extent or extent != aligned(max(1, semantic)):
+                    raise ValueError("Output extent does not cover complete sparse GM blocks")
     return scenario
 
 
@@ -220,6 +226,7 @@ def generate(args):
                             args.experts, args.token_nums_type)
     workload = {"workload_config": {}}
     output_sizes = {}
+    semantic_output_sizes = {}
     for rank in range(args.ranks):
         rank_base = rank * GM_SIZE
         inputs = output / "input_bin" / ("rank%d" % rank)
@@ -233,7 +240,8 @@ def generate(args):
                     "expertIds": struct.pack("<" + "i" * len(ids), *ids)}
         for name, data in expected[rank].items():
             (reference / (name + ".bin")).write_bytes(data)
-            contents[name] = b"\xa5" * max(32, len(data))
+            # 该模板按 512B dump；声明与初始化都覆盖尾部所在的完整块。
+            contents[name] = b"\xa5" * aligned(max(1, len(data)))
         pointers = {}
         regions = [(0x40000000, args.kernel.stat().st_size, "kernel"),
                    (0x80000000, 512, "parameters"),
@@ -270,18 +278,20 @@ def generate(args):
             for name in OUTPUT_TYPES
         }
         output_sizes[str(rank)] = {name: len(contents[name]) for name in OUTPUT_TYPES}
+        semantic_output_sizes[str(rank)] = {name: len(expected[rank][name]) for name in OUTPUT_TYPES}
         workload["workload_config"]["chip%d" % rank] = chip
     encoded = encode_yaml(workload)
     (output / "workload.yml").write_text(encoded)
     (config_dir / "workload_config.yml").write_text(encoded)
     shutil.copy2(args.layout, output / "layout.json")
-    scenario = {"format_version": 1, "transport": "MEM", "dtype": "FP16",
+    scenario = {"format_version": 2, "transport": "MEM", "dtype": "FP16",
                 "rank_size": args.ranks, "active_cores": args.cores, "bs": args.bs,
                 "h": args.h, "top_k": args.top_k, "experts": args.experts,
                 "expert_token_nums_type": args.token_nums_type, "magic": args.magic,
                 "kernel_file": str(args.kernel.resolve()), "kernel_sha256": sha256(args.kernel),
                 "external_abi": list(ABI), "param_types": ["11"] * 9 + ["7"] * 13,
-                "output_sizes": output_sizes, "routed_rows": args.ranks * args.bs * args.top_k}
+                "output_sizes": output_sizes, "semantic_output_sizes": semantic_output_sizes,
+                "routed_rows": args.ranks * args.bs * args.top_k}
     write_json(output / "scenario.json", scenario)
     files = sorted(p for p in output.rglob("*") if p.is_file())
     write_json(output / "manifest.json", {str(p.relative_to(output)): sha256(p) for p in files})

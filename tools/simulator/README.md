@@ -61,3 +61,7 @@ python3 /absolute/path/memory_dispatch_case.py validate "$PWD" \
 `expected/` 的内容选择或生成输出。
 Sparse record 中的地址是 chip 内地址；与 workload 中的输出指针比较前，必须从
 后者减去对应的 `sys_va_base_addr`。仅测试 rank 0 无法发现这类地址转换错误。
+
+模板曾对 2304B 的 assist 输出仅导出四个 512B 块，缺少最后 256B。生成器将输出
+初始化文件和 `output_param.size` 一起向上补齐到 512B，使用 `semantic_output_sizes`
+单独记录有效长度；数值校验仍比对全部有效字节，不会截掉缺失的尾部来获得通过。
