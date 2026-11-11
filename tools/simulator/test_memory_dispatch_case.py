@@ -79,7 +79,8 @@ class MemoryDispatchCaseTest(unittest.TestCase):
                     data = (output / "expected" / ("rank%d" % rank) / (name + ".bin")).read_bytes()
                     size = scenario["output_sizes"][str(rank)][name]
                     data = data.ljust(size, b"\xa5")
-                    address = workload["chip%d" % rank]["output_param"][name]["addr"]
+                    chip = workload["chip%d" % rank]
+                    address = chip["output_param"][name]["addr"] - chip["sys_va_base_addr"]
                     for die in (1, 2):
                         sparse = bytearray()
                         for offset in range(0, size, 512):
@@ -104,7 +105,7 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "did not exit successfully"):
                 case.validate(validation)
             conflicting = output / "bin/david_1_die2_expandXOut.bin"
-            address = workload["chip1"]["output_param"]["expandXOut"]["addr"]
+            address = workload["chip1"]["output_param"]["expandXOut"]["addr"] - case.GM_SIZE
             with conflicting.open("ab") as stream:
                 stream.write(struct.pack("<Q", address) + b"b" * 512)
             with self.assertRaisesRegex(ValueError, "Conflicting die writes"):

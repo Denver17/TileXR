@@ -59,3 +59,5 @@ python3 /absolute/path/memory_dispatch_case.py validate "$PWD" \
 同地址块，会让初始化值覆盖有效写入。本工具只合并与对应输入初始化字节不同的块，
 并拒绝同地址的冲突写入；未写入区域保留初始化值，交给数值校验判错。合并过程不使用
 `expected/` 的内容选择或生成输出。
+Sparse record 中的地址是 chip 内地址；与 workload 中的输出指针比较前，必须从
+后者减去对应的 `sys_va_base_addr`。仅测试 rank 0 无法发现这类地址转换错误。

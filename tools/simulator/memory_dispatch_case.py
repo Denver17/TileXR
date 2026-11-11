@@ -329,7 +329,9 @@ def extract(args):
     extracted = 0
     for rank, chip in enumerate(chips.values()):
         for name, region in chip["output_param"].items():
-            start, size = region["addr"], region["size"]
+            # Sparse dump 使用 chip 内地址，workload 指针使用完整 system VA。
+            start = region["addr"] - chip["sys_va_base_addr"]
+            size = region["size"]
             initial = pathlib.Path(chip["kernel_param"][name]["input_bin"]).read_bytes()
             merged = bytearray(initial)
             owners = {}
