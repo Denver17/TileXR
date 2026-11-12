@@ -1,9 +1,10 @@
 # Memory Dispatch 仿真
 
 `memory_dispatch_case.py` 为普通 `tilexr_ep_dispatch_memory_kernel` 生成全新的
-SST testcase，并逐 rank 比对 FP16 payload、expert token counts、send counts 和
-combine assist triples。当前支持无 shared expert、无 active mask、非量化的 MEM
-路径。它不生成 UDMA WQE，也不修改生产 kernel。
+SST testcase，并逐 rank 比对 payload、expert token counts、send counts 和
+combine assist triples。支持 FP16 非量化与已有 MXFP8 E4M3 量化分支，后者额外
+比对 E8M0 scales。当前限定无 shared expert、无 active mask 的 MEM 路径。
+它不生成 UDMA WQE，也不修改生产 kernel。
 
 需要 Python 3、PyYAML、C++14 Host 编译器、已验证的 SST testcase 模板，以及用
 CANN 9.1 构建的 `tilexr_ep_dispatch_memory_kernel.o`。先从同一源码生成 CommArgs
@@ -48,6 +49,36 @@ python3 /absolute/path/memory_dispatch_case.py validate "$PWD" \
 和部署对象的 SHA-256 均保持一致，才报告通过。生成器自检通过不代表仿真通过。
 先验证小规模，再使用 `--ranks 32 --cores 64 --bs 32 --h 7168 --top-k 6 --experts 384`
 复现参考规模。模拟时间不代表真实 NPU 延迟。
+
+使用 `--output-format mxfp8-e4m3` 选择 `quantMode=4`、FP16 输入和 E4M3 输出；
+生成器为 `dynamicScalesOut` 分配独立区域，并按每 32 元素一组、每行 scale 数向上
+补齐为偶数的布局生成参考字节。FP16 与 MXFP8 必须分别通过数值校验。Python 量化
+参考通过已有 `tests/ep/demo/mxfp8_golden.h` 的独立 C++ 实现验证，不读取仿真输出。
+
+在生成时增加 `--instruction-dump` 会启用模板已有的 `enable_dump`，保留关闭的
+详细 dump、UBus trace 和带宽统计开关。它不保证模板覆盖全部 ranks；报告需从实际
+dump 文件核对 chip/core 范围。配置属于 manifest，生成后不要手工改写。
+
+`instruction_trace.py` 可从原始指令 dump 生成带 PC、InstrID、源文件/行号的 Chrome
+Trace，并输出按指令/PC 的驻留分位数、各流水线区间并集、VEC/MTE 重叠及核结束
+分布。例如，**已确认 dump 时间是 1.65GHz 公共 cycle** 时：
+
+```bash
+python3 tools/simulator/instruction_trace.py /path/to/case/dumps \
+  --clock-ghz 1.65 --output /path/to/new-analysis
+python3 tools/simulator/test_instruction_trace.py
+```
+
+分析器对未配对、重复、身份不一致、负时长或无法解析的指令记录输出诊断，并以
+`PARTIAL` 和非零退出码标识不完整结果。不要丢弃异常记录来获得完整性通过。
+`Popped→Retire` 包含依赖等待；区间并集是驻留覆盖，不是执行单元吞吐利用率。
+FlowCtrl 与 MTE 的相近长区间可能描述同一依赖，RVEC 子流水与 VEC 也不能直接相加。
+
+比较硬件能力参数前，先证明配置被当前 plugin 消费、参数作用在实际 MEM 数据通路、
+单位和方向正确。链路单向 latency 不能直接称为 RTT，整体降频不能冒充独立量化延迟。
+变更时钟域后须重新证明公共时间基准，不能机械沿用上述 1.65GHz 换算。H 变化还会
+改变 480B payload/512B wire padding、量化 scale 大小及 UB 中可容纳的发送 buffer 数；
+应记录这些变化，再判断流水瓶颈是否转移。
 
 维护时注意：CommArgs 的 rank 容量变化会改变后续所有字段偏移；旧 testcase 即使
 使用相同的 22 个启动参数，也可能传入错误结构。重新运行 Host 布局探针，并重新

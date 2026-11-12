@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""生成普通 FP16 Memory Dispatch 的 SST 输入，并逐 rank 校验四项输出。
+"""生成 Memory Dispatch 的 SST 输入，逐 rank 校验 FP16 或 MXFP8 输出。
 
 从已验证的 testcase 复制仿真框架，重新生成全部 workload、地址和二进制输入。
 CommArgs 的偏移由同目录的 Host 布局探针提供；本脚本不修改或编译 kernel。
@@ -10,6 +10,7 @@ import collections
 import copy
 import hashlib
 import json
+import math
 import pathlib
 import re
 import shutil
@@ -67,10 +68,46 @@ def input_row(rank, token, h):
     return struct.pack("<" + "e" * h, *values)
 
 
-def oracle(ranks, bs, h, top_k, experts, token_nums_type):
+def quantize_mxfp8_e4m3(row):
+    """按 32 个 FP16 一组生成 E4M3 元素和偶数字节数的 E8M0 scales。"""
+    values = struct.unpack("<" + "e" * (len(row) // 2), row)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("MXFP8 oracle requires finite FP16 input")
+    elements = bytearray()
+    scales = bytearray(aligned((len(values) + 31) // 32, 2))
+    for begin in range(0, len(values), 32):
+        block = values[begin:begin + 32]
+        maximum = max(abs(value) for value in block)
+        shared = max(-127, min(127, math.frexp(maximum)[1] - 9)) if maximum else -127
+        scales[begin // 32] = shared + 127
+        for value in block:
+            magnitude = min(math.ldexp(abs(value), -shared), 448.0)
+            sign = 128 if math.copysign(1.0, value) < 0 else 0
+            if magnitude < math.ldexp(1.0, -6):
+                encoded = round(math.ldexp(magnitude, 9))
+            else:
+                exponent = math.frexp(magnitude)[1] - 1
+                mantissa = round((math.ldexp(magnitude, -exponent) - 1) * 8)
+                if mantissa == 8:
+                    exponent, mantissa = exponent + 1, 0
+                encoded = ((exponent + 7) << 3) | mantissa
+            elements.append(sign | encoded)
+    return bytes(elements), bytes(scales)
+
+
+def output_types(scenario):
+    types = dict(OUTPUT_TYPES)
+    if scenario.get("output_format", "fp16") == "mxfp8-e4m3":
+        types.update(expandXOut="B", dynamicScalesOut="B")
+    return types
+
+
+def oracle(ranks, bs, h, top_k, experts, token_nums_type, output_format="fp16"):
     buckets = [[] for _ in range(experts)]
     rows = [[input_row(rank, token, h) for token in range(bs)]
             for rank in range(ranks)]
+    quantized = ([[quantize_mxfp8_e4m3(row) for row in rank_rows] for rank_rows in rows]
+                 if output_format == "mxfp8-e4m3" else None)
     for source in range(ranks):
         for token in range(bs):
             for lane in range(top_k):
@@ -80,6 +117,7 @@ def oracle(ranks, bs, h, top_k, experts, token_nums_type):
     result = []
     for rank in range(ranks):
         payload = bytearray()
+        scales = bytearray()
         assist = bytearray()
         counts = []
         expert_counts = []
@@ -91,7 +129,12 @@ def oracle(ranks, bs, h, top_k, experts, token_nums_type):
                 counts.append(cumulative)
             expert_counts.append(cumulative if token_nums_type == 0 else len(buckets[expert]))
             for source, token, lane in buckets[expert]:
-                payload.extend(rows[source][token])
+                if quantized is None:
+                    payload.extend(rows[source][token])
+                else:
+                    element_row, scale_row = quantized[source][token]
+                    payload.extend(element_row)
+                    scales.extend(scale_row)
                 assist.extend(struct.pack("<iii", source, token, lane))
         result.append({
             "expandXOut": bytes(payload),
@@ -99,6 +142,8 @@ def oracle(ranks, bs, h, top_k, experts, token_nums_type):
             "sendCountsOut": struct.pack("<" + "i" * len(counts), *counts),
             "expertTokenNumsOut": struct.pack("<" + "q" * len(expert_counts), *expert_counts),
         })
+        if quantized is not None:
+            result[-1]["dynamicScalesOut"] = bytes(scales)
     return rows, result
 
 
@@ -114,10 +159,10 @@ def comm_args(rank, ranks, layout):
     return data
 
 
-def patch_config(value, ranks):
+def patch_config(value, ranks, instruction_dump=False):
     if isinstance(value, list):
         for child in value:
-            patch_config(child, ranks)
+            patch_config(child, ranks, instruction_dump)
     elif isinstance(value, dict):
         for key, child in value.items():
             if key == "chip_num":
@@ -127,10 +172,12 @@ def patch_config(value, ranks):
             elif key in {"stat_trace_flag", "stat_bw_flag", "stat_pkt_track_flag",
                          "urma_flag", "simt_urma_flag"}:
                 value[key] = False
-            elif key in {"enable_dump", "enable_dump_detail", "log_level"}:
+            elif key == "enable_dump":
+                value[key] = int(instruction_dump)
+            elif key in {"enable_dump_detail", "log_level"}:
                 value[key] = 0
             else:
-                patch_config(child, ranks)
+                patch_config(child, ranks, instruction_dump)
 
 
 def check_regions(regions):
@@ -164,6 +211,16 @@ def preflight(case):
         params = chip["kernel_param"]
         if list(params) != list(ABI):
             raise ValueError("Kernel ABI order mismatch")
+        if scenario["format_version"] >= 3:
+            quantized = scenario["output_format"] == "mxfp8-e4m3"
+            expected_values = {"h": scenario["h"], "bs": scenario["bs"],
+                               "topK": scenario["top_k"], "moeExpertNum": scenario["experts"],
+                               "dtype": 3, "quantMode": 4 if quantized else 0,
+                               "expandXOutDtype": 15 if quantized else 3}
+            if (any(params[name]["value"] != value for name, value in expected_values.items())
+                    or bool(params["dynamicScalesOut"]["value"]) != quantized
+                    or set(chip["output_param"]) != set(output_types(scenario))):
+                raise ValueError("Workload output format or shape differs from scenario")
         for index, entry in enumerate(params.values()):
             if (entry["param_offset"] != str(index * 8)
                     or entry["param_type"] != ("11" if index < 9 else "7")):
@@ -183,6 +240,11 @@ def preflight(case):
 
 def generate(args):
     layout = json.loads(args.layout.read_text())
+    output_format = getattr(args, "output_format", "fp16")
+    if output_format not in ("fp16", "mxfp8-e4m3"):
+        raise ValueError("Unsupported output format")
+    quantized = output_format == "mxfp8-e4m3"
+    types = output_types({"output_format": output_format})
     if args.ranks not in (2, 4, 8, 16, 32) or args.ranks > layout["max_ranks"]:
         raise ValueError("Supported rank counts: 2, 4, 8, 16, 32")
     if args.cores < 2 or args.cores > 64 or args.cores % 2:
@@ -195,7 +257,9 @@ def generate(args):
     workspace_bytes = aligned(args.cores * args.experts * 4, 32)
     if args.experts * 32 + workspace_bytes > layout["count_workspace_end"]:
         raise ValueError("Count records overlap receive-count workspace")
-    token_bytes = aligned(args.h * 2, 32) + 32
+    scale_bytes = aligned((args.h + 31) // 32, 2) if quantized else 0
+    payload_bytes = args.h if quantized else args.h * 2
+    token_bytes = aligned(payload_bytes + scale_bytes, 32) + 32
     wire_bytes = aligned(token_bytes, 480) // 480 * 512
     combine_bytes = args.bs * args.top_k * aligned(args.h * 2, 480) // 480 * 512
     window_bytes = layout["state_bytes"] + combine_bytes + args.experts * args.bs * wire_bytes
@@ -218,12 +282,12 @@ def generate(args):
     for folder in (output / "UBusSim_config", config_dir):
         for path in folder.glob("*.yml"):
             config = read_yaml(path)
-            patch_config(config, args.ranks)
+            patch_config(config, args.ranks, getattr(args, "instruction_dump", False))
             path.write_text(encode_yaml(config))
     template = read_yaml(args.template / "v310_config/workload_config.yml")
     chip_template = next(iter(template["workload_config"].values()))
     rows, expected = oracle(args.ranks, args.bs, args.h, args.top_k,
-                            args.experts, args.token_nums_type)
+                            args.experts, args.token_nums_type, output_format)
     workload = {"workload_config": {}}
     output_sizes = {}
     semantic_output_sizes = {}
@@ -254,11 +318,14 @@ def generate(args):
             cursor = aligned(cursor + len(data))
         check_regions(regions)
         values = dict(pointers)
-        values.update(xActiveMask=0, dynamicScalesOut=0, bs=args.bs, h=args.h,
+        values.update(xActiveMask=0, bs=args.bs, h=args.h,
                       topK=args.top_k, moeExpertNum=args.experts, sharedExpertNum=0,
                       sharedExpertRankNum=0, globalBs=args.bs * args.ranks,
                       expertTokenNumsType=args.token_nums_type, activeMaskType=0,
-                      quantMode=0, dtype=3, expandXOutDtype=3, magic=args.magic)
+                      quantMode=4 if quantized else 0, dtype=3,
+                      expandXOutDtype=15 if quantized else 3, magic=args.magic)
+        if not quantized:
+            values["dynamicScalesOut"] = 0
         params = {}
         for index, name in enumerate(ABI):
             entry = {"value": values[name], "param_offset": str(index * 8),
@@ -275,16 +342,21 @@ def generate(args):
                                "size": args.kernel.stat().st_size})
         chip["output_param"] = {
             name: {"addr": pointers[name], "size": len(contents[name])}
-            for name in OUTPUT_TYPES
+            for name in types
         }
-        output_sizes[str(rank)] = {name: len(contents[name]) for name in OUTPUT_TYPES}
-        semantic_output_sizes[str(rank)] = {name: len(expected[rank][name]) for name in OUTPUT_TYPES}
+        output_sizes[str(rank)] = {name: len(contents[name]) for name in types}
+        semantic_output_sizes[str(rank)] = {name: len(expected[rank][name]) for name in types}
         workload["workload_config"]["chip%d" % rank] = chip
     encoded = encode_yaml(workload)
     (output / "workload.yml").write_text(encoded)
     (config_dir / "workload_config.yml").write_text(encoded)
     shutil.copy2(args.layout, output / "layout.json")
-    scenario = {"format_version": 2, "transport": "MEM", "dtype": "FP16",
+    scenario = {"format_version": 3, "transport": "MEM", "dtype": "FP16",
+                "output_format": output_format, "quant_mode": 4 if quantized else 0,
+                "instruction_dump": getattr(args, "instruction_dump", False),
+                "output_dtype": 15 if quantized else 3,
+                "token_payload_bytes": payload_bytes, "token_scale_bytes": scale_bytes,
+                "token_wire_bytes": wire_bytes, "peer_window_bytes": window_bytes,
                 "rank_size": args.ranks, "active_cores": args.cores, "bs": args.bs,
                 "h": args.h, "top_k": args.top_k, "experts": args.experts,
                 "expert_token_nums_type": args.token_nums_type, "magic": args.magic,
@@ -314,7 +386,7 @@ def validate(args):
         raise ValueError("Fatal simulator error found")
     checks = []
     for rank in range(scenario["rank_size"]):
-        for name, code in OUTPUT_TYPES.items():
+        for name, code in output_types(scenario).items():
             actual = case / "bin" / ("david_%d_%s.bin" % (rank, name))
             expected = (case / "expected" / ("rank%d" % rank) / (name + ".bin")).read_bytes()
             data = actual.read_bytes()
@@ -388,6 +460,9 @@ def main():
                           ("top-k", 2), ("experts", 8), ("magic", 1)):
         gen.add_argument("--" + name, type=int, default=default)
     gen.add_argument("--token-nums-type", type=int, choices=(0, 1), default=0)
+    gen.add_argument("--output-format", choices=("fp16", "mxfp8-e4m3"), default="fp16")
+    gen.add_argument("--instruction-dump", action="store_true",
+                     help="在模板已有 enable_dump 位置启用指令 dump；不启用 UBus 统计 trace")
     gen.set_defaults(action=generate)
     flight = sub.add_parser("preflight")
     flight.add_argument("case", type=pathlib.Path)

@@ -1,4 +1,7 @@
-"""校验 Memory Dispatch 路由基准、当前 CommArgs 序列化和仿真结果验收边界。"""
+"""校验 Dispatch 输入布局、MXFP8 独立 golden 和 sparse GM 结果验收边界。
+
+Host 编译器在临时目录构建布局探针和已有 C++ golden 的适配器；测试不启动 SST。
+"""
 
 import contextlib
 import io
@@ -28,6 +31,27 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             str(repo / "tools/simulator/memory_dispatch_layout.cpp"), "-o", str(probe),
         ], check=True)
         cls.layout = json.loads(subprocess.check_output([str(probe)]))
+        golden_source = cls.root / "golden.cpp"
+        golden_source.write_text('''// 将标准输入的 FP32 行交给已有 MXFP8 golden，输出元素和 scale 字节。
+#include "tests/ep/demo/mxfp8_golden.h"
+#include <iostream>
+#include <iterator>
+#include <cstring>
+int main(int argc, char **argv) {
+    const std::size_t h = std::stoul(argv[1]);
+    std::vector<char> bytes((std::istreambuf_iterator<char>(std::cin)), {});
+    if (bytes.size() % (h * sizeof(float))) return 1;
+    std::vector<float> values(bytes.size() / sizeof(float));
+    std::memcpy(values.data(), bytes.data(), bytes.size());
+    auto q = TileXREpDemo::QuantizeMxfp8(values, values.size() / h, h,
+        TileXREpDemo::Mxfp8Format::E4M3);
+    std::cout.write(reinterpret_cast<const char *>(q.elements.data()), q.elements.size());
+    std::cout.write(reinterpret_cast<const char *>(q.scales.data()), q.scales.size());
+}
+''')
+        cls.golden = cls.root / "golden"
+        subprocess.run(["c++", "-std=c++14", "-O2", "-I" + str(repo),
+                        str(golden_source), "-o", str(cls.golden)], check=True)
 
     @classmethod
     def tearDownClass(cls):
@@ -50,6 +74,31 @@ class MemoryDispatchCaseTest(unittest.TestCase):
                          self.layout["peer_bytes"])
 
     def test_generation_provenance_and_numerical_failure_detection(self):
+        for output_format in ("fp16", "mxfp8-e4m3"):
+            with self.subTest(output_format=output_format):
+                self.check_generation(output_format)
+
+    def test_mxfp8_matches_existing_cpp_golden(self):
+        # 覆盖全部有限 FP16 位型；另测不同 block 最大值、RNE 中点和尾块 scale。
+        finite_bits = [bits for bits in range(65536) if bits & 0x7c00 != 0x7c00]
+        full = struct.pack("<" + "H" * len(finite_bits), *finite_bits)
+        rows = [full[i:i + 512] for i in range(0, len(full), 512)]
+        for value in (0.0, -0.0, 2 ** -24, 0.125, 1.0625, 1.1875, 31.0, 65504.0):
+            rows.append(struct.pack("<256e", *([value] * 256)))
+        self.check_golden(rows, 256)
+        for h in (1, 31, 32, 33, 64, 3584):
+            self.check_golden([case.input_row(1, 3, h), case.input_row(0, 7, h)], h)
+        with self.assertRaisesRegex(ValueError, "finite FP16"):
+            case.quantize_mxfp8_e4m3(struct.pack("<e", float("inf")))
+
+    def check_golden(self, rows, h):
+        values = struct.unpack("<" + "e" * (len(rows) * h), b"".join(rows))
+        expected = subprocess.check_output([str(self.golden), str(h)],
+                                          input=struct.pack("<" + "f" * len(values), *values))
+        actual = [case.quantize_mxfp8_e4m3(row) for row in rows]
+        self.assertEqual(b"".join(q[0] for q in actual) + b"".join(q[1] for q in actual), expected)
+
+    def check_generation(self, output_format):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             template = root / "template"
@@ -59,6 +108,11 @@ class MemoryDispatchCaseTest(unittest.TestCase):
                 (template / name).write_text("# fixture\n")
             (template / "v310_config/workload_config.yml").write_text(
                 yaml.safe_dump({"workload_config": {"chip0": {"ub_base_addr": 0x80000}}}))
+            (template / "v310_config/davidV100_simulator_config.yml").write_text(
+                yaml.safe_dump({"architecture_config": {"chip_num": 1, "enable_dump": 0},
+                                "simulator_config": {"vector": {"params": {
+                                    "enable_dump": 0, "enable_dump_detail": 1,
+                                    "frequency": "1.65GHz"}}}}))
             layout = root / "layout.json"
             layout.write_text(json.dumps(self.layout))
             kernel = root / "kernel.o"
@@ -66,18 +120,30 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             output = root / "case"
             args = types.SimpleNamespace(layout=layout, kernel=kernel, template=template,
                                          output=output, ranks=2, cores=4, bs=96, h=256,
-                                         top_k=2, experts=4, token_nums_type=0, magic=1)
+                                         top_k=2, experts=4, token_nums_type=0, magic=1,
+                                         output_format=output_format, instruction_dump=True)
             with contextlib.redirect_stdout(io.StringIO()):
                 case.generate(args)
             scenario = case.preflight(output)
+            config = case.read_yaml(output / "v310_config/davidV100_simulator_config.yml")
+            self.assertEqual(config["architecture_config"]["chip_num"], 2)
+            vector = config["simulator_config"]["vector"]["params"]
+            self.assertEqual(vector, {"enable_dump": 1, "enable_dump_detail": 0,
+                                      "frequency": "1.65GHz"})
             self.assertEqual(scenario["semantic_output_sizes"]["0"]["assistInfoForCombineOut"], 2304)
             self.assertEqual(scenario["output_sizes"]["0"]["assistInfoForCombineOut"], 2560)
             workload = yaml.safe_load((output / "workload.yml").read_text())["workload_config"]
+            params = workload["chip0"]["kernel_param"]
+            quantized = output_format != "fp16"
+            self.assertEqual(params["quantMode"]["value"], 4 if quantized else 0)
+            self.assertEqual(params["expandXOutDtype"]["value"], 15 if quantized else 3)
+            self.assertEqual(bool(params["dynamicScalesOut"]["value"]), quantized)
+            self.assertEqual(scenario["token_payload_bytes"], args.h * (1 if quantized else 2))
             self.assertEqual(workload["chip1"]["bin_param"]["addr"], case.GM_SIZE + 0x40000000)
             self.assertEqual(list(workload["chip0"]["kernel_param"]), list(case.ABI))
             (output / "bin").mkdir()
             for rank in range(2):
-                for name in case.OUTPUT_TYPES:
+                for name in case.output_types(scenario):
                     data = (output / "expected" / ("rank%d" % rank) / (name + ".bin")).read_bytes()
                     size = scenario["output_sizes"][str(rank)][name]
                     data = data.ljust(size, b"\xa5")
@@ -97,6 +163,13 @@ class MemoryDispatchCaseTest(unittest.TestCase):
             validation = types.SimpleNamespace(case=output, log=log, exit_code=0)
             with contextlib.redirect_stdout(io.StringIO()):
                 case.validate(validation)
+            if quantized:
+                scales = output / "bin/david_1_dynamicScalesOut.bin"
+                original_scales = scales.read_bytes()
+                scales.write_bytes(b"\0" + original_scales[1:])
+                with self.assertRaisesRegex(ValueError, "field=dynamicScalesOut"):
+                    case.validate(validation)
+                scales.write_bytes(original_scales)
             payload = output / "bin/david_1_expandXOut.bin"
             data = bytearray(payload.read_bytes())
             data[0] ^= 1
