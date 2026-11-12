@@ -78,6 +78,35 @@ int main(int argc, char **argv) {
             with self.subTest(output_format=output_format):
                 self.check_generation(output_format)
 
+    def test_platform_profile_provenance_and_input_isolation(self):
+        self.check_generation("fp16", with_profile=True)
+
+    def test_platform_profile_rejects_stale_or_invalid_targets_without_writing(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            config = root / "v310_config/model.yml"
+            config.parent.mkdir()
+            config.write_text("vector:\n  frequency: 1.65GHz\n  verbose: 0\n")
+            original = config.read_bytes()
+            profile = root / "profile.json"
+            change = {"file": "v310_config/model.yml", "path": ["vector", "frequency"],
+                      "expected": "1.65GHz", "value": "0.825GHz"}
+            valid = dict(change, path=["vector", "verbose"], expected=0, value=1)
+            for invalid in (dict(change, expected="2GHz"),
+                            dict(change, path=["typo", "frequency"]),
+                            dict(change, file="v310_config/../model.yml"),
+                            dict(change, file="v310_config/workload_config.yml"),
+                            dict(change, value=0.825)):
+                profile.write_text(json.dumps({"name": "invalid", "changes": [valid, invalid]}))
+                with self.assertRaises(ValueError):
+                    case.apply_platform_profile(root, profile)
+                self.assertEqual(config.read_bytes(), original)
+                self.assertFalse((root / "platform_profile.json").exists())
+            profile.write_text(json.dumps({"name": "duplicate", "changes": [change, change]}))
+            with self.assertRaisesRegex(ValueError, "target twice"):
+                case.apply_platform_profile(root, profile)
+            self.assertEqual(config.read_bytes(), original)
+
     def test_mxfp8_matches_existing_cpp_golden(self):
         # 覆盖全部有限 FP16 位型；另测不同 block 最大值、RNE 中点和尾块 scale。
         finite_bits = [bits for bits in range(65536) if bits & 0x7c00 != 0x7c00]
@@ -98,7 +127,7 @@ int main(int argc, char **argv) {
         actual = [case.quantize_mxfp8_e4m3(row) for row in rows]
         self.assertEqual(b"".join(q[0] for q in actual) + b"".join(q[1] for q in actual), expected)
 
-    def check_generation(self, output_format):
+    def check_generation(self, output_format, with_profile=False):
         with tempfile.TemporaryDirectory() as directory:
             root = pathlib.Path(directory)
             template = root / "template"
@@ -108,11 +137,12 @@ int main(int argc, char **argv) {
                 (template / name).write_text("# fixture\n")
             (template / "v310_config/workload_config.yml").write_text(
                 yaml.safe_dump({"workload_config": {"chip0": {"ub_base_addr": 0x80000}}}))
+            shared_params = {"enable_dump": 0, "enable_dump_detail": 1, "frequency": "1.65GHz"}
             (template / "v310_config/davidV100_simulator_config.yml").write_text(
-                yaml.safe_dump({"architecture_config": {"chip_num": 1, "enable_dump": 0},
-                                "simulator_config": {"vector": {"params": {
-                                    "enable_dump": 0, "enable_dump_detail": 1,
-                                    "frequency": "1.65GHz"}}}}))
+                yaml.safe_dump({"architecture_config": {"chip_num": 1, "enable_dump": 0,
+                                                       "freq_aicore": "1.65GHz"},
+                                "simulator_config": {"vector": {"params": shared_params},
+                                                     "su": {"params": shared_params}}}))
             layout = root / "layout.json"
             layout.write_text(json.dumps(self.layout))
             kernel = root / "kernel.o"
@@ -122,6 +152,12 @@ int main(int argc, char **argv) {
                                          output=output, ranks=2, cores=4, bs=96, h=256,
                                          top_k=2, experts=4, token_nums_type=0, magic=1,
                                          output_format=output_format, instruction_dump=True)
+            if with_profile:
+                args.platform_profile = root / "platform-profile.json"
+                args.platform_profile.write_text(json.dumps({"name": "vector-clock-half", "changes": [{
+                    "file": "v310_config/davidV100_simulator_config.yml",
+                    "path": ["simulator_config", "vector", "params", "frequency"],
+                    "expected": "1.65GHz", "value": "0.825GHz"}]}))
             with contextlib.redirect_stdout(io.StringIO()):
                 case.generate(args)
             scenario = case.preflight(output)
@@ -129,7 +165,15 @@ int main(int argc, char **argv) {
             self.assertEqual(config["architecture_config"]["chip_num"], 2)
             vector = config["simulator_config"]["vector"]["params"]
             self.assertEqual(vector, {"enable_dump": 1, "enable_dump_detail": 0,
-                                      "frequency": "1.65GHz"})
+                                      "frequency": "0.825GHz" if with_profile else "1.65GHz"})
+            self.assertEqual(config["architecture_config"]["freq_aicore"], "1.65GHz")
+            self.assertEqual(config["simulator_config"]["su"]["params"]["frequency"], "1.65GHz")
+            if with_profile:
+                self.assertEqual(scenario["format_version"], 4)
+                evidence = json.loads((output / "platform_profile.json").read_text())
+                self.assertEqual(evidence["source_sha256"], case.sha256(args.platform_profile))
+                self.assertEqual(evidence["configs"]["v310_config/davidV100_simulator_config.yml"]
+                                 ["after_sha256"], case.sha256(output / "v310_config/davidV100_simulator_config.yml"))
             self.assertEqual(scenario["semantic_output_sizes"]["0"]["assistInfoForCombineOut"], 2304)
             self.assertEqual(scenario["output_sizes"]["0"]["assistInfoForCombineOut"], 2560)
             workload = yaml.safe_load((output / "workload.yml").read_text())["workload_config"]
@@ -185,6 +229,19 @@ int main(int argc, char **argv) {
                 stream.write(struct.pack("<Q", address) + b"b" * 512)
             with self.assertRaisesRegex(ValueError, "Conflicting die writes"):
                 case.extract(types.SimpleNamespace(case=output))
+            if with_profile:
+                config_path = output / "v310_config/davidV100_simulator_config.yml"
+                saved_config = config_path.read_bytes()
+                saved_manifest = (output / "manifest.json").read_bytes()
+                config["simulator_config"]["vector"]["params"]["frequency"] = "2GHz"
+                config_path.write_text(case.encode_yaml(config))
+                manifest = json.loads(saved_manifest)
+                manifest["v310_config/davidV100_simulator_config.yml"] = case.sha256(config_path)
+                case.write_json(output / "manifest.json", manifest)
+                with self.assertRaisesRegex(ValueError, "config differs from applied profile"):
+                    case.preflight(output)
+                config_path.write_bytes(saved_config)
+                (output / "manifest.json").write_bytes(saved_manifest)
             original = output / "input_bin/rank0/commArgs.bin"
             original.write_bytes(b"stale input")
             with self.assertRaisesRegex(ValueError, "inputs or deployed kernel changed"):

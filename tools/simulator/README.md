@@ -80,6 +80,29 @@ FlowCtrl 与 MTE 的相近长区间可能描述同一依赖，RVEC 子流水与 
 改变 480B payload/512B wire padding、量化 scale 大小及 UB 中可容纳的发送 buffer 数；
 应记录这些变化，再判断流水瓶颈是否转移。
 
+使用 `generate --platform-profile profile.json` 为新 testcase 应用显式的参数对照。
+例如，已核实模板对应参数为 440 时，可声明：
+
+```json
+{
+  "name": "host-port-bandwidth-half",
+  "changes": [{
+    "file": "UBusSim_config/UBusSim_simulator_config.yml",
+    "path": ["architecture_config", "host_line_bandwidth"],
+    "expected": 440,
+    "value": 220
+  }]
+}
+```
+
+工具只允许修改复制进 testcase 的仿真配置，拒绝 workload、缺失字段、重复目标和
+不符合 `expected` 的旧值。配置先全部校验再写入；`platform_profile.json` 记录原值、
+新值以及配置变更前后的 SHA-256，并与 format 4 scenario、manifest 和 preflight
+交叉核对。生成后不要手动修改配置或刷新 manifest 来掩盖参数漂移。
+该证据证明配置文件的变化，不证明 plugin 使用了该参数；仍需用最小对照验证实际
+数据通路与时间响应。工具在变更路径上复制 YAML 的共享 dict，避免 anchor 将一个
+frequency 改动扩散到其他组件；必须列出确实需要变化的字段，并重新核实时钟换算。
+
 维护时注意：CommArgs 的 rank 容量变化会改变后续所有字段偏移；旧 testcase 即使
 使用相同的 22 个启动参数，也可能传入错误结构。重新运行 Host 布局探针，并重新
 生成全部输入。仅从模板复制框架配置，禁止覆盖新生成的 workload；旧绝对路径可能

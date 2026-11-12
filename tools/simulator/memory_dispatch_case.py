@@ -180,6 +180,89 @@ def patch_config(value, ranks, instruction_dump=False):
                 patch_config(child, ranks, instruction_dump)
 
 
+def profile_config_path(case, filename):
+    relative = pathlib.PurePosixPath(filename)
+    if (len(relative.parts) != 2 or relative.parts[0] not in ("UBusSim_config", "v310_config")
+            or relative.suffix != ".yml" or relative.name == "workload_config.yml"
+            or ".." in relative.parts or relative.is_absolute() or str(relative) != filename):
+        raise ValueError("Platform profile must select a copied simulator config")
+    path = case / str(relative)
+    if not path.is_file() or not path.resolve().is_relative_to(case.resolve()):
+        raise ValueError("Platform profile config is missing or outside testcase")
+    return path
+
+
+def profile_target(case, change):
+    path = profile_config_path(case, change["file"])
+    keys = change["path"]
+    if not isinstance(keys, list) or not keys or not all(isinstance(key, str) for key in keys):
+        raise ValueError("Platform profile path must be a nonempty list of keys")
+    return path, keys
+
+
+def config_parent(config, keys, detach=False):
+    for key in keys[:-1]:
+        if not isinstance(config, dict) or key not in config or not isinstance(config[key], dict):
+            raise ValueError("Platform profile path does not exist")
+        if detach:
+            # YAML 的共享 dict anchor 不能让一个参数改动扩散到其他组件。
+            config[key] = dict(config[key])
+        config = config[key]
+    if not isinstance(config, dict) or keys[-1] not in config:
+        raise ValueError("Platform profile path does not exist")
+    return config
+
+
+def apply_platform_profile(case, source):
+    """核对模板旧值后应用显式配置变更，保存独立于 kernel/workload 的参数证据。"""
+    profile = json.loads(source.read_text())
+    if not isinstance(profile.get("name"), str) or not profile["name"] or not profile.get("changes"):
+        raise ValueError("Platform profile requires a name and changes")
+    configs, hashes, seen = {}, {}, set()
+    for change in profile["changes"]:
+        path, keys = profile_target(case, change)
+        identity = (str(path), tuple(keys))
+        if identity in seen:
+            raise ValueError("Platform profile changes a target twice")
+        seen.add(identity)
+        if path not in configs:
+            configs[path], hashes[path] = read_yaml(path), sha256(path)
+        parent = config_parent(configs[path], keys, detach=True)
+        current = parent[keys[-1]]
+        if current != change["expected"] or type(current) is not type(change["expected"]):
+            raise ValueError("Platform profile expected value differs from template")
+        if type(change["value"]) is not type(current):
+            raise ValueError("Platform profile must preserve the config value type")
+        parent[keys[-1]] = change["value"]
+    for path, config in configs.items():
+        path.write_text(encode_yaml(config))
+    report = {"format_version": 1, "name": profile["name"], "source_sha256": sha256(source),
+              "changes": profile["changes"],
+              "configs": {str(path.relative_to(case)): {"before_sha256": hashes[path],
+                                                        "after_sha256": sha256(path)}
+                          for path in configs}}
+    write_json(case / "platform_profile.json", report)
+    return sha256(case / "platform_profile.json")
+
+
+def verify_platform_profile(case, scenario):
+    path = case / "platform_profile.json"
+    if sha256(path) != scenario["platform_profile_sha256"]:
+        raise ValueError("Platform profile differs from scenario")
+    profile = json.loads(path.read_text())
+    configs = {}
+    for relative, evidence in profile["configs"].items():
+        config_path = profile_config_path(case, relative)
+        if sha256(config_path) != evidence["after_sha256"]:
+            raise ValueError("Platform config differs from applied profile")
+        configs[relative] = read_yaml(config_path)
+    for change in profile["changes"]:
+        _, keys = profile_target(case, change)
+        current = config_parent(configs[change["file"]], keys)[keys[-1]]
+        if current != change["value"] or type(current) is not type(change["value"]):
+            raise ValueError("Platform value differs from applied profile")
+
+
 def check_regions(regions):
     ordered = sorted(regions)
     for (start, size, name), (next_start, _, next_name) in zip(ordered, ordered[1:]):
@@ -198,6 +281,8 @@ def preflight(case):
         raise ValueError("Case inputs or deployed kernel changed: %s" % changed)
     if (case / "workload.yml").read_bytes() != (case / "v310_config/workload_config.yml").read_bytes():
         raise ValueError("Workload mirrors differ")
+    if scenario["format_version"] >= 4:
+        verify_platform_profile(case, scenario)
     chips = read_yaml(case / "workload.yml")["workload_config"]
     if list(chips) != ["chip%d" % rank for rank in range(scenario["rank_size"])]:
         raise ValueError("Workload ranks differ from scenario")
@@ -284,6 +369,8 @@ def generate(args):
             config = read_yaml(path)
             patch_config(config, args.ranks, getattr(args, "instruction_dump", False))
             path.write_text(encode_yaml(config))
+    profile_source = getattr(args, "platform_profile", None)
+    profile_hash = apply_platform_profile(output, profile_source) if profile_source else None
     template = read_yaml(args.template / "v310_config/workload_config.yml")
     chip_template = next(iter(template["workload_config"].values()))
     rows, expected = oracle(args.ranks, args.bs, args.h, args.top_k,
@@ -351,7 +438,7 @@ def generate(args):
     (output / "workload.yml").write_text(encoded)
     (config_dir / "workload_config.yml").write_text(encoded)
     shutil.copy2(args.layout, output / "layout.json")
-    scenario = {"format_version": 3, "transport": "MEM", "dtype": "FP16",
+    scenario = {"format_version": 4 if profile_hash else 3, "transport": "MEM", "dtype": "FP16",
                 "output_format": output_format, "quant_mode": 4 if quantized else 0,
                 "instruction_dump": getattr(args, "instruction_dump", False),
                 "output_dtype": 15 if quantized else 3,
@@ -364,6 +451,8 @@ def generate(args):
                 "external_abi": list(ABI), "param_types": ["11"] * 9 + ["7"] * 13,
                 "output_sizes": output_sizes, "semantic_output_sizes": semantic_output_sizes,
                 "routed_rows": args.ranks * args.bs * args.top_k}
+    if profile_hash:
+        scenario["platform_profile_sha256"] = profile_hash
     write_json(output / "scenario.json", scenario)
     files = sorted(p for p in output.rglob("*") if p.is_file())
     write_json(output / "manifest.json", {str(p.relative_to(output)): sha256(p) for p in files})
@@ -463,6 +552,8 @@ def main():
     gen.add_argument("--output-format", choices=("fp16", "mxfp8-e4m3"), default="fp16")
     gen.add_argument("--instruction-dump", action="store_true",
                      help="在模板已有 enable_dump 位置启用指令 dump；不启用 UBus 统计 trace")
+    gen.add_argument("--platform-profile", type=pathlib.Path,
+                     help="JSON 配置变更清单；逐项检查 expected 旧值后再应用 value")
     gen.set_defaults(action=generate)
     flight = sub.add_parser("preflight")
     flight.add_argument("case", type=pathlib.Path)
