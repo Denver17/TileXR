@@ -1,3 +1,6 @@
+/*
+ * Host 侧 Memory EP 布局计算接口；Combine 使用连续 payload 槽和独立完成标志数组。
+ */
 #ifndef TILEXR_EP_HOST_EP_MEMORY_LAYOUT_H
 #define TILEXR_EP_HOST_EP_MEMORY_LAYOUT_H
 
@@ -33,8 +36,8 @@ struct EpMemoryCombineReferenceConfig {
     int64_t moeExpertNumPerRank = 0;
     uint32_t blockDim = 0;
     uint32_t receiveBufferNum = 0;
-    int64_t blockCntPerToken = 0;
-    int64_t packedRowBytes = 0;
+    int64_t rowStrideBytes = 0;
+    int64_t completionFlagBytes = 0;
     int64_t combineReserveBytes = 0;
     int64_t workspaceBytes = 0;
     int64_t roundPayloadBytes = 0;

@@ -166,7 +166,6 @@ tilexr_add_ep_aicore_kernel(tilexr_ep_combine_memory_kernel
         "${CMAKE_SOURCE_DIR}/src/include/tilexr/profiling/device.h"
         "${CMAKE_CURRENT_SOURCE_DIR}/common/ep_memory_window.h"
         "${CMAKE_SOURCE_DIR}/src/include/comm_args.h"
-        "${CMAKE_SOURCE_DIR}/src/include/tilexr_data_as_flag.h"
         "${CMAKE_SOURCE_DIR}/src/include/tilexr_types.h")
 
 set(TILEXR_EP_SERVER_DEDUP_KERNEL_OP

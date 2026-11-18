@@ -62,6 +62,17 @@ generation 和 peer window 所有权模型，同时将 Dispatch 与 Combine buff
 累加顺序和精度属于 API 行为的一部分。空 route 和 inactive token 都是有效输入，
 不得读取 peer window 中未初始化的行。
 
+普通 Memory Combine 使用连续 payload 和独立的 32 B 完成记录，不再把 flag
+插入每 480 B 数据。每个 token 的各条 route 占用独立槽；发送方按 UB 槽数分批，
+等待该批 MTE3 完成后才发布 flag，接收方等待全部 route 后按原顺序累加。
+FP16 原始行只走 MTE2/MTE3，UB 槽在上一次 MTE3 完成后才复用；MXFP8 模板保留量化转换。
+
+完成记录数组紧随本轮 Combine payload，因此 BS/H/TopK 改变会移动 flag 区。
+每次启动必须先清零本 rank 当前 flag 区并等待全部 rank 初始化完成，再允许发送。
+初始化门闩位于 state window 的固定分区，携带本次 magic，不能使用 payload 内的浮点值
+判断初始化完成。该门闩不占用 Dispatch count/cumsum workspace，也不依赖上一轮 shape。
+只清本地 flag 而没有跨 rank 初始化屏障，会擦除先到的远端通知。
+
 ## 窗口与轮次所有权
 
 `src/ep/common/ep_memory_window.h` 和 Host 布局 helper 定义了权威的窗口分区。

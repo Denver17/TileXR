@@ -375,15 +375,14 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
 {
     const int64_t moeRankNum = rankSize - sharedExpertRankNum;
     const bool useMxfp8 = quantMode == 3 || quantMode == 4;
-    if (out == nullptr || rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 ||
-        rank >= rankSize || bs <= 0 || h <= 0 || topK <= 0 || moeExpertNum <= 0 || sharedExpertNum < 0 ||
-        sharedExpertRankNum < 0 || globalBs <= 0 || globalBs % rankSize != 0 || blockDim == 0 ||
+    if (out == nullptr || rankSize <= 0 || rankSize > TileXR::TILEXR_MAX_RANK_SIZE || rank < 0 || rank >= rankSize ||
+        bs <= 0 || h <= 0 || topK <= 0 || moeExpertNum <= 0 || sharedExpertNum < 0 || sharedExpertRankNum < 0 ||
+        globalBs <= 0 || globalBs % rankSize != 0 || globalBs / rankSize != bs || blockDim == 0 ||
         blockDim > kEpMemoryMaxVectorCoreNum ||
         (dtype != TileXR::TILEXR_DATA_TYPE_FP16 && dtype != TileXR::TILEXR_DATA_TYPE_BFP16) ||
-        (quantMode != 0 && !useMxfp8) ||
-        ((sharedExpertNum == 0) != (sharedExpertRankNum == 0)) || sharedExpertRankNum >= rankSize ||
-        (sharedExpertNum > 0 && sharedExpertRankNum % sharedExpertNum != 0) || moeRankNum <= 0 ||
-        moeExpertNum % moeRankNum != 0) {
+        (quantMode != 0 && !useMxfp8) || ((sharedExpertNum == 0) != (sharedExpertRankNum == 0)) ||
+        sharedExpertRankNum >= rankSize || (sharedExpertNum > 0 && sharedExpertRankNum % sharedExpertNum != 0) ||
+        moeRankNum <= 0 || moeExpertNum % moeRankNum != 0) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -415,17 +414,17 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
     } else {
         commDataBytes = rowBytes;
     }
-    if (!CeilDivInt64(commDataBytes, kEpMemorySplitPayloadBytes, &next.blockCntPerToken) ||
-        next.blockCntPerToken > std::numeric_limits<uint8_t>::max() ||
-        !MulInt64(next.blockCntPerToken, kEpMemorySplitBlockBytes, &next.packedRowBytes)) {
+    if (!AlignUpInt64(commDataBytes, kEpMemoryWindowAlignmentBytes, &next.rowStrideBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
     int64_t routesPerToken = 0;
     int64_t combineRows = 0;
-    if (!AddInt64(topK, sharedExpertNum, &routesPerToken) ||
-        !MulInt64(globalBs / rankSize, routesPerToken, &combineRows) ||
-        !MulInt64(combineRows, next.packedRowBytes, &next.combineReserveBytes)) {
+    int64_t dataReserveBytes = 0;
+    if (!AddInt64(topK, sharedExpertNum, &routesPerToken) || routesPerToken > std::numeric_limits<uint16_t>::max() ||
+        !MulInt64(bs, routesPerToken, &combineRows) || !MulInt64(combineRows, next.rowStrideBytes, &dataReserveBytes) ||
+        !MulInt64(combineRows, kEpMemoryWindowAlignmentBytes, &next.completionFlagBytes) ||
+        !AddInt64(dataReserveBytes, next.completionFlagBytes, &next.combineReserveBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
@@ -442,62 +441,38 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
 
-    int64_t totalPackedBlocks = 0;
-    int64_t flagFloatCount = 0;
-    int64_t compareCount = 0;
-    int64_t checkFlagBytes = 0;
-    int64_t checkCompareBytes = 0;
-    int64_t checkFlagsBytes = 0;
-    int64_t compactPayloadBytes = 0;
+    int64_t flagBytes = 0;
+    int64_t reduceBytes = 0;
     int64_t floatRowBytes = 0;
     int64_t alignedFloatRowBytes = 0;
     int64_t alignedMulRowBytes = 0;
     int64_t alignedOutputBytes = 0;
-    int64_t receiveInputBytes = 0;
-    int64_t sendInputBytes = 0;
     int64_t scaleBytes = 0;
     int64_t maskBytes = 0;
-    int64_t clearFlagBytes = 0;
     int64_t tokenStatusBytes = 0;
     int64_t maxTokensPerCore = 0;
     int64_t receiveBytes = 4 * kEpMemoryWindowAlignmentBytes;
     int64_t term = 0;
-    if (!MulInt64(routesPerToken, next.blockCntPerToken, &totalPackedBlocks) ||
-        !MulInt64(totalPackedBlocks,
-            kEpMemoryWindowAlignmentBytes / static_cast<int64_t>(sizeof(float)), &flagFloatCount) ||
-        !AlignUpInt64(flagFloatCount, 64, &compareCount) ||
-        !MulInt64(compareCount, static_cast<int64_t>(sizeof(float)), &checkFlagBytes) ||
-        !MulInt64(compareCount, static_cast<int64_t>(sizeof(uint8_t)), &checkCompareBytes) ||
-        !AlignUpInt64(checkCompareBytes, 256, &checkCompareBytes) ||
-        !AddInt64(checkFlagBytes, checkCompareBytes, &checkFlagsBytes) ||
-        !MulInt64(next.blockCntPerToken, kEpMemorySplitPayloadBytes, &compactPayloadBytes) ||
-        !MulInt64(h, static_cast<int64_t>(sizeof(float)), &floatRowBytes) ||
+    if (!MulInt64(routesPerToken, kEpMemoryWindowAlignmentBytes, &flagBytes) ||
+        !MulInt64(routesPerToken, sizeof(float), &reduceBytes) || !AlignUpInt64(reduceBytes, 256, &reduceBytes) ||
+        !AddInt64(reduceBytes, kEpMemoryWindowAlignmentBytes, &reduceBytes) ||
+        !MulInt64(h, sizeof(float), &floatRowBytes) ||
         !AlignUpInt64(floatRowBytes, kEpMemoryWindowAlignmentBytes, &alignedFloatRowBytes) ||
         !AlignUpInt64(floatRowBytes, useMxfp8 ? 512 : 256, &alignedMulRowBytes) ||
-        !AlignUpInt64(rowBytes, kEpMemoryWindowAlignmentBytes, &alignedOutputBytes)) {
-        return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
-    }
-    receiveInputBytes = std::max(compactPayloadBytes, alignedOutputBytes);
-    sendInputBytes = useMxfp8 ? inputAlignBytes : std::max(inputAlignBytes, compactPayloadBytes);
-    if (!CeilDivInt64(bs, blockDim, &maxTokensPerCore) ||
-        !MulInt64(maxTokensPerCore, topK, &term) ||
-        !MulInt64(term, static_cast<int64_t>(sizeof(float)), &term) ||
-        !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &scaleBytes) ||
-        !MulInt64(bs, static_cast<int64_t>(sizeof(bool)), &term) ||
-        !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &maskBytes) ||
-        !MulInt64(maxTokensPerCore, static_cast<int64_t>(sizeof(int32_t)), &term) ||
-        !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &tokenStatusBytes) ||
-        !MulInt64(next.blockCntPerToken, kEpMemoryWindowAlignmentBytes, &clearFlagBytes) ||
-        !AddInt64(receiveBytes, checkFlagsBytes, &receiveBytes) ||
-        !AddInt64(receiveBytes, alignedOutputBytes, &receiveBytes) ||
-        !MulInt64(2, alignedFloatRowBytes, &term) || !AddInt64(receiveBytes, term, &receiveBytes) ||
-        !AddInt64(receiveBytes, alignedMulRowBytes, &receiveBytes) ||
-        !AddInt64(receiveBytes, scaleBytes, &receiveBytes) ||
-        !AddInt64(receiveBytes, maskBytes, &receiveBytes) ||
-        !AddInt64(receiveBytes, clearFlagBytes, &receiveBytes) ||
+        !AlignUpInt64(rowBytes, kEpMemoryWindowAlignmentBytes, &alignedOutputBytes) ||
+        !CeilDivInt64(bs, blockDim, &maxTokensPerCore) || !MulInt64(maxTokensPerCore, topK, &term) ||
+        !MulInt64(term, sizeof(float), &term) || !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &scaleBytes) ||
+        !AlignUpInt64(bs, kEpMemoryWindowAlignmentBytes, &maskBytes) ||
+        !MulInt64(maxTokensPerCore, sizeof(int32_t), &term) ||
+        !AlignUpInt64(term, kEpMemoryWindowAlignmentBytes, &tokenStatusBytes) || !MulInt64(2, flagBytes, &term) ||
+        !AddInt64(receiveBytes, term, &receiveBytes) || !AddInt64(receiveBytes, reduceBytes, &receiveBytes) ||
+        !AddInt64(receiveBytes, alignedOutputBytes, &receiveBytes) || !MulInt64(2, alignedFloatRowBytes, &term) ||
+        !AddInt64(receiveBytes, term, &receiveBytes) || !AddInt64(receiveBytes, alignedMulRowBytes, &receiveBytes) ||
+        !AddInt64(receiveBytes, scaleBytes, &receiveBytes) || !AddInt64(receiveBytes, maskBytes, &receiveBytes) ||
         !AddInt64(receiveBytes, tokenStatusBytes, &receiveBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
+    const int64_t receiveInputBytes = std::max(next.rowStrideBytes, alignedOutputBytes);
     if (useMxfp8) {
         int64_t dequantScaleBytes = 0;
         if (!AlignUpInt64(scaleCount, 128, &dequantScaleBytes) ||
@@ -522,19 +497,18 @@ int TileXREpBuildMemoryCombineReferenceConfig(int64_t rankSize, int64_t rank, in
         }
     }
     int64_t sendUbBytes = 4 * kEpMemoryWindowAlignmentBytes;
-    if (!AddInt64(sendUbBytes, sendInputBytes, &sendUbBytes) ||
-        !AddInt64(sendUbBytes, next.packedRowBytes, &sendUbBytes)) {
+    if (!AddInt64(sendUbBytes, inputAlignBytes, &sendUbBytes)) {
         return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
     }
     if (useMxfp8) {
         int64_t alignedScaleCount = 0;
         int64_t quantWorkBytes = 0;
         if (!AlignUpInt64(quantComputeScaleCount, 32, &alignedScaleCount) ||
-            !MulInt64(alignedScaleCount, static_cast<int64_t>(sizeof(float)), &quantWorkBytes) ||
-            !MulInt64(quantComputeScaleCount, static_cast<int64_t>(sizeof(uint16_t)), &term) ||
+            !MulInt64(alignedScaleCount, sizeof(float), &quantWorkBytes) ||
+            !MulInt64(quantComputeScaleCount, sizeof(uint16_t), &term) ||
             !AddInt64(quantWorkBytes, term, &quantWorkBytes) ||
             !AlignUpInt64(quantWorkBytes, kEpMemoryWindowAlignmentBytes, &quantWorkBytes) ||
-            !AddInt64(sendUbBytes, compactPayloadBytes, &sendUbBytes) ||
+            !AddInt64(sendUbBytes, next.rowStrideBytes, &sendUbBytes) ||
             !AddInt64(sendUbBytes, quantWorkBytes, &sendUbBytes)) {
             return TileXR::TILEXR_ERROR_PARA_CHECK_FAIL;
         }

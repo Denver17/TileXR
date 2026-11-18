@@ -32,8 +32,15 @@ constexpr uint64_t kEpMemoryRequiredPeerBytes =
 
 // Receive-count workspace grows backward from this unchanged state-window boundary.
 constexpr uint64_t kEpMemoryRecvCountWorkspaceEnd = 768ULL * 1024ULL;
+// Combine 初始化门闩使用固定地址，避免 shape 改变后把旧 payload 当成完成标志。
+constexpr uint64_t kEpMemoryCombineInitOffset = kEpMemoryRecvCountWorkspaceEnd;
+constexpr uint64_t kEpMemoryCombineInitBytes =
+    static_cast<uint64_t>(TileXR::TILEXR_MAX_RANK_SIZE) * kEpMemoryWindowAlignmentBytes;
 constexpr uint64_t kEpMemoryDispatchCumsumOffset = 868ULL * 1024ULL;
 constexpr uint64_t kEpMemoryDispatchCumsumFlagOffset = 876ULL * 1024ULL;
+
+static_assert(kEpMemoryCombineInitOffset + kEpMemoryCombineInitBytes <= kEpMemoryDispatchCumsumOffset,
+    "Combine initialization records must not overlap Dispatch cumsum workspace");
 
 static_assert(kEpMemoryDispatchCumsumOffset +
         static_cast<uint64_t>(kEpMemoryMaxCountCoreNum) * kEpMemoryMaxCountCoreNum *

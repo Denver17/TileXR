@@ -1,3 +1,7 @@
+/*
+ * 验证 EP Host 布局、容量边界与数据类型；覆盖独立 Combine flag 和连续 payload
+ * 的预留空间。
+ */
 #include <cmath>
 #include <cstdint>
 #include <iostream>
@@ -290,11 +294,11 @@ void TestMemoryWindowConfig()
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 4, 48,
         &combineConfig);
     CheckInt("combine mxfp8 memory config ret", combineMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine mxfp8 blocks", combineConfig.blockCntPerToken, 3);
-    CheckInt64("combine mxfp8 packed row", combineConfig.packedRowBytes, 1536);
+    CheckInt64("combine mxfp8 flags", combineConfig.completionFlagBytes, 256);
+    CheckInt64("combine mxfp8 row stride", combineConfig.rowStrideBytes, 1056);
     CheckInt("combine mxfp8 receive buffers", combineConfig.receiveBufferNum, 2);
-    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 20288);
-    CheckInt64("combine mxfp8 send UB", combineConfig.sendUbBytes, 5344);
+    CheckInt64("combine mxfp8 receive UB", combineConfig.receiveUbBytes, 20096);
+    CheckInt64("combine mxfp8 send UB", combineConfig.sendUbBytes, 3424);
 
     TileXREp::EpMemoryDispatchReferenceConfig dispatchMxfp8Config {};
     const int dispatchMxfp8Ret = TileXREp::TileXREpBuildMemoryDispatchReferenceConfig(
@@ -315,21 +319,43 @@ void TestMemoryWindowConfig()
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 0, 48,
         &combineNonQuantConfig);
     CheckInt("combine non-quant UB config ret", combineNonQuantRet, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine non-quant send UB", combineNonQuantConfig.sendUbBytes, 5088);
+    CheckInt64("combine non-quant send UB", combineNonQuantConfig.sendUbBytes,
+               2176);
 
     TileXREp::EpMemoryCombineReferenceConfig combineSharedMxfp8Config {};
     const int combineSharedMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         2, 0, 4, 1024, 2, 1, 1, 1, 8, TileXR::TILEXR_DATA_TYPE_FP16, 4, 48,
         &combineSharedMxfp8Config);
     CheckInt("combine shared mxfp8 UB config ret", combineSharedMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine shared mxfp8 receive UB", combineSharedMxfp8Config.receiveUbBytes, 20544);
+    CheckInt64("combine shared mxfp8 receive UB",
+               combineSharedMxfp8Config.receiveUbBytes, 20160);
 
     TileXREp::EpMemoryCombineReferenceConfig combineLargeMxfp8Config {};
     const int combineLargeMxfp8Ret = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         16, 0, 256, 7168, 16, 64, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_FP16, 4, 200,
         &combineLargeMxfp8Config);
     CheckInt("combine large mxfp8 UB config ret", combineLargeMxfp8Ret, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine large mxfp8 receive UB", combineLargeMxfp8Config.receiveUbBytes, 142368);
+    CheckInt64("combine large mxfp8 receive UB",
+               combineLargeMxfp8Config.receiveUbBytes, 132928);
+
+    TileXREp::EpMemoryCombineReferenceConfig bs96{};
+    CheckInt("combine BS96 raw config",
+             TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+                 32, 0, 96, 7168, 6, 384, 0, 0, 3072,
+                 TileXR::TILEXR_DATA_TYPE_FP16, 0, 64, &bs96),
+             TileXR::TILEXR_SUCCESS);
+    CheckInt64("combine BS96 raw row stride", bs96.rowStrideBytes, 14336);
+    CheckInt64("combine BS96 independent flags", bs96.completionFlagBytes,
+               18432);
+    CheckInt64("combine BS96 combined reservation", bs96.combineReserveBytes,
+               8275968);
+    CheckInt("combine FP16 unaligned tail",
+             TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
+                 2, 0, 4, 17, 2, 8, 0, 0, 8, TileXR::TILEXR_DATA_TYPE_FP16, 0,
+                 48, &bs96),
+             TileXR::TILEXR_SUCCESS);
+    CheckInt64("combine tail aligned payload stride", bs96.rowStrideBytes, 64);
+    CheckInt64("combine tail data and flags", bs96.combineReserveBytes, 768);
 
     const int combineInvalidQuantRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         8, 0, 4, 1024, 2, 8, 0, 0, 32, TileXR::TILEXR_DATA_TYPE_FP16, 2, 48,
@@ -370,14 +396,16 @@ void TestMemoryWindowConfig()
         16, 0, 256, 3584, 16, 64, 0, 0, 4096, TileXR::TILEXR_DATA_TYPE_BFP16, 0, 200,
         &largeCombineConfig);
     CheckInt("large bf16 memory combine config ret", largeCombineRet, TileXR::TILEXR_SUCCESS);
-    CheckInt64("large bf16 memory combine reserve", largeCombineConfig.combineReserveBytes, 31457280);
+    CheckInt64("large bf16 memory combine reserve",
+               largeCombineConfig.combineReserveBytes, 29491200);
 
     TileXREp::EpMemoryCombineReferenceConfig fullRoundCombineConfig {};
     const int fullRoundCombineRet = TileXREp::TileXREpBuildMemoryCombineReferenceConfig(
         16, 0, 4096, 3584, 16, 64, 0, 0, 65536, TileXR::TILEXR_DATA_TYPE_BFP16, 0, 200,
         &fullRoundCombineConfig);
     CheckInt("combine accepts reserve larger than old half", fullRoundCombineRet, TileXR::TILEXR_SUCCESS);
-    CheckInt64("combine full round reserve", fullRoundCombineConfig.combineReserveBytes, 503316480);
+    CheckInt64("combine full round reserve",
+               fullRoundCombineConfig.combineReserveBytes, 471859200);
 }
 
 void TestMemoryWindowRejectsInvalidConfig()
