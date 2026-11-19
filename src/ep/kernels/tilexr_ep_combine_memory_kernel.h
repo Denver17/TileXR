@@ -411,7 +411,11 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::BuffInit()
 template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::PrepareCompletionFlags()
 {
-    LocalTensor<uint64_t> stateLocal = readStateBuf_.Get<uint64_t>();
+    // 预备阶段单独使用 UB，BuffInit 随后 Reset，不挤占 payload 流水的 buffer。
+    TBuf<> stateBuf;
+    TBuf<> readyBuf;
+    tpipe_->InitBuffer(stateBuf, UB_ALIGN);
+    LocalTensor<uint64_t> stateLocal = stateBuf.Get<uint64_t>();
     Duplicate(stateLocal.ReinterpretCast<uint32_t>(), 0U, UB_ALIGN / sizeof(uint32_t));
     SyncFunc<HardEvent::V_MTE3>();
     GlobalTensor<uint64_t> localFlags;
@@ -434,15 +438,23 @@ __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::PrepareCompleti
             DataCopy(readyGlobal, stateLocal, UB_ALIGN / sizeof(uint64_t));
         }
         SyncFunc<HardEvent::MTE3_S>();
-        LocalTensor<uint64_t> peerReady = calEndBuf_.Get<uint64_t>();
+        tpipe_->InitBuffer(readyBuf, epWorldSize_ * UB_ALIGN);
+        LocalTensor<uint64_t> peerReady = readyBuf.Get<uint64_t>();
         GlobalTensor<uint64_t> readyGlobal;
         readyGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ uint64_t *>(context_.InitWindowBase(epRankId_)));
-        for (uint32_t rank = 0U; rank < epWorldSize_; ++rank) {
-            do {
-                SyncFunc<HardEvent::S_MTE2>();
-                DataCopy(peerReady, readyGlobal[rank * UB_ALIGN / sizeof(uint64_t)], UB_ALIGN / sizeof(uint64_t));
-                SyncFunc<HardEvent::MTE2_S>();
-            } while (peerReady.GetValue(0) != context_.Generation());
+        // 每次轮询连续搬入所有 rank 的状态，再在 UB 检查；晚到 rank 仍需等待。
+        bool allReady = false;
+        while (!allReady) {
+            SyncFunc<HardEvent::S_MTE2>();
+            DataCopy(peerReady, readyGlobal, epWorldSize_ * UB_ALIGN / sizeof(uint64_t));
+            SyncFunc<HardEvent::MTE2_S>();
+            allReady = true;
+            for (uint32_t rank = 0U; rank < epWorldSize_; ++rank) {
+                if (peerReady.GetValue(rank * UB_ALIGN / sizeof(uint64_t)) != context_.Generation()) {
+                    allReady = false;
+                    break;
+                }
+            }
         }
     }
     AscendC::SyncAll<true>();
@@ -975,8 +987,8 @@ template <typename ExpandXType, int64_t QuantMode>
 __aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::Process()
 {
     if ASCEND_IS_AIV {
-        BuffInit();
         PrepareCompletionFlags();
+        BuffInit();
         SetWaitTpStatusAndDisPatch();
         PipeBarrier<PIPE_ALL>();
         AlltoAllBuffInitAndMaskCal();

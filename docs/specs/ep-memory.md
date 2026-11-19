@@ -72,6 +72,15 @@ FP16 原始行只走 MTE2/MTE3，UB 槽在上一次 MTE3 完成后才复用；MX
 初始化门闩位于 state window 的固定分区，携带本次 magic，不能使用 payload 内的浮点值
 判断初始化完成。该门闩不占用 Dispatch count/cumsum workspace，也不依赖上一轮 shape。
 只清本地 flag 而没有跨 rank 初始化屏障，会擦除先到的远端通知。
+初始化状态连续存放，core 0 每次轮询通过一条 MTE2 搬入全部 rank 的记录，
+在 UB 中逐项检查 generation；32P 对应一次 1024 B 搬运，而非 32 次 32 B 搬运。
+晚到 rank 会触发再次轮询，因此不能把一次轮询等同于整个屏障只读取一次。
+预备阶段的 UB 在 payload 流水开始前释放，不减少发送 buffer 数量。
+
+参考实现的固定状态区需要独立的内存所有权和窗口复用保证。TileXR 的共享 peer window
+可能被其他算子写入，Combine 也允许连续异步提交；仅固定 flag 地址或依赖双窗口，
+不足以替代初始化与复用同步。优化 trace 中的控制搬运时，应保留这些条件，
+并分别统计初始化状态读取、路由元数据读取和真正的 payload 搬运。
 
 ## 窗口与轮次所有权
 
