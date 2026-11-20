@@ -1,6 +1,6 @@
 /*
  * Memory Combine 按 assist metadata 将 expert 输出送回源 rank，并按 token 累加结果。
- * payload 连续存放，批量 MTE3 完成后发布独立 flag；接收方合并后清理 flag。
+ * payload 连续存放，每条数据经过 PIPE_MTE3 屏障后发布独立 flag；接收方合并后清理 flag。
  * 外置 kernel 入口调用本实现；TPipe 持有计算与搬运所用的 UB buffer。
  */
 #ifndef TILEXR_EP_KERNELS_TILEXR_EP_COMBINE_MEMORY_KERNEL_H
@@ -121,9 +121,8 @@ private:
     __aicore__ inline void PrepareCompletionFlags();
     __aicore__ inline void SetWaitTpStatusAndDisPatch();
     __aicore__ inline void ExpertAlltoAllDispatchCopyAdd();
-    __aicore__ inline void SendDispatchBatchFlags(uint32_t batchBegin, uint32_t batchEnd, uint32_t batchPermIdx,
-        uint32_t permStride, uint32_t roundId, uint32_t roundNum, LocalTensor<int32_t> assistLocal,
-        LocalTensor<float> readyLocal);
+    __aicore__ inline void SendDispatchFlag(
+        uint32_t rank, uint32_t token, uint32_t route, LocalTensor<float> readyLocal);
     __aicore__ inline bool IsDoubleGroupRankSize() const;
     __aicore__ inline bool ShouldSendToRankInRound(
         uint32_t logicalRankId, uint32_t roundId) const;
@@ -535,29 +534,14 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchInnerCopyAdd(
 }
 
 template <typename ExpandXType, int64_t QuantMode>
-__aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::SendDispatchBatchFlags(uint32_t batchBegin,
-    uint32_t batchEnd, uint32_t batchPermIdx, uint32_t permStride, uint32_t roundId, uint32_t roundNum,
-    LocalTensor<int32_t> assistLocal, LocalTensor<float> readyLocal)
+__aicore__ inline void MoeCombineMemory<ExpandXType, QuantMode>::SendDispatchFlag(
+    uint32_t rank, uint32_t token, uint32_t route, LocalTensor<float> readyLocal)
 {
-    uint32_t permIdx = batchPermIdx;
-    for (uint32_t loop = batchBegin; loop < batchEnd; ++loop) {
-        const uint32_t baseOffset = permIdx * (UB_ALIGN / sizeof(int32_t));
-        const uint32_t rank = static_cast<uint32_t>(assistLocal.GetValue(baseOffset));
-        const uint32_t token = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 1U));
-        const uint32_t route = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 2U));
-        if ((roundNum == 1U || ShouldSendToRankInRound(rank, roundId)) && rank < epWorldSize_ && token < axisBS_ &&
-            route < slotCount_) {
-            const uint64_t slot = static_cast<uint64_t>(token) * slotCount_ + route;
-            GlobalTensor<float> flagGlobal;
-            flagGlobal.SetGlobalBuffer(reinterpret_cast<__gm__ float *>(
-                context_.CombineWindowBase(rank) + flagOffsetBytes_ + slot * UB_ALIGN));
-            DataCopy(flagGlobal, readyLocal, FLAG_FLOATS);
-        }
-        permIdx += permStride;
-        if (permIdx >= sendCntNum_) {
-            permIdx -= sendCntNum_;
-        }
-    }
+    const uint64_t slot = static_cast<uint64_t>(token) * slotCount_ + route;
+    GlobalTensor<float> flagGlobal;
+    flagGlobal.SetGlobalBuffer(
+        reinterpret_cast<__gm__ float *>(context_.CombineWindowBase(rank) + flagOffsetBytes_ + slot * UB_ALIGN));
+    DataCopy(flagGlobal, readyLocal, FLAG_FLOATS);
 }
 
 template <typename ExpandXType, int64_t QuantMode>
@@ -600,29 +584,23 @@ MoeCombineMemory<ExpandXType, QuantMode>::ExpertAlltoAllDispatchCopyAdd()
         const uint32_t rankOffset = (epRankId_ * sendCntNum_) / epWorldSize_;
         for (uint32_t roundId = 0U; roundId < roundNum; ++roundId) {
             uint32_t permIdx = rankOffset % sendCntNum_;
-            for (uint32_t batch = 0U; batch < sendCntNum_; batch += dispatchBufferNum_) {
-                const uint32_t batchEnd =
-                    batch + dispatchBufferNum_ < sendCntNum_ ? batch + dispatchBufferNum_ : sendCntNum_;
-                const uint32_t batchPermIdx = permIdx;
-                for (uint32_t loop = batch; loop < batchEnd; ++loop) {
-                    const uint32_t tokenIndex = coreIdx_ + permIdx * aivNum_;
-                    const uint32_t baseOffset = permIdx * localRecordStride;
-                    const uint32_t toRankId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset));
-                    const uint32_t tokenId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 1U));
-                    const uint32_t topkId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 2U));
-                    const bool isCurrentRound = roundNum == 1U || ShouldSendToRankInRound(toRankId, roundId);
-                    if (isCurrentRound && toRankId < epWorldSize_ && tokenId < axisBS_ && topkId < slotCount_) {
-                        ExpertAlltoAllDispatchInnerCopyAdd(toRankId, tokenId, topkId, tokenIndex);
-                    }
-                    permIdx += permStride;
-                    if (permIdx >= sendCntNum_) {
-                        permIdx -= sendCntNum_;
-                    }
+            for (uint32_t loop = 0U; loop < sendCntNum_; ++loop) {
+                const uint32_t tokenIndex = coreIdx_ + permIdx * aivNum_;
+                const uint32_t baseOffset = permIdx * localRecordStride;
+                const uint32_t toRankId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset));
+                const uint32_t tokenId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 1U));
+                const uint32_t topkId = static_cast<uint32_t>(assistLocal.GetValue(baseOffset + 2U));
+                const bool isCurrentRound = roundNum == 1U || ShouldSendToRankInRound(toRankId, roundId);
+                if (isCurrentRound && toRankId < epWorldSize_ && tokenId < axisBS_ && topkId < slotCount_) {
+                    ExpertAlltoAllDispatchInnerCopyAdd(toRankId, tokenId, topkId, tokenIndex);
+                    // Order this payload before its notification on MTE3; do not drain the flag before the next row.
+                    PipeBarrier<PIPE_MTE3>();
+                    SendDispatchFlag(toRankId, tokenId, topkId, readyLocal);
                 }
-                // The completion records may become visible only after this batch's data.
-                SyncFunc<AscendC::HardEvent::MTE3_S>();
-                SendDispatchBatchFlags(
-                    batch, batchEnd, batchPermIdx, permStride, roundId, roundNum, assistLocal, readyLocal);
+                permIdx += permStride;
+                if (permIdx >= sendCntNum_) {
+                    permIdx -= sendCntNum_;
+                }
             }
             if (doubleGroupEnabled && roundId == 0U) {
                 PipeBarrier<PIPE_ALL>();

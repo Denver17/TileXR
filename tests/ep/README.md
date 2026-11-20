@@ -14,6 +14,23 @@ available in the same Host library on non-A5 systems and return
 Internal Memory classes, profiling artifacts, trace tools, and test helpers use unversioned names. Version suffixes
 are reserved for public ABI compatibility and MoonEP-owned identifiers.
 
+## Independent Combine completion ordering
+
+The per-data-barrier variant sends each contiguous payload, inserts
+`PipeBarrier<PIPE_MTE3>()`, then writes its separate 32-byte completion record.
+There is no extra wait after that record before submitting the next payload.
+The FP16 path retains the per-buffer MTE2/MTE3 events that prevent UB reuse while
+a previous transfer still reads it. Rank initialization and receive-side flag
+polling remain part of the operation.
+
+When comparing this variant with batched completion notifications, use identical
+inputs, simulator libraries and platform settings. Verify the compiled MTE3
+barrier and match each payload address to its completion record in the native
+trace; source order alone does not establish transfer completion. Measure any
+overlap between a flag and the next payload instead of assuming it. Instruction
+Popped-to-Retire intervals include waiting and are not physical link utilization.
+Accept performance only after numerical validation passes on every rank.
+
 ## Host Tests
 
 From `tests/ep`:
